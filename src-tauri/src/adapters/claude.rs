@@ -64,6 +64,10 @@ const CLAUDE_PERMISSION_MODES: &[&str] = &[
     "plan",
 ];
 
+/// Effort levels accepted by the Claude CLI's `--effort` flag. Every current
+/// Claude model (Opus, Fable, Sonnet) supports the full range.
+const CLAUDE_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultracode"];
+
 #[derive(Clone, Debug)]
 pub struct ClaudeAdapter {
     binary: String,
@@ -236,6 +240,7 @@ impl ClaudeAdapter {
         Ok(shell_session_args(
             session_id,
             source.model.as_deref(),
+            source.effort.as_deref(),
             prompt,
             true,
         ))
@@ -252,7 +257,13 @@ impl ClaudeAdapter {
         session_id: &str,
         prompt: Option<&str>,
     ) -> Vec<String> {
-        shell_session_args(session_id, source.model.as_deref(), prompt, false)
+        shell_session_args(
+            session_id,
+            source.model.as_deref(),
+            source.effort.as_deref(),
+            prompt,
+            false,
+        )
     }
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
@@ -267,6 +278,7 @@ impl ClaudeAdapter {
                 base_ref: request.base_ref,
                 adapter: self.id().to_string(),
                 model: request.model.clone(),
+                effort: options.effort.clone(),
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
         )?;
@@ -298,6 +310,7 @@ impl ClaudeAdapter {
             args.push("--model".to_string());
             args.push(model);
         }
+        push_effort_args(&mut args, agent.effort.as_deref());
 
         let permission_mode = options.permission_mode.unwrap_or("auto".to_string());
         args.push("--permission-mode".to_string());
@@ -390,6 +403,7 @@ impl ClaudeAdapter {
                 base_ref: Some("HEAD".to_string()),
                 adapter: self.id().to_string(),
                 model: source.model.clone(),
+                effort: source.effort.clone(),
                 use_worktree,
             },
         )?;
@@ -432,6 +446,7 @@ impl ClaudeAdapter {
             args.push("--model".to_string());
             args.push(model);
         }
+        push_effort_args(&mut args, agent.effort.as_deref());
         args.push("--permission-mode".to_string());
         args.push("auto".to_string());
         args.push("--resume".to_string());
@@ -523,6 +538,7 @@ impl ClaudeAdapter {
             args.push("--model".to_string());
             args.push(model);
         }
+        push_effort_args(&mut args, agent.effort.as_deref());
 
         let resumed = if let Some(session_id) = agent
             .session_id
@@ -641,6 +657,7 @@ impl ClaudeAdapter {
                         base_ref: Some("HEAD".to_string()),
                         adapter: self.id().to_string(),
                         model: None,
+                        effort: None,
                         // Typing `claude` in a shell runs in the current directory; no worktree.
                         use_worktree: false,
                     },
@@ -1326,6 +1343,8 @@ fn claude_resume_argument_id(args: &[String]) -> Option<&str> {
 struct ClaudeLaunchOptions {
     #[serde(default)]
     permission_mode: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 impl ClaudeLaunchOptions {
@@ -1333,6 +1352,7 @@ impl ClaudeLaunchOptions {
         if value.is_null() {
             return Ok(Self {
                 permission_mode: None,
+                effort: None,
             });
         }
         let mut options: ClaudeLaunchOptions = serde_json::from_value(value)
@@ -1353,6 +1373,17 @@ impl ClaudeLaunchOptions {
             }
             None => None,
         };
+        options.effort = match options.effort.map(|effort| effort.trim().to_string()) {
+            Some(effort) if effort.is_empty() => None,
+            Some(effort) if CLAUDE_EFFORT_LEVELS.contains(&effort.as_str()) => Some(effort),
+            Some(effort) => {
+                return Err(format!(
+                    "invalid Claude adapter option effort='{effort}'; expected one of {}",
+                    CLAUDE_EFFORT_LEVELS.join(", ")
+                ));
+            }
+            None => None,
+        };
         Ok(options)
     }
 }
@@ -1366,6 +1397,7 @@ pub struct SpawnClaudeRequest {
     pub base_ref: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub permission_mode: Option<String>,
     pub initial_size: Option<InitialPaneSize>,
     /// Opt in to an isolated git worktree; defaults to false (run in place).
@@ -1374,9 +1406,17 @@ pub struct SpawnClaudeRequest {
 
 impl SpawnClaudeRequest {
     pub fn into_agent_request(self) -> SpawnAgentRequest {
-        let options = match self.permission_mode {
-            Some(permission_mode) => json!({ "permissionMode": permission_mode }),
-            None => Value::Null,
+        let mut option_fields = serde_json::Map::new();
+        if let Some(permission_mode) = self.permission_mode {
+            option_fields.insert("permissionMode".to_string(), json!(permission_mode));
+        }
+        if let Some(effort) = self.effort {
+            option_fields.insert("effort".to_string(), json!(effort));
+        }
+        let options = if option_fields.is_empty() {
+            Value::Null
+        } else {
+            Value::Object(option_fields)
         };
 
         SpawnAgentRequest {
@@ -2101,13 +2141,23 @@ fn claude_ancestor_set(
 /// to an untruncated copy looks like it should steer the resume to an earlier
 /// leaf, but Claude ignores it and replays the full history — truncation is the
 /// only mechanism that actually works.
-/// The shared shape of a resume-based launch: optional model, the permission
-/// mode forks run under, the session to resume, and the prompt. `--` delimits
-/// the prompt so a leading `-` in attacker-influenced text cannot be read as a
-/// flag (e.g. `--dangerously-skip-permissions`).
+/// Appends `--effort <level>` when the session has a recorded reasoning effort,
+/// mirroring how `--model` is re-applied on every launch shape.
+fn push_effort_args(args: &mut Vec<String>, effort: Option<&str>) {
+    if let Some(effort) = effort.map(str::trim).filter(|effort| !effort.is_empty()) {
+        args.push("--effort".to_string());
+        args.push(effort.to_string());
+    }
+}
+
+/// The shared shape of a resume-based launch: optional model and effort, the
+/// permission mode forks run under, the session to resume, and the prompt. `--`
+/// delimits the prompt so a leading `-` in attacker-influenced text cannot be
+/// read as a flag (e.g. `--dangerously-skip-permissions`).
 fn shell_session_args(
     session_id: &str,
     model: Option<&str>,
+    effort: Option<&str>,
     prompt: Option<&str>,
     fork_session: bool,
 ) -> Vec<String> {
@@ -2116,6 +2166,7 @@ fn shell_session_args(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
+    push_effort_args(&mut args, effort);
     args.push("--permission-mode".to_string());
     args.push("auto".to_string());
     args.push("--resume".to_string());
@@ -2721,6 +2772,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Running,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -3960,6 +4012,52 @@ mod tests {
 
         assert!(err.contains("invalid Claude adapter option permissionMode"));
         assert!(ClaudeLaunchOptions::from_value(json!({ "permissionMode": "default" })).is_err());
+    }
+
+    #[test]
+    fn launch_options_validate_effort() {
+        for level in CLAUDE_EFFORT_LEVELS {
+            let options = ClaudeLaunchOptions::from_value(json!({ "effort": level }))
+                .expect("current Claude effort level should be accepted");
+            assert_eq!(options.effort.as_deref(), Some(*level));
+        }
+
+        let blank = ClaudeLaunchOptions::from_value(json!({ "effort": "  " })).unwrap();
+        assert_eq!(blank.effort, None);
+
+        let err = ClaudeLaunchOptions::from_value(json!({ "effort": "extreme" })).unwrap_err();
+        assert!(err.contains("invalid Claude adapter option effort"));
+    }
+
+    #[test]
+    fn shell_session_args_reapply_recorded_effort() {
+        assert_eq!(
+            shell_session_args("sess-1", Some("opus"), Some("xhigh"), None, false),
+            svec(&[
+                "--model",
+                "opus",
+                "--effort",
+                "xhigh",
+                "--permission-mode",
+                "auto",
+                "--resume",
+                "sess-1",
+            ])
+        );
+
+        // No recorded effort: the flag is omitted so the CLI default applies.
+        assert_eq!(
+            shell_session_args("sess-1", None, None, Some("go on"), true),
+            svec(&[
+                "--permission-mode",
+                "auto",
+                "--resume",
+                "sess-1",
+                "--fork-session",
+                "--",
+                "go on",
+            ])
+        );
     }
 
     #[test]

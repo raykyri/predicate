@@ -129,6 +129,8 @@ export interface AgentInfo {
     | "idle"
     | "failed";
   model?: string | null;
+  /** Reasoning effort the session was launched with; absent for the default. */
+  effort?: string | null;
   // True when the queue has paused after a pause-after turn finished.
   paused?: boolean;
   createdAt: number;
@@ -228,6 +230,8 @@ export interface ResearchNode {
   responsePreview?: string | null;
   adapter: string;
   model?: string | null;
+  /** Reasoning effort the run launches with; inherited by follow-ups. */
+  effort?: string | null;
   groupId: string;
   worktreeDir: string;
   nativeSessionId?: string | null;

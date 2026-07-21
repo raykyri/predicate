@@ -147,6 +147,7 @@ pub fn resume_recent_session(
         transcript_path: session.transcript_path.clone(),
         status: AgentStatus::Starting,
         model: session.model.clone(),
+        effort: session.effort.clone(),
         parent_id: session.parent_id.clone(),
         fork_point: session.fork_point.clone(),
         root_session_id: session.root_session_id.clone(),

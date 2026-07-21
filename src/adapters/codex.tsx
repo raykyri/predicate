@@ -13,6 +13,20 @@ const CODEX_SANDBOX_OPTIONS: LauncherSelectOption[] = [
 const CODEX_AUTO_REVIEW_APPROVAL = "auto-review";
 const CODEX_AUTO_REVIEWER = "auto_review";
 
+// Mirrors CODEX_REASONING_EFFORT_LEVELS in src-tauri/src/adapters/codex.rs:
+// the union across supported models. GPT-5.6 (Sol, Terra, Luna) accepts the
+// full range; GPT-5.4 tops out at extra high, and the CLI rejects levels the
+// selected model does not support.
+export const CODEX_REASONING_OPTIONS: LauncherSelectOption[] = [
+  { value: "", label: "Default reasoning" },
+  { value: "low", label: "Low reasoning", dividerBefore: true },
+  { value: "medium", label: "Medium reasoning" },
+  { value: "high", label: "High reasoning" },
+  { value: "xhigh", label: "Extra high reasoning" },
+  { value: "max", label: "Max reasoning" },
+  { value: "ultra", label: "Ultra reasoning" },
+];
+
 const CODEX_APPROVAL_OPTIONS: LauncherSelectOption[] = [
   { value: CODEX_AUTO_REVIEW_APPROVAL, label: "Auto approvals" },
   { value: "", label: "Default approvals", dividerBefore: true },
@@ -38,6 +52,7 @@ export const codexUiAdapter: AgentUiAdapter = {
 function CodexLauncherOptions({ value, onChange }: LauncherOptionsProps) {
   const sandbox = stringOption(value.sandbox) || "workspace-write";
   const approvalSelection = codexApprovalSelection(value);
+  const reasoningEffort = stringOption(value.reasoningEffort);
 
   return (
     <>
@@ -52,6 +67,12 @@ function CodexLauncherOptions({ value, onChange }: LauncherOptionsProps) {
         value={approvalSelection}
         options={CODEX_APPROVAL_OPTIONS}
         onChange={(next) => setApprovalOption(value, onChange, next)}
+      />
+      <LauncherSelect
+        ariaLabel="Reasoning level"
+        value={reasoningEffort}
+        options={CODEX_REASONING_OPTIONS}
+        onChange={(next) => setOption(value, onChange, "reasoningEffort", next)}
       />
     </>
   );

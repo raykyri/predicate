@@ -852,6 +852,7 @@ async fn create_research_tree(
             &workspace,
             &root.adapter,
             root.model.clone(),
+            root.effort.clone(),
             root.prompt.clone(),
         ) {
             Ok(_) => state.research_tree(&detail.tree.id),
@@ -865,6 +866,17 @@ async fn create_research_tree(
     .map_err(|err| format!("create_research_tree task failed: {err}"))?
 }
 
+/// Maps a research node's reasoning effort onto the launching adapter's own
+/// launch-option key. Adapters without a reasoning-effort option launch with
+/// their defaults.
+fn research_launch_options(adapter: &str, effort: Option<&str>) -> serde_json::Value {
+    match (adapter, effort) {
+        ("claude", Some(effort)) => serde_json::json!({ "effort": effort }),
+        ("codex", Some(effort)) => serde_json::json!({ "reasoningEffort": effort }),
+        _ => serde_json::Value::Null,
+    }
+}
+
 /// Launches a fresh (non-forked) agent run for an admitted research node and
 /// binds the resulting pane. Shared by root-run creation and document
 /// follow-ups. On failure the node is failed and any spawned pane reclaimed;
@@ -875,8 +887,10 @@ fn launch_fresh_research_run(
     workspace: &workspace::GroupInfo,
     adapter: &str,
     model: Option<String>,
+    effort: Option<String>,
     prompt: String,
 ) -> Result<research::ResearchNode, String> {
+    let options = research_launch_options(adapter, effort.as_deref());
     let spawn = SpawnAgentRequest {
         adapter_id: adapter.to_string(),
         prompt,
@@ -887,7 +901,7 @@ fn launch_fresh_research_run(
         model,
         initial_size: None,
         use_worktree: Some(false),
-        options: serde_json::Value::Null,
+        options,
     };
     match spawn_agent_pane(state, spawn) {
         Ok(pane) => {
@@ -1183,6 +1197,7 @@ async fn fork_research_node(
                     &workspace,
                     &child.adapter,
                     child.model.clone(),
+                    child.effort.clone(),
                     launch_prompt,
                 );
             }
@@ -1217,6 +1232,7 @@ async fn fork_research_node(
                     &workspace,
                     &child.adapter,
                     child.model.clone(),
+                    child.effort.clone(),
                     launch_prompt,
                 );
             }
@@ -1253,6 +1269,7 @@ async fn fork_research_node(
                     transcript_path: parent.transcript_path.clone(),
                     status: AgentStatus::Done,
                     model: parent.model.clone(),
+                    effort: parent.effort.clone(),
                     parent_id: None,
                     fork_point: None,
                     root_session_id: Some(session_id),
@@ -1267,6 +1284,9 @@ async fn fork_research_node(
         // and cwd always come from the tree's current durable workspace.
         source.group_id = workspace.id;
         source.worktree_dir = workspace.dir;
+        // The follow-up runs at the child's (inherited) effort, applied by the
+        // adapter's fork path the same way `model` is re-applied.
+        source.effort = child.effort.clone();
         match fork_agent_source(&state, &source, false, true, Some(&question)) {
             Ok(pane) => {
                 let association = pane

@@ -388,6 +388,8 @@ pub struct RecentSessionInfo {
     pub worktree_dir: String,
     pub branch: Option<String>,
     pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub parent_id: Option<String>,
     pub fork_point: Option<String>,
     pub root_session_id: Option<String>,
@@ -2867,6 +2869,7 @@ impl AppState {
             response_preview: None,
             adapter: request.adapter,
             model: request.model,
+            effort: request.effort,
             group_id: request.group_id,
             worktree_dir: String::new(),
             native_session_id: None,
@@ -2950,6 +2953,7 @@ impl AppState {
             response_preview: research::response_preview(&turns, None, "", &[]),
             adapter: String::new(),
             model: None,
+            effort: None,
             group_id: request.group_id,
             worktree_dir: String::new(),
             native_session_id: None,
@@ -3121,6 +3125,7 @@ impl AppState {
             response_preview,
             adapter: agent.adapter,
             model: agent.model,
+            effort: agent.effort,
             agent_created_at: agent.created_at,
         })
     }
@@ -3192,6 +3197,7 @@ impl AppState {
             response_preview: prepared.response_preview.clone(),
             adapter: prepared.adapter.clone(),
             model: prepared.model.clone(),
+            effort: prepared.effort.clone(),
             group_id,
             worktree_dir: String::new(),
             native_session_id: None,
@@ -3564,9 +3570,10 @@ impl AppState {
             // A document has no session to fork — its follow-ups launch fresh
             // runs on the default adapter, so only run parents need the
             // checkpoint (and only they carry an adapter to inherit).
-            let (adapter, parent_model) = match parent.kind {
+            let (adapter, parent_model, parent_effort) = match parent.kind {
                 ResearchNodeKind::Document => (
                     crate::adapters::default_fork_adapter(&self.inner.config)?,
+                    None,
                     None,
                 ),
                 // An exported conversation is severed from its session by
@@ -3581,10 +3588,11 @@ impl AppState {
                     // carries the same tag neutralization as the serialized
                     // turns it travels with.
                     if crate::adapters::adapter_supports_fork(&parent.adapter) {
-                        (parent.adapter, parent.model)
+                        (parent.adapter, parent.model, parent.effort)
                     } else {
                         (
                             crate::adapters::default_fork_adapter(&self.inner.config)?,
+                            None,
                             None,
                         )
                     }
@@ -3595,7 +3603,7 @@ impl AppState {
                             "research follow-ups require a recorded parent checkpoint".to_string()
                         );
                     }
-                    (parent.adapter, parent.model)
+                    (parent.adapter, parent.model, parent.effort)
                 }
             };
             let workspace = model
@@ -3617,6 +3625,7 @@ impl AppState {
                 response_preview: None,
                 adapter,
                 model: parent_model,
+                effort: parent_effort,
                 group_id: workspace.id.clone(),
                 worktree_dir: workspace.dir.clone(),
                 native_session_id: None,
@@ -8718,6 +8727,7 @@ fn upsert_recent_session_for_agent_locked(
         worktree_dir: agent.worktree_dir.clone(),
         branch: agent.branch.clone(),
         model: agent.model.clone(),
+        effort: agent.effort.clone(),
         parent_id: agent.parent_id.clone(),
         fork_point: agent.fork_point.clone(),
         root_session_id: agent.root_session_id.clone(),
@@ -9838,6 +9848,7 @@ mod tests {
             transcript_path: Some("/tmp/transcript.jsonl".to_string()),
             status: AgentStatus::Running,
             model: Some("opus".to_string()),
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -9931,6 +9942,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: existing_group.id.clone(),
             })
             .unwrap();
@@ -9990,6 +10002,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: group.id.clone(),
             })
             .unwrap();
@@ -10048,6 +10061,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: Some("opus".to_string()),
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10094,6 +10108,7 @@ mod tests {
                         title: Some(prompt.to_string()),
                         adapter: "claude".to_string(),
                         model: None,
+                        effort: None,
                         group_id: group.id.clone(),
                     })
                     .unwrap()
@@ -10195,6 +10210,7 @@ mod tests {
                         title: Some(title.to_string()),
                         adapter: "claude".to_string(),
                         model: None,
+                        effort: None,
                         group_id: group.id.clone(),
                     })
                     .unwrap()
@@ -10241,6 +10257,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10326,6 +10343,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10427,6 +10445,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10470,6 +10489,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10544,6 +10564,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "missing".to_string(),
             })
             .unwrap_err();
@@ -10562,6 +10583,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap_err();
@@ -10593,6 +10615,7 @@ mod tests {
                 title: None,
                 adapter: "shell-only".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap_err();
@@ -10610,6 +10633,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10627,6 +10651,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10670,6 +10695,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10710,6 +10736,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10749,6 +10776,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10779,6 +10807,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10814,6 +10843,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -10894,6 +10924,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11010,6 +11041,7 @@ mod tests {
                 title: None,
                 adapter: "codex".to_string(),
                 model: Some("gpt-5".to_string()),
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11059,6 +11091,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11088,6 +11121,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11121,6 +11155,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11155,6 +11190,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11180,6 +11216,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11229,6 +11266,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11275,6 +11313,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11328,6 +11367,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11587,6 +11627,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11719,6 +11760,7 @@ mod tests {
                     title: None,
                     adapter: "claude".to_string(),
                     model: None,
+                    effort: None,
                     group_id: "group-1".to_string(),
                 })
                 .unwrap();
@@ -11745,6 +11787,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11781,6 +11824,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11820,6 +11864,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11862,6 +11907,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -11897,6 +11943,7 @@ mod tests {
             response_preview: None,
             adapter: "claude".to_string(),
             model: None,
+            effort: None,
             group_id: "group-1".to_string(),
             worktree_dir: "/tmp/work".to_string(),
             native_session_id: Some("session".to_string()),
@@ -12019,6 +12066,7 @@ mod tests {
             response_preview: None,
             adapter: "claude".to_string(),
             model: None,
+            effort: None,
             group_id: group.id.clone(),
             worktree_dir: workspace.display().to_string(),
             native_session_id: Some("session-abc".to_string()),
@@ -12119,6 +12167,7 @@ mod tests {
             response_preview: None,
             adapter: "claude".to_string(),
             model: None,
+            effort: None,
             group_id: group.id.clone(),
             worktree_dir: group.dir.clone(),
             native_session_id: Some("session".to_string()),
@@ -12196,6 +12245,7 @@ mod tests {
             response_preview: Some("Answer".to_string()),
             adapter: "claude".to_string(),
             model: None,
+            effort: None,
             group_id: "missing-group".to_string(),
             worktree_dir: legacy_dir.display().to_string(),
             native_session_id: Some("session".to_string()),
@@ -12282,6 +12332,7 @@ mod tests {
                     response_preview: None,
                     adapter: "claude".to_string(),
                     model: None,
+                    effort: None,
                     group_id,
                     worktree_dir: shared_dir.display().to_string(),
                     native_session_id: Some(format!("session-{index}")),
@@ -12342,6 +12393,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12402,6 +12454,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12665,6 +12718,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12777,6 +12831,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12836,6 +12891,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12872,6 +12928,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12907,6 +12964,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -12953,6 +13011,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13000,6 +13059,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13048,6 +13108,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13088,6 +13149,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13122,6 +13184,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13149,6 +13212,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13184,6 +13248,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -13221,6 +13286,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: "group-1".to_string(),
             })
             .unwrap();
@@ -15670,6 +15736,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Starting,
             model: None,
+            effort: None,
             parent_id: Some("agent-0".to_string()),
             fork_point: Some("sess-src".to_string()),
             root_session_id: Some("sess-src".to_string()),
@@ -15721,6 +15788,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Running,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -15831,6 +15899,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Starting,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -16226,6 +16295,7 @@ mod tests {
             worktree_dir: "/tmp/work/agent-1".to_string(),
             branch: None,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

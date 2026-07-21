@@ -243,6 +243,7 @@ impl CodexAdapter {
                 base_ref: request.base_ref,
                 adapter: self.id().to_string(),
                 model: request.model.clone(),
+                effort: options.reasoning_effort.clone(),
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
         )?;
@@ -319,7 +320,10 @@ impl CodexAdapter {
                 agent.worktree_dir
             )
         })?;
-        let options = CodexLaunchOptions::default();
+        let options = CodexLaunchOptions {
+            reasoning_effort: agent.effort.clone(),
+            ..CodexLaunchOptions::default()
+        };
         let (args, resumed) = build_codex_resume_args(
             &cwd,
             Some(&state.config().workspace_root),
@@ -413,6 +417,7 @@ impl CodexAdapter {
                 base_ref: Some("HEAD".to_string()),
                 adapter: self.id().to_string(),
                 model: source.model.clone(),
+                effort: source.effort.clone(),
                 use_worktree,
             },
         )?;
@@ -432,7 +437,10 @@ impl CodexAdapter {
                 agent.worktree_dir
             )
         })?;
-        let options = CodexLaunchOptions::default();
+        let options = CodexLaunchOptions {
+            reasoning_effort: agent.effort.clone(),
+            ..CodexLaunchOptions::default()
+        };
         let prompt = prompt.map(str::trim).unwrap_or_default();
         let has_initial_prompt = !prompt.is_empty();
         let args = build_codex_fork_args(
@@ -546,6 +554,7 @@ impl CodexAdapter {
                         base_ref: Some("HEAD".to_string()),
                         adapter: self.id().to_string(),
                         model: None,
+                        effort: None,
                         // Typing `codex` in a shell runs in the current directory; no worktree.
                         use_worktree: false,
                     },
@@ -843,6 +852,10 @@ impl CodexAdapter {
     }
 }
 
+/// Reasoning levels accepted by the Codex CLI's `model_reasoning_effort`
+/// config across supported models.
+const CODEX_REASONING_EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh", "max", "ultra"];
+
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CodexLaunchOptions {
@@ -852,6 +865,8 @@ struct CodexLaunchOptions {
     approval_policy: Option<String>,
     #[serde(default)]
     approvals_reviewer: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
     // Kept only so saved launcher options that still carry `search: true` parse
     // cleanly under `deny_unknown_fields`; --search is now always emitted.
     #[serde(default)]
@@ -881,6 +896,14 @@ impl CodexLaunchOptions {
             "approvalsReviewer",
             options.approvals_reviewer.as_deref(),
             &["auto_review"],
+        )?;
+        // Union across supported models: GPT-5.6 (Sol, Terra, Luna) accepts the
+        // full range while GPT-5.4 tops out at xhigh; the CLI rejects a level
+        // the selected model does not support.
+        options.reasoning_effort = normalize_option(
+            "reasoningEffort",
+            options.reasoning_effort.as_deref(),
+            CODEX_REASONING_EFFORT_LEVELS,
         )?;
         Ok(options)
     }
@@ -937,6 +960,13 @@ fn build_codex_args(
         args.push(format!(
             "approvals_reviewer={}",
             toml_string(approvals_reviewer)
+        ));
+    }
+    if let Some(reasoning_effort) = options.reasoning_effort.as_deref() {
+        args.push("--config".to_string());
+        args.push(format!(
+            "model_reasoning_effort={}",
+            toml_string(reasoning_effort)
         ));
     }
     args.push("--search".to_string());
@@ -2444,6 +2474,50 @@ mod tests {
     }
 
     #[test]
+    fn launch_options_validate_reasoning_effort() {
+        for level in CODEX_REASONING_EFFORT_LEVELS {
+            let options = CodexLaunchOptions::from_value(json!({ "reasoningEffort": level }))
+                .expect("current Codex reasoning level should be accepted");
+            assert_eq!(options.reasoning_effort.as_deref(), Some(*level));
+        }
+
+        let err =
+            CodexLaunchOptions::from_value(json!({ "reasoningEffort": "extreme" })).unwrap_err();
+        assert!(err.contains("invalid Codex adapter option reasoningEffort"));
+    }
+
+    #[test]
+    fn build_args_adds_reasoning_effort_config() {
+        let options =
+            CodexLaunchOptions::from_value(json!({ "reasoningEffort": "ultra" })).unwrap();
+
+        let args = build_codex_args(
+            Path::new("/tmp/qmux"),
+            None,
+            Some("gpt-5.6-luna"),
+            &options,
+            Vec::new(),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "--cd",
+                "/tmp/qmux",
+                "--model",
+                "gpt-5.6-luna",
+                "--profile",
+                "qmux-codex",
+                "--sandbox",
+                "workspace-write",
+                "--config",
+                "model_reasoning_effort=\"ultra\"",
+                "--search"
+            ]
+        );
+    }
+
+    #[test]
     fn prompt_tail_args_trim_and_delimit_initial_prompt() {
         assert_eq!(prompt_tail_args("   "), Vec::<String>::new());
         assert_eq!(
@@ -3740,6 +3814,7 @@ trusted_hash = "sha256:trusted"
             transcript_path: None,
             status: AgentStatus::Running,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
