@@ -2709,6 +2709,23 @@ impl AppState {
             .ok_or_else(|| format!("research node {node_id} was not found"))
     }
 
+    /// Prompts of the node's ancestor chain, nearest parent first, for
+    /// response-boundary matching against replayed forked history.
+    pub fn research_node_ancestor_prompts(&self, node_id: &str) -> Result<Vec<String>, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let node = model
+            .research_nodes
+            .get(node_id)
+            .ok_or_else(|| format!("research node {node_id} was not found"))?;
+        Ok(research::ancestor_prompts(node, |id| {
+            model.research_nodes.get(id)
+        }))
+    }
+
     pub fn research_node_content(&self, node_id: &str) -> Result<ResearchNodeContent, String> {
         let model = self
             .inner
@@ -2720,12 +2737,18 @@ impl AppState {
             .get(node_id)
             .cloned()
             .ok_or_else(|| format!("research node {node_id} was not found"))?;
+        let ancestor_prompts = research::ancestor_prompts(&node, |id| model.research_nodes.get(id));
         let turns = node
             .agent_id
             .as_deref()
             .and_then(|agent_id| model.turns.get(agent_id))
             .map(|turns| {
-                research::response_turns(turns, node.prompt_native_id.as_deref(), &node.prompt)
+                research::response_turns(
+                    turns,
+                    node.prompt_native_id.as_deref(),
+                    &node.prompt,
+                    &ancestor_prompts,
+                )
             })
             .unwrap_or_default();
         let mut children = model
@@ -2924,7 +2947,7 @@ impl AppState {
             inline: false,
             prompt: String::new(),
             title: None,
-            response_preview: research::response_preview(&turns, None, ""),
+            response_preview: research::response_preview(&turns, None, "", &[]),
             adapter: String::new(),
             model: None,
             group_id: request.group_id,
@@ -3327,7 +3350,7 @@ impl AppState {
             let removed = if let Some(turns) = turns.as_deref() {
                 let removed = node.highlights.len();
                 node.highlights.clear();
-                node.response_preview = research::response_preview(turns, None, "");
+                node.response_preview = research::response_preview(turns, None, "", &[]);
                 node.response_snapshot_at = Some(
                     node.response_snapshot_at
                         .map_or(now, |previous| now.max(previous.saturating_add(1))),
@@ -6627,12 +6650,18 @@ impl AppState {
                 .get(&node_id)
                 .map(|node| (node.prompt.clone(), node.prompt_native_id.clone()))
                 .expect("node exists");
+            let ancestor_prompts = model
+                .research_nodes
+                .get(&node_id)
+                .map(|node| research::ancestor_prompts(node, |id| model.research_nodes.get(id)))
+                .unwrap_or_default();
             let (prompt_id, preview) = model.turns.get(&agent.id).map_or((None, None), |turns| {
                 let prompt_id = research::prompt_native_id(turns, &node_prompt);
                 let preview = research::response_preview(
                     turns,
                     prompt_id.as_deref().or(existing_prompt_id.as_deref()),
                     &node_prompt,
+                    &ancestor_prompts,
                 );
                 (prompt_id, preview)
             });
@@ -6839,13 +6868,19 @@ impl AppState {
             return Ok(());
         }
         let content = self.research_node_content(node_id)?;
-        let turns = research::load_transcript_response(&self.inner.config, &content.node).or_else(
-            |_| {
-                (!content.turns.is_empty())
-                    .then_some(content.turns)
-                    .ok_or_else(|| "completed research response is not available yet".to_string())
-            },
-        )?;
+        let ancestor_prompts = self
+            .research_node_ancestor_prompts(node_id)
+            .unwrap_or_default();
+        let turns = research::load_transcript_response(
+            &self.inner.config,
+            &content.node,
+            &ancestor_prompts,
+        )
+        .or_else(|_| {
+            (!content.turns.is_empty())
+                .then_some(content.turns)
+                .ok_or_else(|| "completed research response is not available yet".to_string())
+        })?;
         if !turns.iter().any(|turn| turn.role == "assistant") {
             *last_candidate = Some(turns);
             return Err("research response has no assistant turn yet".to_string());
@@ -10765,6 +10800,85 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn generating_followup_never_previews_the_parent_answer() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-8")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id.clone();
+        let agent = sample_agent("research-agent");
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+        state
+            .append_turn(sample_user_turn("research-agent", "Root question"))
+            .unwrap();
+        let mut answer = sample_user_turn("research-agent", "Root answer");
+        answer.role = "assistant".to_string();
+        answer.id = "research-agent-answer".to_string();
+        answer.source_index = 1;
+        state.append_turn(answer).unwrap();
+        state
+            .set_agent_status("research-agent", AgentStatus::Done)
+            .unwrap();
+
+        // The follow-up runs in a forked session: its transcript replays the
+        // parent exchange first, and while the answer is being generated the
+        // child's own prompt has not reached the transcript yet.
+        let child = state
+            .create_research_child(&root_id, "Follow-up question".to_string(), None, false)
+            .unwrap();
+        let child_agent = sample_agent("child-agent");
+        state.insert_agent(child_agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&child.id, &child_agent, "pane-8")
+            .unwrap();
+        state
+            .append_turn(sample_user_turn("child-agent", "Root question"))
+            .unwrap();
+        let mut replayed = sample_user_turn("child-agent", "Root answer");
+        replayed.role = "assistant".to_string();
+        replayed.id = "child-agent-replayed".to_string();
+        replayed.source_index = 1;
+        state.append_turn(replayed).unwrap();
+
+        // The parent's answer must not stand in as the child's preview or
+        // response; the card and pane keep their generating placeholders.
+        let content = state.research_node_content(&child.id).unwrap();
+        assert_eq!(content.node.response_preview, None);
+        assert!(content.turns.is_empty());
+
+        // Once the child's own (adapter-rewritten) prompt and answer land,
+        // the preview follows the child's response as before.
+        let mut child_prompt = sample_user_turn("child-agent", "[wrapped] follow-up (rewritten)");
+        child_prompt.id = "child-agent-prompt".to_string();
+        child_prompt.source_index = 2;
+        state.append_turn(child_prompt).unwrap();
+        let mut child_answer = sample_user_turn("child-agent", "Child answer");
+        child_answer.role = "assistant".to_string();
+        child_answer.id = "child-agent-answer".to_string();
+        child_answer.source_index = 3;
+        state.append_turn(child_answer).unwrap();
+        let content = state.research_node_content(&child.id).unwrap();
+        assert_eq!(
+            content.node.response_preview.as_deref(),
+            Some("Child answer")
+        );
+        assert_eq!(content.turns.len(), 1);
+        assert_eq!(content.turns[0].role, "assistant");
     }
 
     #[test]
