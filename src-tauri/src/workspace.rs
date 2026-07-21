@@ -574,13 +574,26 @@ pub fn remove_research_workspace(
         return Ok(detached_tree_ids);
     }
     let mut responses = HashMap::new();
+    let archived_nodes_by_id = archive
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
     for node in &archive.nodes {
         let turns =
             match crate::research::read_response_snapshot(&state.config().workspace_root, &node.id)
             {
                 Ok(Some(turns)) => Some(turns),
                 Ok(None) | Err(_) => {
-                    crate::research::load_transcript_response(state.config(), node).ok()
+                    let ancestor_prompts = crate::research::ancestor_prompts(node, |id| {
+                        archived_nodes_by_id.get(id).copied()
+                    });
+                    crate::research::load_transcript_response(
+                        state.config(),
+                        node,
+                        &ancestor_prompts,
+                    )
+                    .ok()
                 }
             };
         if let Some(turns) = turns.filter(|turns| {

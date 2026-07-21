@@ -1087,7 +1087,14 @@ async fn get_research_node_content(
                     | research::ResearchNodeStatus::Cancelled
             )
         {
-            match research::load_transcript_response(state.config(), &content.node) {
+            let ancestor_prompts = state
+                .research_node_ancestor_prompts(&node_id)
+                .unwrap_or_default();
+            match research::load_transcript_response(
+                state.config(),
+                &content.node,
+                &ancestor_prompts,
+            ) {
                 Ok(turns) => content.turns = turns,
                 // No snapshot, no live turns, and the adapter transcript is
                 // unreadable: return the node with the failure recorded rather
