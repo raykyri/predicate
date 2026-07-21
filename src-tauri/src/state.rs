@@ -3665,6 +3665,113 @@ impl AppState {
         Ok(node)
     }
 
+    /// Arms the pre-session watchdog for a just-launched research run. Agent
+    /// status is entirely hook-driven, and a CLI blocked on startup UI that
+    /// predates its session — a workspace-trust dialog, a login prompt, an
+    /// update gate — fires no hooks at all, so the agent would sit `Starting`
+    /// forever while the research pane's read-only policy keeps the user from
+    /// answering the very prompt it is stuck on. If the agent is still
+    /// pre-session after the delay, flag it `AwaitingInput`: the pane's
+    /// keyboard unlocks and the node stays live, and the first real hook
+    /// moves the status on as usual. Deliberately adapter-agnostic — every
+    /// harness wedges the same way here and gets the same recovery.
+    pub fn schedule_research_startup_watchdog(&self, agent_id: String) {
+        // Long enough that a healthy launch has bound its native session id
+        // (SessionStart on a fresh spawn, the first turn's hook payload on a
+        // fork); a false flag only unlocks the pane early and heals on the
+        // next hook.
+        const RESEARCH_STARTUP_WATCHDOG_DELAY_MS: u64 = 10_000;
+        let state = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                RESEARCH_STARTUP_WATCHDOG_DELAY_MS,
+            ));
+            match state.flag_stalled_research_startup(&agent_id) {
+                Ok(Some(agent)) => {
+                    // Mirrors the hook pipeline's event shape (type + attached
+                    // agent) so the frontend applies the status surgically.
+                    state.emit(QmuxEvent::new(
+                        "agent.awaiting_input",
+                        agent.pane_id.clone(),
+                        Some(agent.id.clone()),
+                        json!({ "agent": agent, "source": "research-startup-watchdog" }),
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!("qmux: research startup watchdog for {agent_id} failed: {err}");
+                }
+            }
+        });
+    }
+
+    /// The watchdog's check-and-flip. Returns the updated agent when the run
+    /// was still pre-session and got flagged `AwaitingInput`; `None` when it
+    /// moved on, settled, or lost its pane (exit teardown owns that outcome).
+    ///
+    /// Pre-session has two observed signatures, so both flag:
+    /// - `Starting`: no lifecycle hook has landed at all.
+    /// - `Running` with no bound session: Claude fires `UserPromptSubmit`
+    ///   for a launch-argument prompt even while startup UI (the
+    ///   workspace-trust dialog) still blocks the session, so the status
+    ///   promotes while `SessionStart` never delivers a session id. Every
+    ///   adapter binds the session id within seconds on a healthy launch
+    ///   (forks heal theirs from the first turn's hook payload), so
+    ///   session-less `Running` this long after spawn means startup UI is
+    ///   blocking — and a rare false flag only unlocks the pane early and
+    ///   heals on the next hook.
+    ///
+    /// The check and the status write share one model lock so a hook racing
+    /// this flip cannot have its fresher status stomped back to
+    /// `AwaitingInput`.
+    pub(crate) fn flag_stalled_research_startup(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<AgentInfo>, String> {
+        let updated = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let node_live = model.research_nodes.values().any(|node| {
+                node.agent_id.as_deref() == Some(agent_id) && !node.status.is_terminal()
+            });
+            if !node_live {
+                return Ok(None);
+            }
+            let stalled = model.agents.get(agent_id).is_some_and(|agent| {
+                let presession = match agent.status {
+                    AgentStatus::Starting => true,
+                    AgentStatus::Running => agent.session_id.is_none(),
+                    _ => false,
+                };
+                presession
+                    && agent
+                        .pane_id
+                        .as_deref()
+                        .is_some_and(|pane_id| model.panes.contains_key(pane_id))
+            });
+            if !stalled {
+                return Ok(None);
+            }
+            let agent = model
+                .agents
+                .get_mut(agent_id)
+                .expect("agent was checked above");
+            agent.status = AgentStatus::AwaitingInput;
+            let updated = agent.clone();
+            bump_agent_activity_locked(&mut model, agent_id);
+            bump_agent_status_activity_locked(&mut model, agent_id);
+            updated
+        };
+        // No recent-session upsert on purpose: research sessions are excluded
+        // from the recents pool, and this is not real agent activity anyway.
+        self.sync_research_node_from_agent(&updated)?;
+        self.persist();
+        Ok(Some(updated))
+    }
+
     pub fn research_workspace_for_node(&self, node_id: &str) -> Result<GroupInfo, String> {
         let model = self
             .inner
@@ -10460,6 +10567,149 @@ mod tests {
         );
         assert_eq!(content.turns.len(), 1);
         assert_eq!(content.turns[0].role, "assistant");
+    }
+
+    #[test]
+    fn startup_watchdog_flags_presession_research_agent() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id;
+        let mut agent = sample_agent("research-agent");
+        agent.status = AgentStatus::Starting;
+        agent.session_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+
+        let flagged = state
+            .flag_stalled_research_startup("research-agent")
+            .unwrap()
+            .expect("pre-session agent should be flagged");
+        assert!(matches!(flagged.status, AgentStatus::AwaitingInput));
+        assert!(matches!(
+            state.agent("research-agent").unwrap().unwrap().status,
+            AgentStatus::AwaitingInput
+        ));
+        // The node must stay live: AwaitingInput maps to Running, so
+        // retirement never reaps the run while it waits on the user.
+        assert_eq!(
+            state.research_node(&root_id).unwrap().status,
+            ResearchNodeStatus::Running
+        );
+    }
+
+    #[test]
+    fn startup_watchdog_leaves_started_runs_alone() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id;
+        // sample_agent is Running with a bound session id: the launch is past
+        // startup UI and mid-turn, exactly what the watchdog must not touch.
+        let agent = sample_agent("research-agent");
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+
+        assert!(
+            state
+                .flag_stalled_research_startup("research-agent")
+                .unwrap()
+                .is_none()
+        );
+        assert!(matches!(
+            state.agent("research-agent").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
+    }
+
+    #[test]
+    fn startup_watchdog_flags_sessionless_running_agent() {
+        // The trust-dialog wedge as observed live: Claude fires
+        // UserPromptSubmit for the launch-argument prompt (promoting the
+        // agent to Running) while startup UI still blocks the session, so no
+        // session id is ever bound. That shape must flag too.
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id;
+        let mut agent = sample_agent("research-agent");
+        agent.status = AgentStatus::Running;
+        agent.session_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+
+        let flagged = state
+            .flag_stalled_research_startup("research-agent")
+            .unwrap()
+            .expect("session-less running agent should be flagged");
+        assert!(matches!(flagged.status, AgentStatus::AwaitingInput));
+    }
+
+    #[test]
+    fn startup_watchdog_ignores_settled_runs() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id;
+        let mut agent = sample_agent("research-agent");
+        agent.status = AgentStatus::Starting;
+        agent.session_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+        state.cancel_research_node(&root_id).unwrap();
+
+        // A watchdog firing after the user already settled the run must not
+        // resurrect it by flipping its (possibly still-recorded) agent.
+        assert!(
+            state
+                .flag_stalled_research_startup("research-agent")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
