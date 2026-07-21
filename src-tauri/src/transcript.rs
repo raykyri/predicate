@@ -2478,6 +2478,7 @@ mod tests {
             transcript_path: Some("/tmp/session.jsonl".to_string()),
             status,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

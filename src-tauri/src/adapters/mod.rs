@@ -782,6 +782,7 @@ fn fork_agent_in_shell(
             base_ref: Some("HEAD".to_string()),
             adapter: source.adapter.clone(),
             model: source.model.clone(),
+            effort: source.effort.clone(),
             use_worktree,
         },
     )?;
@@ -1315,6 +1316,7 @@ mod tests {
                 transcript_path: None,
                 status: AgentStatus::Running,
                 model: None,
+                effort: None,
                 parent_id: None,
                 fork_point: None,
                 root_session_id: None,
@@ -1341,6 +1343,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Idle,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

@@ -317,6 +317,10 @@ pub struct ResearchNode {
     pub adapter: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Reasoning effort the run launches with. Inherited by follow-up nodes
+    /// like `model`; absent when the adapter default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub group_id: String,
     pub worktree_dir: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -395,6 +399,8 @@ pub struct CreateResearchTreeRequest {
     pub title: Option<String>,
     pub adapter: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
     /// The run directory is derived from this workspace's durable record, never
     /// accepted from the caller: the group is the workspace the user actually
     /// picked, and a stale or fabricated directory would silently run the
@@ -440,6 +446,7 @@ pub struct PreparedPaneExport {
     pub response_preview: Option<String>,
     pub adapter: String,
     pub model: Option<String>,
+    pub effort: Option<String>,
     pub agent_created_at: u128,
 }
 
@@ -2518,6 +2525,7 @@ mod tests {
             response_preview: Some("Answer".to_string()),
             adapter: "claude".to_string(),
             model: None,
+            effort: None,
             group_id: "group-1".to_string(),
             worktree_dir: folder.display().to_string(),
             native_session_id: Some("session-1".to_string()),

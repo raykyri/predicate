@@ -6,8 +6,8 @@ import {
   isComposerSubmitShortcut,
 } from "../ComposerSubmitShortcut";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "../../lib/adapterIcons";
-import { CLAUDE_ADAPTER_ID } from "../../adapters/claude";
-import { CODEX_ADAPTER_ID } from "../../adapters/codex";
+import { CLAUDE_ADAPTER_ID, CLAUDE_EFFORT_OPTIONS } from "../../adapters/claude";
+import { CODEX_ADAPTER_ID, CODEX_REASONING_OPTIONS } from "../../adapters/codex";
 import {
   clearSessionDraft,
   loadSessionDraftJson,
@@ -20,10 +20,22 @@ import {
 // without a curated list only offer "custom".
 const MODEL_PRESETS_BY_ADAPTER: Record<string, string[]> = {
   [CLAUDE_ADAPTER_ID]: ["fable", "opus", "sonnet", "custom"],
-  [CODEX_ADAPTER_ID]: ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5", "gpt-5.4", "custom"],
+  [CODEX_ADAPTER_ID]: [
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "custom",
+  ],
 };
 
 const CUSTOM_MODEL = "custom";
+
+// GPT-5.4 stops at extra high; every other Codex preset (and a custom model,
+// whose ceiling is unknown here) offers the full range and lets the CLI
+// reject a level the model does not support.
+const GPT_5_4_REASONING_LEVELS = ["", "low", "medium", "high", "xhigh"];
 
 function modelPresetsFor(adapter: string): string[] {
   return MODEL_PRESETS_BY_ADAPTER[adapter] ?? [CUSTOM_MODEL];
@@ -41,6 +53,24 @@ function formatResearchModelLabel(preset: string): string {
   });
 }
 
+// The reasoning/effort levels the selected model supports, or null for
+// adapters without a reasoning-effort launch option. Every Claude model
+// (Fable, Opus, Sonnet) shares one range; Codex ranges vary by model.
+function effortOptionsFor(adapter: string, model: string): LauncherSelectOption[] | null {
+  if (adapter === CLAUDE_ADAPTER_ID) {
+    return CLAUDE_EFFORT_OPTIONS;
+  }
+  if (adapter === CODEX_ADAPTER_ID) {
+    if (model === "gpt-5.4") {
+      return CODEX_REASONING_OPTIONS.filter((option) =>
+        GPT_5_4_REASONING_LEVELS.includes(option.value),
+      );
+    }
+    return CODEX_REASONING_OPTIONS;
+  }
+  return null;
+}
+
 interface NewResearchDialogProps {
   open: boolean;
   inline?: boolean;
@@ -56,6 +86,7 @@ interface NewResearchDialogProps {
     prompt: string;
     adapter: string;
     model: string | null;
+    effort: string | null;
     workspaceId: string | null;
   }) => Promise<void>;
 }
@@ -74,6 +105,7 @@ export default function NewResearchDialog({
   const [adapter, setAdapter] = useState("");
   const [modelChoice, setModelChoice] = useState<string | null>(null);
   const [customModel, setCustomModel] = useState("");
+  const [effortChoice, setEffortChoice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sessionDraftReady, setSessionDraftReady] = useState(false);
   const sessionDraftTouchedRef = useRef(false);
@@ -108,6 +140,7 @@ export default function NewResearchDialog({
     setPrompt(restored?.prompt ?? "");
     setModelChoice(restored?.modelChoice ?? null);
     setCustomModel(restored?.customModel ?? "");
+    setEffortChoice("");
     setError(null);
     setAdapter(
       restored?.adapter ??
@@ -202,6 +235,15 @@ export default function NewResearchDialog({
     modelChoice && modelPresets.includes(modelChoice) ? modelChoice : modelPresets[0];
   const resolvedModel =
     selectedModel === CUSTOM_MODEL ? customModel.trim() || null : selectedModel;
+  // Same stale-choice contract as the model picker: a level left over from
+  // another adapter or model silently falls back to the default, so the
+  // trigger always shows what will launch.
+  const effortOptions = effortOptionsFor(adapter, selectedModel);
+  const selectedEffort =
+    effortOptions && effortOptions.some((option) => option.value === effortChoice)
+      ? effortChoice
+      : "";
+  const resolvedEffort = selectedEffort || null;
 
   async function submit() {
     if (!prompt.trim() || !adapter || submitting) {
@@ -214,6 +256,7 @@ export default function NewResearchDialog({
         prompt: prompt.trim(),
         adapter,
         model: resolvedModel,
+        effort: resolvedEffort,
         workspaceId,
       });
       // The modal unmounts on close, but the inline Research-home launcher is
@@ -311,6 +354,14 @@ export default function NewResearchDialog({
                     sessionDraftTouchedRef.current = true;
                     setCustomModel(event.currentTarget.value);
                   }}
+                />
+              ) : null}
+              {effortOptions ? (
+                <LauncherSelect
+                  value={selectedEffort}
+                  options={effortOptions}
+                  ariaLabel="Reasoning effort"
+                  onChange={setEffortChoice}
                 />
               ) : null}
             </div>

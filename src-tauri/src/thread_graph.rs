@@ -1410,6 +1410,7 @@ mod tests {
             transcript_path: Some(format!("/tmp/{id}-session.jsonl")),
             status: AgentStatus::Done,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

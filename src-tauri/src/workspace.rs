@@ -165,6 +165,11 @@ pub struct AgentInfo {
     pub transcript_path: Option<String>,
     pub status: AgentStatus,
     pub model: Option<String>,
+    /// Reasoning effort level the session was launched with. Persisted like
+    /// `model` so respawns, resumes, and forks keep the session's configured
+    /// effort. Absent when the adapter default applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
     pub parent_id: Option<String>,
     pub fork_point: Option<String>,
     pub root_session_id: Option<String>,
@@ -226,6 +231,9 @@ pub struct PrepareAgentWorkspaceRequest {
     pub base_ref: Option<String>,
     pub adapter: String,
     pub model: Option<String>,
+    /// Reasoning effort level for the new session, recorded on the agent like
+    /// `model` so later respawns and forks re-apply it.
+    pub effort: Option<String>,
     /// When false, the agent runs directly in the base repository / cwd with no
     /// isolated git worktree (the default).
     pub use_worktree: bool,
@@ -1021,6 +1029,7 @@ fn prepare_agent_workspace_locked(
         transcript_path: None,
         status: AgentStatus::Starting,
         model: request.model,
+        effort: request.effort,
         parent_id: None,
         fork_point: None,
         root_session_id: None,
@@ -1107,6 +1116,7 @@ pub fn recover_shell_agent_from_session_start(
                 base_ref: Some("HEAD".to_string()),
                 adapter: adapter_id.to_string(),
                 model: None,
+                effort: None,
                 // This is an agent running inside the shell's own directory, not a
                 // qmux-managed isolated worktree.
                 use_worktree: false,
@@ -2230,6 +2240,7 @@ mod tests {
             transcript_path: None,
             status,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -2511,6 +2522,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: workspace.id.clone(),
             })
             .unwrap();
@@ -2566,6 +2578,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: workspace.id.clone(),
             })
             .unwrap();
@@ -2741,6 +2754,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: workspace.id.clone(),
             })
             .unwrap();
@@ -2821,6 +2835,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: removed_workspace.id.clone(),
             })
             .unwrap();
@@ -2873,6 +2888,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: workspace.id.clone(),
             })
             .unwrap();
@@ -2938,6 +2954,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: donor_workspace.id.clone(),
             })
             .unwrap();
@@ -2992,6 +3009,7 @@ mod tests {
                 title: None,
                 adapter: "claude".to_string(),
                 model: None,
+                effort: None,
                 group_id: workspace.id.clone(),
             })
             .unwrap();
