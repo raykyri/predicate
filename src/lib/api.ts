@@ -393,6 +393,7 @@ export function createResearchTree(request: {
   title?: string | null;
   adapter: string;
   model?: string | null;
+  effort?: string | null;
   workspaceId: string;
 }) {
   return invoke<ResearchTreeDetail>("create_research_tree", { request });

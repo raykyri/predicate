@@ -203,6 +203,7 @@ impl OpencodeAdapter {
                 base_ref: request.base_ref,
                 adapter: self.id().to_string(),
                 model: request.model.clone(),
+                effort: None,
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
         )?;
@@ -365,6 +366,7 @@ impl OpencodeAdapter {
                 base_ref: Some("HEAD".to_string()),
                 adapter: self.id().to_string(),
                 model: source.model.clone(),
+                effort: source.effort.clone(),
                 use_worktree,
             },
         )?;
@@ -483,6 +485,7 @@ impl OpencodeAdapter {
                             base_ref: Some("HEAD".to_string()),
                             adapter: self.id().to_string(),
                             model: None,
+                            effort: None,
                             // Typing `opencode` in a shell runs in the current directory.
                             use_worktree: false,
                         },
@@ -1249,6 +1252,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Starting,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

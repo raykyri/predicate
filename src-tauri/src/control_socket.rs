@@ -638,6 +638,7 @@ mod tests {
             transcript_path: None,
             status: AgentStatus::Running,
             model: None,
+            effort: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
