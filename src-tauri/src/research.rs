@@ -1414,6 +1414,7 @@ pub fn load_transcript_turns(
 pub fn load_transcript_response(
     config: &crate::config::QmuxConfig,
     node: &ResearchNode,
+    ancestor_prompts: &[String],
 ) -> Result<Vec<crate::transcript::Turn>, String> {
     let path = node
         .transcript_path
@@ -1429,7 +1430,35 @@ pub fn load_transcript_response(
         &turns,
         node.prompt_native_id.as_deref(),
         &node.prompt,
+        ancestor_prompts,
     ))
+}
+
+/// Prompts of every ancestor run in the node's follow-up chain, nearest
+/// parent first. `lookup` resolves a node id within whatever collection the
+/// caller holds (the live model map, a detached archive). Response-boundary
+/// matching uses these to recognize a forked transcript that still holds
+/// only the replayed ancestor exchange — see `response_boundary`.
+pub fn ancestor_prompts<'a>(
+    node: &ResearchNode,
+    lookup: impl Fn(&str) -> Option<&'a ResearchNode>,
+) -> Vec<String> {
+    let mut prompts = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut parent_id = node.parent_node_id.clone();
+    while let Some(id) = parent_id {
+        if !seen.insert(id.clone()) {
+            break;
+        }
+        let Some(parent) = lookup(&id) else {
+            break;
+        };
+        if !parent.prompt.trim().is_empty() {
+            prompts.push(parent.prompt.clone());
+        }
+        parent_id = parent.parent_node_id.clone();
+    }
+    prompts
 }
 
 fn normalized_text(value: &str) -> String {
@@ -1491,6 +1520,7 @@ fn response_boundary(
     turns: &[crate::transcript::Turn],
     prompt_native_id: Option<&str>,
     prompt: &str,
+    ancestor_prompts: &[String],
 ) -> Option<usize> {
     let expected = normalized_text(prompt);
     turns
@@ -1508,19 +1538,37 @@ fn response_boundary(
         // session's transcript replays every ancestor exchange, so "no match"
         // must not mean "show everything" — that renders and persists ancestor
         // conversations as this node's response. The last user turn carrying
-        // prompt text is the safest remaining boundary: replayed history always
+        // prompt text is the safest remaining boundary once replayed history
         // ends with this node's own prompt, and research runs accept no later
-        // user prompts. Only a transcript with no user prompt at all — nothing
-        // inherited to leak — falls through to the full transcript.
-        .or_else(|| turns.iter().rposition(turn_has_prompt_text))
+        // user prompts. But while the answer is still being generated the
+        // fork can hold *only* the replayed ancestor exchange — the node's
+        // own prompt has not reached the transcript yet — and that last user
+        // turn is an ancestor's prompt. Treating it as the boundary showed
+        // the ancestor's (main query's) answer as this node's response, so a
+        // fallback turn recognized as an ancestor prompt means "response not
+        // started": the boundary is the final turn and the response is empty.
+        // Only a transcript with no user prompt at all — nothing inherited to
+        // leak — falls through to the full transcript.
+        .or_else(|| {
+            let index = turns.iter().rposition(turn_has_prompt_text)?;
+            let is_replayed_ancestor = ancestor_prompts.iter().any(|ancestor| {
+                turn_contains_normalized_prompt(&turns[index], &normalized_text(ancestor))
+            });
+            Some(if is_replayed_ancestor {
+                turns.len() - 1
+            } else {
+                index
+            })
+        })
 }
 
 pub fn response_turns(
     turns: &[crate::transcript::Turn],
     prompt_native_id: Option<&str>,
     prompt: &str,
+    ancestor_prompts: &[String],
 ) -> Vec<crate::transcript::Turn> {
-    let boundary = response_boundary(turns, prompt_native_id, prompt);
+    let boundary = response_boundary(turns, prompt_native_id, prompt, ancestor_prompts);
     turns
         .iter()
         .skip(boundary.map_or(0, |index| index + 1))
@@ -1532,12 +1580,14 @@ pub fn response_preview(
     turns: &[crate::transcript::Turn],
     prompt_native_id: Option<&str>,
     prompt: &str,
+    ancestor_prompts: &[String],
 ) -> Option<String> {
     // Borrows rather than going through response_turns: this runs on every
     // hook-driven agent event under the model lock, and cloning the whole
     // response tail (tool-result payloads included) to extract a 220-char
     // preview added lock-hold latency for the lifetime of a streaming run.
-    let start = response_boundary(turns, prompt_native_id, prompt).map_or(0, |index| index + 1);
+    let start = response_boundary(turns, prompt_native_id, prompt, ancestor_prompts)
+        .map_or(0, |index| index + 1);
     let mut fallback_text = None;
     let mut text_after_last_activity = None;
     for turn in &turns[start..] {
@@ -3009,7 +3059,7 @@ mod tests {
         }
         assert_eq!(conversation_prompt(&exported), "First question");
         assert_eq!(
-            response_preview(&exported, None, "").as_deref(),
+            response_preview(&exported, None, "", &[]).as_deref(),
             Some("Second answer")
         );
     }
@@ -3558,7 +3608,7 @@ mod tests {
             .unwrap();
         assert_eq!(turns, vec![turn]);
         assert_eq!(
-            response_preview(&turns, None, "").as_deref(),
+            response_preview(&turns, None, "", &[]).as_deref(),
             Some("# Title Body **bold**.")
         );
         std::fs::remove_dir_all(workspace).unwrap();
@@ -3597,12 +3647,12 @@ mod tests {
             tool_result,
             turn("new-answer", "assistant", "New answer"),
         ];
-        let visible = response_turns(&turns, None, "New question");
+        let visible = response_turns(&turns, None, "New question", &[]);
         assert_eq!(visible.len(), 3);
         assert_eq!(visible[0].id, "working");
         assert_eq!(visible[1].id, "tool-result");
         assert_eq!(
-            response_preview(&turns, None, "New question").as_deref(),
+            response_preview(&turns, None, "New question", &[]).as_deref(),
             Some("New answer")
         );
 
@@ -3617,7 +3667,7 @@ mod tests {
             turn("final", "assistant", "Final answer"),
         ];
         assert_eq!(
-            response_preview(&turns_with_thinking, None, "Question").as_deref(),
+            response_preview(&turns_with_thinking, None, "Question", &[]).as_deref(),
             Some("Final answer")
         );
 
@@ -3627,7 +3677,7 @@ mod tests {
             thinking,
         ];
         assert_eq!(
-            response_preview(&turns_with_trailing_thinking, None, "Question").as_deref(),
+            response_preview(&turns_with_trailing_thinking, None, "Question", &[]).as_deref(),
             Some("Draft answer")
         );
     }
@@ -3662,11 +3712,11 @@ mod tests {
             turn("child-user", "user", "[wrapped] follow-up (rewritten)"),
             turn("child-answer", "assistant", "Child answer"),
         ];
-        let visible = response_turns(&turns, None, "Original follow-up");
+        let visible = response_turns(&turns, None, "Original follow-up", &[]);
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].id, "child-answer");
         assert_eq!(
-            response_preview(&turns, None, "Original follow-up").as_deref(),
+            response_preview(&turns, None, "Original follow-up", &[]).as_deref(),
             Some("Child answer")
         );
 
@@ -3674,8 +3724,81 @@ mod tests {
         // leak; the whole transcript remains visible.
         let assistant_only = vec![turn("only-answer", "assistant", "Answer")];
         assert_eq!(
-            response_turns(&assistant_only, None, "Original follow-up").len(),
+            response_turns(&assistant_only, None, "Original follow-up", &[]).len(),
             1
+        );
+    }
+
+    #[test]
+    fn pending_followup_never_previews_the_ancestor_answer() {
+        use crate::transcript::{Turn, TurnBlock};
+        let turn = |id: &str, role: &str, text: &str| Turn {
+            id: id.to_string(),
+            agent_id: "agent-1".to_string(),
+            session_id: None,
+            role: role.to_string(),
+            blocks: vec![TurnBlock::Text {
+                text: text.to_string(),
+            }],
+            source_index: 0,
+            timestamp: None,
+            status: None,
+            status_reason: None,
+            native_id: None,
+            parent_native_id: None,
+            native_message_id: None,
+        };
+        // While a follow-up's answer is being generated, the forked session's
+        // transcript can hold only the replayed ancestor exchange — the
+        // node's own prompt has not reached it yet. The positional fallback
+        // then lands on the ancestor's prompt, which used to surface the
+        // ancestor's (main query's) answer as this node's preview. With the
+        // ancestor prompts supplied, the response must stay empty instead.
+        let ancestors = vec!["Ancestor question".to_string()];
+        let replayed_only = vec![
+            turn("ancestor-user", "user", "Ancestor question"),
+            turn("ancestor-answer", "assistant", "Ancestor answer"),
+        ];
+        assert!(response_turns(&replayed_only, None, "Follow-up question", &ancestors).is_empty());
+        assert_eq!(
+            response_preview(&replayed_only, None, "Follow-up question", &ancestors),
+            None
+        );
+
+        // The replayed ancestor turn carries the wrapped launch prompt, not
+        // the bare question stored on the node; the substring match must
+        // still recognize it.
+        let replayed_wrapped = vec![
+            turn(
+                "ancestor-user",
+                "user",
+                "The user's question refers to this quoted passage:\n\n> Some passage\n\nAncestor question",
+            ),
+            turn("ancestor-answer", "assistant", "Ancestor answer"),
+        ];
+        assert!(
+            response_turns(&replayed_wrapped, None, "Follow-up question", &ancestors).is_empty()
+        );
+        assert_eq!(
+            response_preview(&replayed_wrapped, None, "Follow-up question", &ancestors),
+            None
+        );
+
+        // Once the node's own prompt lands — even rewritten beyond both text
+        // matches — the positional fallback works as before: the response is
+        // everything after the last user turn.
+        let with_child = vec![
+            turn("ancestor-user", "user", "Ancestor question"),
+            turn("ancestor-answer", "assistant", "Ancestor answer"),
+            turn("child-user", "user", "[wrapped] follow-up (rewritten)"),
+            turn("child-answer", "assistant", "Child answer"),
+        ];
+        let visible = response_turns(&with_child, None, "Original follow-up", &ancestors);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, "child-answer");
+        assert_eq!(
+            response_preview(&with_child, None, "Original follow-up", &ancestors).as_deref(),
+            Some("Child answer")
         );
     }
 }
