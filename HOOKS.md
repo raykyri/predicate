@@ -8,6 +8,20 @@ Hooks are only installed for agents launched by qmux or by qmux's
 shell wrapper functions inside a qmux shell pane, so a Claude or Codex
 process started outside qmux's setup will not have these hooks.
 
+Because status is entirely hook-driven, a CLI blocked on startup UI
+that predates its session — a workspace-trust dialog, a login prompt,
+an update gate — is nearly invisible to qmux: the agent sits
+`Starting`, or `Running` with no session id bound (Claude fires
+`UserPromptSubmit` for a launch-argument prompt even while the trust
+dialog still blocks the session). For research runs, whose panes are
+read-only outside `AwaitingPermission`/`AwaitingInput`, that would
+lock the user out of the very prompt the run is stuck on. A startup
+watchdog (`schedule_research_startup_watchdog` in
+src-tauri/src/state.rs) covers this for every adapter: a research
+agent that still has either signature 10 seconds after launch is
+flagged `AwaitingInput`, which unlocks its pane and keeps the node
+live; the first real hook moves the status on as usual.
+
 
 ## Agent Integrations
 

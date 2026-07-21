@@ -924,6 +924,7 @@ fn launch_fresh_research_run(
                                 "source": "research",
                             }),
                         ));
+                        state.schedule_research_startup_watchdog(agent.id.clone());
                     }
                     state.research_node(node_id)
                 }
@@ -1275,7 +1276,16 @@ async fn fork_research_node(
                         reclaim_settled_research_launch(&state, &node, &pane.id);
                         state.research_node(&child.id)
                     }
-                    Ok(node) => Ok(node),
+                    Ok(node) => {
+                        // Forks usually land in an already-trusted directory,
+                        // but login/update gates are just as hook-invisible as
+                        // the trust dialog — arm the same startup watchdog as
+                        // fresh runs.
+                        if let Some(agent_id) = node.agent_id.clone() {
+                            state.schedule_research_startup_watchdog(agent_id);
+                        }
+                        Ok(node)
+                    }
                     Err(err) => Err(fail_research_launch(&state, &child.id, &pane.id, err)),
                 }
             }
