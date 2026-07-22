@@ -10,6 +10,13 @@ import {
   type EncyclopediaStatus,
 } from "../src/lib/encyclopedia";
 import { safeHref } from "../src/lib/links";
+import {
+  EMPTY_RESEARCH_HISTORY,
+  pruneResearchHistory,
+  pushResearchHistory,
+  researchHistoryBack,
+  researchHistoryForward,
+} from "../src/lib/researchHistory";
 
 function status(overrides: Partial<EncyclopediaStatus> = {}): EncyclopediaStatus {
   return {
@@ -81,6 +88,42 @@ test("unrecognized internal shapes fall out as external", () => {
   assert.equal(parseEncyclopediaHref(resolved("nested/deep/page.md")).kind, "external");
   assert.equal(parseEncyclopediaHref(resolved("/settings")).kind, "external");
   assert.equal(parseEncyclopediaHref("not a url").kind, "external");
+});
+
+// ---- page history ----
+// The encyclopedia reuses the research document's history reducer with page
+// file names as entries; pin that contract (App.tsx holds the state).
+
+test("page history walks back and forward over visited pages", () => {
+  let history = pushResearchHistory(EMPTY_RESEARCH_HISTORY, "index.md");
+  history = pushResearchHistory(history, "caching.md");
+  history = pushResearchHistory(history, "build-pipeline.md");
+  const back = researchHistoryBack(history);
+  assert.ok(back);
+  assert.equal(back.nodeId, "caching.md");
+  const forward = researchHistoryForward(back.history);
+  assert.ok(forward);
+  assert.equal(forward.nodeId, "build-pipeline.md");
+  // Following a new link from the middle drops the forward stack.
+  const branched = pushResearchHistory(back.history, "index.md");
+  assert.equal(researchHistoryForward(branched), null);
+  assert.deepEqual(branched.entries, ["index.md", "caching.md", "index.md"]);
+});
+
+test("regeneration prunes deleted pages and keeps the cursor sensible", () => {
+  let history = pushResearchHistory(EMPTY_RESEARCH_HISTORY, "index.md");
+  history = pushResearchHistory(history, "stale.md");
+  history = pushResearchHistory(history, "caching.md");
+  const pruned = pruneResearchHistory(
+    history,
+    new Set(["index.md", "caching.md"]),
+    "caching.md",
+  );
+  assert.deepEqual(pruned.entries, ["index.md", "caching.md"]);
+  assert.equal(pruned.entries[pruned.index], "caching.md");
+  // Everything deleted: the history restarts at the fallback (or empties).
+  const emptied = pruneResearchHistory(history, new Set(), null);
+  assert.deepEqual(emptied.entries, []);
 });
 
 // ---- auto-update scheduling ----

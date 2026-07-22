@@ -272,6 +272,15 @@ import {
   shouldScheduleEncyclopediaAutoUpdate,
   type EncyclopediaStatus,
 } from "./lib/encyclopedia";
+import {
+  EMPTY_RESEARCH_HISTORY,
+  canGoBack as historyCanGoBack,
+  canGoForward as historyCanGoForward,
+  pruneResearchHistory as pruneHistoryEntries,
+  pushResearchHistory as pushHistoryEntry,
+  researchHistoryBack as historyBack,
+  researchHistoryForward as historyForward,
+} from "./lib/researchHistory";
 import { isActiveResearchStatus } from "./lib/researchThreads";
 import {
   groupsForScope,
@@ -1623,6 +1632,12 @@ function MainApp() {
   const encyclopediaStatusRef = useRef(encyclopediaStatus);
   encyclopediaStatusRef.current = encyclopediaStatus;
   const [activeEncyclopediaPage, setActiveEncyclopediaPage] = useState<string | null>(null);
+  const activeEncyclopediaPageRef = useRef(activeEncyclopediaPage);
+  activeEncyclopediaPageRef.current = activeEncyclopediaPage;
+  // Browser-style visit history over encyclopedia pages, sharing the research
+  // document's reducer (entries here are page file names). Held in App because
+  // the page viewer remounts per page.
+  const [encyclopediaHistory, setEncyclopediaHistory] = useState(EMPTY_RESEARCH_HISTORY);
   const encyclopediaRefreshTimerRef = useRef<number | null>(null);
   // Wall-clock of the last auto-launch attempt, so a failing launch cannot
   // retry in a tight loop off every status refresh.
@@ -6351,8 +6366,10 @@ function MainApp() {
     }, 1_000);
   }, [refreshEncyclopediaStatus]);
   useEffect(() => {
-    // Scope switch: drop the other folder's page and snapshot, then fetch.
+    // Scope switch: drop the other folder's page, history, and snapshot,
+    // then fetch.
     setActiveEncyclopediaPage(null);
+    setEncyclopediaHistory(EMPTY_RESEARCH_HISTORY);
     setEncyclopediaStatus(null);
     void refreshEncyclopediaStatus();
   }, [researchScope, refreshEncyclopediaStatus]);
@@ -6449,10 +6466,59 @@ function MainApp() {
       setSidebarMode("encyclopedia");
       setActiveSurface("research");
       setResearchMultiSelectIds([]);
+      if (activeEncyclopediaPageRef.current !== fileName) {
+        setEncyclopediaHistory((prev) => pushHistoryEntry(prev, fileName));
+      }
       setActiveEncyclopediaPage(fileName);
     },
     [dismissPristineNewDocumentComposer, setActiveSurface, setSidebarMode],
   );
+  const encyclopediaGoBack = useCallback(() => {
+    const step = historyBack(encyclopediaHistory);
+    if (!step) {
+      return;
+    }
+    setActiveEncyclopediaPage(step.nodeId);
+    setEncyclopediaHistory(step.history);
+  }, [encyclopediaHistory]);
+  const encyclopediaGoForward = useCallback(() => {
+    const step = historyForward(encyclopediaHistory);
+    if (!step) {
+      return;
+    }
+    setActiveEncyclopediaPage(step.nodeId);
+    setEncyclopediaHistory(step.history);
+  }, [encyclopediaHistory]);
+  useEffect(() => {
+    // Prune visits to pages that no longer exist (a regeneration can delete
+    // pages) whenever a status snapshot delivers the authoritative listing,
+    // mirroring the research document's prune-on-removal. A vanished active
+    // page falls back to the pruned cursor's page, or to the pane's empty
+    // state when nothing survives.
+    const pages = encyclopediaStatus?.pages;
+    if (!pages) {
+      return;
+    }
+    const valid = new Set(pages.map((candidate) => candidate.fileName));
+    const active = activeEncyclopediaPageRef.current;
+    const pruned = pruneHistoryEntries(
+      encyclopediaHistory,
+      valid,
+      active && valid.has(active) ? active : null,
+    );
+    if (active && !valid.has(active)) {
+      setActiveEncyclopediaPage(pruned.entries[pruned.index] ?? null);
+    }
+    const unchanged =
+      pruned.entries.length === encyclopediaHistory.entries.length &&
+      pruned.index === encyclopediaHistory.index &&
+      pruned.entries.every(
+        (entry, position) => entry === encyclopediaHistory.entries[position],
+      );
+    if (!unchanged) {
+      setEncyclopediaHistory(pruned);
+    }
+  }, [encyclopediaHistory, encyclopediaStatus]);
   const openEncyclopediaCitation = useCallback(
     (treeId: string, nodeId: string) => {
       // Aim the tree's saved selection at the cited node before opening, so
@@ -14056,6 +14122,10 @@ function MainApp() {
               fileName={activeEncyclopediaPage}
               refreshToken={encyclopediaStatus?.lastGeneratedAt ?? 0}
               linkActions={encyclopediaLinkActions}
+              canGoBack={historyCanGoBack(encyclopediaHistory)}
+              canGoForward={historyCanGoForward(encyclopediaHistory)}
+              onBack={encyclopediaGoBack}
+              onForward={encyclopediaGoForward}
               onOpenPage={openEncyclopediaPage}
               onOpenCitation={openEncyclopediaCitation}
             />

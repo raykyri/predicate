@@ -1,5 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { BookOpen, LoaderCircle, RefreshCw } from "lucide-react";
+import { IS_MAC } from "../../lib/appHelpers";
+import { ResearchHistoryNav } from "./ResearchDocumentChrome";
+import { useHistoryNavigationInput } from "./useHistoryNavigationInput";
 import TranscriptMarkdown, {
   TranscriptLinkActionsProvider,
   type LinkActions,
@@ -23,12 +26,19 @@ const OVERSIZED_MARKDOWN_POLICY = {
 // Link routing: citations (`/research/<treeId>/<nodeId>`) jump to the cited
 // chat, sibling `.md` links open that page here, and everything else takes
 // the app's ordinary link path. `refreshToken` re-fetches after an update run
-// lands new content for the already-open page.
+// lands new content for the already-open page. History lives in App (the
+// component remounts per page); this surface mirrors the research document's
+// navigation affordances — header arrows, Cmd/Ctrl+[ and ], Alt+arrows,
+// mouse back/forward buttons, and the horizontal wheel swipe.
 export default function EncyclopediaPage({
   workspaceId,
   fileName,
   refreshToken,
   linkActions,
+  canGoBack,
+  canGoForward,
+  onBack,
+  onForward,
   onOpenPage,
   onOpenCitation,
 }: {
@@ -36,12 +46,18 @@ export default function EncyclopediaPage({
   fileName: string;
   refreshToken: number;
   linkActions: LinkActions;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  onBack: () => void;
+  onForward: () => void;
   onOpenPage: (fileName: string) => void;
   onOpenCitation: (treeId: string, nodeId: string) => void;
 }) {
   const [page, setPage] = useState<EncyclopediaPageContent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  useHistoryNavigationInput(scrollRef, onBack, onForward);
 
   useEffect(() => {
     let disposed = false;
@@ -94,6 +110,29 @@ export default function EncyclopediaPage({
 
   return (
     <div className="encyclopedia-page" aria-label="Encyclopedia page">
+      <header className="encyclopedia-page-header">
+        <span className="encyclopedia-page-lead">
+          <ResearchHistoryNav
+            canGoBack={canGoBack}
+            canGoForward={canGoForward}
+            backTitle={`Back (${IS_MAC ? "⌘[" : "Ctrl+["})`}
+            forwardTitle={`Forward (${IS_MAC ? "⌘]" : "Ctrl+]"})`}
+            onBack={onBack}
+            onForward={onForward}
+          />
+          <span className="encyclopedia-page-file" title={fileName}>
+            <BookOpen size={13} aria-hidden="true" />
+            {fileName}
+          </span>
+        </span>
+        {page && page.updatedAt > 0 ? (
+          <span className="encyclopedia-page-updated" title="Last written">
+            <RefreshCw size={11} aria-hidden="true" />
+            {formatRelativeTime(page.updatedAt)}
+          </span>
+        ) : null}
+      </header>
+      <div className="encyclopedia-page-scroll" ref={scrollRef}>
       {loading && !page ? (
         <div className="encyclopedia-page-placeholder">
           <LoaderCircle className="research-spinner" size={16} aria-hidden="true" />
@@ -107,21 +146,6 @@ export default function EncyclopediaPage({
       ) : null}
       {page ? (
         <article className="encyclopedia-page-body">
-          <header className="encyclopedia-page-header">
-            <span className="encyclopedia-page-file" title={page.fileName}>
-              <BookOpen size={13} aria-hidden="true" />
-              {page.fileName}
-            </span>
-            {page.updatedAt > 0 ? (
-              <span
-                className="encyclopedia-page-updated"
-                title="Last written"
-              >
-                <RefreshCw size={11} aria-hidden="true" />
-                {formatRelativeTime(page.updatedAt)}
-              </span>
-            ) : null}
-          </header>
           <TranscriptLinkActionsProvider actions={actions}>
             <TranscriptMarkdown
               text={page.markdown}
@@ -131,6 +155,7 @@ export default function EncyclopediaPage({
           </TranscriptLinkActionsProvider>
         </article>
       ) : null}
+      </div>
     </div>
   );
 }
