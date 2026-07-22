@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { DiagnosticRecord, FrontendDiagnosticEntry } from "./diagnostics";
 import type { PaneLayoutItem } from "./paneTree";
 import type {
   EncyclopediaPageContent,
@@ -1130,4 +1131,27 @@ export function listenToEvents(onEvent: (event: QmuxEvent) => void): Promise<Unl
  */
 export function markEventsListenerReady() {
   return invoke<void>("mark_events_listener_ready");
+}
+
+/**
+ * Freeze diagnostics (see lib/diagnostics.ts and src-tauri/src/diagnostics.rs):
+ * forwards buffered frontend records to the backend's durable JSONL log.
+ */
+export function diagnosticsRecordBatch(entries: FrontendDiagnosticEntry[]) {
+  return invoke<void>("diagnostics_record_batch", { entries });
+}
+
+/** Liveness beat for the backend's frontend-stall watchdog. */
+export function diagnosticsHeartbeat() {
+  return invoke<void>("diagnostics_heartbeat");
+}
+
+/** Recent diagnostic records (frontend and backend), oldest first. */
+export function diagnosticsSnapshot(limit?: number) {
+  return invoke<DiagnosticRecord[]>("diagnostics_snapshot", { limit: limit ?? null });
+}
+
+/** Absolute path of the durable diagnostics JSONL log. */
+export function diagnosticsLogPath() {
+  return invoke<string>("diagnostics_log_path");
 }

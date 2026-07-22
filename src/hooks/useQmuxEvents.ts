@@ -21,6 +21,7 @@ import {
   upsertThreadGraphs,
 } from "../lib/appHelpers";
 import { parseAppShortcutCommand, type AppShortcutCommand } from "../lib/appShortcuts";
+import { noteEventBatch } from "../lib/diagnostics";
 import type { ExitPreflightRequest, PaneContextMenuState } from "../appTypes";
 import type {
   AgentInfo,
@@ -646,9 +647,17 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       const batch = pendingEvents.splice(0, pendingEvents.length);
       // Every setState across the batch runs in this one synchronous block, so
       // React commits a single render for the whole burst.
+      const startedAt = performance.now();
       for (const event of batch) {
         handleEvent(event);
       }
+      // Freeze diagnostics: every batch leaves a breadcrumb and a slow batch —
+      // main-thread time, exactly what a freeze is made of — is reported to
+      // the durable log with its event-type histogram (see lib/diagnostics.ts).
+      noteEventBatch(
+        batch.map((event) => event.type),
+        performance.now() - startedAt,
+      );
     };
 
     void listenToEvents((event) => {

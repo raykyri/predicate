@@ -23,6 +23,7 @@
     "test:research-highlights": "node scripts/test-research-highlights.mjs",
     "test:research-navigation": "node scripts/test-research-navigation.mjs",
     "test:research-events": "node scripts/test-research-events.mjs",
+    "test:diagnostics": "node scripts/test-diagnostics.mjs",
     "test:research-history": "node scripts/test-research-history.mjs",
     "test:research-folders": "node scripts/test-research-folders.mjs",
     "test:research-documents": "node scripts/test-research-documents.mjs",
