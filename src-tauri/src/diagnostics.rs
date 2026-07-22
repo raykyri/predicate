@@ -55,6 +55,9 @@ const WATCHDOG_TICK_MS: u64 = 1_000;
 const MAX_BATCH_LEN: usize = 200;
 /// Event types listed in a rate summary (highest count first).
 const RATE_SUMMARY_TOP: usize = 8;
+/// Native terminal bridge calls slower than this get a record: they block on
+/// the AppKit main thread, the surface a freeze is felt on.
+const SLOW_NATIVE_CALL_MS: u128 = 100;
 
 fn now_ms() -> u128 {
     SystemTime::now()
@@ -332,6 +335,20 @@ impl Diagnostics {
                     "eventType": event_type,
                     "durationMs": emit_duration.as_millis(),
                 }),
+            );
+        }
+    }
+
+    /// Times a native-terminal bridge call (layout, focus, keyboard owner) on
+    /// the switch-to-terminal path. These run on the AppKit main thread, so a
+    /// slow one is a direct freeze contributor and worth a durable record.
+    pub fn note_native_call(&self, call: &str, duration: Duration) {
+        if duration.as_millis() >= SLOW_NATIVE_CALL_MS {
+            self.record(
+                "backend",
+                "backend.slow_native_call",
+                format!("native terminal {call} took {}ms", duration.as_millis()),
+                json!({ "call": call, "durationMs": duration.as_millis() }),
             );
         }
     }
@@ -622,6 +639,27 @@ mod tests {
         let current = fs::read_to_string(&log_path).expect("fresh log");
         assert!(current.contains("test.second"));
         assert!(!current.contains("test.first"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn native_calls_record_only_when_slow() {
+        let dir = std::env::temp_dir().join(format!("qmux-diag-native-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let diagnostics = Diagnostics::with_log(dir.join("diagnostics.log"), u64::MAX);
+        diagnostics.note_native_call(
+            "focus",
+            Duration::from_millis(SLOW_NATIVE_CALL_MS as u64 - 1),
+        );
+        assert!(diagnostics.snapshot(10).is_empty());
+        diagnostics.note_native_call(
+            "set_layout",
+            Duration::from_millis(SLOW_NATIVE_CALL_MS as u64),
+        );
+        let snapshot = diagnostics.snapshot(10);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].category, "backend.slow_native_call");
+        assert_eq!(snapshot[0].data["call"], "set_layout");
         let _ = fs::remove_dir_all(dir);
     }
 

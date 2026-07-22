@@ -52,6 +52,7 @@ import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapte
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
+import { diagnostics } from "./lib/diagnostics";
 import CommandPalette, { type PaletteCommand } from "./components/CommandPalette";
 import GlobalTaskLauncher from "./components/GlobalTaskLauncher";
 import NativeInput from "./components/NativeInput";
@@ -1850,6 +1851,14 @@ function MainApp() {
         next === HOME_TAB_ID
           ? "terminal"
           : (groupsRef.current.find((group) => group.id === pane?.groupId)?.scope ?? "terminal");
+      // Freeze diagnostics: stamp the switch itself. When a main-thread stall
+      // report fires moments later, this breadcrumb is what places the freeze
+      // "right after switching to the terminal" (see lib/diagnostics.ts).
+      diagnostics.breadcrumb("ui.pane_switch", `switched to ${next} (${mode})`, {
+        paneId: next,
+        mode,
+        paneKind: pane?.kind ?? null,
+      });
       setSidebarMode(mode);
       if (mode === "terminal") {
         lastTerminalTabIdRef.current = next;

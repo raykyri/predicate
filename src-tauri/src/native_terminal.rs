@@ -1274,16 +1274,33 @@ pub extern "C" fn qmux_native_terminal_did_open_url(
     });
 }
 
+// The layout/focus/keyboard-owner commands below run during a switch to a
+// terminal pane and block on the AppKit main thread; each is timed so a slow
+// bridge call lands in the freeze-diagnostics log (see diagnostics.rs).
 #[tauri::command]
-pub fn native_terminal_set_layout(layout: NativeTerminalLayout) -> Result<(), String> {
-    set_layout(layout)
+pub fn native_terminal_set_layout(
+    state: tauri::State<'_, AppState>,
+    layout: NativeTerminalLayout,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let result = set_layout(layout);
+    state
+        .diagnostics()
+        .note_native_call("set_layout", started.elapsed());
+    result
 }
 
 #[tauri::command]
 pub fn native_terminal_set_keyboard_owner(
+    state: tauri::State<'_, AppState>,
     update: NativeTerminalKeyboardOwnerUpdate,
 ) -> Result<(), String> {
-    imp::set_keyboard_owner(update)
+    let started = std::time::Instant::now();
+    let result = imp::set_keyboard_owner(update);
+    state
+        .diagnostics()
+        .note_native_call("set_keyboard_owner", started.elapsed());
+    result
 }
 
 #[tauri::command]
@@ -1314,8 +1331,16 @@ pub fn native_terminal_set_stage_backstop(
 }
 
 #[tauri::command]
-pub fn native_terminal_focus(pane_id: String) -> Result<(), String> {
-    focus(&pane_id)
+pub fn native_terminal_focus(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let result = focus(&pane_id);
+    state
+        .diagnostics()
+        .note_native_call("focus", started.elapsed());
+    result
 }
 
 #[tauri::command]
