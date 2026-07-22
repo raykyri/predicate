@@ -891,6 +891,23 @@ fn launch_fresh_research_run(
     prompt: String,
 ) -> Result<research::ResearchNode, String> {
     let options = research_launch_options(adapter, effort.as_deref());
+    // The custom launch instruction is read per launch (not cached at startup)
+    // so a settings change applies from the very next run. It is applied to
+    // the fully assembled prompt — after any document/conversation context
+    // wrapper — so a leading slash command stays at the start of the message.
+    // A damaged preferences file fails the launch, mirroring
+    // update_preferences' refusal discipline, rather than silently launching
+    // without the user's instruction.
+    let prompt = match persistence::load_preferences(&state.config().workspace_root) {
+        Ok(preferences) => research::prompt_with_research_launch_instruction(
+            prompt,
+            preferences.research_launch_instruction.as_deref(),
+        ),
+        Err(err) => {
+            let _ = state.fail_research_node(node_id, err.clone());
+            return Err(err);
+        }
+    };
     let spawn = SpawnAgentRequest {
         adapter_id: adapter.to_string(),
         prompt,
@@ -1238,6 +1255,21 @@ async fn fork_research_node(
             }
             research::ResearchNodeKind::Run => {}
         }
+        // Run follow-ups fork the parent session, bypassing
+        // launch_fresh_research_run, so the custom launch instruction is
+        // applied to the sent question here. The child's displayed prompt
+        // stays the bare question — still a normalized substring of the sent
+        // prompt, so response-boundary matching keeps working.
+        let question = match persistence::load_preferences(&state.config().workspace_root) {
+            Ok(preferences) => research::prompt_with_research_launch_instruction(
+                question,
+                preferences.research_launch_instruction.as_deref(),
+            ),
+            Err(err) => {
+                let _ = state.fail_research_node(&child.id, err.clone());
+                return Err(err);
+            }
+        };
         let live_source = parent
             .agent_id
             .as_deref()
@@ -1616,6 +1648,31 @@ fn worktree_location_set(
 ) -> Result<(), String> {
     persistence::update_preferences(&state.config().workspace_root, |preferences| {
         preferences.worktree_location = Some(location);
+    })
+}
+
+/// Returns the stored research launch instruction (empty string when unset).
+/// The backend owns this preference — see AppPreferences — because research
+/// launch prompts are assembled on the Rust side.
+#[tauri::command(async)]
+fn research_launch_instruction_get(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    Ok(
+        persistence::load_preferences(&state.config().workspace_root)?
+            .research_launch_instruction
+            .unwrap_or_default(),
+    )
+}
+
+/// Persists the research launch instruction. An empty/whitespace value clears
+/// it (launches send prompts unchanged); a value over the byte cap is refused.
+#[tauri::command(async)]
+fn research_launch_instruction_set(
+    state: tauri::State<'_, AppState>,
+    instruction: String,
+) -> Result<(), String> {
+    let instruction = research::sanitized_research_launch_instruction(&instruction)?;
+    persistence::update_preferences(&state.config().workspace_root, move |preferences| {
+        preferences.research_launch_instruction = instruction;
     })
 }
 
@@ -2397,6 +2454,8 @@ fn main() {
             spawn_shell,
             use_login_shell_get,
             use_login_shell_set,
+            research_launch_instruction_get,
+            research_launch_instruction_set,
             worktree_location_get,
             worktree_location_set,
             agent_spawn,

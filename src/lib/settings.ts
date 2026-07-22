@@ -194,6 +194,33 @@ export const LINE_HEIGHT_MAX = 1.3;
 export const LINE_HEIGHT_STEP = 0.1;
 export const CONFIRM_PASTE_OVER_CHARS_MIN = 1;
 export const CONFIRM_PASTE_OVER_CHARS_MAX = 5_000_000;
+/**
+ * Byte cap on the research launch instruction, mirroring
+ * MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES on the backend (which refuses larger
+ * values), so the dialog can never hold a value the backend won't persist.
+ */
+export const RESEARCH_LAUNCH_INSTRUCTION_MAX_BYTES = 4 * 1024;
+
+/**
+ * Trims a research launch instruction to the backend's byte cap at a code-point
+ * boundary. The cap counts UTF-8 bytes — the unit the backend validates — not
+ * UTF-16 length, so a multi-byte instruction cannot pass here yet be refused
+ * on save.
+ */
+export function clampResearchLaunchInstruction(value: string): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of value) {
+    const codePoint = char.codePointAt(0) ?? 0;
+    const size = codePoint < 0x80 ? 1 : codePoint < 0x800 ? 2 : codePoint < 0x10000 ? 3 : 4;
+    if (bytes + size > RESEARCH_LAUNCH_INSTRUCTION_MAX_BYTES) {
+      break;
+    }
+    bytes += size;
+    end += char.length;
+  }
+  return value.slice(0, end);
+}
 
 export interface AppSettings {
   /** color theme for application chrome and active states */
@@ -255,6 +282,13 @@ export interface AppSettings {
   /** root used for newly-created isolated worktrees */
   worktreeLocation: WorktreeLocation;
   /**
+   * Custom instruction text sent with every research launch (fresh runs and
+   * all follow-up kinds). Empty means launches send prompts unchanged. The
+   * backend persists its own copy (read on every research launch path); this
+   * mirror keeps the dialog in sync.
+   */
+  researchLaunchInstruction: string;
+  /**
    * Show code-oriented context in tabs and the launcher: per-tab paths, git
    * worktree metadata, and the "New worktree" launcher option. When off, tabs
    * collapse to a single aligned row (status dot · title · status).
@@ -294,6 +328,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preventSleep: true,
   useLoginShell: true,
   worktreeLocation: "global",
+  researchLaunchInstruction: "",
   codeMode: true,
   showTabDirectories: true,
   showToolCalls: true,
@@ -466,6 +501,10 @@ export function loadSettings(): AppSettings {
       WORKTREE_LOCATION_OPTIONS.some((option) => option.id === parsed.worktreeLocation)
         ? parsed.worktreeLocation
         : DEFAULT_SETTINGS.worktreeLocation;
+    const researchLaunchInstruction =
+      typeof parsed.researchLaunchInstruction === "string"
+        ? clampResearchLaunchInstruction(parsed.researchLaunchInstruction)
+        : DEFAULT_SETTINGS.researchLaunchInstruction;
     const showShortcutHints =
       typeof parsed.showShortcutHints === "boolean"
         ? parsed.showShortcutHints
@@ -527,6 +566,7 @@ export function loadSettings(): AppSettings {
       preventSleep,
       useLoginShell,
       worktreeLocation,
+      researchLaunchInstruction,
       codeMode,
       showTabDirectories,
       showToolCalls,

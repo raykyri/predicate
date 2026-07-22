@@ -154,3 +154,41 @@ test("generic tagged-block stripping preserves fenced and indented code", () => 
     ].join("\n"),
   );
 });
+
+// The backend wraps the custom research launch instruction (the settings
+// dialog's "Research instructions" text) in a <research-instructions> tagged
+// block — leading normally, trailing when the prompt begins with a slash
+// command. Both forms must strip back to the user's own words in the
+// user-message display/copy path and in previews, like any other
+// qmux-injected instruction block.
+test("strips the research launch instruction block the backend prepends", () => {
+  const sent = [
+    "<research-instructions>",
+    "Answer concisely, in a few short paragraphs.",
+    "</research-instructions>",
+    "",
+    "Why is the sky blue?",
+  ].join("\n");
+
+  assert.equal(stripTaggedUserInstructionBlocks(sent).trim(), "Why is the sky blue?");
+  assert.equal(stripTaggedInstructionBlocksForPreview(sent).trim(), "Why is the sky blue?");
+});
+
+test("strips the research launch instruction block appended after slash commands", () => {
+  const sent = [
+    "/qmux:deep-research Why is the sky blue?",
+    "",
+    "<research-instructions>",
+    "Answer concisely.",
+    "</research-instructions>",
+  ].join("\n");
+
+  assert.equal(
+    stripTaggedUserInstructionBlocks(sent).trim(),
+    "/qmux:deep-research Why is the sky blue?",
+  );
+  assert.equal(
+    stripTaggedInstructionBlocksForPreview(sent).trim(),
+    "/qmux:deep-research Why is the sky blue?",
+  );
+});
