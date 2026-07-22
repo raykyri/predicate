@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { PaneLayoutItem } from "./paneTree";
+import type {
+  EncyclopediaPageContent,
+  EncyclopediaStatus,
+} from "./encyclopedia";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
 import type {
@@ -529,6 +533,47 @@ export function removeResearchTree(treeId: string) {
 
 export function removeResearchBranch(nodeId: string) {
   return invoke<ResearchBranchRemoval>("remove_research_branch", { nodeId });
+}
+
+export function encyclopediaStatus(workspaceId: string) {
+  return invoke<EncyclopediaStatus>("encyclopedia_status", { workspaceId });
+}
+
+export function encyclopediaSetSettings(
+  workspaceId: string,
+  enabled: boolean,
+  autoUpdate: boolean,
+) {
+  return invoke<EncyclopediaStatus>("encyclopedia_set_settings", {
+    workspaceId,
+    enabled,
+    autoUpdate,
+  });
+}
+
+export function encyclopediaUpdate(
+  workspaceId: string,
+  adapter: string,
+  model: string | null,
+  full: boolean,
+) {
+  return invoke<EncyclopediaStatus>("encyclopedia_update", {
+    workspaceId,
+    adapter,
+    model,
+    full,
+  });
+}
+
+export function encyclopediaCancel(workspaceId: string) {
+  return invoke<EncyclopediaStatus>("encyclopedia_cancel", { workspaceId });
+}
+
+export function encyclopediaReadPage(workspaceId: string, fileName: string) {
+  return invoke<EncyclopediaPageContent>("encyclopedia_read_page", {
+    workspaceId,
+    fileName,
+  });
 }
 
 export function listAgentTurnQueue(agentId: string) {

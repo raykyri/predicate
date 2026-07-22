@@ -148,6 +148,16 @@ export function saveResearchNavigation(): void {
   }
 }
 
+/** Points a tree's saved selection at a specific node before the tree is
+ * opened, so navigation that targets a node (an encyclopedia citation) lands
+ * on it instead of the tree's last-viewed node. */
+export function setSavedResearchSelection(treeId: string, nodeId: string): void {
+  const current = researchNavigationStore();
+  const navigation = (current[treeId] ??= { scrollByNode: {} });
+  navigation.selectedNodeId = nodeId;
+  saveResearchNavigation();
+}
+
 export function recordResearchScrollPosition(
   navigation: SavedResearchNavigation,
   nodeId: string,
