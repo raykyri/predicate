@@ -4,6 +4,7 @@ mod browser_engine;
 mod config;
 mod connection_limit;
 mod control_socket;
+mod diagnostics;
 mod encyclopedia;
 mod events;
 mod file_server;
@@ -2796,6 +2797,16 @@ fn main() {
                     .attach_app(app.handle().clone())
                     .map_err(std::io::Error::other)?;
                 app.manage(human_browser::HumanBrowserManager::default());
+                // Freeze diagnostics: start the heartbeat watchdog and mark the
+                // launch in the durable log, so records across restarts are
+                // separable when reading <workspace_root>/.qmux/diagnostics.log.
+                diagnostics::spawn_watchdog(state.clone());
+                state.diagnostics().record(
+                    "backend",
+                    "app.started",
+                    "qmux backend started",
+                    serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
+                );
                 #[cfg(target_os = "macos")]
                 if !native_terminal::available() {
                     return Err(std::io::Error::other(
@@ -3094,6 +3105,10 @@ fn main() {
             global_task_launcher::global_task_launcher_hotkey_set,
             global_task_launcher::global_task_launcher_open,
             global_task_launcher::global_task_launcher_dismiss,
+            diagnostics::diagnostics_record_batch,
+            diagnostics::diagnostics_heartbeat,
+            diagnostics::diagnostics_snapshot,
+            diagnostics::diagnostics_log_path,
         ])
         .build(tauri::generate_context!())
         .expect("error while building qmux")

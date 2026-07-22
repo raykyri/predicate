@@ -1,4 +1,5 @@
 use crate::config::QmuxConfig;
+use crate::diagnostics::Diagnostics;
 use crate::encyclopedia;
 use crate::events::QmuxEvent;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
@@ -20,7 +21,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
@@ -142,6 +143,9 @@ pub struct AppState {
 
 struct AppStateInner {
     config: QmuxConfig,
+    // Freeze diagnostics: durable record ring + JSONL log, emit-rate
+    // instrumentation, and the frontend heartbeat monitor (see diagnostics.rs).
+    diagnostics: Diagnostics,
     pane_tokens: Mutex<HashMap<String, String>>,
     // Separate read-only credentials used in file-preview URLs.
     file_tokens: Mutex<HashMap<String, String>>,
@@ -1106,9 +1110,11 @@ pub enum PaneStatus {
 
 impl AppState {
     pub fn new(config: QmuxConfig) -> Self {
+        let diagnostics = Diagnostics::new(&config.workspace_root);
         Self {
             inner: Arc::new(AppStateInner {
                 config,
+                diagnostics,
                 pane_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
@@ -2124,8 +2130,21 @@ impl AppState {
         // contending with transcript tails mid-serialize.
         let app_handle = self.app_handle();
         if let Some(app_handle) = app_handle {
+            // Time the emit itself: it serializes the payload and enqueues the
+            // IPC, so a slow call here means the payload was huge or the webview
+            // side is backed up — both prime freeze suspects. The same call
+            // feeds the event-rate flood detector (see diagnostics.rs).
+            let event_type = event.event_type.clone();
+            let started = Instant::now();
             let _ = app_handle.emit("qmux-event", event);
+            self.inner
+                .diagnostics
+                .note_emit(&event_type, started.elapsed());
         }
+    }
+
+    pub fn diagnostics(&self) -> &Diagnostics {
+        &self.inner.diagnostics
     }
 
     pub fn mark_exit_confirmed(&self) {
