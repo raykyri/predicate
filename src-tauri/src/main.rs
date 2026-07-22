@@ -1275,7 +1275,13 @@ fn load_encyclopedia_sources(
             let turns = research::read_response_snapshot(&state.config().workspace_root, &node.id)
                 .ok()
                 .flatten()
-                .or_else(|| research::load_transcript_response(state.config(), &node).ok())?;
+                .or_else(|| {
+                    let ancestor_prompts = state
+                        .research_node_ancestor_prompts(&node.id)
+                        .unwrap_or_default();
+                    research::load_transcript_response(state.config(), &node, &ancestor_prompts)
+                        .ok()
+                })?;
             let (kind, include_user) = match node.kind {
                 research::ResearchNodeKind::Run => {
                     (encyclopedia::EncyclopediaSourceKind::Chat, false)
