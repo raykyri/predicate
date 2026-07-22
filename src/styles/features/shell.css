@@ -2082,6 +2082,22 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   font-variant-numeric: tabular-nums;
 }
 
+/* The research-instructions row: multi-line text against a top-aligned label. */
+.settings-research-instructions-row {
+  align-items: flex-start;
+}
+
+.settings-textarea {
+  /* Match .settings-input width so the column of controls lines up. */
+  flex: 0 0 190px;
+  width: 190px;
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
 .settings-shortcut-row {
   align-items: flex-start;
 }

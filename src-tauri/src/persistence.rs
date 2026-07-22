@@ -185,6 +185,13 @@ pub struct AppPreferences {
     /// rest. Absent means no key is configured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_router_key: Option<String>,
+    /// Custom instruction text sent with every research launch (fresh runs,
+    /// run follow-ups, and document/conversation follow-ups). The backend owns
+    /// this preference because follow-up launches assemble their sent prompt
+    /// here, not in the frontend. Absent or empty means launches send the
+    /// user's prompt unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_launch_instruction: Option<String>,
 }
 
 pub fn preferences_path(workspace_root: &Path) -> PathBuf {

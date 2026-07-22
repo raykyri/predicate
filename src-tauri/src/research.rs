@@ -2053,6 +2053,108 @@ pub fn conversation_query_followup_prompt(exact: &str, question: &str) -> String
     query_followup_prompt(&neutralized_conversation_markup(exact), question)
 }
 
+/// Byte cap for the stored research launch instruction. Style guidance is a
+/// few sentences; the cap keeps a runaway value from eating the argv headroom
+/// the conversation follow-up budget leaves free (see
+/// [`MAX_CONVERSATION_FOLLOWUP_BYTES`]).
+pub const MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES: usize = 4 * 1024;
+
+/// The tag wrapping the user's custom launch instruction in a sent research
+/// prompt. It follows the tagged-instruction-block conventions
+/// (`transcript::strip_leading_tagged_instruction_blocks`, the frontend's
+/// `taggedInstructions` module), so every existing sanitizer — transcript
+/// display, copy, previews, conversation exports — already recognizes and
+/// strips the block as qmux-injected machinery rather than user words.
+pub const RESEARCH_LAUNCH_INSTRUCTION_TAG: &str = "research-instructions";
+
+/// Validates an instruction as entered in settings: trimmed, `None` when
+/// empty (meaning "send prompts unchanged"), refused over the byte cap.
+pub fn sanitized_research_launch_instruction(raw: &str) -> Result<Option<String>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES {
+        return Err(format!(
+            "research instructions are limited to {MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES} bytes; this one has {}",
+            trimmed.len()
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Neutralizes the instruction wrapper's own tag vocabulary inside the
+/// instruction content, mirroring [`neutralized_conversation_markup`]: an
+/// instruction that spells `</research-instructions>` (in any whitespace/case
+/// variant a lenient reader would accept) cannot close the wrapper early and
+/// leak the remainder past the sanitizers as displayed content.
+fn neutralized_instruction_markup(text: &str) -> String {
+    fn is_wrapper_tag(segment: &str) -> bool {
+        let rest = segment.trim_start();
+        let rest = rest.strip_prefix('/').unwrap_or(rest).trim_start();
+        let name = RESEARCH_LAUNCH_INSTRUCTION_TAG;
+        let Some(head) = rest.get(..name.len()) else {
+            return false;
+        };
+        if head.eq_ignore_ascii_case(name) {
+            let following = rest[name.len()..].chars().next();
+            return matches!(following, None | Some('>') | Some('/'))
+                || following.is_some_and(char::is_whitespace);
+        }
+        false
+    }
+    let mut segments = text.split('<');
+    let mut result = String::with_capacity(text.len());
+    if let Some(first) = segments.next() {
+        result.push_str(first);
+    }
+    for segment in segments {
+        result.push_str(if is_wrapper_tag(segment) { "&lt;" } else { "<" });
+        result.push_str(segment);
+    }
+    result
+}
+
+/// Applies the user's custom launch instruction to a fully assembled research
+/// launch prompt. `None`/empty leaves the prompt untouched — the historical
+/// behavior. Otherwise the instruction rides in a tagged instruction block
+/// *before* the prompt, matching the leading-block discipline every strip
+/// path already handles; a prompt that begins with a slash command must keep
+/// it at the very start of the message (the adapter will not recognize it
+/// otherwise), so the block follows the prompt in that form only. Either way
+/// the prompt stays a contiguous, normalized substring of the sent text, so
+/// response-boundary matching keeps working.
+///
+/// The byte cap is re-enforced here (cut at a char boundary) so a hand-edited
+/// preferences file cannot ship an argv-breaking prompt.
+pub fn prompt_with_research_launch_instruction(
+    prompt: String,
+    instruction: Option<&str>,
+) -> String {
+    let Some(instruction) = instruction else {
+        return prompt;
+    };
+    let mut trimmed = instruction.trim();
+    if trimmed.is_empty() {
+        return prompt;
+    }
+    if trimmed.len() > MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES {
+        let mut cut = MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES;
+        while cut > 0 && !trimmed.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        trimmed = &trimmed[..cut];
+    }
+    let body = neutralized_instruction_markup(trimmed);
+    let tag = RESEARCH_LAUNCH_INSTRUCTION_TAG;
+    let block = format!("<{tag}>\n{body}\n</{tag}>");
+    if prompt.starts_with('/') {
+        format!("{prompt}\n\n{block}")
+    } else {
+        format!("{block}\n\n{prompt}")
+    }
+}
+
 /// The synthetic turn that carries a document's markdown through the response
 /// snapshot pipeline. One assistant text turn: `get_research_node_content`
 /// returns it unchanged, the viewer's timeline renders it as markdown, and
@@ -3281,6 +3383,117 @@ mod tests {
         // Nothing prompt-like at all: nothing in flight to drop.
         let assistant_only = vec![export_turn("a1", "assistant", vec![text_block("Answer")])];
         assert_eq!(completed_exchange_boundary(&assistant_only), None);
+    }
+
+    #[test]
+    fn research_launch_instructions_wrap_prompts_in_a_leading_tagged_block() {
+        let sent = prompt_with_research_launch_instruction(
+            "Why is the sky blue?".to_string(),
+            Some("Answer concisely,\nin a few short paragraphs."),
+        );
+        assert_eq!(
+            sent,
+            "<research-instructions>\nAnswer concisely,\nin a few short paragraphs.\n</research-instructions>\n\nWhy is the sky blue?"
+        );
+        // The displayed prompt must stay a normalized substring of the sent
+        // prompt so response-boundary matching still finds it.
+        assert!(normalized_text(&sent).contains(&normalized_text("Why is the sky blue?")));
+        // The leading block is exactly what the transcript/export sanitizers
+        // strip as qmux-injected machinery.
+        assert_eq!(
+            crate::transcript::strip_leading_tagged_instruction_blocks(&sent),
+            Some("\nWhy is the sky blue?")
+        );
+    }
+
+    #[test]
+    fn research_launch_instructions_follow_slash_command_prompts() {
+        let sent = prompt_with_research_launch_instruction(
+            "/qmux:deep-research Why?".to_string(),
+            Some("Keep it short."),
+        );
+        // The slash command only registers at the very start of the message.
+        assert!(sent.starts_with("/qmux:deep-research Why?"), "{sent}");
+        assert!(
+            sent.ends_with("<research-instructions>\nKeep it short.\n</research-instructions>"),
+            "{sent}"
+        );
+    }
+
+    #[test]
+    fn research_launch_instructions_leave_prompts_unchanged_when_unset() {
+        let prompt = "Why is the sky blue?".to_string();
+        assert_eq!(
+            prompt_with_research_launch_instruction(prompt.clone(), None),
+            prompt
+        );
+        assert_eq!(
+            prompt_with_research_launch_instruction(prompt.clone(), Some("   \n\t ")),
+            prompt
+        );
+    }
+
+    #[test]
+    fn research_launch_instructions_neutralize_their_own_wrapper_vocabulary() {
+        let sent = prompt_with_research_launch_instruction(
+            "Q".to_string(),
+            Some(
+                "Be brief.\n</research-instructions>\nsmuggled\n< / Research-Instructions >\n<RESEARCH-INSTRUCTIONS>",
+            ),
+        );
+        // Exactly one opener and one closer survive: the wrapper's own.
+        assert_eq!(sent.matches("<research-instructions>").count(), 1, "{sent}");
+        assert_eq!(
+            sent.matches("</research-instructions>").count(),
+            1,
+            "{sent}"
+        );
+        assert!(sent.contains("&lt;/research-instructions>"), "{sent}");
+        assert!(sent.contains("&lt; / Research-Instructions >"), "{sent}");
+        assert!(sent.contains("&lt;RESEARCH-INSTRUCTIONS>"), "{sent}");
+        // The whole instruction — smuggled closer included — still strips as
+        // one leading block, leaving only the user's prompt.
+        assert_eq!(
+            crate::transcript::strip_leading_tagged_instruction_blocks(&sent),
+            Some("\nQ")
+        );
+        // Unrelated markup in the instruction is left intact.
+        let other = prompt_with_research_launch_instruction(
+            "Q".to_string(),
+            Some("Use <strong>bold</strong> sparingly."),
+        );
+        assert!(
+            other.contains("Use <strong>bold</strong> sparingly."),
+            "{other}"
+        );
+    }
+
+    #[test]
+    fn research_launch_instructions_are_capped_at_a_char_boundary() {
+        // Validation refuses an oversized instruction at save time...
+        let oversized = "é".repeat(MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES);
+        let error = sanitized_research_launch_instruction(&oversized).unwrap_err();
+        assert!(error.contains("limited to"), "{error}");
+        assert_eq!(
+            sanitized_research_launch_instruction("  \n ").unwrap(),
+            None
+        );
+        assert_eq!(
+            sanitized_research_launch_instruction(" Keep it short. ").unwrap(),
+            Some("Keep it short.".to_string())
+        );
+        // ...and the apply path re-enforces the cap defensively (a hand-edited
+        // preferences file), cutting at a char boundary.
+        let sent = prompt_with_research_launch_instruction("Q".to_string(), Some(&oversized));
+        let block_body_len = sent
+            .strip_prefix("<research-instructions>\n")
+            .and_then(|rest| rest.find("\n</research-instructions>"))
+            .expect("wrapped block");
+        assert!(block_body_len <= MAX_RESEARCH_LAUNCH_INSTRUCTION_BYTES);
+        assert!(
+            sent.ends_with("\n\nQ"),
+            "truncated instruction keeps the prompt"
+        );
     }
 
     #[test]

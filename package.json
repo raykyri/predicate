@@ -35,6 +35,7 @@
     "test:markdown-math": "node --import tsx --test tests/markdownMath.test.ts",
     "test:research-prompt-markdown": "node --import tsx --test tests/researchPromptMarkdown.test.ts",
     "test:tagged-instructions": "node scripts/test-tagged-instructions.mjs",
+    "test:research-instruction-setting": "node scripts/test-research-instruction-setting.mjs",
     "test:thread-graph-overlay": "node scripts/test-thread-graph-overlay.mjs",
     "test:workspace-scope": "node scripts/test-workspace-scope.mjs",
     "test:turn-timeline": "node scripts/test-turn-timeline.mjs",

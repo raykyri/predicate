@@ -317,6 +317,7 @@ import {
   clampConfirmPasteOverChars,
   clampFontSize,
   clampLineHeight,
+  clampResearchLaunchInstruction,
   clampScrollbackRows,
   COLOR_THEME_OPTIONS,
   CONFIRM_PASTE_OVER_CHARS_MAX,
@@ -389,6 +390,7 @@ import {
   activatePane,
   getRuntimeConfig,
   getUseLoginShell,
+  getResearchLaunchInstruction,
   getWorktreeLocation,
   generateFoundationTabTitle,
   killPane,
@@ -448,6 +450,7 @@ import {
   setShowHideShortcutCaptureActive,
   setPreventSleep,
   setUseLoginShell,
+  setResearchLaunchInstruction,
   setWorktreeLocation,
   spawnAgent,
   spawnShell,
@@ -1506,6 +1509,7 @@ function MainApp() {
   // localStorage mirror write its default back before that durable value is loaded.
   const useLoginShellHydratedRef = useRef(false);
   const worktreeLocationHydratedRef = useRef(false);
+  const researchLaunchInstructionHydratedRef = useRef(false);
   const paneSplitsRef = useRef<PaneSplitInfo[]>([]);
   const queuedBtwSplitPersistChainRef = useRef<Promise<void>>(Promise.resolve());
   const titleGenerationTestSeqRef = useRef(0);
@@ -6180,6 +6184,7 @@ function MainApp() {
           storedOpenRouterKey,
           storedUseLoginShell,
           storedWorktreeLocation,
+          storedResearchLaunchInstruction,
           queueEntries,
           draftEntries,
           storedGlobalDrafts,
@@ -6188,6 +6193,7 @@ function MainApp() {
             getOpenRouterKey().catch(() => ""),
             getUseLoginShell().catch((): boolean | null => null),
             getWorktreeLocation().catch((): AppSettings["worktreeLocation"] | null => null),
+            getResearchLaunchInstruction().catch((): string | null => null),
             // Per-agent fetches are individually guarded so one failed
             // draft/queue read just falls back to empty for that agent.
             Promise.all(
@@ -6224,21 +6230,27 @@ function MainApp() {
           const effectiveUseLoginShell = storedUseLoginShell ?? current.useLoginShell;
           const effectiveWorktreeLocation =
             storedWorktreeLocation ?? current.worktreeLocation;
+          const effectiveResearchLaunchInstruction = clampResearchLaunchInstruction(
+            storedResearchLaunchInstruction ?? current.researchLaunchInstruction,
+          );
           if (!backendKey && migratedKey) {
             void setOpenRouterKey(migratedKey).catch(() => undefined);
           }
           openRouterKeyHydratedRef.current = true;
           useLoginShellHydratedRef.current = true;
           worktreeLocationHydratedRef.current = true;
+          researchLaunchInstructionHydratedRef.current = true;
           return current.openRouterKey === effectiveKey &&
             current.useLoginShell === effectiveUseLoginShell &&
-            current.worktreeLocation === effectiveWorktreeLocation
+            current.worktreeLocation === effectiveWorktreeLocation &&
+            current.researchLaunchInstruction === effectiveResearchLaunchInstruction
             ? current
             : {
                 ...current,
                 openRouterKey: effectiveKey,
                 useLoginShell: effectiveUseLoginShell,
                 worktreeLocation: effectiveWorktreeLocation,
+                researchLaunchInstruction: effectiveResearchLaunchInstruction,
               };
         });
 
@@ -10999,6 +11011,19 @@ function MainApp() {
     });
   }, [settings.worktreeLocation]);
 
+  // The backend owns this preference because research launch prompts (fresh
+  // runs and every follow-up kind) are assembled on the Rust side. Hydrate the
+  // durable value first, then mirror later edits so the next launch honors
+  // what the dialog shows.
+  useEffect(() => {
+    if (!researchLaunchInstructionHydratedRef.current) {
+      return;
+    }
+    void setResearchLaunchInstruction(settings.researchLaunchInstruction).catch((err) => {
+      setError(`Could not save the research-instructions setting: ${unknownErrorMessage(err)}`);
+    });
+  }, [settings.researchLaunchInstruction]);
+
   // Escape handling for the worktree close/exit dialogs and the settings panel
   // lives in the app-level Escape dispatcher; this effect only resets the
   // settings panel's transient state when it closes.
@@ -13769,6 +13794,29 @@ function MainApp() {
                 : settings.worktreeLocation === "localClaude"
                   ? "New worktrees stored in <project>/.claude/worktrees/<name>."
                   : "New worktrees stored in qmux’s global workspace directory."}
+            </p>
+
+            <div className="settings-row settings-research-instructions-row">
+              <label htmlFor="settings-research-instructions" className="settings-label">
+                Research instructions
+              </label>
+              <textarea
+                id="settings-research-instructions"
+                className="form-field settings-input settings-textarea"
+                rows={3}
+                placeholder="e.g. Answer concisely, in a few short paragraphs."
+                value={settings.researchLaunchInstruction}
+                onChange={(event) => {
+                  const researchLaunchInstruction = clampResearchLaunchInstruction(
+                    event.currentTarget.value,
+                  );
+                  setSettings((current) => ({ ...current, researchLaunchInstruction }));
+                }}
+              />
+            </div>
+            <p className="settings-hint">
+              Sent with every research launch — fresh runs and follow-ups. Leave empty to send
+              research prompts unchanged.
             </p>
 
             <div className="settings-row settings-shortcut-row">
