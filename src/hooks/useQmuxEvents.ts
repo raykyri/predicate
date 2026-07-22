@@ -517,9 +517,12 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (
         event.type === "agent.forked" ||
         (event.type === "agent.spawned" &&
-          (event.payload.source === "queue" || event.payload.source === "research"))
+          (event.payload.source === "queue" ||
+            event.payload.source === "research" ||
+            event.payload.source === "encyclopedia"))
       ) {
-        // The fork — or a queue-dispatched new-session or research-root spawn —
+        // The fork — or a queue-dispatched new-session, research-root, or
+        // encyclopedia-update spawn —
         // created a new pane backend-side with no frontend caller holding it;
         // refetch the ordered list so the nested tab appears (with its depth)
         // without stealing focus from the source.

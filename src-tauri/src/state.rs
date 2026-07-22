@@ -1,4 +1,5 @@
 use crate::config::QmuxConfig;
+use crate::encyclopedia;
 use crate::events::QmuxEvent;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
 use crate::research::{
@@ -266,6 +267,9 @@ struct Model {
     /// never drift; reconciled against the live tree set at load and scrubbed
     /// when a tree is removed.
     research_folders: research::ResearchFolderState,
+    /// Per-workspace encyclopedia settings, generation cursor, and in-flight
+    /// update run. Persisted with the research records it derives from.
+    encyclopedia: encyclopedia::EncyclopediaState,
     /// Pane ids with a backend retirement worker in flight. Transient and deduplicated.
     research_retiring_panes: HashSet<String>,
     agent_turn_queues: HashMap<String, VecDeque<QueuedTurn>>,
@@ -1794,6 +1798,11 @@ impl AppState {
                 &mut model.research_folders,
                 &known_research_tree_ids,
             );
+            // Same discipline for the encyclopedia layer: reconcile against
+            // the authoritative group set, under the model lock, at load.
+            model.encyclopedia = persisted.encyclopedia;
+            let known_group_ids = model.groups.keys().cloned().collect::<HashSet<_>>();
+            encyclopedia::reconcile_encyclopedia_state(&mut model.encyclopedia, &known_group_ids);
             for mut agent in persisted.agents {
                 ensure_agent_thread_metadata(self, &mut model, &mut agent);
                 if let Some(pane_id) = agent
@@ -2040,6 +2049,7 @@ impl AppState {
                 research_tree_order: ordered_research_tree_ids(&model),
                 research_nodes: model.research_nodes.clone(),
                 research_folders: model.research_folders.clone(),
+                encyclopedia: model.encyclopedia.clone(),
             }
         };
         persistence::save(&self.inner.config.workspace_root, &snapshot)
@@ -2659,6 +2669,268 @@ impl AppState {
         }
         self.persist();
         Ok(folders)
+    }
+
+    /// Applies a settings change and announces it. Only `enabled` and
+    /// `auto_update` are caller-writable; the cursor and run record belong to
+    /// the update lifecycle.
+    pub fn set_encyclopedia_settings(
+        &self,
+        workspace_id: &str,
+        enabled: bool,
+        auto_update: bool,
+    ) -> Result<encyclopedia::WorkspaceEncyclopedia, String> {
+        let record = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if !model.groups.contains_key(workspace_id) {
+                return Err(format!("workspace {workspace_id} was not found"));
+            }
+            let record = model
+                .encyclopedia
+                .workspaces
+                .entry(workspace_id.to_string())
+                .or_default();
+            if record.enabled == enabled && record.auto_update == auto_update {
+                return Ok(record.clone());
+            }
+            record.enabled = enabled;
+            record.auto_update = auto_update;
+            record.clone()
+        };
+        self.persist();
+        self.emit_encyclopedia_changed(workspace_id, &record);
+        Ok(record)
+    }
+
+    /// Records a just-launched encyclopedia update run. Refuses while another
+    /// run is still recorded — reap it first — so a workspace never has two
+    /// generation agents racing over the same files.
+    pub fn begin_encyclopedia_run(
+        &self,
+        workspace_id: &str,
+        run: encyclopedia::EncyclopediaRun,
+    ) -> Result<encyclopedia::WorkspaceEncyclopedia, String> {
+        let record = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if !model.groups.contains_key(workspace_id) {
+                return Err(format!("workspace {workspace_id} was not found"));
+            }
+            let record = model
+                .encyclopedia
+                .workspaces
+                .entry(workspace_id.to_string())
+                .or_default();
+            if record.active_run.is_some() {
+                return Err("an encyclopedia update is already running".to_string());
+            }
+            record.active_run = Some(run);
+            record.last_error = None;
+            record.clone()
+        };
+        self.persist();
+        self.emit_encyclopedia_changed(workspace_id, &record);
+        Ok(record)
+    }
+
+    /// Settles the workspace's update run if its agent has finished (or
+    /// vanished): advances the cursor to the run's cutoff, clears the run,
+    /// and reclaims the run's pane. Safe to call at any time — a still-active
+    /// run is left untouched. Returns the current record either way.
+    pub fn reap_encyclopedia_run(
+        &self,
+        workspace_id: &str,
+    ) -> Result<encyclopedia::WorkspaceEncyclopedia, String> {
+        let (record, retired_pane) = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if !model.groups.contains_key(workspace_id) {
+                return Err(format!("workspace {workspace_id} was not found"));
+            }
+            let Some(run) = model
+                .encyclopedia
+                .workspaces
+                .get(workspace_id)
+                .and_then(|record| record.active_run.clone())
+            else {
+                return Ok(model
+                    .encyclopedia
+                    .workspaces
+                    .get(workspace_id)
+                    .cloned()
+                    .unwrap_or_default());
+            };
+            let agent_status = model.agents.get(&run.agent_id).map(|agent| agent.status);
+            let finished = match agent_status {
+                // Agent record gone: the pane closed (user or crash); the run
+                // is over regardless of how it ended.
+                None => true,
+                Some(status) => matches!(
+                    status,
+                    AgentStatus::Done | AgentStatus::Idle | AgentStatus::Failed
+                ),
+            };
+            let record = model
+                .encyclopedia
+                .workspaces
+                .get_mut(workspace_id)
+                .expect("record existed above under the same lock");
+            if !finished {
+                return Ok(record.clone());
+            }
+            let failed = matches!(agent_status, Some(AgentStatus::Failed));
+            if failed {
+                // Keep the cursor where it was so the material this run never
+                // digested is offered again to the next update.
+                record.last_error = Some("the encyclopedia update agent failed".to_string());
+            } else {
+                record.last_generated_at = record.last_generated_at.max(run.cutoff);
+            }
+            record.active_run = None;
+            let record = record.clone();
+            let retired_pane = model
+                .panes
+                .contains_key(&run.pane_id)
+                .then_some(run.pane_id);
+            (record, retired_pane)
+        };
+        // Reclaim the run's pane outside the model lock. Automated
+        // retirement is not a user close and must not be undoable.
+        if let Some(pane_id) = retired_pane {
+            match crate::pty::kill_pane(self, pane_id.clone()) {
+                Ok(()) => self.clear_last_closed_pane_for_pane(&pane_id),
+                Err(err) => {
+                    if self.pane_exists(&pane_id).unwrap_or(false) {
+                        eprintln!("qmux: failed to retire encyclopedia pane {pane_id}: {err}");
+                    }
+                }
+            }
+        }
+        self.persist();
+        self.emit_encyclopedia_changed(workspace_id, &record);
+        Ok(record)
+    }
+
+    /// Cancels an in-flight update run without advancing the cursor, so the
+    /// undigested material is offered again next time.
+    pub fn cancel_encyclopedia_run(
+        &self,
+        workspace_id: &str,
+    ) -> Result<encyclopedia::WorkspaceEncyclopedia, String> {
+        let (record, cancelled_pane) = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if !model.groups.contains_key(workspace_id) {
+                return Err(format!("workspace {workspace_id} was not found"));
+            }
+            let Some(record) = model.encyclopedia.workspaces.get_mut(workspace_id) else {
+                return Ok(encyclopedia::WorkspaceEncyclopedia::default());
+            };
+            let Some(run) = record.active_run.take() else {
+                return Ok(record.clone());
+            };
+            let record = record.clone();
+            let cancelled_pane = model
+                .panes
+                .contains_key(&run.pane_id)
+                .then_some(run.pane_id);
+            (record, cancelled_pane)
+        };
+        if let Some(pane_id) = cancelled_pane {
+            match crate::pty::kill_pane(self, pane_id.clone()) {
+                Ok(()) => self.clear_last_closed_pane_for_pane(&pane_id),
+                Err(err) => {
+                    if self.pane_exists(&pane_id).unwrap_or(false) {
+                        eprintln!("qmux: failed to cancel encyclopedia pane {pane_id}: {err}");
+                    }
+                }
+            }
+        }
+        self.persist();
+        self.emit_encyclopedia_changed(workspace_id, &record);
+        Ok(record)
+    }
+
+    /// Records a launch failure so the sidebar can surface it.
+    pub fn set_encyclopedia_error(&self, workspace_id: &str, error: String) {
+        let record = {
+            let Ok(mut model) = self.inner.model.lock() else {
+                return;
+            };
+            let Some(record) = model.encyclopedia.workspaces.get_mut(workspace_id) else {
+                return;
+            };
+            record.last_error = Some(error);
+            record.clone()
+        };
+        self.persist();
+        self.emit_encyclopedia_changed(workspace_id, &record);
+    }
+
+    /// Completed research material in this workspace newer than `since`,
+    /// oldest first: the metadata half of an update digest (snapshot bodies
+    /// are read outside the model lock). Also serves as the pending-source
+    /// count for status. Newest `MAX_ENCYCLOPEDIA_SOURCES` are kept.
+    pub fn encyclopedia_source_nodes(
+        &self,
+        workspace_id: &str,
+        since: u128,
+    ) -> Result<Vec<(ResearchNode, String)>, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        if !model.groups.contains_key(workspace_id) {
+            return Err(format!("workspace {workspace_id} was not found"));
+        }
+        let mut sources = model
+            .research_nodes
+            .values()
+            .filter(|node| node.status == ResearchNodeStatus::Complete)
+            .filter(|node| encyclopedia::node_source_time(node) > since)
+            .filter_map(|node| {
+                let tree = model.research_trees.get(&node.tree_id)?;
+                (tree.workspace_id == workspace_id).then(|| (node.clone(), tree.title.clone()))
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by_key(|(node, _)| (encyclopedia::node_source_time(node), node.id.clone()));
+        if sources.len() > encyclopedia::MAX_ENCYCLOPEDIA_SOURCES {
+            let drop = sources.len() - encyclopedia::MAX_ENCYCLOPEDIA_SOURCES;
+            sources.drain(..drop);
+        }
+        Ok(sources)
+    }
+
+    fn emit_encyclopedia_changed(
+        &self,
+        workspace_id: &str,
+        record: &encyclopedia::WorkspaceEncyclopedia,
+    ) {
+        self.emit(QmuxEvent::new(
+            "research.encyclopedia.changed",
+            None,
+            None,
+            serde_json::json!({
+                "workspaceId": workspace_id,
+                "enabled": record.enabled,
+                "autoUpdate": record.auto_update,
+                "updating": record.active_run.is_some(),
+            }),
+        ));
     }
 
     pub fn list_research_activity(&self) -> Result<Vec<ResearchNode>, String> {
