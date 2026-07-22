@@ -47,11 +47,13 @@ matching UI adapter on the frontend.
 - (Experimental) A tab-bound, resizable browser that renders a local file or a
   `http://localhost` dev server in a panel over the terminal. Markdown
   files render as styled HTML.
-- (Experimental) Workspace encyclopedia: an agent-maintained wiki of
+- (Experimental) Workspace encyclopedia: a dedicated Encyclopedia sidebar
+  pane (alongside Terminal and Research) showing an agent-maintained wiki of
   interlinked Markdown pages in each research folder's `encyclopedia/`
   directory, distilled from that folder's chats and documents. Pages cite the
-  chats they draw from and can be updated automatically (debounced) as new
-  material lands; the files stay plain Markdown on disk.
+  chats they draw from, update automatically (debounced) as new material
+  lands, and can be regenerated from scratch; the files stay plain Markdown
+  on disk.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install

@@ -29,6 +29,7 @@ import {
   GitBranch,
   House,
   Layers,
+  Library,
   LoaderCircle,
   MessageSquareText,
   Minimize2,
@@ -2479,10 +2480,12 @@ function MainApp() {
     ? null
     : newDocumentOpen
       ? ("composer" as const)
-      : researchMultiSelection.length > 1
-        ? ("multi-select" as const)
-        : activeEncyclopediaPage
+      : sidebarMode === "encyclopedia"
+        ? activeEncyclopediaPage
           ? ("encyclopedia" as const)
+          : ("encyclopedia-home" as const)
+        : researchMultiSelection.length > 1
+          ? ("multi-select" as const)
           : activeResearchTreeId
             ? ("document" as const)
             : ("home" as const);
@@ -3221,7 +3224,12 @@ function MainApp() {
     // Recorded synchronously in the event batch, so the run's first turn
     // events — flushed in the same coalesce window as agent.spawned — already
     // see the id when deciding whether to skip thread-graph refreshes.
-    if (source === "research") {
+    if (source === "research" || source === "encyclopedia") {
+      // Encyclopedia update runs behave like research runs for graph work: no
+      // fork lineage will ever exist for them, and their dense turn bursts
+      // (an agent rewriting every page) plus the trailing events after their
+      // pane retires must not schedule thread-graph refreshes — the miss
+      // path's full refetch is a main-thread stall at exactly those moments.
       researchAgentIdsRef.current.add(agent.id);
     }
     registerShellCodexFirstMessageTitle(agent, paneId, source);
@@ -6380,6 +6388,12 @@ function MainApp() {
       setError(err instanceof Error ? err.message : String(err));
     });
   }, [runEncyclopediaUpdate]);
+  const regenerateEncyclopedia = useCallback(() => {
+    setError(null);
+    runEncyclopediaUpdate(true).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, [runEncyclopediaUpdate]);
   const enableEncyclopedia = useCallback(() => {
     const scope = researchScopeRef.current;
     if (!scope) {
@@ -6432,7 +6446,7 @@ function MainApp() {
   const openEncyclopediaPage = useCallback(
     (fileName: string) => {
       dismissPristineNewDocumentComposer();
-      setSidebarMode("research");
+      setSidebarMode("encyclopedia");
       setActiveSurface("research");
       setResearchMultiSelectIds([]);
       setActiveEncyclopediaPage(fileName);
@@ -6449,6 +6463,15 @@ function MainApp() {
     },
     [selectResearchTree],
   );
+  useEffect(() => {
+    // A run this window never saw spawn (boot restore, another window's
+    // launch) must still be exempt from thread-graph refreshes; see
+    // handleAgentSpawned. Grow-only, like the spawn-time registration.
+    const agentId = encyclopediaStatus?.activeAgentId;
+    if (agentId) {
+      researchAgentIdsRef.current.add(agentId);
+    }
+  }, [encyclopediaStatus]);
   useEffect(() => {
     // Auto-update: armed whenever the scoped snapshot says material is
     // pending; the debounce restarts on every refresh (each new completion
@@ -6499,6 +6522,17 @@ function MainApp() {
         return;
       }
 
+      if (mode === "encyclopedia") {
+        // The Encyclopedia pane rides the research surface (terminals hide,
+        // web stage forward) but drives its own stage view; a lingering
+        // research terminal selection would keep the stage on that pane.
+        setSidebarMode("encyclopedia");
+        activeResearchPaneIdRef.current = null;
+        setActiveResearchPaneId(null);
+        localStorage.removeItem(ACTIVE_RESEARCH_PANE_KEY);
+        setActiveSurface("research");
+        return;
+      }
       setSidebarMode("research");
       const researchPaneId = activeResearchPaneIdRef.current;
       const researchPane = panesRef.current.find((pane) => pane.id === researchPaneId);
@@ -7977,7 +8011,7 @@ function MainApp() {
       title: "Home",
       hint: "⇧⌘H",
       action: () => {
-        if (sidebarMode === "research") {
+        if (sidebarMode !== "terminal") {
           focusResearchHome();
         } else {
           focusHomeTab();
@@ -10673,12 +10707,18 @@ function MainApp() {
           changeSidebarMode("research");
           return;
         case "toggleSidebarMode":
-          changeSidebarMode(currentSidebarMode === "terminal" ? "research" : "terminal");
+          changeSidebarMode(
+            currentSidebarMode === "terminal"
+              ? "research"
+              : currentSidebarMode === "research"
+                ? "encyclopedia"
+                : "terminal",
+          );
           return;
         case "cyclePaneTab":
           if (currentSidebarMode === "research") {
             cycleResearchTab(command.direction);
-          } else {
+          } else if (currentSidebarMode === "terminal") {
             cycleTab(command.direction, false, cycleableSidebarPanes);
           }
           return;
@@ -11970,7 +12010,9 @@ function MainApp() {
         ref={sidebarRef}
         className={`sidebar${sidebarWidth < LEFT_SIDEBAR_COMPACT_WIDTH ? " is-narrow" : ""}${
           settings.codeMode ? " is-code-mode" : ""
-        }${sidebarMode === "research" ? " is-research-mode" : ""}`}
+        }${sidebarMode !== "terminal" ? " is-research-mode" : ""}${
+          sidebarMode === "encyclopedia" ? " is-encyclopedia-mode" : ""
+        }`}
       >
         <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
         <SidebarModeToggle
@@ -12008,7 +12050,7 @@ function MainApp() {
             ) : null}
           </div>
         ) : null}
-        {sidebarMode === "research" ? (
+        {sidebarMode !== "terminal" ? (
           <ResearchFolderSwitcher
             folders={researchGroups}
             scope={researchScope}
@@ -12018,6 +12060,12 @@ function MainApp() {
             onSelectScope={(scope) => {
               changeResearchFolderScope(scope);
               setResearchMultiSelectIds([]);
+              if (sidebarMode === "encyclopedia") {
+                // The scope effect swaps the encyclopedia snapshot and closes
+                // the open page; research selection is untouched so switching
+                // back to Research lands where the user left it.
+                return;
+              }
               // Keep the selection inside the new scope: an active document
               // from another folder would otherwise sit with no sidebar row.
               const allTrees = [...researchTrees, ...archivedResearchTrees];
@@ -12072,7 +12120,13 @@ function MainApp() {
         <nav
           ref={paneListRef}
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
-          aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
+          aria-label={
+            sidebarMode === "terminal"
+              ? "Terminal tabs"
+              : sidebarMode === "research"
+                ? "Research"
+                : "Encyclopedia"
+          }
         >
           {/* Fixed Home tab: not a real pane, so it can't be closed, reordered, or
               nested. Selecting it shows the empty content placeholder (the launcher). */}
@@ -12132,7 +12186,7 @@ function MainApp() {
               onReorder={reorderResearchTreesFromSidebar}
             />
           ) : null}
-          {sidebarMode === "research" && researchScope ? (
+          {sidebarMode === "encyclopedia" && researchScope ? (
             <EncyclopediaSection
               status={encyclopediaStatus}
               activePageFileName={activeEncyclopediaPage}
@@ -12140,6 +12194,7 @@ function MainApp() {
               onEnable={enableEncyclopedia}
               onSetAutoUpdate={setEncyclopediaAutoUpdate}
               onUpdateNow={updateEncyclopediaNow}
+              onRegenerateAll={regenerateEncyclopedia}
               onCancelUpdate={cancelEncyclopediaUpdate}
             />
           ) : null}
@@ -13976,6 +14031,20 @@ function MainApp() {
             <div className="research-multi-select-state" aria-live="polite">
               <Layers size={48} aria-hidden="true" />
               <span>{researchMultiSelection.length} research items selected</span>
+            </div>
+          ) : null}
+          {researchStageView === "encyclopedia-home" ? (
+            <div className="research-empty-state encyclopedia-empty-state">
+              <div className="encyclopedia-empty-copy">
+                <Library size={48} aria-hidden="true" />
+                <span>
+                  {encyclopediaStatus?.enabled
+                    ? encyclopediaStatus.pages.length > 0
+                      ? "Select an encyclopedia page from the sidebar"
+                      : "No encyclopedia pages yet — they appear as chats complete"
+                    : "Enable the encyclopedia in the sidebar to build a wiki from this folder's chats"}
+                </span>
+              </div>
             </div>
           ) : null}
           {researchStageView === "encyclopedia" && activeEncyclopediaPage && researchScope ? (

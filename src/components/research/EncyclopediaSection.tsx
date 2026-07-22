@@ -1,4 +1,4 @@
-import { BookOpen, LoaderCircle, RefreshCw, Square } from "lucide-react";
+import { BookOpen, LoaderCircle, RefreshCw, RotateCcw, Square } from "lucide-react";
 import type { EncyclopediaStatus } from "../../lib/encyclopedia";
 
 // Sidebar block for the workspace encyclopedia: the generated pages, the
@@ -12,6 +12,7 @@ export default function EncyclopediaSection({
   onEnable,
   onSetAutoUpdate,
   onUpdateNow,
+  onRegenerateAll,
   onCancelUpdate,
 }: {
   status: EncyclopediaStatus | null;
@@ -20,6 +21,7 @@ export default function EncyclopediaSection({
   onEnable: () => void;
   onSetAutoUpdate: (autoUpdate: boolean) => void;
   onUpdateNow: () => void;
+  onRegenerateAll: () => void;
   onCancelUpdate: () => void;
 }) {
   if (!status) {
@@ -66,26 +68,36 @@ export default function EncyclopediaSection({
             <Square size={9} aria-hidden="true" />
           </button>
         ) : (
-          <button
-            type="button"
-            className="control-button encyclopedia-heading-action"
-            title={
-              status.pendingSourceCount > 0
-                ? `Update now (${status.pendingSourceCount} new ${
-                    status.pendingSourceCount === 1 ? "source" : "sources"
-                  })`
-                : "Nothing new since the last update"
-            }
-            disabled={status.pendingSourceCount === 0}
-            onClick={onUpdateNow}
-          >
-            <RefreshCw size={12} aria-hidden="true" />
-            {status.pendingSourceCount > 0 ? (
-              <span className="encyclopedia-pending-count">
-                {status.pendingSourceCount}
-              </span>
-            ) : null}
-          </button>
+          <span className="encyclopedia-heading-actions">
+            <button
+              type="button"
+              className="control-button encyclopedia-heading-action"
+              title="Regenerate every page from all of this folder's material"
+              onClick={onRegenerateAll}
+            >
+              <RotateCcw size={12} aria-hidden="true" />
+            </button>
+            <button
+              type="button"
+              className="control-button encyclopedia-heading-action"
+              title={
+                status.pendingSourceCount > 0
+                  ? `Update now (${status.pendingSourceCount} new ${
+                      status.pendingSourceCount === 1 ? "source" : "sources"
+                    })`
+                  : "Nothing new since the last update"
+              }
+              disabled={status.pendingSourceCount === 0}
+              onClick={onUpdateNow}
+            >
+              <RefreshCw size={12} aria-hidden="true" />
+              {status.pendingSourceCount > 0 ? (
+                <span className="encyclopedia-pending-count">
+                  {status.pendingSourceCount}
+                </span>
+              ) : null}
+            </button>
+          </span>
         )}
       </div>
       {status.pages.length === 0 ? (
