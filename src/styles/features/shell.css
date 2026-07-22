@@ -1911,6 +1911,21 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* The research-instructions row: multi-line text against a top-aligned label. */
+.settings-research-instructions-row {
+  align-items: flex-start;
+}
+
+.settings-textarea {
+  flex: 0 0 240px;
+  width: 240px;
+  height: auto;
+  min-height: 64px;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.4;
+}
+
 .settings-shortcut-row {
   align-items: flex-start;
 }

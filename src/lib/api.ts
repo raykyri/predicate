@@ -625,6 +625,14 @@ export function setWorktreeLocation(location: WorktreeLocation) {
   return invoke<void>("worktree_location_set", { location });
 }
 
+export function getResearchLaunchInstruction() {
+  return invoke<string>("research_launch_instruction_get");
+}
+
+export function setResearchLaunchInstruction(instruction: string) {
+  return invoke<void>("research_launch_instruction_set", { instruction });
+}
+
 export function spawnAgent(request: SpawnAgentRequest) {
   return invoke<PaneInfo>("agent_spawn", { request });
 }
