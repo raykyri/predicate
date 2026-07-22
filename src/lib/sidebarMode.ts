@@ -2,7 +2,7 @@ import type { GroupInfo, PaneInfo, ResearchTreeSummary } from "../types";
 import { type ResearchFolderScope, workspaceIsInResearchScope } from "./researchScope";
 import { panesForScope } from "./workspaceScope";
 
-export type SidebarMode = "terminal" | "research";
+export type SidebarMode = "terminal" | "research" | "encyclopedia";
 
 export const SIDEBAR_MODE_STORAGE_KEY = "qmux.sidebar-mode.v1";
 const RESEARCH_TREE_TAB_PREFIX = "__research_tree__:";
@@ -20,7 +20,7 @@ export function researchTreeIdFromTabId(tabId: string): string | null {
 }
 
 export function parseSidebarMode(value: string | null): SidebarMode {
-  return value === "research" ? "research" : "terminal";
+  return value === "research" || value === "encyclopedia" ? value : "terminal";
 }
 
 export function terminalTabForMode(

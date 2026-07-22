@@ -154,8 +154,10 @@ export function resolveAppShortcut(input: AppShortcutInput): AppShortcutCommand 
 // both DOM and native-terminal shortcut paths share the same behavior.
 export function contextualizeAppShortcut(
   command: AppShortcutCommand,
-  sidebarMode: "terminal" | "research",
+  sidebarMode: "terminal" | "research" | "encyclopedia",
 ): AppShortcutCommand {
+  // Encyclopedia mode takes no research remaps: its sidebar has no tabs or
+  // composer, so the default (terminal-flavored) behaviors stand.
   if (sidebarMode === "research" && command.type === "homeOrCycleAdapter") {
     return { type: "focusResearchHome" };
   }

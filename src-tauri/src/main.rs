@@ -1129,7 +1129,7 @@ async fn encyclopedia_update(
         let cutoff = encyclopedia::now_ms();
         let refs = state.encyclopedia_source_nodes(&workspace_id, since)?;
         let sources = load_encyclopedia_sources(&state, refs);
-        let prompt = encyclopedia::encyclopedia_update_prompt(&sources)?;
+        let prompt = encyclopedia::encyclopedia_update_prompt(&sources, full)?;
         let dir = encyclopedia::encyclopedia_dir(std::path::Path::new(&workspace.dir));
         std::fs::create_dir_all(&dir)
             .map_err(|err| format!("failed to create the encyclopedia folder: {err}"))?;
