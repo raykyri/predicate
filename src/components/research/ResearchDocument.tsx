@@ -1368,7 +1368,7 @@ const ResearchConnectorOverlay = memo(function ResearchConnectorOverlay({
   previous.linkedAnchorId === next.linkedAnchorId &&
   sameSegmentConnectors(previous.connectors, next.connectors));
 
-const ResearchSegmentPrompt = memo(function ResearchSegmentPrompt({
+export const ResearchSegmentPrompt = memo(function ResearchSegmentPrompt({
   visible,
   index,
   parentNodeId,
@@ -1401,7 +1401,7 @@ const ResearchSegmentPrompt = memo(function ResearchSegmentPrompt({
       {queryQuote ? (
         <blockquote className="research-prompt-quote">{quoteDisplayText(queryQuote)}</blockquote>
       ) : null}
-      <TranscriptMarkdown text={prompt} imageBehavior="open" inline />
+      <TranscriptMarkdown text={prompt} imageBehavior="open" />
     </div>
   );
 });
