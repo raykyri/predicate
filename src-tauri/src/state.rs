@@ -7187,15 +7187,6 @@ impl AppState {
             let removed = queue
                 .remove(index)
                 .ok_or_else(|| format!("queued turn {index} was not found"))?;
-            if index == 0
-                && removed
-                    .wait_for
-                    .as_ref()
-                    .is_some_and(|wait_for| wait_for.agent_id != agent_id)
-                && let Some(next) = queue.front_mut()
-            {
-                next.wait_for = removed.wait_for.clone();
-            }
             let queued_turns = queue.iter().cloned().collect::<Vec<_>>();
             (removed, queued_turns, queue.is_empty())
         };
@@ -13596,7 +13587,7 @@ mod tests {
     }
 
     #[test]
-    fn removing_front_wait_turn_moves_wait_to_next_turn() {
+    fn removing_front_wait_turn_drops_its_wait_dependency() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
 
@@ -13623,12 +13614,11 @@ mod tests {
         assert_eq!(removed.text, "remove me");
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].text, "keep waiting");
-        let propagated_wait = queued[0].wait_for.as_ref().unwrap();
-        assert_eq!(propagated_wait.agent_id, "target");
+        assert!(queued[0].wait_for.is_none());
 
-        assert!(state.pop_ready_agent_turn("source").unwrap().is_none());
-
-        state.set_agent_status("target", AgentStatus::Done).unwrap();
+        // A wait belongs to the removed message, not to the queue position.
+        // Edit and X both remove through this path, so the next message becomes
+        // ready immediately instead of inheriting an unrelated dependency.
         let (turn, pending) = state.pop_ready_agent_turn("source").unwrap().unwrap();
         assert_eq!(turn.text, "keep waiting");
         assert_eq!(pending, 0);
