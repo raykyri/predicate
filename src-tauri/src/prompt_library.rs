@@ -328,7 +328,12 @@ fn ensure_prompt_unchanged(path: &Path, expected_modified_ms: Option<u64>) -> Re
 /// With `create_only`, refuses to overwrite an existing prompt of that name so
 /// two surfaces deriving the same filename can't clobber each other (serialized
 /// by LIBRARY_LOCK, so the existence check and the rename don't race in-process).
-fn write_prompt(dir: &Path, name: &str, content: &str, create_only: bool) -> Result<PathBuf, String> {
+fn write_prompt(
+    dir: &Path,
+    name: &str,
+    content: &str,
+    create_only: bool,
+) -> Result<PathBuf, String> {
     let path = prompt_path(dir, name)?;
     if create_only && path.exists() {
         return Err(PROMPT_CONFLICT_MESSAGE.to_string());
@@ -562,10 +567,22 @@ mod tests {
         assert_eq!(prompts[0].name, "Review checklist");
         assert_eq!(prompts[0].content, "Review {target} for bugs.");
 
-        delete(Some(&project), PromptScope::Project, "Review checklist", None).unwrap();
+        delete(
+            Some(&project),
+            PromptScope::Project,
+            "Review checklist",
+            None,
+        )
+        .unwrap();
         assert!(list_dir(&dir, PromptScope::Project).unwrap().is_empty());
         // Deleting an already-missing prompt is a no-op, not an error.
-        delete(Some(&project), PromptScope::Project, "Review checklist", None).unwrap();
+        delete(
+            Some(&project),
+            PromptScope::Project,
+            "Review checklist",
+            None,
+        )
+        .unwrap();
 
         // Clean up the real ~/.qmux/projects entry this test created.
         let _ = fs::remove_dir_all(store.dir);
@@ -660,7 +677,15 @@ mod tests {
             "a\nb",
         ] {
             assert!(
-                save(Some(&project), PromptScope::Project, bad, "body", None, None).is_err(),
+                save(
+                    Some(&project),
+                    PromptScope::Project,
+                    bad,
+                    "body",
+                    None,
+                    None
+                )
+                .is_err(),
                 "accepted {bad:?}"
             );
         }
@@ -671,7 +696,15 @@ mod tests {
     #[test]
     fn skips_non_markdown_files() {
         let project = temp_dir("filter");
-        save(Some(&project), PromptScope::Project, "keep", "body", None, None).unwrap();
+        save(
+            Some(&project),
+            PromptScope::Project,
+            "keep",
+            "body",
+            None,
+            None,
+        )
+        .unwrap();
         let store = ProjectStore::resolve(&project).unwrap();
         fs::write(store.prompts_dir().join("notes.txt"), "ignored").unwrap();
         let prompts = list_dir(&store.prompts_dir(), PromptScope::Project).unwrap();
@@ -696,10 +729,28 @@ mod tests {
     #[test]
     fn create_only_save_refuses_to_clobber() {
         let project = temp_dir("create-only");
-        save(Some(&project), PromptScope::Project, "dup", "first", None, None).unwrap();
+        save(
+            Some(&project),
+            PromptScope::Project,
+            "dup",
+            "first",
+            None,
+            None,
+        )
+        .unwrap();
         // A second create (no `previous`) at the same name must not overwrite —
         // this is how two panes deriving the same filename are resolved.
-        assert!(save(Some(&project), PromptScope::Project, "dup", "second", None, None).is_err());
+        assert!(
+            save(
+                Some(&project),
+                PromptScope::Project,
+                "dup",
+                "second",
+                None,
+                None
+            )
+            .is_err()
+        );
         let store = ProjectStore::resolve(&project).unwrap();
         let prompts = list_dir(&store.prompts_dir(), PromptScope::Project).unwrap();
         assert_eq!(prompts.len(), 1);
@@ -710,7 +761,15 @@ mod tests {
     #[test]
     fn stale_update_is_rejected_and_current_survives() {
         let project = temp_dir("stale-update");
-        let saved = save(Some(&project), PromptScope::Project, "note", "v1", None, None).unwrap();
+        let saved = save(
+            Some(&project),
+            PromptScope::Project,
+            "note",
+            "v1",
+            None,
+            None,
+        )
+        .unwrap();
         let previous = Some((PromptScope::Project, "note"));
         // A stale in-place update (mismatched expected mtime) is refused.
         assert!(
@@ -744,7 +803,15 @@ mod tests {
     #[test]
     fn stale_delete_is_rejected_and_matching_delete_succeeds() {
         let project = temp_dir("stale-delete");
-        let saved = save(Some(&project), PromptScope::Project, "keep", "body", None, None).unwrap();
+        let saved = save(
+            Some(&project),
+            PromptScope::Project,
+            "keep",
+            "body",
+            None,
+            None,
+        )
+        .unwrap();
         let store = ProjectStore::resolve(&project).unwrap();
         // A stale delete (mismatched expected mtime) leaves the prompt in place.
         assert!(
@@ -756,11 +823,32 @@ mod tests {
             )
             .is_err()
         );
-        assert_eq!(list_dir(&store.prompts_dir(), PromptScope::Project).unwrap().len(), 1);
+        assert_eq!(
+            list_dir(&store.prompts_dir(), PromptScope::Project)
+                .unwrap()
+                .len(),
+            1
+        );
         // The matching mtime deletes; a repeat on the now-missing file is a no-op.
-        delete(Some(&project), PromptScope::Project, "keep", Some(saved.modified_ms)).unwrap();
-        assert!(list_dir(&store.prompts_dir(), PromptScope::Project).unwrap().is_empty());
-        delete(Some(&project), PromptScope::Project, "keep", Some(saved.modified_ms)).unwrap();
+        delete(
+            Some(&project),
+            PromptScope::Project,
+            "keep",
+            Some(saved.modified_ms),
+        )
+        .unwrap();
+        assert!(
+            list_dir(&store.prompts_dir(), PromptScope::Project)
+                .unwrap()
+                .is_empty()
+        );
+        delete(
+            Some(&project),
+            PromptScope::Project,
+            "keep",
+            Some(saved.modified_ms),
+        )
+        .unwrap();
         let _ = fs::remove_dir_all(store.dir);
     }
 }

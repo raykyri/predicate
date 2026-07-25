@@ -121,7 +121,10 @@ fn save_pasted_image_within(
     extension: &str,
     cache_dir: &Path,
 ) -> Result<String, String> {
-    let ext = extension.trim().trim_start_matches('.').to_ascii_lowercase();
+    let ext = extension
+        .trim()
+        .trim_start_matches('.')
+        .to_ascii_lowercase();
     // Reuse the render allow-list as the write allow-list: only formats the webview
     // can later display as a thumbnail may be stored.
     if image_mime_for_extension(&ext).is_none() {
@@ -150,8 +153,7 @@ fn save_pasted_image_within(
         .unwrap_or_default();
     let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
     let path = cache_dir.join(format!("qmux-paste-{nanos}-{seq}.{ext}"));
-    fs::write(&path, &bytes)
-        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    fs::write(&path, &bytes).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
     let absolute = fs::canonicalize(&path).unwrap_or(path);
     Ok(absolute.to_string_lossy().into_owned())
 }
