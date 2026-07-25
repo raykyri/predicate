@@ -52,7 +52,44 @@ function segmenterConstructor() {
   return (Intl as unknown as { Segmenter?: SegmenterConstructor }).Segmenter ?? null;
 }
 
-function selectionUnits(text: string, locale?: string) {
+/** Cuts every unit that straddles a hard boundary into per-side pieces.
+ *
+ * The flat rendered-text projection concatenates messages (and the rows
+ * between them) with no separator, so word segmentation reads across the seam
+ * and fuses one message's last word with the next one's first: `"…faster"` +
+ * `"I rewrote…"` is one unit, and so is `"…faster."` + `"I…"` — a period
+ * between letters does not break a word. Snapping to such a unit would drag a
+ * selection into a neighbouring message, which for a conversation turn means a
+ * quote spanning two speakers. Splitting at the seams keeps snapping to what it
+ * advertises: each endpoint moves by at most a partial word, and which
+ * messages a selection touches never changes. */
+function unitsSplitAtBoundaries(units: SelectionUnit[], boundaries: number[]) {
+  if (boundaries.length === 0) {
+    return units;
+  }
+  const cuts = [...new Set(boundaries)].sort((a, b) => a - b);
+  const split: SelectionUnit[] = [];
+  // `units` is sorted by start, so the cut cursor only ever moves forward.
+  let cursor = 0;
+  for (const unit of units) {
+    while (cursor < cuts.length && cuts[cursor] <= unit.start) {
+      cursor += 1;
+    }
+    let start = unit.start;
+    for (let index = cursor; index < cuts.length; index += 1) {
+      const cut = cuts[index];
+      if (cut >= unit.end) {
+        break;
+      }
+      split.push({ start, end: cut });
+      start = cut;
+    }
+    split.push({ start, end: unit.end });
+  }
+  return split;
+}
+
+function selectionUnits(text: string, locale?: string, boundaries: number[] = []) {
   const Segmenter = segmenterConstructor();
   if (!Segmenter) {
     return null;
@@ -78,7 +115,7 @@ function selectionUnits(text: string, locale?: string) {
     }
 
     units.sort((a, b) => a.start - b.start || a.end - b.end);
-    return units;
+    return unitsSplitAtBoundaries(units, boundaries);
   } catch {
     // An invalid document language tag should degrade the same way as a
     // missing Segmenter: keep WebKit's native character-precise selection.
@@ -127,12 +164,17 @@ function trailingUnit(units: SelectionUnit[], offset: number) {
 /** Expands a drag's flat rendered-text offsets to linguistic word boundaries.
  * The returned offsets are normalized, while `direction` preserves which end
  * owns the live focus. Equal offsets deliberately select one whole unit once
- * the caller's pointer-distance threshold has activated the drag. */
+ * the caller's pointer-distance threshold has activated the drag.
+ *
+ * `boundaries` are flat offsets no unit may straddle — the seams between the
+ * projection's messages and the rows around them, which carry no separating
+ * whitespace of their own (see `unitsSplitAtBoundaries`). */
 export function createResearchSelectionSnapper(
   text: string,
   locale?: string,
+  boundaries: number[] = [],
 ): ResearchSelectionSnapper | null {
-  const units = selectionUnits(text, locale);
+  const units = selectionUnits(text, locale, boundaries);
   if (!text || !units || units.length === 0) {
     return null;
   }
@@ -169,8 +211,12 @@ export function snapResearchDragSelection(
   anchorOffset: number,
   focusOffset: number,
   locale?: string,
+  boundaries: number[] = [],
 ): SnappedResearchSelection | null {
   return (
-    createResearchSelectionSnapper(text, locale)?.(anchorOffset, focusOffset) ?? null
+    createResearchSelectionSnapper(text, locale, boundaries)?.(
+      anchorOffset,
+      focusOffset,
+    ) ?? null
   );
 }

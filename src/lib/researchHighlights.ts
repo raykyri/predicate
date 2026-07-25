@@ -127,6 +127,29 @@ export function expandedResearchHighlightOffsets(
   return { start, end };
 }
 
+/** The span a new anchor's surrounding context may be taken from, or null when
+ * the selection cannot be anchored at all.
+ *
+ * Context is clamped to the selection's enclosing message so the anchor
+ * resolves the same in either transcript view — an unclamped prefix or suffix
+ * reaching into an adjacent tool or thinking row would only match in the view
+ * it was taken in. A run's messages are all one speaker, so a selection
+ * crossing them costs only that clamp. A conversation turn is one message, so a
+ * conversation selection with no enclosing message spans turns: separate
+ * speakers, reading as one passage without being one, and the published viewer
+ * injects a role label between them. That is not anchorable, so it is refused
+ * rather than saved with context that resolves in the app and nowhere else. */
+export function researchAnchorContextBounds(input: {
+  isConversation: boolean;
+  messageBounds: ResearchHighlightOffsets | null;
+  projectionLength: number;
+}): ResearchHighlightOffsets | null {
+  if (input.messageBounds) {
+    return input.messageBounds;
+  }
+  return input.isConversation ? null : { start: 0, end: input.projectionLength };
+}
+
 function contextSidesAt(
   projection: string,
   start: number,
@@ -135,12 +158,17 @@ function contextSidesAt(
   suffix: string,
 ): { prefix: boolean; suffix: boolean; both: boolean } {
   const end = start + exactLength;
-  const prefixMatches = prefix
-    ? projection.slice(Math.max(0, start - prefix.length), start) === prefix
-    : start === 0;
-  const suffixMatches = suffix
-    ? projection.slice(end, end + suffix.length) === suffix
-    : end === projection.length;
+  // An empty side constrains nothing. Context is captured clamped to the
+  // passage's enclosing message, so a quote reaching that message's edge saves
+  // no context on that side — and a whole conversation turn, which is one
+  // message, saves none on either. Reading emptiness as "must sit at the
+  // projection's own edge" orphaned every such anchor the moment another
+  // message rendered before or after it.
+  const prefixMatches =
+    !prefix ||
+    projection.slice(Math.max(0, start - prefix.length), start) === prefix;
+  const suffixMatches =
+    !suffix || projection.slice(end, end + suffix.length) === suffix;
   return {
     prefix: prefixMatches,
     suffix: suffixMatches,

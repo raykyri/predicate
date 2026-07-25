@@ -47,6 +47,7 @@ import {
   isResearchExpandActionShortcut,
   isResearchHighlightActionShortcut,
   overlappingResearchHighlightRegions,
+  researchAnchorContextBounds,
   resolveResearchHighlightOffset,
 } from "../../lib/researchHighlights";
 import {
@@ -428,6 +429,30 @@ function flatOffsetAtPoint(root: HTMLElement, clientX: number, clientY: number) 
     return position ? flatTextOffsetAt(root, position.offsetNode, position.offset) : null;
   }
   return null;
+}
+
+/** Flat offsets where the enclosing `.research-response-message` changes —
+ * every seam between one message and the next, or between a message and the
+ * tool/thinking rows around it. The projection concatenates these with no
+ * separating whitespace, so word snapping needs them to avoid fusing a
+ * message's last word to its neighbour's first (see
+ * `createResearchSelectionSnapper`). */
+function messageFlatBoundaries(root: HTMLElement) {
+  const boundaries: number[] = [];
+  let consumed = 0;
+  let previous: HTMLElement | null = null;
+  let first = true;
+  for (const node of textNodesWithin(root)) {
+    const message =
+      node.parentElement?.closest<HTMLElement>(".research-response-message") ?? null;
+    if (!first && message !== previous) {
+      boundaries.push(consumed);
+    }
+    first = false;
+    previous = message;
+    consumed += node.data.length;
+  }
+  return boundaries;
 }
 
 /** Flat-offset span of the `.research-response-message` that encloses the
@@ -1098,6 +1123,13 @@ const ResearchAnswerPane = memo(function ResearchAnswerPane({
               >
                 {hiddenHighlightCount} {hiddenHighlightCount === 1 ? "highlight" : "highlights"} not
                 visible in this view
+                {/* Only a run needs a reveal here, and `hasTranscriptActivity`
+                    is false on the other kinds. What can hide a run's passage
+                    sits behind the answer fold, which nothing else on screen
+                    opens. A conversation has no fold — its tool payloads never
+                    survived the export — and the only content it hides is
+                    windowed-off turns, whose expander already renders directly
+                    above this footer under the same condition. */}
                 {view.hasTranscriptActivity && !view.showFullTrace ? (
                   <>
                     {" · "}
@@ -3428,10 +3460,7 @@ function ResearchDocument({
     const nodeId = root?.dataset.nodeId ?? null;
     const segmentContent = nodeId ? contentByNodeRef.current[nodeId] : null;
     const revision = segmentContent?.responseRevision;
-    // Highlights are not offered on conversation nodes: the answer-v1
-    // projection is one flat answer document with no per-turn addressing, so
-    // anchors into a multi-turn timeline would not survive view changes.
-    if (!root || !nodeId || !revision || segmentContent?.node.kind === "conversation") {
+    if (!root || !nodeId || !revision) {
       setHighlightAction(null);
       return;
     }
@@ -3464,11 +3493,19 @@ function ResearchDocument({
       return;
     }
     // Keep the quote's surrounding context inside the message it belongs to so
-    // the anchor resolves the same in either transcript view (see
-    // enclosingMessageFlatBounds).
-    const messageBounds = enclosingMessageFlatBounds(root, range);
-    const contextFloor = messageBounds?.start ?? 0;
-    const contextCeil = messageBounds?.end ?? projection.length;
+    // the anchor resolves the same in either transcript view, and refuse the
+    // selections that leaves unanchorable (see researchAnchorContextBounds).
+    const contextBounds = researchAnchorContextBounds({
+      isConversation: segmentContent?.node.kind === "conversation",
+      messageBounds: enclosingMessageFlatBounds(root, range),
+      projectionLength: projection.length,
+    });
+    if (!contextBounds) {
+      setHighlightAction(null);
+      return;
+    }
+    const contextFloor = contextBounds.start;
+    const contextCeil = contextBounds.end;
     const anchorForOffsets = (span: {
       start: number;
       end: number;
@@ -3535,6 +3572,7 @@ function ResearchDocument({
         drag.snapper = createResearchSelectionSnapper(
           drag.root.textContent ?? "",
           document.documentElement.lang || navigator.language,
+          messageFlatBoundaries(drag.root),
         );
       }
       const snapped = drag.snapper?.(drag.anchorOffset, focusOffset) ?? null;
@@ -3577,11 +3615,16 @@ function ResearchDocument({
         lastX: event.clientX,
         lastY: event.clientY,
         active: false,
+        // Turn membership is deliberately not part of this test: the snapper
+        // splits its word units at every message seam, so it moves each
+        // endpoint by at most a partial word *within one turn* and can neither
+        // carry a selection across a turn boundary nor pull a cross-turn one
+        // back inside a single turn. The eligibility class is preserved either
+        // way.
         snapEligible: Boolean(
           researchHighlightApi() &&
             nodeId &&
             content?.responseRevision &&
-            content.node.kind !== "conversation" &&
             anchorOffset !== null &&
             !target?.closest(NON_TEXT_ROW_SELECTOR)
         ),

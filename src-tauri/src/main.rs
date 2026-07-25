@@ -1185,8 +1185,17 @@ async fn fork_research_node(
                 // context; the child's displayed prompt stays the bare
                 // question (the response boundary still matches it as a
                 // substring of the sent prompt).
-                let launch_prompt =
-                    state.research_conversation_followup_prompt(&parent.id, &question);
+                //
+                // The bare prompt and the anchor go in unwrapped: an anchored
+                // quote is conversation content, so the conversation prompt
+                // builder wraps it itself with the tag neutralization the
+                // serialized turns get, rather than taking the verbatim
+                // `question` the other kinds share.
+                let launch_prompt = state.research_conversation_followup_prompt(
+                    &parent.id,
+                    &child.prompt,
+                    child.query_anchor.as_ref(),
+                );
                 let launch_prompt = match launch_prompt {
                     Ok(launch_prompt) => launch_prompt,
                     Err(err) => {

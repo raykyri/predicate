@@ -1779,14 +1779,17 @@ const PAGE_SCRIPT = `(() => {
     text += walker.currentNode.nodeValue;
   }
 
+  // An empty side constrains nothing, matching the app's resolver: context is
+  // captured clamped to the passage's enclosing message, so a quote reaching
+  // that message's edge saves none on that side — and a whole conversation
+  // turn, which is one message, saves none on either. Reading emptiness as
+  // "must sit at the projection's own edge" left those anchors unpainted here
+  // while the app placed them fine.
   function contextMatches(start, exactLength, prefix, suffix) {
     var end = start + exactLength;
-    var prefixOk = prefix
-      ? text.slice(Math.max(0, start - prefix.length), start) === prefix
-      : start === 0;
-    var suffixOk = suffix
-      ? text.slice(end, end + suffix.length) === suffix
-      : end === text.length;
+    var prefixOk =
+      !prefix || text.slice(Math.max(0, start - prefix.length), start) === prefix;
+    var suffixOk = !suffix || text.slice(end, end + suffix.length) === suffix;
     return prefixOk && suffixOk;
   }
 
@@ -2129,19 +2132,55 @@ const PAGE_SCRIPT = `(() => {
     if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
       return null;
     }
+    // A conversation anchor must stay inside one turn body. Labels exist only
+    // in the published projection, and crossing a label/turn seam creates an
+    // anchor the app cannot relocate against its label-free conversation view.
+    var contextRoot = root;
+    if (root.querySelector(".research-conversation")) {
+      var startElement = range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer
+        : range.startContainer.parentElement;
+      var endElement = range.endContainer.nodeType === Node.ELEMENT_NODE
+        ? range.endContainer
+        : range.endContainer.parentElement;
+      var startTurn = startElement
+        ? startElement.closest(".conversation-turn-body")
+        : null;
+      var endTurn = endElement
+        ? endElement.closest(".conversation-turn-body")
+        : null;
+      if (!startTurn || startTurn !== endTurn || !root.contains(startTurn)) {
+        return null;
+      }
+      contextRoot = startTurn;
+    }
     var probe = document.createRange();
     probe.selectNodeContents(root);
     probe.setEnd(range.startContainer, range.startOffset);
     var start = (probe.cloneContents().textContent || "").length;
     probe.setEnd(range.endContainer, range.endOffset);
     var end = (probe.cloneContents().textContent || "").length;
+    var contextStart = 0;
+    var contextEnd = text.length;
+    if (contextRoot !== root) {
+      probe.setEnd(contextRoot, 0);
+      contextStart = (probe.cloneContents().textContent || "").length;
+      probe.setEnd(contextRoot, contextRoot.childNodes.length);
+      contextEnd = (probe.cloneContents().textContent || "").length;
+    }
     var slice = text.slice(start, end);
     var trimmedLeading = slice.length - slice.replace(/^\\s+/, "").length;
     var trimmedTrailing = slice.length - slice.replace(/\\s+$/, "").length;
     start += trimmedLeading;
     end -= trimmedTrailing;
     if (end <= start || end - start > 2000) return null;
-    return { start: start, end: end, rect: range.getBoundingClientRect() };
+    return {
+      start: start,
+      end: end,
+      contextStart: contextStart,
+      contextEnd: contextEnd,
+      rect: range.getBoundingClientRect(),
+    };
   }
 
   function updateAskAction() {
@@ -2183,8 +2222,8 @@ const PAGE_SCRIPT = `(() => {
       start: start,
       end: end,
       exact: exact,
-      prefix: text.slice(Math.max(0, start - 32), start),
-      suffix: text.slice(end, end + 32),
+      prefix: text.slice(Math.max(pendingSelection.contextStart, start - 32), start),
+      suffix: text.slice(end, Math.min(pendingSelection.contextEnd, end + 32)),
     });
     if (quoteText) {
       quoteText.textContent = exact.split(/\\s+/).join(" ").trim();

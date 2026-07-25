@@ -111,6 +111,52 @@ test("treats composed emoji as indivisible selectable units", () => {
   });
 });
 
+test("never snaps across a message seam", () => {
+  // The projection carries no separator between messages, so without the seam
+  // segmentation fuses this turn's last word with the next turn's first.
+  const turn = "Make it faster";
+  const text = `${turn}I rewrote the loop`;
+  assert.deepEqual(snapResearchDragSelection(text, 8, turn.length), {
+    start: 8,
+    end: turn.length + 1,
+    direction: "forward",
+  });
+  assert.deepEqual(
+    snapResearchDragSelection(text, 8, turn.length, undefined, [turn.length]),
+    { start: 8, end: turn.length, direction: "forward" },
+  );
+  // A period between letters does not break a word either, so a turn ending in
+  // one fuses just the same.
+  const punctuated = "Make it faster.";
+  const punctuatedText = `${punctuated}I rewrote the loop`;
+  assert.deepEqual(snapResearchDragSelection(punctuatedText, 8, punctuated.length), {
+    start: 8,
+    end: punctuated.length + 1,
+    direction: "forward",
+  });
+  assert.deepEqual(
+    snapResearchDragSelection(punctuatedText, 8, punctuated.length, undefined, [
+      punctuated.length,
+    ]),
+    { start: 8, end: punctuated.length, direction: "forward" },
+  );
+  // Dragging back from inside the next turn stays inside it: the seam ends the
+  // leading unit at the turn's first character rather than the previous turn's
+  // last word.
+  assert.deepEqual(
+    snapResearchDragSelection(text, turn.length + 3, turn.length, undefined, [
+      turn.length,
+    ]),
+    { start: turn.length, end: turn.length + 9, direction: "backward" },
+  );
+  // A drag that genuinely spans two messages still snaps on both outer edges;
+  // the seam only stops snapping from creating the crossing.
+  assert.deepEqual(
+    snapResearchDragSelection(text, 10, turn.length + 3, undefined, [turn.length]),
+    { start: 8, end: turn.length + 9, direction: "forward" },
+  );
+});
+
 test("rejects invalid offsets", () => {
   assert.equal(snapResearchDragSelection("answer", -1, 2), null);
   assert.equal(snapResearchDragSelection("answer", 1, 99), null);

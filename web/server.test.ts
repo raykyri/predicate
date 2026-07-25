@@ -370,6 +370,11 @@ test("the public server renders a published conversation as labelled turn bubble
   assert.match(body, /scripts\/build\.sh/);
   // A conversation tree still exposes the reader comment composer.
   assert.match(body, /proposal-composer/);
+  // Public targeted asks are confined to one label-free turn body, matching
+  // the app's conversation-anchor projection and context clamp.
+  assert.match(body, /closest\("\.conversation-turn-body"\)/);
+  assert.match(body, /startTurn !== endTurn/);
+  assert.match(body, /pendingSelection\.contextStart/);
 });
 
 test("the public server redirects pinned-revision URLs to the latest view", async (t) => {
