@@ -4895,9 +4895,21 @@ function MainApp() {
     }
     setError(null);
     try {
-      const acknowledged = await Promise.all(
-        dismissibleAgents.map((agent) => acknowledgeAgent(agent.id, includeFailed)),
+      const results = await Promise.all(
+        dismissibleAgents.map((agent) =>
+          acknowledgeAgent(agent.id, includeFailed).catch((err: unknown) => {
+            // A pane close races the attention probe: the backend prunes the
+            // agent before the frontend forgets its pane. Acknowledging a
+            // pruned agent has nothing left to do (the close path already
+            // released its waiters), so drop it instead of surfacing an error.
+            if (String(err).includes(`agent ${agent.id} was not found`)) {
+              return null;
+            }
+            throw err;
+          }),
+        ),
       );
+      const acknowledged = results.filter((agent): agent is AgentInfo => agent !== null);
       replaceAgents(
         checkBackend ? applicableSpeculativeAcknowledgements(acknowledged) : acknowledged,
       );
