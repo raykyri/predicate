@@ -9,7 +9,6 @@ import {
   ArchiveRestore,
   ChevronRight,
   FileText,
-  MessagesSquare,
   Folder,
   FolderMinus,
   FolderPlus,
@@ -19,6 +18,7 @@ import {
   RefreshCw,
   Star,
   StarOff,
+  Terminal,
   Trash2,
 } from "lucide-react";
 import type { ResearchTreeSummary } from "../../types";
@@ -115,7 +115,7 @@ function ResearchSidebarTitle({ tree }: { tree: ResearchTreeSummary }) {
       {tree.kind === "document" ? (
         <FileText className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
       ) : tree.kind === "conversation" ? (
-        <MessagesSquare className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
+        <Terminal className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
       ) : null}
       <span className="research-sidebar-title-text">{tree.title}</span>
     </span>
