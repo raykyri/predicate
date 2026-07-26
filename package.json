@@ -35,6 +35,7 @@
     "test:thread-graph-overlay": "node scripts/test-thread-graph-overlay.mjs",
     "test:workspace-scope": "node scripts/test-workspace-scope.mjs",
     "test:turn-timeline": "node scripts/test-turn-timeline.mjs",
+    "test:handoff": "node scripts/test-handoff.mjs",
     "test:publication": "node --import tsx --test tests/publication.test.ts tests/publicationComments.test.ts web/server.test.ts web/comments.test.ts",
     "test:opencode-plugin": "node --experimental-default-type=module --test qmux-opencode-plugin/tests/*.test.mjs",
     "tauri": "tauri"
