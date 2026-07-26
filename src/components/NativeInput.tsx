@@ -1563,7 +1563,6 @@ export default function NativeInput({
                     );
                   })}
                 </div>
-                <p className="composer-slash-hint">Type a message after the command</p>
               </div>,
               document.body,
             )

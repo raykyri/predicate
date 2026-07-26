@@ -362,7 +362,6 @@
   overflow: hidden;
 }
 
-/* The options scroll; the shared footer caption stays pinned below them. */
 .composer-slash-list {
   display: flex;
   min-height: 0;
@@ -378,7 +377,7 @@
 .composer-slash-option {
   appearance: none;
   display: grid;
-  grid-template-columns: auto minmax(52px, auto) minmax(0, 1fr);
+  grid-template-columns: auto 76px minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   width: 100%;
@@ -398,7 +397,7 @@
 
 .composer-slash-option.is-selected:not(:disabled),
 .composer-slash-option:hover:not(:disabled) {
-  background: var(--popover-item-hover-bg);
+  background: var(--control-bg-hover);
 }
 
 .composer-slash-option:disabled {
@@ -411,12 +410,6 @@
   display: grid;
   place-items: center;
   color: var(--text-muted);
-  transition: color var(--transition-fast);
-}
-
-.composer-slash-option.is-selected:not(:disabled) .composer-slash-icon,
-.composer-slash-option:hover:not(:disabled) .composer-slash-icon {
-  color: var(--accent-color);
 }
 
 .composer-slash-token {
@@ -439,15 +432,6 @@
   font-size: calc(var(--fs-base) - 1px);
   white-space: nowrap;
   text-overflow: ellipsis;
-}
-
-.composer-slash-hint {
-  margin: 0;
-  padding: 6px 8px 4px;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  line-height: 1.4;
-  border-top: 1px solid var(--surface-border-faint);
 }
 
 .composer-menu-label {
