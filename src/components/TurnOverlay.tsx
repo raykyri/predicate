@@ -28,6 +28,7 @@ import {
 } from "../lib/appHelpers";
 import { claimNativeTerminalPointerForWebDrag } from "../lib/api";
 import { writeClipboardText } from "../lib/clipboard";
+import { buildHandoffDocument, type HandoffContext } from "../lib/handoff";
 import { splitImageMarkers, type ImageMarkerSegment } from "../lib/imageMarkers";
 import { requestSaveDraftAsPrompt } from "../lib/promptLibrary";
 import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
@@ -123,6 +124,10 @@ interface TurnOverlayProps {
   // composer: its history ends just before the message, so the point is to take
   // that turn somewhere else rather than re-run it.
   onForkFromMessage?: (anchor: MessageAnchor) => void;
+  // Where the work lives, for the "Copy handoff" briefing. Every field is
+  // optional: a detached transcript has no agent, and a missing field just
+  // drops its line from the copied document.
+  handoffContext?: HandoffContext;
   // When true (the overlay showing the active pane), Cmd-F/Ctrl-F opens this
   // pane's find bar — unless focus is in the terminal, which owns its own find.
   searchHotkeyActive?: boolean;
@@ -197,6 +202,7 @@ export default function TurnOverlay({
   onRegenerateTitleFromUserMessage,
   titleGenerationBusy = false,
   onForkFromMessage,
+  handoffContext,
   searchHotkeyActive = false,
 }: TurnOverlayProps) {
   const sidebarRef = useRef<HTMLElement | null>(null);
@@ -564,6 +570,43 @@ export default function TurnOverlay({
     [timelineItems],
   );
 
+  // "Copy handoff" reads live transcript state through a ref so its callback
+  // identity never changes: it is passed to every memoized message row, and a
+  // fresh function per render would re-render the whole timeline on every
+  // streamed event.
+  const handoffSourceRef = useRef({ turns, assistantLabel, handoffContext, timelineItems });
+  handoffSourceRef.current = { turns, assistantLabel, handoffContext, timelineItems };
+  const copyHandoff = useCallback(async (anchorKey: string) => {
+    const source = handoffSourceRef.current;
+    // Rebuild with activity detail forced on: the file paths a handoff needs
+    // are in the tool calls, which the pane itself may be configured to hide.
+    // Message keys are stable across that flag, but the detail-on fold can
+    // split a merged card, so fall back to the pane's own items if the anchor
+    // is missing rather than copying the wrong slice.
+    const handoffText =
+      buildHandoffDocument({
+        items: buildTimelineItems(source.turns, true),
+        anchorKey,
+        assistantLabel: source.assistantLabel,
+        context: source.handoffContext,
+      }) ??
+      buildHandoffDocument({
+        items: source.timelineItems,
+        anchorKey,
+        assistantLabel: source.assistantLabel,
+        context: source.handoffContext,
+      });
+    if (!handoffText) {
+      return false;
+    }
+    try {
+      await writeClipboardText(handoffText);
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
   // The last real user message (a bubble — not a tagged instruction, not a
   // dropped turn) is the sticky candidate: it pins to the top of the pane while
   // the turn beneath it scrolls, and releases as the view scrolls back up to
@@ -784,6 +827,7 @@ export default function TurnOverlay({
                 // conservative by one item, which beats offering an action the
                 // backend would refuse.
                 onForkFromMessage={index === 0 ? undefined : onForkFromMessage}
+                onCopyHandoff={copyHandoff}
               />
             );
           })
@@ -828,6 +872,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   onRegenerateTitleFromUserMessage,
   titleGenerationBusy,
   onForkFromMessage,
+  onCopyHandoff,
 }: {
   item: MessageItem;
   agentId?: string;
@@ -840,6 +885,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   onRegenerateTitleFromUserMessage: (message: string) => void;
   titleGenerationBusy: boolean;
   onForkFromMessage?: ((anchor: MessageAnchor) => void) | undefined;
+  onCopyHandoff?: (anchorKey: string) => Promise<boolean>;
 }) {
   return (
     <>
@@ -856,6 +902,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
           onRegenerateTitleFromUserMessage={onRegenerateTitleFromUserMessage}
           titleGenerationBusy={titleGenerationBusy}
           onForkFromMessage={onForkFromMessage}
+          onCopyHandoff={onCopyHandoff}
         />
       ) : null}
       {item.activities.map((activity) => (
@@ -881,6 +928,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   previous.titleGenerationEnabled === next.titleGenerationEnabled &&
   previous.titleGenerationBusy === next.titleGenerationBusy &&
   previous.onRegenerateTitleFromUserMessage === next.onRegenerateTitleFromUserMessage &&
+  previous.onCopyHandoff === next.onCopyHandoff &&
   previous.onForkFromMessage === next.onForkFromMessage &&
   (previous.item === next.item || sameMessageItem(previous.item, next.item)));
 
@@ -896,6 +944,7 @@ function MessageItemView({
   onRegenerateTitleFromUserMessage,
   titleGenerationBusy,
   onForkFromMessage,
+  onCopyHandoff,
 }: {
   item: MessageItem;
   agentId?: string;
@@ -908,6 +957,7 @@ function MessageItemView({
   onRegenerateTitleFromUserMessage: (message: string) => void;
   titleGenerationBusy: boolean;
   onForkFromMessage?: ((anchor: MessageAnchor) => void) | undefined;
+  onCopyHandoff?: (anchorKey: string) => Promise<boolean>;
 }) {
   const taggedInstructionMessage = messageItemIsTaggedInstruction(item);
   const messageText =
@@ -922,10 +972,16 @@ function MessageItemView({
     item.role === "user" && onForkFromMessage && item.anchor
       ? () => onForkFromMessage(item.anchor as MessageAnchor)
       : null;
+  // Handing off means exporting an outstanding request together with the
+  // history behind it, which only a user message carries. Unlike forking it
+  // needs no adapter support and no live agent, so a detached transcript can
+  // still be handed to another tool.
+  const copyHandoff =
+    item.role === "user" && onCopyHandoff ? () => onCopyHandoff(item.key) : null;
   const showUserMessageActions = Boolean(
     item.role === "user" &&
       showName &&
-      (titleGenerationEnabled || savePromptAgentId || forkFromMessage),
+      (titleGenerationEnabled || savePromptAgentId || forkFromMessage || copyHandoff),
   );
   const showMessageActions = Boolean(
     !taggedInstructionMessage &&
@@ -961,6 +1017,7 @@ function MessageItemView({
               titleGenerationBusy={titleGenerationBusy}
               onRegenerateTitleFromUserMessage={onRegenerateTitleFromUserMessage}
               onForkFromMessage={forkFromMessage}
+              onCopyHandoff={copyHandoff}
             />
           ) : null}
         </header>
@@ -977,9 +1034,12 @@ function MessageItemView({
 // Preferred natural width for the message "..." menu; placement clamps to the pane.
 const MESSAGE_MENU_PREFERRED_WIDTH = 200;
 
+// How long the "Copied handoff" confirmation stays up before the menu closes.
+const HANDOFF_FEEDBACK_MS = 900;
+
 // The "..." menu shown at the right of a message header. Assistant messages only
-// offer Copy; user messages can also regenerate the tab title or save to the
-// prompt library.
+// offer Copy; user messages can also regenerate the tab title, copy a handoff
+// briefing, or save to the prompt library.
 // Portaled so the scrollable timeline cannot clip it; right-aligned so it grows
 // toward the pane center.
 function MessageActionsMenu({
@@ -991,6 +1051,7 @@ function MessageActionsMenu({
   titleGenerationBusy,
   onRegenerateTitleFromUserMessage,
   onForkFromMessage,
+  onCopyHandoff,
 }: {
   savePromptAgentId?: string | null;
   messageText: string;
@@ -1000,8 +1061,23 @@ function MessageActionsMenu({
   titleGenerationBusy: boolean;
   onRegenerateTitleFromUserMessage: (message: string) => void;
   onForkFromMessage?: (() => void) | null;
+  onCopyHandoff?: (() => Promise<boolean>) | null;
 }) {
   const [open, setOpen] = useState(false);
+  // A handoff's payload is never on screen, so unlike the plain copy items this
+  // one reports what happened instead of closing silently.
+  const [handoffState, setHandoffState] = useState<
+    "idle" | "copying" | "copied" | "failed"
+  >("idle");
+  const handoffTimerRef = useRef<number | null>(null);
+  useEffect(
+    () => () => {
+      if (handoffTimerRef.current !== null) {
+        window.clearTimeout(handoffTimerRef.current);
+      }
+    },
+    [],
+  );
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{
@@ -1055,6 +1131,7 @@ function MessageActionsMenu({
   useLayoutEffect(() => {
     if (!open) {
       setPos(null);
+      setHandoffState("idle");
       return;
     }
     positionMenu();
@@ -1144,6 +1221,48 @@ function MessageActionsMenu({
               >
                 {copyLabel}
               </button>
+              {onCopyHandoff ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="menu-item turn-message-menu-item"
+                  title="Copy the conversation up to this message as a briefing for another coding agent"
+                  disabled={handoffState === "copying"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (handoffState === "copying") {
+                      return;
+                    }
+                    setHandoffState("copying");
+                    void onCopyHandoff().then(
+                      (copied) => {
+                        setHandoffState(copied ? "copied" : "failed");
+                        // A failure stays on screen until the menu is
+                        // dismissed; only the confirmation self-closes.
+                        if (!copied) {
+                          return;
+                        }
+                        if (handoffTimerRef.current !== null) {
+                          window.clearTimeout(handoffTimerRef.current);
+                        }
+                        handoffTimerRef.current = window.setTimeout(() => {
+                          handoffTimerRef.current = null;
+                          setOpen(false);
+                        }, HANDOFF_FEEDBACK_MS);
+                      },
+                      () => setHandoffState("failed"),
+                    );
+                  }}
+                >
+                  {handoffState === "copying"
+                    ? "Copying handoff…"
+                    : handoffState === "copied"
+                      ? "Copied handoff"
+                      : handoffState === "failed"
+                        ? "Handoff copy failed"
+                        : "Copy handoff"}
+                </button>
+              ) : null}
               {savePromptAgentId ? (
                 <button
                   type="button"

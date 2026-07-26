@@ -11450,6 +11450,15 @@ function MainApp() {
                 void forkPane(surface.pane, { nest: true, useWorktree: false, anchor })
             : undefined
         }
+        // Where the handed-off work lives. The pane's cwd is what the user is
+        // actually looking at; the worktree is the fallback for a pane that
+        // never reported one.
+        handoffContext={{
+          cwd: surface.pane.cwd || agent?.worktreeDir || null,
+          branch: agent?.branch ?? null,
+          agentLabel: surface.assistantLabel,
+          model: agent?.model ?? null,
+        }}
         header={
           showHeader ? (
             <TurnPaneHeader
