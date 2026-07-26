@@ -45,6 +45,17 @@
   background: var(--split-border-active);
 }
 
+.terminal-split-resize-mask {
+  position: absolute;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  /* Veil stale native pixels without turning the live resize preview opaque. */
+  background: var(--terminal-bg, var(--terminal-pane-bg));
+  opacity: 0.3;
+  pointer-events: none;
+}
+
 .terminal-split-resizer,
 .turn-pane-split-divider {
   position: absolute;

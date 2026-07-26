@@ -2202,6 +2202,13 @@ function MainApp() {
   // layout keeps following the pointer while the native frames stay committed
   // at their pre-drag size until pointerup/pointercancel.
   const [terminalGeometryResizing, setTerminalGeometryResizing] = useState(false);
+  // A split drag additionally keeps the committed divider position so the
+  // mismatched band between it and the live divider can be veiled.
+  const [terminalSplitResizeMask, setTerminalSplitResizeMask] = useState<{
+    splitId: string;
+    dividerIndex: number;
+    startOffset: number;
+  } | null>(null);
   const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null);
   const [groupDropTarget, setGroupDropTarget] = useState<GroupDropTarget | null>(null);
   // Per-pane browser overlay state, so each tab keeps its own page and open/closed.
@@ -5153,6 +5160,25 @@ function MainApp() {
       )
     : [];
 
+  const terminalSplitResizeMaskStyle = (() => {
+    if (!terminalSplitResizeMask || activePaneSplit?.id !== terminalSplitResizeMask.splitId) {
+      return undefined;
+    }
+    const currentOffset = terminalSplitDividerOffsets[terminalSplitResizeMask.dividerIndex];
+    if (
+      currentOffset === undefined ||
+      Math.abs(currentOffset - terminalSplitResizeMask.startOffset) < Number.EPSILON
+    ) {
+      return undefined;
+    }
+    const topOffset = Math.min(currentOffset, terminalSplitResizeMask.startOffset);
+    const offsetSpan = Math.abs(currentOffset - terminalSplitResizeMask.startOffset);
+    return {
+      top: splitTrackPosition(topOffset, terminalSplitResizeMask.dividerIndex),
+      height: `calc(${splitTrackExtent(offsetSpan)} + ${TERMINAL_SPLIT_GUTTER_PX}px)`,
+    } satisfies CSSProperties;
+  })();
+
   function terminalSplitDividerStyle(offset: number, index: number): CSSProperties {
     return {
       top: splitTrackPosition(offset, index),
@@ -5180,7 +5206,16 @@ function MainApp() {
 
     const releasePointer = claimResizePointer(event);
     let latestSplit = split;
+    const startFractions = splitFractions(split);
+    const startOffset = startFractions
+      .slice(0, dividerIndex + 1)
+      .reduce((sum, value) => sum + value, 0);
     setTerminalGeometryResizing(true);
+    setTerminalSplitResizeMask({
+      splitId: split.id,
+      dividerIndex,
+      startOffset,
+    });
     terminalSplitResizeRef.current = {
       splitId: split.id,
       dividerIndex,
@@ -5211,6 +5246,7 @@ function MainApp() {
       releasePointer();
       terminalSplitResizeRef.current = null;
       setTerminalGeometryResizing(false);
+      setTerminalSplitResizeMask(null);
       savePaneSplits(
         paneSplits.map((candidate) => (candidate.id === latestSplit.id ? latestSplit : candidate)),
       );
@@ -13802,6 +13838,13 @@ function MainApp() {
             <div
               className="terminal-split-drop-placeholder"
               style={terminalSplitDropStyle}
+              aria-hidden="true"
+            />
+          ) : null}
+          {terminalSplitResizeMaskStyle ? (
+            <div
+              className="terminal-split-resize-mask"
+              style={terminalSplitResizeMaskStyle}
               aria-hidden="true"
             />
           ) : null}
