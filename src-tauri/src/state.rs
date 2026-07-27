@@ -4451,6 +4451,93 @@ impl AppState {
         self.research_node(node_id)
     }
 
+    /// Resets a settled (Failed or Cancelled) run back to `Queued` in place —
+    /// same node id, same launch inputs — so the retry command can relaunch it
+    /// through the ordinary launch machinery.
+    ///
+    /// The reset must happen before the relaunch, not after: terminal statuses
+    /// are monotonic, so `bind_research_node_run` and
+    /// `sync_research_node_from_agent` refuse to write a fresh run's status
+    /// over a Failed/Cancelled node, and `maybe_schedule_research_retirement`
+    /// retires the pane of any Failed node it sees. A relaunch without this
+    /// reset would therefore bind a pane the node's terminal status
+    /// immediately orphans.
+    pub fn reset_research_node_for_retry(&self, node_id: &str) -> Result<ResearchNode, String> {
+        let node = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let node = model
+                .research_nodes
+                .get(node_id)
+                .ok_or_else(|| format!("research node {node_id} was not found"))?;
+            let tree = model
+                .research_trees
+                .get(&node.tree_id)
+                .ok_or_else(|| format!("research tree {} was not found", node.tree_id))?;
+            if tree.archived_at.is_some() {
+                return Err("restore archived research before retrying a run".to_string());
+            }
+            if !matches!(
+                node.status,
+                ResearchNodeStatus::Failed | ResearchNodeStatus::Cancelled
+            ) {
+                return Err("only failed or cancelled runs can be retried".to_string());
+            }
+            // A still-bound live pane means the old run's process may still be
+            // holding on (a cancel whose kill failed). Mirror the
+            // cancellation-needs-retry stance: the user resolves the pane
+            // first, so two processes never race to settle one node.
+            if let Some(pane_id) = node.pane_id.as_deref() {
+                if model.panes.contains_key(pane_id) {
+                    return Err(
+                        "the previous run still has a terminal open; close the run's terminal first"
+                            .to_string(),
+                    );
+                }
+            }
+            let now = now_millis();
+            let node = model
+                .research_nodes
+                .get_mut(node_id)
+                .expect("research node was checked above");
+            node.status = ResearchNodeStatus::Queued;
+            node.error = None;
+            node.completed_at = None;
+            node.started_at = None;
+            node.agent_id = None;
+            node.pane_id = None;
+            node.thread_id = None;
+            node.native_session_id = None;
+            node.transcript_path = None;
+            node.prompt_native_id = None;
+            node.response_preview = None;
+            node.response_snapshot_at = None;
+            let node = node.clone();
+            touch_research_tree_locked(&mut model, &node.tree_id, now);
+            node
+        };
+        // Best-effort: a leftover snapshot from the failed attempt would be
+        // served as the retried run's response until the fresh one lands.
+        if let Err(err) =
+            research::remove_response_snapshot(&self.inner.config.workspace_root, node_id)
+        {
+            eprintln!(
+                "qmux: failed to remove stale research response snapshot for {node_id}: {err}"
+            );
+        }
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "research.node.updated",
+            None,
+            None,
+            json!({ "node": node }),
+        ));
+        Ok(node)
+    }
+
     pub fn active_research_node_for_pane(
         &self,
         pane_id: &str,
@@ -12365,6 +12452,187 @@ mod tests {
         // A settled node no longer counts as an active run, so the tree stays
         // removable instead of being pinned by a phantom launch.
         restored.remove_research_tree(&detail.tree.id).unwrap();
+    }
+
+    #[test]
+    fn retry_reset_requeues_a_failed_run_and_clears_the_previous_attempt() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let node_id = detail.tree.root_node_id.clone();
+        let agent = sample_agent("research-agent");
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_run(&node_id, &agent, "pane-7")
+            .unwrap();
+        // The pane's teardown settles the still-running node as Failed while
+        // leaving the run's checkpoint bindings on it.
+        state.remove_pane("pane-7").unwrap();
+        let failed = state.research_node(&node_id).unwrap();
+        assert_eq!(failed.status, ResearchNodeStatus::Failed);
+        assert!(failed.error.is_some());
+        assert_eq!(failed.agent_id.as_deref(), Some("research-agent"));
+        assert_eq!(failed.native_session_id.as_deref(), Some("session-abc"));
+        assert!(failed.started_at.is_some());
+        // A partial response snapshot left over from the failed attempt.
+        research::write_response_snapshot_verified(
+            &workspace,
+            &node_id,
+            &[sample_user_turn("research-agent", "partial answer")],
+        )
+        .unwrap();
+        assert!(
+            research::read_response_snapshot(&workspace, &node_id)
+                .unwrap()
+                .is_some()
+        );
+
+        let reset = state.reset_research_node_for_retry(&node_id).unwrap();
+        assert_eq!(reset.status, ResearchNodeStatus::Queued);
+        assert!(reset.error.is_none());
+        assert!(reset.agent_id.is_none());
+        assert!(reset.pane_id.is_none());
+        assert!(reset.thread_id.is_none());
+        assert!(reset.native_session_id.is_none());
+        assert!(reset.transcript_path.is_none());
+        assert!(reset.prompt_native_id.is_none());
+        assert!(reset.response_preview.is_none());
+        assert!(reset.response_snapshot_at.is_none());
+        assert!(reset.started_at.is_none());
+        assert!(reset.completed_at.is_none());
+        // Launch inputs survive in place: the retry relaunches the same
+        // question on the same node id.
+        assert_eq!(reset.id, node_id);
+        assert_eq!(reset.prompt, "Root");
+        assert_eq!(reset.adapter, "claude");
+        // The stale snapshot is gone, so the retried run can never serve the
+        // failed attempt's partial answer as its response.
+        assert!(
+            research::read_response_snapshot(&workspace, &node_id)
+                .unwrap()
+                .is_none()
+        );
+        // The reset run counts as active again, pinning its tree like any
+        // other Queued launch.
+        assert!(
+            state
+                .remove_research_tree(&detail.tree.id)
+                .unwrap_err()
+                .contains("active"),
+        );
+    }
+
+    #[test]
+    fn retry_reset_refuses_unsettled_nodes_live_panes_and_archived_trees() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id.clone();
+        // Queued (never launched) is still an active run.
+        let err = state.reset_research_node_for_retry(&root_id).unwrap_err();
+        assert!(err.contains("only failed or cancelled"), "{err}");
+
+        // Running, pane bound.
+        state.insert_pane(sample_pane_runtime("pane-7")).unwrap();
+        let agent = sample_agent("research-agent");
+        state.insert_agent(agent.clone()).unwrap();
+        let bound = state
+            .bind_research_node_run(&root_id, &agent, "pane-7")
+            .unwrap();
+        assert_eq!(bound.status, ResearchNodeStatus::Running);
+        let err = state.reset_research_node_for_retry(&root_id).unwrap_err();
+        assert!(err.contains("only failed or cancelled"), "{err}");
+
+        // Failed while its pane is still open: the old process may still be
+        // holding on, so the retry refuses until the pane is resolved.
+        state
+            .fail_research_node(&root_id, "boom".to_string())
+            .unwrap();
+        let err = state.reset_research_node_for_retry(&root_id).unwrap_err();
+        assert!(err.contains("terminal"), "{err}");
+
+        // Pane gone, but the tree is archived: restore first.
+        state.remove_pane("pane-7").unwrap();
+        state.archive_research_tree(&detail.tree.id).unwrap();
+        let err = state.reset_research_node_for_retry(&root_id).unwrap_err();
+        assert!(err.contains("restore archived research"), "{err}");
+
+        // A Complete outcome is never retryable.
+        let complete = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Done".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        state.insert_pane(sample_pane_runtime("pane-8")).unwrap();
+        let mut done_agent = sample_agent("research-agent-2");
+        done_agent.status = AgentStatus::Done;
+        state.insert_agent(done_agent.clone()).unwrap();
+        let bound = state
+            .bind_research_node_run(&complete.tree.root_node_id, &done_agent, "pane-8")
+            .unwrap();
+        assert_eq!(bound.status, ResearchNodeStatus::Complete);
+        let err = state
+            .reset_research_node_for_retry(&complete.tree.root_node_id)
+            .unwrap_err();
+        assert!(err.contains("only failed or cancelled"), "{err}");
+    }
+
+    #[test]
+    fn retry_reset_round_trips_failed_to_queued_and_back() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id.clone();
+        state
+            .fail_research_node(&root_id, "first failure".to_string())
+            .unwrap();
+
+        let reset = state.reset_research_node_for_retry(&root_id).unwrap();
+        assert_eq!(reset.status, ResearchNodeStatus::Queued);
+        // A failed relaunch settles the re-queued node again…
+        let failed = state
+            .fail_research_node(&root_id, "second failure".to_string())
+            .unwrap();
+        assert_eq!(failed.status, ResearchNodeStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some("second failure"));
+        // …and that failure is retryable in turn.
+        let reset = state.reset_research_node_for_retry(&root_id).unwrap();
+        assert_eq!(reset.status, ResearchNodeStatus::Queued);
+        assert!(reset.error.is_none());
     }
 
     #[test]

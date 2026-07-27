@@ -629,6 +629,13 @@ export function forkResearchNode(
   });
 }
 
+/** Relaunches a failed (or cancelled) run in place: the node keeps its id and
+ * launch inputs, resets to queued, and goes back through the ordinary launch
+ * machinery. Returns the refreshed tree detail. */
+export function retryResearchNode(nodeId: string) {
+  return invoke<ResearchTreeDetail>("retry_research_node", { nodeId });
+}
+
 export function cancelResearchNode(nodeId: string) {
   return invoke<ResearchNode>("cancel_research_node", { nodeId });
 }

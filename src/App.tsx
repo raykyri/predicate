@@ -371,6 +371,7 @@ import {
   removeResearchTree,
   removeResearchBranch,
   restoreResearchTree,
+  retryResearchNode,
   forkAgent,
   getActiveTab,
   getPaneSplits,
@@ -7887,6 +7888,21 @@ function MainApp() {
     },
     [applyGeneratedResearchNodeTitle],
   );
+  const retryResearchRun = useCallback(
+    async (nodeId: string) => {
+      // The command settles the whole relaunch (reset + spawn/fork + bind)
+      // before returning the refreshed tree, so reconciling it here is
+      // authoritative; interleaved research.node.updated events carry the
+      // same node states and reconcile idempotently.
+      const detail = await retryResearchNode(nodeId);
+      if (activeResearchTreeIdRef.current === detail.tree.id) {
+        setActiveResearchDetail((current) =>
+          reconcileResearchTreeDetail(current, detail),
+        );
+      }
+    },
+    [],
+  );
   const removeResearchBranchFromDocument = useCallback(
     async (nodeId: string) => {
       setError(null);
@@ -14209,6 +14225,7 @@ function MainApp() {
               onRemoveTree={removeResearchTreeAndSelectFallback}
               onUpdateDocument={editResearchDocument}
               onCancel={cancelResearchRun}
+              onRetryNode={retryResearchRun}
               onOpenPane={handleResearchDocumentOpenPane}
               linkActions={linkActionsForPane(researchBrowserOwnerId(activeResearchTreeId))}
               onError={setError}

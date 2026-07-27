@@ -130,6 +130,17 @@ export function inlineChainFor(nodes: ResearchNode[], nodeId: string): string[] 
   return chain;
 }
 
+/** Whether a settled node can be retried in place (same node id, same launch
+ * inputs, relaunched through the ordinary machinery): it failed or was
+ * cancelled, and no pane from the previous run lingers — an unfinished cancel
+ * keeps its own Retry-cancel controls until the pane is reclaimed.
+ * Archived-tree gating stays the caller's job, matching canContinueThread. */
+export function canRetryResearchNode(node: ResearchNode): boolean {
+  return (
+    (node.status === "failed" || node.status === "cancelled") && !node.paneId
+  );
+}
+
 /** Whether the thread composer can continue from this tail node: complete,
  * inline slot free, and — for run nodes, whose follow-ups fork the native
  * session — the session checkpoint recorded. Documents and conversations
