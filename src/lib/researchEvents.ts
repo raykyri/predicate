@@ -361,6 +361,7 @@ export function researchSummaryFromDetail(detail: ResearchTreeDetail): ResearchT
     title: detail.tree.title,
     rootNodeId: detail.tree.rootNodeId,
     kind: root?.kind ?? "run",
+    ...(root?.origin != null ? { origin: root.origin } : {}),
     workspaceId: detail.tree.workspaceId,
     runningCount,
     failedCount,

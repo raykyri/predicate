@@ -187,6 +187,16 @@ test("researchSummaryFromDetail exactly derives counts, kind, and unseen attenti
   const viewed = researchSummaryFromDetail(detail(nodes, { lastViewedAt: 14 }));
   assert.equal(viewed.hasUnseenUpdate, false);
   assert.equal(viewed.hasUnseenFailure, false);
+
+  // The root's origin is surfaced (and the key omitted entirely when absent,
+  // mirroring the backend's skip-if-none serialization).
+  const imported = researchSummaryFromDetail(
+    detail([
+      node({ kind: "conversation", origin: "conversationImport", status: "complete" }),
+    ]),
+  );
+  assert.equal(imported.origin, "conversationImport");
+  assert.ok(!("origin" in researchSummaryFromDetail(detail(nodes))));
 });
 
 test("research status contributions match backend active and terminal buckets", () => {

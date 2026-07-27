@@ -6,6 +6,8 @@ import {
   ResearchDocumentWordLimitExceeded,
   countResearchDocumentWords,
   deriveResearchDocumentTitle,
+  isConversationArchivePath,
+  isConversationTranscriptPath,
   isMarkdownDocumentPath,
 } from "../src/lib/researchDocuments";
 
@@ -15,6 +17,23 @@ test("document imports accept conventional Markdown paths and cap content at 10 
   assert.equal(isMarkdownDocumentPath("/tmp/NOTES.MARKDOWN"), true);
   assert.equal(isMarkdownDocumentPath("/tmp/notes.md.txt"), false);
   assert.equal(isMarkdownDocumentPath("/tmp/notes"), false);
+});
+
+test("conversation-import drops recognize archives and transcripts by extension", () => {
+  assert.equal(isConversationArchivePath("/tmp/data-2026.zip"), true);
+  assert.equal(isConversationArchivePath("/tmp/DATA.ZIP"), true);
+  assert.equal(isConversationArchivePath("/tmp/conversations.json"), true);
+  assert.equal(isConversationArchivePath("/tmp/Conversations.JSON"), true);
+  assert.equal(isConversationArchivePath("/tmp/session.jsonl"), false);
+  assert.equal(isConversationArchivePath("/tmp/notes.md"), false);
+  assert.equal(isConversationArchivePath("/tmp/archive"), false);
+  assert.equal(isConversationArchivePath("/tmp/archive.zip.txt"), false);
+
+  assert.equal(isConversationTranscriptPath("/tmp/session.jsonl"), true);
+  assert.equal(isConversationTranscriptPath("/tmp/SESSION.JSONL"), true);
+  assert.equal(isConversationTranscriptPath("/tmp/conversations.json"), false);
+  assert.equal(isConversationTranscriptPath("/tmp/notes.md"), false);
+  assert.equal(isConversationTranscriptPath("/tmp/session"), false);
 });
 
 test("word counting matches whitespace-delimited tokens", () => {
