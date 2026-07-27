@@ -36,6 +36,7 @@ import {
 import {
   canContinueThread,
   canFollowUpFrom,
+  canRetryResearchNode,
   inlineChainFor,
   isActiveResearchStatus,
 } from "../../lib/researchThreads";
@@ -135,6 +136,10 @@ interface ResearchDocumentProps {
     expectedHighlightIds: string[];
   }) => Promise<UpdateResearchDocumentResult>;
   onCancel: (nodeId: string) => Promise<void>;
+  /** Relaunches a failed or cancelled run in place (same node id, same
+   * inputs). The refreshed tree detail flows back through the caller's
+   * reconciliation, so the segment re-renders as Queued. */
+  onRetryNode: (nodeId: string) => Promise<void>;
   onOpenPane: (paneId: string) => void;
   linkActions: LinkActions;
   onError: (message: string) => void;
@@ -868,6 +873,12 @@ interface ThreadSegmentProps {
   onOpenFollowupMenu: (nodeId: string, clientX: number, clientY: number) => void;
   onOpenPane: (paneId: string) => void;
   onCancelNode: (nodeId: string) => void;
+  /** Whether this segment's settled node can be retried in place (predicate
+   * plus archived gating, computed by the parent). */
+  canRetryNode: boolean;
+  /** True while this segment's retry request is in flight. */
+  retryingNode: boolean;
+  onRetryNode: (nodeId: string) => void;
   onCardHover: (childId: string, entering: boolean) => void;
   onRootMouseDown: (event: React.MouseEvent<HTMLDivElement>) => void;
   onRootMouseUp: (event: React.MouseEvent<HTMLDivElement>) => void;
@@ -978,6 +989,9 @@ interface ResearchAnswerPaneProps {
   onOpenAnswerMenu: ThreadSegmentProps["onOpenAnswerMenu"];
   onOpenPane: ThreadSegmentProps["onOpenPane"];
   onCancelNode: ThreadSegmentProps["onCancelNode"];
+  canRetryNode: ThreadSegmentProps["canRetryNode"];
+  retryingNode: ThreadSegmentProps["retryingNode"];
+  onRetryNode: ThreadSegmentProps["onRetryNode"];
   onRootMouseDown: ThreadSegmentProps["onRootMouseDown"];
   onRootMouseUp: ThreadSegmentProps["onRootMouseUp"];
   onRootKeyUp: ThreadSegmentProps["onRootKeyUp"];
@@ -1020,6 +1034,9 @@ const ResearchAnswerPane = memo(function ResearchAnswerPane({
   onOpenAnswerMenu,
   onOpenPane,
   onCancelNode,
+  canRetryNode,
+  retryingNode,
+  onRetryNode,
   onRootMouseDown,
   onRootMouseUp,
   onRootKeyUp,
@@ -1027,6 +1044,29 @@ const ResearchAnswerPane = memo(function ResearchAnswerPane({
   onRootMouseMove,
   onRootMouseLeave,
 }: ResearchAnswerPaneProps) {
+  // One-click relaunch beside a settled failure/cancellation. Errors surface
+  // through the parent's handler (the shared global banner), matching the
+  // neighboring cancel control.
+  const retryButton = canRetryNode ? (
+    <button
+      className="control-button research-response-retry"
+      type="button"
+      disabled={retryingNode}
+      onClick={() => onRetryNode(node.id)}
+    >
+      {retryingNode ? (
+        <>
+          <LoaderCircle className="research-spinner" size={12} aria-hidden="true" />
+          <span>Retrying…</span>
+        </>
+      ) : (
+        <>
+          <RefreshCw size={12} aria-hidden="true" />
+          <span>Retry</span>
+        </>
+      )}
+    </button>
+  ) : null;
   return (
     <section className="research-response" aria-label="Research response">
       {!view.content ? (
@@ -1053,26 +1093,32 @@ const ResearchAnswerPane = memo(function ResearchAnswerPane({
             </div>
           ) : null}
           {node.status === "failed" && view.content.turns.length > 0 ? (
-            <p className="research-response-error" role="alert">
-              {node.error ?? "The research run failed."}
-            </p>
+            <div className="research-response-failure" role="alert">
+              <p className="research-response-error">
+                {node.error ?? "The research run failed."}
+              </p>
+              {retryButton}
+            </div>
           ) : null}
           {view.displayedTimelineItems.length === 0 ? (
-            <p className="research-response-empty">
-              {node.status === "failed"
-                ? node.error ?? "The research run failed."
-                : node.status === "cancelled"
-                  ? "Research was cancelled."
-                  : view.content.sourceError
-                    ? `The response is no longer available: ${view.content.sourceError}`
-                    : node.status === "complete"
-                      ? "Research completed, but its response is unavailable. Open the original session transcript if it still exists."
-                      : segmentActive
-                        ? view.timelineItems.length > 0
-                          ? "Waiting for the final response…"
-                          : "Working…"
-                        : "No response is available."}
-            </p>
+            <>
+              <p className="research-response-empty">
+                {node.status === "failed"
+                  ? node.error ?? "The research run failed."
+                  : node.status === "cancelled"
+                    ? "Research was cancelled."
+                    : view.content.sourceError
+                      ? `The response is no longer available: ${view.content.sourceError}`
+                      : node.status === "complete"
+                        ? "Research completed, but its response is unavailable. Open the original session transcript if it still exists."
+                        : segmentActive
+                          ? view.timelineItems.length > 0
+                            ? "Waiting for the final response…"
+                            : "Working…"
+                          : "No response is available."}
+              </p>
+              {node.status === "failed" || node.status === "cancelled" ? retryButton : null}
+            </>
           ) : (
             <>
               {view.hiddenTimelineItemCount > 0 && !view.isConversation ? (
@@ -1447,6 +1493,9 @@ const ThreadSegment = memo(function ThreadSegment({
   onOpenFollowupMenu,
   onOpenPane,
   onCancelNode,
+  canRetryNode,
+  retryingNode,
+  onRetryNode,
   onCardHover,
   onRootMouseDown,
   onRootMouseUp,
@@ -1497,6 +1546,9 @@ const ThreadSegment = memo(function ThreadSegment({
           onOpenAnswerMenu={onOpenAnswerMenu}
           onOpenPane={onOpenPane}
           onCancelNode={onCancelNode}
+          canRetryNode={canRetryNode}
+          retryingNode={retryingNode}
+          onRetryNode={onRetryNode}
           onRootMouseDown={onRootMouseDown}
           onRootMouseUp={onRootMouseUp}
           onRootKeyUp={onRootKeyUp}
@@ -1534,6 +1586,7 @@ function ResearchDocument({
   onRemoveTree,
   onUpdateDocument,
   onCancel,
+  onRetryNode,
   onOpenPane,
   linkActions,
   onError,
@@ -1559,7 +1612,10 @@ function ResearchDocument({
   // ask is always a branch.
   const [followupMode, setFollowupMode] = useState<"thread" | "branch">("thread");
   const [submitting, setSubmitting] = useState(false);
-  const [retryingTail, setRetryingTail] = useState(false);
+  // The node whose in-place retry request is in flight (id-stable relaunch of
+  // a failed/cancelled run), or null. One at a time is plenty: the control
+  // that started it shows the busy state, every other retry control disables.
+  const [retryingNodeId, setRetryingNodeId] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const [followupMenu, setFollowupMenu] = useState<FollowupMenu | null>(null);
   const [deletingBranchId, setDeletingBranchId] = useState<string | null>(null);
@@ -4263,14 +4319,11 @@ function ResearchDocument({
     }
   }
 
-  // One-click recovery for a failed (or cancelled) inline tail: free the
-  // slot by deleting the settled leaf, then relaunch the same question
-  // inline from the same parent. A failed tail is always a leaf (children
-  // require a completed parent), so the removal is exactly one node. If the
-  // relaunch fails after the removal succeeded, the thread is simply back to
-  // its pre-submit state — parent as tail, slot free — with the error
-  // surfaced.
-  async function retryInlineTail() {
+  // One-click recovery for a failed (or cancelled) inline tail: relaunch the
+  // node in place — same id, same question, same slot — through the retry
+  // command. The reader stays put; the segment re-renders as Queued when the
+  // refreshed detail lands.
+  function retryInlineTail() {
     const tail = tailNode;
     if (
       !detail ||
@@ -4278,29 +4331,14 @@ function ResearchDocument({
       !tail.inline ||
       !tail.parentNodeId ||
       tail.paneId ||
-      retryingTail ||
+      retryingNodeId !== null ||
       submitting ||
       archived ||
       (tail.status !== "failed" && tail.status !== "cancelled")
     ) {
       return;
     }
-    setRetryingTail(true);
-    try {
-      await onRemoveBranch(tail.id);
-      const child = await onFork(
-        tail.parentNodeId,
-        tail.prompt,
-        null,
-        tail.queryAnchor ?? null,
-        true,
-      );
-      pendingScrollNodeIdRef.current = child.id;
-    } catch (err) {
-      onError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setRetryingTail(false);
-    }
+    handleRetryNode(tail.id);
   }
 
   async function resolveProposal(
@@ -4417,6 +4455,8 @@ function ResearchDocument({
   // identities cannot defeat the segment comparator.
   const onCancelRef = useRef(onCancel);
   onCancelRef.current = onCancel;
+  const onRetryNodeRef = useRef(onRetryNode);
+  onRetryNodeRef.current = onRetryNode;
   const onOpenPaneRef = useRef(onOpenPane);
   onOpenPaneRef.current = onOpenPane;
   const onToastRef = useRef(onToast);
@@ -4435,6 +4475,25 @@ function ResearchDocument({
     onCancelRef.current(nodeId)
       .catch((err) => onErrorRef.current(err instanceof Error ? err.message : String(err)))
       .finally(() => setCancelling(false));
+  }, []);
+  // Relaunches a settled node in place. Ref-guarded against double entry: the
+  // clicked control disables itself, but a second control for the same node
+  // (the follow-up menu beside the inline button) fires before the state
+  // lands. The backend refuses a duplicate anyway — the reset finds the node
+  // already Queued — so this only spares the user a bounced error.
+  const retryRequestInFlightRef = useRef(false);
+  const handleRetryNode = useCallback((nodeId: string) => {
+    if (retryRequestInFlightRef.current) {
+      return;
+    }
+    retryRequestInFlightRef.current = true;
+    setRetryingNodeId(nodeId);
+    onRetryNodeRef.current(nodeId)
+      .catch((err) => onErrorRef.current(err instanceof Error ? err.message : String(err)))
+      .finally(() => {
+        retryRequestInFlightRef.current = false;
+        setRetryingNodeId((current) => (current === nodeId ? null : current));
+      });
   }, []);
   const retryContentLoad = useCallback(() => setContentLoadNonce((value) => value + 1), []);
   const showFullTraceFor = useCallback(
@@ -4640,10 +4699,10 @@ function ResearchDocument({
     tailNode &&
       tailNode.inline &&
       tailNode.parentNodeId &&
-      !tailNode.paneId &&
       !archived &&
-      (tailNode.status === "failed" || tailNode.status === "cancelled"),
+      canRetryResearchNode(tailNode),
   );
+  const retryingTail = Boolean(tailNode && retryingNodeId === tailNode.id);
   const composerHint = archived
     ? null
     : composerAwaitingCheckpoint
@@ -4766,8 +4825,8 @@ function ResearchDocument({
               <button
                 type="button"
                 className="control-button research-followup-retry"
-                disabled={retryingTail || submitting}
-                onClick={() => void retryInlineTail()}
+                disabled={retryingNodeId !== null || submitting}
+                onClick={() => retryInlineTail()}
               >
                 {retryingTail ? (
                   <>
@@ -4989,6 +5048,9 @@ function ResearchDocument({
         onOpenFollowupMenu={openFollowupMenu}
         onOpenPane={handleOpenPane}
         onCancelNode={handleCancelNode}
+        canRetryNode={!archived && canRetryResearchNode(node)}
+        retryingNode={retryingNodeId === node.id}
+        onRetryNode={handleRetryNode}
         onCardHover={handleCardHover}
         onRootMouseDown={beginHighlightSelectionDrag}
         onRootMouseUp={finishHighlightSelectionDrag}
@@ -5244,6 +5306,21 @@ function ResearchDocument({
                           );
                         })()
                       : null}
+                    {!archived && canRetryResearchNode(node) ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="control-button"
+                        disabled={retryingNodeId !== null}
+                        onClick={() => {
+                          setFollowupMenu(null);
+                          handleRetryNode(node.id);
+                        }}
+                      >
+                        <RefreshCw size={13} aria-hidden="true" />
+                        <span>Retry run</span>
+                      </button>
+                    ) : null}
                     <div className="context-menu-divider" role="separator" />
                     {rootNode && node.kind === "document" ? (
                       <>

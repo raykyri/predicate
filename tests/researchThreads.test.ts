@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   canContinueThread,
   canFollowUpFrom,
+  canRetryResearchNode,
   inlineChainFor,
   inlineChildOf,
   isActiveResearchStatus,
@@ -139,6 +140,30 @@ test("canFollowUpFrom gates on completion and the run checkpoint", () => {
     canFollowUpFrom(node("conv", { kind: "conversation", nativeSessionId: null })),
     true,
   );
+});
+
+test("canRetryResearchNode allows settled failures without a lingering pane", () => {
+  assert.equal(canRetryResearchNode(node("failed", { status: "failed" })), true);
+  assert.equal(
+    canRetryResearchNode(node("cancelled", { status: "cancelled" })),
+    true,
+  );
+  // A still-bound pane means the previous run's process may linger — the
+  // cancel controls own that recovery, not retry.
+  assert.equal(
+    canRetryResearchNode(node("stuck", { status: "failed", paneId: "pane-1" })),
+    false,
+  );
+  assert.equal(
+    canRetryResearchNode(
+      node("stuck-cancel", { status: "cancelled", paneId: "pane-1" }),
+    ),
+    false,
+  );
+  assert.equal(canRetryResearchNode(node("done")), false);
+  for (const status of ["queued", "starting", "running"] as const) {
+    assert.equal(canRetryResearchNode(node("active", { status })), false);
+  }
 });
 
 test("run tails need the session checkpoint; documents and conversations do not", () => {

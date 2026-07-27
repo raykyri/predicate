@@ -1182,181 +1182,267 @@ async fn fork_research_node(
             };
             (parent, workspace, child)
         };
-        // A highlight-targeted follow-up sends the quoted passage with the
-        // question. Only the sent prompt carries the quote — the child's
-        // displayed prompt stays the bare question, which boundary matching
-        // still finds as a normalized substring of the sent prompt.
-        let question = match &child.query_anchor {
-            Some(anchor) => research::query_followup_prompt(&anchor.exact, &child.prompt),
-            None => child.prompt.clone(),
-        };
-        // Exhaustive on purpose: each kind must pick its launch path
-        // explicitly, so a new kind (or lifting a refusal in
-        // create_research_child) forces a decision here instead of falling
-        // into the session-fork branch without a checkpoint.
-        match parent.kind {
-            research::ResearchNodeKind::Document => {
-                // A document has no session to fork. Its follow-up launches a
-                // fresh run whose prompt carries the document as context; the
-                // child's displayed prompt stays the bare question (the
-                // response boundary still matches it as a substring of the
-                // sent prompt).
-                let launch_prompt = state.research_document_followup_prompt(&parent.id, &question);
-                let launch_prompt = match launch_prompt {
-                    Ok(launch_prompt) => launch_prompt,
-                    Err(err) => {
-                        let _ = state.fail_research_node(&child.id, err.clone());
-                        return Err(err);
-                    }
-                };
-                return launch_fresh_research_run(
-                    &state,
-                    &child.id,
-                    &workspace,
-                    &child.adapter,
-                    child.model.clone(),
-                    child.effort.clone(),
-                    launch_prompt,
-                );
-            }
-            research::ResearchNodeKind::Conversation => {
-                // An exported conversation is severed from its source session
-                // — there is nothing to fork. Its follow-up launches a fresh
-                // run whose prompt carries the serialized conversation as
-                // context; the child's displayed prompt stays the bare
-                // question (the response boundary still matches it as a
-                // substring of the sent prompt).
-                //
-                // The bare prompt and the anchor go in unwrapped: an anchored
-                // quote is conversation content, so the conversation prompt
-                // builder wraps it itself with the tag neutralization the
-                // serialized turns get, rather than taking the verbatim
-                // `question` the other kinds share.
-                let launch_prompt = state.research_conversation_followup_prompt(
-                    &parent.id,
-                    &child.prompt,
-                    child.query_anchor.as_ref(),
-                );
-                let launch_prompt = match launch_prompt {
-                    Ok(launch_prompt) => launch_prompt,
-                    Err(err) => {
-                        let _ = state.fail_research_node(&child.id, err.clone());
-                        return Err(err);
-                    }
-                };
-                return launch_fresh_research_run(
-                    &state,
-                    &child.id,
-                    &workspace,
-                    &child.adapter,
-                    child.model.clone(),
-                    child.effort.clone(),
-                    launch_prompt,
-                );
-            }
-            research::ResearchNodeKind::Run => {}
-        }
-        // Run follow-ups fork the parent session, bypassing
-        // launch_fresh_research_run, so the custom launch instruction is
-        // applied to the sent question here. The child's displayed prompt
-        // stays the bare question — still a normalized substring of the sent
-        // prompt, so response-boundary matching keeps working.
-        let question = match persistence::load_preferences(&state.config().workspace_root) {
-            Ok(preferences) => research::prompt_with_research_launch_instruction(
-                question,
-                preferences.research_launch_instruction.as_deref(),
-            ),
-            Err(err) => {
-                let _ = state.fail_research_node(&child.id, err.clone());
-                return Err(err);
-            }
-        };
-        let live_source = parent
-            .agent_id
-            .as_deref()
-            .and_then(|agent_id| state.agent(agent_id).ok().flatten());
-        let mut source = match live_source {
-            Some(source) => source,
-            None => {
-                let session_id = match parent.native_session_id.clone() {
-                    Some(session_id) => session_id,
-                    None => {
-                        let err = "the parent research session has no native session id to fork"
-                            .to_string();
-                        let _ = state.fail_research_node(&child.id, err.clone());
-                        return Err(err);
-                    }
-                };
-                AgentInfo {
-                    id: parent
-                        .agent_id
-                        .clone()
-                        .unwrap_or_else(|| format!("research-source-{}", parent.id)),
-                    group_id: parent.group_id.clone(),
-                    adapter: parent.adapter.clone(),
-                    worktree_dir: parent.worktree_dir.clone(),
-                    branch: None,
-                    pane_id: None,
-                    orphaned_queue_pane_id: None,
-                    session_id: Some(session_id.clone()),
-                    transcript_path: parent.transcript_path.clone(),
-                    status: AgentStatus::Done,
-                    model: parent.model.clone(),
-                    effort: parent.effort.clone(),
-                    parent_id: None,
-                    fork_point: None,
-                    root_session_id: Some(session_id),
-                    thread_id: None,
-                    branch_id: None,
-                    paused: false,
-                    created_at: parent.created_at,
-                }
-            }
-        };
-        // Native checkpoints come from the parent run, but execution ownership
-        // and cwd always come from the tree's current durable workspace.
-        source.group_id = workspace.id;
-        source.worktree_dir = workspace.dir;
-        // The follow-up runs at the child's (inherited) effort, applied by the
-        // adapter's fork path the same way `model` is re-applied.
-        source.effort = child.effort.clone();
-        match fork_agent_source(&state, &source, false, true, Some(&question)) {
-            Ok(pane) => {
-                let association = pane
-                    .agent_id
-                    .as_deref()
-                    .and_then(|agent_id| state.agent(agent_id).ok().flatten())
-                    .ok_or_else(|| "forked research agent was not recorded".to_string())
-                    .and_then(|agent| state.bind_research_node_run(&child.id, &agent, &pane.id));
-                match association {
-                    Ok(node) if node.status.is_terminal() => {
-                        // Cancelled while the fork was in flight: keep the
-                        // settled outcome, reclaim the fresh pane, and hand
-                        // back the node as it stands after the teardown.
-                        reclaim_settled_research_launch(&state, &node, &pane.id);
-                        state.research_node(&child.id)
-                    }
-                    Ok(node) => {
-                        // Forks usually land in an already-trusted directory,
-                        // but login/update gates are just as hook-invisible as
-                        // the trust dialog — arm the same startup watchdog as
-                        // fresh runs.
-                        if let Some(agent_id) = node.agent_id.clone() {
-                            state.schedule_research_startup_watchdog(agent_id);
-                        }
-                        Ok(node)
-                    }
-                    Err(err) => Err(fail_research_launch(&state, &child.id, &pane.id, err)),
-                }
-            }
-            Err(err) => {
-                let _ = state.fail_research_node(&child.id, err.clone());
-                Err(err)
-            }
-        }
+        launch_research_child_run(&state, &parent, &workspace, &child)
     })
     .await
     .map_err(|err| format!("fork_research_node task failed: {err}"))?
+}
+
+/// Launches the run for an admitted (Queued) research child from its parent's
+/// kind: document and conversation parents launch fresh runs that carry their
+/// content as prompt context; run parents fork the parent's native session.
+/// Shared by the fork command and retry, which relaunches a reset child
+/// through the same dispatch. Every failure path settles the child as Failed
+/// (reclaiming any spawned pane) before returning the error, exactly as the
+/// fork command always did.
+fn launch_research_child_run(
+    state: &AppState,
+    parent: &ResearchNode,
+    workspace: &GroupInfo,
+    child: &ResearchNode,
+) -> Result<ResearchNode, String> {
+    // A highlight-targeted follow-up sends the quoted passage with the
+    // question. Only the sent prompt carries the quote — the child's
+    // displayed prompt stays the bare question, which boundary matching
+    // still finds as a normalized substring of the sent prompt.
+    let question = match &child.query_anchor {
+        Some(anchor) => research::query_followup_prompt(&anchor.exact, &child.prompt),
+        None => child.prompt.clone(),
+    };
+    // Exhaustive on purpose: each kind must pick its launch path
+    // explicitly, so a new kind (or lifting a refusal in
+    // create_research_child) forces a decision here instead of falling
+    // into the session-fork branch without a checkpoint.
+    match parent.kind {
+        research::ResearchNodeKind::Document => {
+            // A document has no session to fork. Its follow-up launches a
+            // fresh run whose prompt carries the document as context; the
+            // child's displayed prompt stays the bare question (the
+            // response boundary still matches it as a substring of the
+            // sent prompt).
+            let launch_prompt = state.research_document_followup_prompt(&parent.id, &question);
+            let launch_prompt = match launch_prompt {
+                Ok(launch_prompt) => launch_prompt,
+                Err(err) => {
+                    let _ = state.fail_research_node(&child.id, err.clone());
+                    return Err(err);
+                }
+            };
+            return launch_fresh_research_run(
+                state,
+                &child.id,
+                workspace,
+                &child.adapter,
+                child.model.clone(),
+                child.effort.clone(),
+                launch_prompt,
+            );
+        }
+        research::ResearchNodeKind::Conversation => {
+            // An exported conversation is severed from its source session
+            // — there is nothing to fork. Its follow-up launches a fresh
+            // run whose prompt carries the serialized conversation as
+            // context; the child's displayed prompt stays the bare
+            // question (the response boundary still matches it as a
+            // substring of the sent prompt).
+            //
+            // The bare prompt and the anchor go in unwrapped: an anchored
+            // quote is conversation content, so the conversation prompt
+            // builder wraps it itself with the tag neutralization the
+            // serialized turns get, rather than taking the verbatim
+            // `question` the other kinds share.
+            let launch_prompt = state.research_conversation_followup_prompt(
+                &parent.id,
+                &child.prompt,
+                child.query_anchor.as_ref(),
+            );
+            let launch_prompt = match launch_prompt {
+                Ok(launch_prompt) => launch_prompt,
+                Err(err) => {
+                    let _ = state.fail_research_node(&child.id, err.clone());
+                    return Err(err);
+                }
+            };
+            return launch_fresh_research_run(
+                state,
+                &child.id,
+                workspace,
+                &child.adapter,
+                child.model.clone(),
+                child.effort.clone(),
+                launch_prompt,
+            );
+        }
+        research::ResearchNodeKind::Run => {}
+    }
+    // Run follow-ups fork the parent session, bypassing
+    // launch_fresh_research_run, so the custom launch instruction is
+    // applied to the sent question here. The child's displayed prompt
+    // stays the bare question — still a normalized substring of the sent
+    // prompt, so response-boundary matching keeps working.
+    let question = match persistence::load_preferences(&state.config().workspace_root) {
+        Ok(preferences) => research::prompt_with_research_launch_instruction(
+            question,
+            preferences.research_launch_instruction.as_deref(),
+        ),
+        Err(err) => {
+            let _ = state.fail_research_node(&child.id, err.clone());
+            return Err(err);
+        }
+    };
+    let live_source = parent
+        .agent_id
+        .as_deref()
+        .and_then(|agent_id| state.agent(agent_id).ok().flatten());
+    let mut source = match live_source {
+        Some(source) => source,
+        None => {
+            let session_id = match parent.native_session_id.clone() {
+                Some(session_id) => session_id,
+                None => {
+                    let err =
+                        "the parent research session has no native session id to fork".to_string();
+                    let _ = state.fail_research_node(&child.id, err.clone());
+                    return Err(err);
+                }
+            };
+            AgentInfo {
+                id: parent
+                    .agent_id
+                    .clone()
+                    .unwrap_or_else(|| format!("research-source-{}", parent.id)),
+                group_id: parent.group_id.clone(),
+                adapter: parent.adapter.clone(),
+                worktree_dir: parent.worktree_dir.clone(),
+                branch: None,
+                pane_id: None,
+                orphaned_queue_pane_id: None,
+                session_id: Some(session_id.clone()),
+                transcript_path: parent.transcript_path.clone(),
+                status: AgentStatus::Done,
+                model: parent.model.clone(),
+                effort: parent.effort.clone(),
+                parent_id: None,
+                fork_point: None,
+                root_session_id: Some(session_id),
+                thread_id: None,
+                branch_id: None,
+                paused: false,
+                created_at: parent.created_at,
+            }
+        }
+    };
+    // Native checkpoints come from the parent run, but execution ownership
+    // and cwd always come from the tree's current durable workspace.
+    source.group_id = workspace.id.clone();
+    source.worktree_dir = workspace.dir.clone();
+    // The follow-up runs at the child's (inherited) effort, applied by the
+    // adapter's fork path the same way `model` is re-applied.
+    source.effort = child.effort.clone();
+    match fork_agent_source(state, &source, false, true, Some(&question)) {
+        Ok(pane) => {
+            let association = pane
+                .agent_id
+                .as_deref()
+                .and_then(|agent_id| state.agent(agent_id).ok().flatten())
+                .ok_or_else(|| "forked research agent was not recorded".to_string())
+                .and_then(|agent| state.bind_research_node_run(&child.id, &agent, &pane.id));
+            match association {
+                Ok(node) if node.status.is_terminal() => {
+                    // Cancelled while the fork was in flight: keep the
+                    // settled outcome, reclaim the fresh pane, and hand
+                    // back the node as it stands after the teardown.
+                    reclaim_settled_research_launch(state, &node, &pane.id);
+                    state.research_node(&child.id)
+                }
+                Ok(node) => {
+                    // Forks usually land in an already-trusted directory,
+                    // but login/update gates are just as hook-invisible as
+                    // the trust dialog — arm the same startup watchdog as
+                    // fresh runs.
+                    if let Some(agent_id) = node.agent_id.clone() {
+                        state.schedule_research_startup_watchdog(agent_id);
+                    }
+                    Ok(node)
+                }
+                Err(err) => Err(fail_research_launch(state, &child.id, &pane.id, err)),
+            }
+        }
+        Err(err) => {
+            let _ = state.fail_research_node(&child.id, err.clone());
+            Err(err)
+        }
+    }
+}
+
+/// Retries a Failed (or Cancelled) research run in place: the node keeps its
+/// id and every launch input, is reset back to `Queued`, and relaunches
+/// through the same machinery that launched it originally — a fresh spawn for
+/// roots, the parent-kind dispatch for children. On a launch failure the node
+/// settles as Failed again with the new error; unlike `create_research_tree`
+/// there is no freshly created tree to roll back.
+#[tauri::command]
+async fn retry_research_node(
+    state: tauri::State<'_, AppState>,
+    node_id: String,
+) -> Result<ResearchTreeDetail, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Same admission guard as create/fork: the node must flip back to
+        // Queued atomically with the workspace checks, or a concurrent folder
+        // removal could invalidate its workspace before the relaunch. The
+        // reset itself refuses anything that is not a settled Failed/Cancelled
+        // run (or that still holds a live pane), so a double-click cannot
+        // relaunch twice.
+        let node = {
+            let _guard = workspace::lock_research_workspace_mutations()?;
+            let node = state.research_node(&node_id)?;
+            validate_launch_workspace(&state, Some(&node.group_id), LaunchOrigin::Research)?;
+            state.reset_research_node_for_retry(&node_id)?
+        };
+        // Failures past this point must settle the re-queued node: leaving it
+        // Queued would pin the tree as an active run nothing ever finishes.
+        let workspace = match state.research_workspace_for_node(&node_id) {
+            Ok(workspace) => workspace,
+            Err(err) => {
+                let _ = state.fail_research_node(&node_id, err.clone());
+                return Err(err);
+            }
+        };
+        let launch = match node.parent_node_id.as_deref() {
+            None => launch_fresh_research_run(
+                &state,
+                &node.id,
+                &workspace,
+                &node.adapter,
+                node.model.clone(),
+                node.effort.clone(),
+                node.prompt.clone(),
+            ),
+            Some(parent_id) => {
+                let parent = match state.research_node(parent_id) {
+                    Ok(parent) => parent,
+                    Err(err) => {
+                        let _ = state.fail_research_node(&node.id, err.clone());
+                        return Err(err);
+                    }
+                };
+                // The original fork required a completed parent; a parent that
+                // has since been re-run (or whose checkpoint regressed) cannot
+                // anchor the relaunch.
+                if parent.status != research::ResearchNodeStatus::Complete {
+                    let err = "research follow-ups require a completed parent response".to_string();
+                    let _ = state.fail_research_node(&node.id, err.clone());
+                    return Err(err);
+                }
+                launch_research_child_run(&state, &parent, &workspace, &node)
+            }
+        };
+        launch?;
+        state.research_tree(&node.tree_id)
+    })
+    .await
+    .map_err(|err| format!("retry_research_node task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -2724,6 +2810,7 @@ fn main() {
             save_pasted_image,
             get_research_node_content,
             fork_research_node,
+            retry_research_node,
             cancel_research_node,
             rename_research_tree,
             rename_research_node,

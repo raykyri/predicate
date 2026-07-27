@@ -1199,6 +1199,26 @@
   line-height: 1.5;
 }
 
+/* A settled failure with its in-place Retry beside it, mirroring the stale
+ * banner's row layout. */
+.research-response-failure {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+.research-response-failure .research-response-error {
+  margin: 0;
+}
+
+.research-response-retry {
+  flex-shrink: 0;
+  align-self: flex-start;
+  padding: 2px 10px;
+  font-size: var(--fs-sm);
+}
+
 .research-response-stale {
   display: flex;
   align-items: baseline;
