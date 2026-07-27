@@ -35,7 +35,14 @@ static PREFERENCES_CACHE: LazyLock<Mutex<HashMap<PathBuf, AppPreferences>>> =
 
 /// Bumped whenever the on-disk shape changes incompatibly. A file written by a
 /// newer or unknown version is treated as empty rather than misinterpreted.
-pub const STATE_VERSION: u32 = 5;
+pub const STATE_VERSION: u32 = 6;
+/// Written when the state contains conversation nodes but none imported from
+/// external archives, so it stays loadable by pre-import builds (which accept
+/// versions 2–5). Version 6 marks imported conversations being present: a
+/// pre-import build would fail deserializing the unknown `conversationImport`
+/// origin variant, and the version gate turns that into its newer-version
+/// guidance instead. Mirrors the detached-archive tiering.
+pub const STATE_VERSION_PRE_IMPORTS: u32 = 5;
 /// Written when the state contains no conversation nodes, so sessions that
 /// never used terminal export stay loadable by pre-conversations builds
 /// (which accept versions 2–4). Version 5 marks conversation nodes being

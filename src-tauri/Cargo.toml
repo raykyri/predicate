@@ -61,6 +61,10 @@ tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 window-vibrancy = "0.7.1"
+# Reading claude.ai/ChatGPT export archives for conversation import. The crate
+# is already in the tree via tauri-plugin-updater; deflate is the one addition
+# (export zips are deflate-compressed) and its flate2 backend is present too.
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }

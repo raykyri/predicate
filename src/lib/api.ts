@@ -463,6 +463,155 @@ export function readMarkdownDocumentFile(path: string) {
   return invoke<string>("read_markdown_document_file", { path });
 }
 
+/** Reads a transcript file for conversation import — a Claude Code .jsonl
+ * session or an already-extracted conversations.json. The backend enforces
+ * the home-directory confinement, extension allowlist, UTF-8 encoding,
+ * regular-file requirement, and byte cap. */
+export function readConversationImportFile(path: string) {
+  return invoke<string>("read_conversation_import_file", { path });
+}
+
+/** Shows the native file chooser for a conversation import. `kind` selects
+ * the filter set: "archive" (claude.ai/ChatGPT export zips or an extracted
+ * conversations.json) or "transcript" (Claude Code .jsonl sessions).
+ * Resolves to null when the user cancels. */
+export function pickImportFile(kind: "archive" | "transcript") {
+  return invoke<string | null>("pick_import_file", { kind });
+}
+
+/** One selectable native-harness session (Claude Code or Codex) in the
+ * import browser. */
+export interface HarnessSessionSummary {
+  /** Grouping fallback when no cwd is readable: the directory name under
+   * ~/.claude/projects (Claude Code) or the rollout's parent directory
+   * (Codex). */
+  projectSlug: string;
+  /** The project's real working directory, when readable from the session. */
+  projectDir?: string;
+  sessionId?: string;
+  path: string;
+  modifiedMs: number;
+  preview?: string;
+}
+
+/** Scans ~/.claude/projects for importable Claude Code sessions, newest
+ * first, capped per project. Subagent and symlinked transcripts are
+ * excluded. */
+export function listClaudeCodeSessions() {
+  return invoke<HarnessSessionSummary[]>("list_claude_code_sessions");
+}
+
+/** Scans the Codex sessions tree ($CODEX_HOME, else ~/.codex) for importable
+ * rollouts, newest first with an overall cap. Symlinked transcripts are
+ * excluded. */
+export function listCodexSessions() {
+  return invoke<HarnessSessionSummary[]>("list_codex_sessions");
+}
+
+/** Scans the OpenCode store ($XDG_DATA_HOME else ~/.local/share, then
+ * opencode/storage) for importable sessions, newest first with an overall
+ * cap. Rows come from the per-session metadata files: the stored title is
+ * the preview and the stored directory is the project. Symlinked metadata
+ * files are excluded. */
+export function listOpencodeSessions() {
+  return invoke<HarnessSessionSummary[]>("list_opencode_sessions");
+}
+
+/** Assembles one OpenCode session for import from its metadata file path:
+ * the metadata, its messages, and each message's parts combined as one
+ * `{"session", "messages": [{…, "parts"}]}` JSON string with messages in
+ * conversation order. The backend confines every read to the OpenCode
+ * storage root and byte-caps the assembly. */
+export function readOpencodeSession(path: string) {
+  return invoke<string>("read_opencode_session", { sessionPath: path });
+}
+
+/** Which product exported a staged archive. */
+export type ImportArchiveFormat = "claudeAi" | "chatgpt";
+
+/** One conversation's listing row for the import picker. */
+export interface StagedConversationMeta {
+  index: number;
+  id?: string;
+  title: string;
+  createdAt?: number;
+  updatedAt?: number;
+  /** Countable user/assistant messages — 0 disables the row in the picker. */
+  messageCount: number;
+}
+
+export interface ConversationArchiveSummary {
+  token: string;
+  format: ImportArchiveFormat;
+  conversations: StagedConversationMeta[];
+}
+
+/** Stages a claude.ai/ChatGPT export (a .zip, or a bare conversations.json)
+ * backend-side and returns the picker listing. The conversation payloads stay
+ * in the backend staging slot until fetched with readStagedConversations;
+ * staging a new archive replaces the previous slot. */
+export function stageConversationArchive(path: string) {
+  return invoke<ConversationArchiveSummary>("stage_conversation_archive", { path });
+}
+
+/** Fetches the staged JSON payloads for the selected listing rows. Call in
+ * chunks to keep IPC transfers and parse work incremental. Fails once the
+ * token is stale (a newer archive was staged, or the slot was discarded). */
+export function readStagedConversations(token: string, indices: number[]) {
+  return invoke<string[]>("read_staged_conversations", { token, indices });
+}
+
+/** Releases the staging slot when the import dialog closes. Safe to call with
+ * a stale token — only the matching stage is discarded. */
+export function discardConversationArchive(token: string) {
+  return invoke<void>("discard_conversation_archive", { token });
+}
+
+/** Which external product a conversation import came from. */
+export type ImportedConversationSource =
+  | "claudeAi"
+  | "chatgpt"
+  | "claudeCode"
+  | "codex"
+  | "hermes"
+  | "lettaCode"
+  | "openclaw"
+  | "opencode"
+  | "openhands"
+  | "pi";
+
+/** One parsed conversation ready for import. `turns` may carry ToolUse
+ * markers; the backend re-sanitizes through the terminal-export pipeline, so
+ * payloads should already be stripped client-side purely to keep IPC small. */
+export interface ImportedConversationPayload {
+  title?: string | null;
+  /** Epoch ms of the source conversation's creation. */
+  createdAt?: number | null;
+  turns: Turn[];
+}
+
+export interface SkippedImport {
+  title: string;
+  error: string;
+}
+
+export interface ImportResearchConversationsResult {
+  trees: ResearchTreeDetail[];
+  skipped: SkippedImport[];
+}
+
+/** Imports parsed external conversations as read-only conversation trees in
+ * a research workspace. Conversations that fail sanitization are reported in
+ * `skipped` rather than failing the batch. Batches are capped at 200 per
+ * call — chunk larger selections. */
+export function importResearchConversations(request: {
+  groupId: string;
+  source: ImportedConversationSource;
+  conversations: ImportedConversationPayload[];
+}) {
+  return invoke<ImportResearchConversationsResult>("import_research_conversations", { request });
+}
+
 /** Reads a pasted image referenced by a transcript "[Image: source: <path>]"
  * marker and returns it as a data: URL for direct use in an <img> tag. The
  * backend confines reads to the home or platform temporary directory and

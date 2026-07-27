@@ -4,6 +4,7 @@ mod browser_engine;
 mod config;
 mod connection_limit;
 mod control_socket;
+mod conversation_import;
 mod diagnostics;
 mod encyclopedia;
 mod events;
@@ -1048,6 +1049,155 @@ async fn read_markdown_document_file(path: String) -> Result<String, String> {
     })
     .await
     .map_err(|err| format!("read_markdown_document_file task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn import_research_conversations(
+    state: tauri::State<'_, AppState>,
+    request: research::ImportResearchConversationsRequest,
+) -> Result<research::ImportResearchConversationsResult, String> {
+    if request.conversations.is_empty() {
+        return Err("select at least one conversation to import".to_string());
+    }
+    if request.conversations.len() > research::MAX_IMPORT_CONVERSATIONS_PER_CALL {
+        return Err(format!(
+            "imports are limited to {} conversations per call",
+            research::MAX_IMPORT_CONVERSATIONS_PER_CALL
+        ));
+    }
+    let state = state.inner().clone();
+    // Blocking: sanitization and one fsynced snapshot per conversation.
+    tauri::async_runtime::spawn_blocking(move || {
+        // Prepare runs unguarded, like export_pane_to_research: only
+        // admission needs atomicity with workspace mutations, and a batch
+        // whose commit never runs strands only snapshots that are reclaimed
+        // here (and by prune at startup as the crash backstop).
+        let (prepared, mut skipped) = state.prepare_conversation_imports(&request);
+        let admission = workspace::lock_research_workspace_mutations().and_then(|guard| {
+            validate_launch_workspace(&state, Some(&request.group_id), LaunchOrigin::Research)?;
+            Ok(guard)
+        });
+        let _guard = match admission {
+            Ok(guard) => guard,
+            Err(err) => {
+                state.discard_conversation_imports(&prepared);
+                return Err(err);
+            }
+        };
+        let trees = state.commit_conversation_imports(prepared, &request.group_id, &mut skipped);
+        Ok(research::ImportResearchConversationsResult { trees, skipped })
+    })
+    .await
+    .map_err(|err| format!("import_research_conversations task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn list_claude_code_sessions()
+-> Result<Vec<conversation_import::HarnessSessionSummary>, String> {
+    tauri::async_runtime::spawn_blocking(conversation_import::list_claude_code_sessions)
+        .await
+        .map_err(|err| format!("list_claude_code_sessions task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn list_codex_sessions() -> Result<Vec<conversation_import::HarnessSessionSummary>, String> {
+    tauri::async_runtime::spawn_blocking(conversation_import::list_codex_sessions)
+        .await
+        .map_err(|err| format!("list_codex_sessions task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn list_opencode_sessions() -> Result<Vec<conversation_import::HarnessSessionSummary>, String>
+{
+    tauri::async_runtime::spawn_blocking(conversation_import::list_opencode_sessions)
+        .await
+        .map_err(|err| format!("list_opencode_sessions task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn read_opencode_session(session_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        conversation_import::read_opencode_session(std::path::Path::new(&session_path))
+    })
+    .await
+    .map_err(|err| format!("read_opencode_session task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn stage_conversation_archive(
+    path: String,
+) -> Result<conversation_import::ConversationArchiveSummary, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        conversation_import::stage_conversation_archive(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|err| format!("stage_conversation_archive task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn read_staged_conversations(
+    token: String,
+    indices: Vec<u32>,
+) -> Result<Vec<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        conversation_import::read_staged_conversations(&token, &indices)
+    })
+    .await
+    .map_err(|err| format!("read_staged_conversations task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn discard_conversation_archive(token: String) -> Result<(), String> {
+    conversation_import::discard_conversation_archive(&token);
+    Ok(())
+}
+
+#[tauri::command]
+async fn read_conversation_import_file(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        conversation_import::read_conversation_import_file(std::path::Path::new(&path))
+    })
+    .await
+    .map_err(|err| format!("read_conversation_import_file task failed: {err}"))?
+}
+
+/// Shows the native file chooser for a conversation import and returns the
+/// selected path, or `None` when the user cancels. `kind` picks the filter
+/// set: "archive" for claude.ai/ChatGPT export zips (or an already-extracted
+/// conversations.json), "transcript" for Claude Code `.jsonl` sessions.
+/// Blocks the calling thread, like `pick_folder_dialog`.
+#[tauri::command(async)]
+fn pick_import_file(app: tauri::AppHandle, kind: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let (title, filter_name, extensions): (&str, &str, &[&str]) = match kind.as_str() {
+        "archive" => (
+            "Choose a conversation export",
+            "Conversation exports",
+            &["zip", "json"],
+        ),
+        "transcript" => (
+            "Choose a session transcript",
+            "Session transcripts",
+            &["jsonl", "json"],
+        ),
+        other => return Err(format!("unknown import picker kind: {other}")),
+    };
+    let mut dialog = app
+        .dialog()
+        .file()
+        .set_title(title)
+        .add_filter(filter_name, extensions);
+    if let Some(window) = app.get_webview_window("main") {
+        dialog = dialog.set_parent(&window);
+    }
+    match dialog.blocking_pick_file() {
+        Some(path) => path
+            .into_path()
+            .map(|p| Some(p.to_string_lossy().into_owned()))
+            .map_err(|err| format!("file chooser returned an unusable path: {err}")),
+        None => Ok(None),
+    }
 }
 
 /// The encyclopedia surface's one-stop snapshot: settings, pages on disk,
@@ -2999,6 +3149,16 @@ fn main() {
             export_pane_to_research,
             update_research_document,
             read_markdown_document_file,
+            read_conversation_import_file,
+            pick_import_file,
+            stage_conversation_archive,
+            read_staged_conversations,
+            discard_conversation_archive,
+            list_claude_code_sessions,
+            list_codex_sessions,
+            list_opencode_sessions,
+            read_opencode_session,
+            import_research_conversations,
             encyclopedia_status,
             encyclopedia_set_settings,
             encyclopedia_update,

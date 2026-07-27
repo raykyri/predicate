@@ -36,6 +36,8 @@
     "test:markdown-math": "node --import tsx --test tests/markdownMath.test.ts",
     "test:research-prompt-markdown": "node --import tsx --test tests/researchPromptMarkdown.test.ts",
     "test:encyclopedia": "node --import tsx --test tests/encyclopedia.test.ts",
+    "test:import-parsers": "node --import tsx --test tests/importParsers.test.ts",
+    "test:trajectory-to-turns": "node --import tsx --test tests/trajectoryToTurns.test.ts",
     "test:tagged-instructions": "node scripts/test-tagged-instructions.mjs",
     "test:research-instruction-setting": "node scripts/test-research-instruction-setting.mjs",
     "test:thread-graph-overlay": "node scripts/test-thread-graph-overlay.mjs",
@@ -47,6 +49,7 @@
     "tauri": "tauri"
   },
   "dependencies": {
+    "@letta-ai/trajectory": "^0.2.1",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.2",
     "@viz-js/viz": "^3.28.0",

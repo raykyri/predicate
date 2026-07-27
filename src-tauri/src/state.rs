@@ -1108,6 +1108,14 @@ pub enum PaneStatus {
     Failed,
 }
 
+/// One conversation staged by `prepare_conversation_imports`: the shared
+/// prepared-snapshot record plus the source conversation's own title (used as
+/// the tree title, with the derived default as fallback).
+pub struct PreparedConversationImport {
+    prepared: research::PreparedPaneExport,
+    title: Option<String>,
+}
+
 impl AppState {
     pub fn new(config: QmuxConfig) -> Self {
         let diagnostics = Diagnostics::new(&config.workspace_root);
@@ -1987,15 +1995,21 @@ impl AppState {
                 .map_err(|_| "model lock poisoned".to_string())?;
             PersistedState {
                 // The lowest version whose readers understand every node kind
-                // present, so sessions without conversation nodes stay
-                // loadable by pre-conversations builds — same tiering as
-                // research::detached_archive_version.
+                // and origin present, so sessions without imported or exported
+                // conversations stay loadable by older builds — same tiering
+                // as research::detached_archive_version.
                 version: if model
+                    .research_nodes
+                    .values()
+                    .any(|node| node.origin == Some(ResearchNodeOrigin::ConversationImport))
+                {
+                    STATE_VERSION
+                } else if model
                     .research_nodes
                     .values()
                     .any(|node| node.kind == ResearchNodeKind::Conversation)
                 {
-                    STATE_VERSION
+                    persistence::STATE_VERSION_PRE_IMPORTS
                 } else {
                     persistence::STATE_VERSION_PRE_CONVERSATIONS
                 },
@@ -2502,6 +2516,10 @@ impl AppState {
                         .get(&tree.root_node_id)
                         .map(|root| root.kind)
                         .unwrap_or_default(),
+                    origin: model
+                        .research_nodes
+                        .get(&tree.root_node_id)
+                        .and_then(|root| root.origin),
                     workspace_id: tree.workspace_id.clone(),
                     running_count,
                     failed_count,
@@ -3389,8 +3407,41 @@ impl AppState {
         group_id: String,
         title: Option<String>,
     ) -> Result<ResearchTreeDetail, String> {
+        let (tree, node) = match self.admit_conversation_tree(
+            prepared,
+            group_id,
+            title,
+            ResearchNodeOrigin::TerminalExport,
+        ) {
+            Ok(admitted) => admitted,
+            Err(err) => {
+                self.discard_pane_export(prepared);
+                return Err(err);
+            }
+        };
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "research.tree.created",
+            None,
+            None,
+            json!({ "tree": tree, "node": node }),
+        ));
+        self.research_tree(&tree.id)
+    }
+
+    /// Builds and admits one Complete conversation tree from a prepared
+    /// snapshot — the record-building shared by terminal exports and
+    /// conversation imports, which differ only in origin. Does not persist or
+    /// emit: single-tree callers do both immediately, the batch importer once
+    /// per batch. Caller holds the research workspace-mutation guard.
+    fn admit_conversation_tree(
+        &self,
+        prepared: &research::PreparedPaneExport,
+        group_id: String,
+        title: Option<String>,
+        origin: ResearchNodeOrigin,
+    ) -> Result<(ResearchTree, ResearchNode), String> {
         if group_id.trim().is_empty() {
-            self.discard_pane_export(prepared);
             return Err("research workspace cannot be empty".to_string());
         }
         let now = now_millis();
@@ -3428,7 +3479,7 @@ impl AppState {
             pane_id: None,
             thread_id: None,
             kind: ResearchNodeKind::Conversation,
-            origin: Some(ResearchNodeOrigin::TerminalExport),
+            origin: Some(origin),
             status: ResearchNodeStatus::Complete,
             error: None,
             response_snapshot_at: Some(now),
@@ -3437,18 +3488,8 @@ impl AppState {
             completed_at: Some(now),
             highlights: Vec::new(),
         };
-        if let Err(err) = self.admit_research_root(&tree, &mut node) {
-            self.discard_pane_export(prepared);
-            return Err(err);
-        }
-        self.persist();
-        self.emit(QmuxEvent::new(
-            "research.tree.created",
-            None,
-            None,
-            json!({ "tree": tree, "node": node }),
-        ));
-        self.research_tree(&tree.id)
+        self.admit_research_root(&tree, &mut node)?;
+        Ok((tree, node))
     }
 
     /// Reclaims a prepared export whose records never committed (validation
@@ -3458,6 +3499,130 @@ impl AppState {
             &self.inner.config.workspace_root,
             &prepared.node_id,
         );
+    }
+
+    /// Stage one of a conversation import: sanitizes each parsed conversation
+    /// through the same `conversation_export_turns` pipeline as terminal
+    /// exports and lands its snapshot. Runs unguarded — a conversation that
+    /// fails to sanitize or snapshot becomes a `skipped` entry rather than
+    /// failing the batch, and a prepared batch whose commit never happens
+    /// strands only orphan snapshots for prune_response_snapshots.
+    pub fn prepare_conversation_imports(
+        &self,
+        request: &research::ImportResearchConversationsRequest,
+    ) -> (
+        Vec<PreparedConversationImport>,
+        Vec<research::SkippedImport>,
+    ) {
+        let now = now_millis();
+        let mut prepared = Vec::new();
+        let mut skipped = Vec::new();
+        for conversation in &request.conversations {
+            let display_title = conversation
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| "Untitled conversation".to_string());
+            let skip = |error: String| research::SkippedImport {
+                title: display_title.clone(),
+                error,
+            };
+            let tree_id = self.next_id("research");
+            let node_id = self.next_id("research-node");
+            let turns = match research::conversation_export_turns(&node_id, &conversation.turns) {
+                Ok(turns) => turns,
+                Err(error) => {
+                    skipped.push(skip(error));
+                    continue;
+                }
+            };
+            if let Err(error) = research::write_response_snapshot_verified(
+                &self.inner.config.workspace_root,
+                &node_id,
+                &turns,
+            ) {
+                skipped.push(skip(error));
+                continue;
+            }
+            let prompt = research::conversation_prompt(&turns);
+            let response_preview = research::conversation_preview(&turns);
+            prepared.push(PreparedConversationImport {
+                prepared: research::PreparedPaneExport {
+                    tree_id,
+                    node_id,
+                    prompt,
+                    response_preview,
+                    adapter: request.source.adapter().to_string(),
+                    model: None,
+                    effort: None,
+                    agent_created_at: conversation
+                        .created_at
+                        .filter(|&created_at| created_at > 0)
+                        .map(|created_at| created_at as u128)
+                        .unwrap_or(now),
+                },
+                title: conversation.title.clone(),
+            });
+        }
+        (prepared, skipped)
+    }
+
+    /// Stage two of a conversation import: admits every prepared conversation
+    /// as its own Complete tree, persisting once for the whole batch and
+    /// emitting one `research.tree.created` per admitted tree. A conversation
+    /// that fails admission is reclaimed into `skipped`; the rest proceed.
+    /// Caller holds the research workspace-mutation guard.
+    pub fn commit_conversation_imports(
+        &self,
+        prepared: Vec<PreparedConversationImport>,
+        group_id: &str,
+        skipped: &mut Vec<research::SkippedImport>,
+    ) -> Vec<ResearchTreeDetail> {
+        let mut admitted = Vec::new();
+        for conversation in prepared {
+            match self.admit_conversation_tree(
+                &conversation.prepared,
+                group_id.to_string(),
+                conversation.title.clone(),
+                ResearchNodeOrigin::ConversationImport,
+            ) {
+                Ok(pair) => admitted.push(pair),
+                Err(error) => {
+                    self.discard_pane_export(&conversation.prepared);
+                    skipped.push(research::SkippedImport {
+                        title: conversation
+                            .title
+                            .filter(|title| !title.trim().is_empty())
+                            .unwrap_or_else(|| "Untitled conversation".to_string()),
+                        error,
+                    });
+                }
+            }
+        }
+        if !admitted.is_empty() {
+            self.persist();
+        }
+        let mut trees = Vec::new();
+        for (tree, node) in admitted {
+            self.emit(QmuxEvent::new(
+                "research.tree.created",
+                None,
+                None,
+                json!({ "tree": tree, "node": node }),
+            ));
+            if let Ok(detail) = self.research_tree(&tree.id) {
+                trees.push(detail);
+            }
+        }
+        trees
+    }
+
+    /// Reclaims a whole prepared import batch whose commit stage never ran
+    /// (the workspace guard or validation failed).
+    pub fn discard_conversation_imports(&self, prepared: &[PreparedConversationImport]) {
+        for conversation in prepared {
+            self.discard_pane_export(&conversation.prepared);
+        }
     }
 
     /// Replaces a root document's durable Markdown in place. Existing child
@@ -11735,6 +11900,142 @@ mod tests {
             Some(ResearchNodeOrigin::TerminalExport)
         );
         assert_eq!(restored_node.status, ResearchNodeStatus::Complete);
+    }
+
+    fn imported_conversation_turns(agent: &str, question: &str, answer: &str) -> Vec<Turn> {
+        let user = sample_user_turn(agent, question);
+        let mut tool = sample_user_turn(agent, "");
+        tool.id = format!("{agent}-1");
+        tool.source_index = 1;
+        tool.role = "assistant".to_string();
+        tool.blocks = vec![crate::transcript::TurnBlock::ToolUse {
+            id: Some("tool-1".to_string()),
+            name: "WebSearch".to_string(),
+            input: serde_json::json!({}),
+        }];
+        let mut assistant = sample_user_turn(agent, answer);
+        assistant.id = format!("{agent}-2");
+        assistant.source_index = 2;
+        assistant.role = "assistant".to_string();
+        vec![user, tool, assistant]
+    }
+
+    #[test]
+    fn import_research_conversations_admits_batches_and_skips_bad_ones() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        assert!(state.restore_session().is_empty());
+        state.insert_group_after(sample_group(), None).unwrap();
+
+        let request = research::ImportResearchConversationsRequest {
+            group_id: "group-1".to_string(),
+            source: research::ImportedConversationSource::Chatgpt,
+            conversations: vec![
+                research::ImportedConversation {
+                    title: Some("Rust lifetimes".to_string()),
+                    created_at: Some(1_600_000_000_000),
+                    turns: imported_conversation_turns(
+                        "import-a",
+                        "How do lifetimes work?",
+                        "Like this.",
+                    ),
+                },
+                // No completed exchange: sanitization refuses it and the
+                // batch continues without it.
+                research::ImportedConversation {
+                    title: None,
+                    created_at: None,
+                    turns: Vec::new(),
+                },
+            ],
+        };
+        let (prepared, mut skipped) = state.prepare_conversation_imports(&request);
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].title, "Untitled conversation");
+
+        let trees = state.commit_conversation_imports(prepared, "group-1", &mut skipped);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(skipped.len(), 1);
+        let detail = &trees[0];
+        assert_eq!(detail.tree.title, "Rust lifetimes");
+        let node = &detail.nodes[0];
+        assert_eq!(node.kind, ResearchNodeKind::Conversation);
+        assert_eq!(node.origin, Some(ResearchNodeOrigin::ConversationImport));
+        assert_eq!(node.status, ResearchNodeStatus::Complete);
+        assert_eq!(node.adapter, "chatgpt");
+        assert_eq!(node.prompt, "How do lifetimes work?");
+        // The source conversation's creation time survives as started_at.
+        assert_eq!(node.started_at, Some(1_600_000_000_000));
+        // Severed like any conversation node: nothing points at a session.
+        assert!(node.agent_id.is_none());
+        assert!(node.native_session_id.is_none());
+        assert!(node.pane_id.is_none());
+
+        // The sanitizer ran server-side: the tool turn collapsed into an
+        // activity marker and every turn was reissued under the node.
+        let turns = research::read_response_snapshot(&state.config().workspace_root, &node.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(turns.len(), 3);
+        assert!(turns.iter().all(|turn| {
+            turn.agent_id == node.id && turn.session_id.is_none() && turn.native_id.is_none()
+        }));
+        assert!(matches!(
+            turns[1].blocks.as_slice(),
+            [crate::transcript::TurnBlock::Raw { .. }]
+        ));
+
+        // The sidebar summary carries the origin for the import icon.
+        let summary = &state.list_research_trees().unwrap()[0];
+        assert_eq!(summary.origin, Some(ResearchNodeOrigin::ConversationImport));
+
+        // The state file claims the import tier so pre-import builds refuse
+        // it instead of failing on the unknown origin variant.
+        state.finalize_persistence_for_exit();
+        let raw = std::fs::read(persistence::state_path(&workspace)).unwrap();
+        let version = serde_json::from_slice::<serde_json::Value>(&raw).unwrap()["version"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(version, 6);
+    }
+
+    #[test]
+    fn import_commit_failures_reclaim_snapshots_into_skipped() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        assert!(state.restore_session().is_empty());
+        state.insert_group_after(sample_group(), None).unwrap();
+
+        let request = research::ImportResearchConversationsRequest {
+            group_id: "group-1".to_string(),
+            source: research::ImportedConversationSource::ClaudeAi,
+            conversations: vec![research::ImportedConversation {
+                title: Some("Doomed".to_string()),
+                created_at: None,
+                turns: imported_conversation_turns("import-b", "Q", "A"),
+            }],
+        };
+        let (prepared, mut skipped) = state.prepare_conversation_imports(&request);
+        assert_eq!(prepared.len(), 1);
+        let node_id = prepared[0].prepared.node_id.clone();
+        assert!(
+            research::read_response_snapshot(&state.config().workspace_root, &node_id)
+                .unwrap()
+                .is_some()
+        );
+
+        // An admission failure (empty workspace id) reclaims the snapshot and
+        // reports the conversation as skipped instead of failing the batch.
+        let trees = state.commit_conversation_imports(prepared, "", &mut skipped);
+        assert!(trees.is_empty());
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].title, "Doomed");
+        assert!(
+            research::read_response_snapshot(&state.config().workspace_root, &node_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

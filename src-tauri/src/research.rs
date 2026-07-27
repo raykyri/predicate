@@ -18,7 +18,14 @@ pub const MAX_RESEARCH_DOCUMENT_WORDS: usize = 10_000;
 /// Backstop for word-sparse documents (one giant token counts as one word).
 /// Imports and the composer both advertise this exact limit.
 pub const MAX_RESEARCH_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
-pub const DETACHED_RESEARCH_ARCHIVE_VERSION: u32 = 6;
+pub const DETACHED_RESEARCH_ARCHIVE_VERSION: u32 = 7;
+/// Written for archives whose newest feature is inline follow-ups or
+/// conversation highlights, so they stay readable by pre-import builds
+/// (which accept versions 1–6). Builds that predate the `conversationImport`
+/// origin variant would fail the typed parse on an unknown enum value with a
+/// serde error instead of the version gate's "upgrade this installation"
+/// refusal — this tier keeps that clearer message.
+const DETACHED_RESEARCH_ARCHIVE_VERSION_INLINE: u32 = 6;
 /// Written for archives whose newest feature is conversation nodes (no
 /// inline follow-ups), so they stay readable by pre-inline builds (which
 /// accept versions 1–5). Builds that predate the `inline` field would
@@ -275,14 +282,17 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Where a node's content came from when it was not produced by a research
-/// launch or the document composer. Exported terminal conversations are
-/// marked so viewers, archives, and publication can surface their provenance:
-/// that content was produced under a terminal agent's full permissions, not a
-/// research run.
+/// launch or the document composer. Exported terminal conversations and
+/// imported external conversations are marked so viewers, archives, and
+/// publication can surface their provenance: that content was not produced by
+/// a research run — terminal exports ran under a terminal agent's full
+/// permissions, and conversation imports were authored outside qmux entirely
+/// (claude.ai/ChatGPT export archives, Claude Code transcripts).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ResearchNodeOrigin {
     TerminalExport,
+    ConversationImport,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -450,6 +460,83 @@ pub struct PreparedPaneExport {
     pub agent_created_at: u128,
 }
 
+/// Batch size cap for one import_research_conversations call. The frontend
+/// chunks larger selections; the cap bounds a single call's snapshot writes
+/// and the records admitted under one workspace-mutation guard.
+pub const MAX_IMPORT_CONVERSATIONS_PER_CALL: usize = 200;
+
+/// Which external product a conversation import came from — decides the
+/// adapter branding on the imported node.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub enum ImportedConversationSource {
+    ClaudeAi,
+    Chatgpt,
+    ClaudeCode,
+    Codex,
+    Hermes,
+    LettaCode,
+    Openclaw,
+    Opencode,
+    Openhands,
+    Pi,
+}
+
+impl ImportedConversationSource {
+    pub fn adapter(self) -> &'static str {
+        match self {
+            Self::ClaudeAi | Self::ClaudeCode => "claude",
+            Self::Chatgpt => "chatgpt",
+            Self::Codex => "codex",
+            Self::Hermes => "hermes",
+            Self::LettaCode => "letta-code",
+            Self::Openclaw => "openclaw",
+            Self::Opencode => "opencode",
+            Self::Openhands => "openhands",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// One conversation the webview parsed from an external source, ready for
+/// sanitization. `turns` is raw-ish: the backend re-runs
+/// `conversation_export_turns` on it, so the severed/payload-free invariant
+/// never depends on client behavior.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedConversation {
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Epoch ms of the source conversation's creation, for started_at.
+    #[serde(default)]
+    pub created_at: Option<i64>,
+    pub turns: Vec<crate::transcript::Turn>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResearchConversationsRequest {
+    pub group_id: String,
+    pub source: ImportedConversationSource,
+    pub conversations: Vec<ImportedConversation>,
+}
+
+/// A conversation the batch left behind, with the reason — surfaced in the
+/// dialog's final summary instead of failing the whole import.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedImport {
+    pub title: String,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResearchConversationsResult {
+    pub trees: Vec<ResearchTreeDetail>,
+    pub skipped: Vec<SkippedImport>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateResearchDocumentRequest {
@@ -486,6 +573,10 @@ pub struct ResearchTreeSummary {
     /// The root node's kind — what this sidebar item fundamentally is —
     /// surfaced here so list consumers never need the node collection.
     pub kind: ResearchNodeKind,
+    /// The root node's origin, so the sidebar can distinguish imported
+    /// conversations from terminal exports without the node collection.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ResearchNodeOrigin>,
     pub workspace_id: String,
     pub running_count: usize,
     pub failed_count: usize,
@@ -768,19 +859,27 @@ fn validate_detached_archive(archive: &DetachedResearchArchive) -> Result<(), St
 
 /// The version to stamp on a new archive: the lowest version whose readers
 /// understand every feature present, so archives keep the widest
-/// compatibility their content allows. Two features need the newest readers
-/// regardless of node kinds: inline follow-ups, which older builds would drop
-/// silently rather than fail on, and highlights on a conversation node, which
-/// builds that predate them reject outright — stamping the conversations
-/// version there would hand such a build a validation error blaming the
-/// archive instead of the "upgrade this installation" error the version gate
-/// raises. Pre-conversations builds refuse anything above 4, and
-/// pre-documents builds anything above 3, the same way.
+/// compatibility their content allows. Imported conversations (the
+/// `conversationImport` origin) need the newest readers — older builds fail
+/// the typed parse on the unknown enum variant, and the version gate turns
+/// that into "upgrade this installation" instead. Two more features need
+/// version-6 readers regardless of node kinds: inline follow-ups, which older
+/// builds would drop silently rather than fail on, and highlights on a
+/// conversation node, which builds that predate them reject outright —
+/// stamping the conversations version there would hand such a build a
+/// validation error blaming the archive instead of the version gate's error.
+/// Pre-conversations builds refuse anything above 4, and pre-documents builds
+/// anything above 3, the same way.
 pub fn detached_archive_version(nodes: &[ResearchNode]) -> u32 {
-    if nodes.iter().any(|node| {
+    if nodes
+        .iter()
+        .any(|node| node.origin == Some(ResearchNodeOrigin::ConversationImport))
+    {
+        DETACHED_RESEARCH_ARCHIVE_VERSION
+    } else if nodes.iter().any(|node| {
         node.inline || (node.kind == ResearchNodeKind::Conversation && !node.highlights.is_empty())
     }) {
-        DETACHED_RESEARCH_ARCHIVE_VERSION
+        DETACHED_RESEARCH_ARCHIVE_VERSION_INLINE
     } else if nodes
         .iter()
         .any(|node| node.kind == ResearchNodeKind::Conversation)
@@ -1681,34 +1780,90 @@ pub fn document_word_count(markdown: &str) -> usize {
 /// (a mounted volume, a system temp dir), it must be copied under home first — a
 /// deliberate trade of that edge case for closing the oracle.
 pub fn read_markdown_document_file(path: &Path) -> Result<String, String> {
+    let bytes = read_confined_import_file(path, &MARKDOWN_DOCUMENT_IMPORT)?;
+    String::from_utf8(bytes).map_err(|_| "Markdown files must be valid UTF-8".to_string())
+}
+
+/// What one confined import read accepts: the extension allowlist (re-checked
+/// on the canonical target), the byte cap, and the plural label used in
+/// error messages ("Markdown files are limited to …").
+pub struct ConfinedImportSpec {
+    pub label: &'static str,
+    pub extensions: &'static [&'static str],
+    pub max_bytes: usize,
+}
+
+const MARKDOWN_DOCUMENT_IMPORT: ConfinedImportSpec = ConfinedImportSpec {
+    label: "Markdown files",
+    extensions: &["md", "markdown"],
+    max_bytes: MAX_RESEARCH_DOCUMENT_BYTES,
+};
+
+impl ConfinedImportSpec {
+    fn extension_error(&self) -> String {
+        let allowed = self
+            .extensions
+            .iter()
+            .map(|extension| format!(".{extension}"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        format!("only {allowed} files can be imported")
+    }
+
+    fn size_error(&self) -> String {
+        format!(
+            "{} are limited to {} MB",
+            self.label,
+            self.max_bytes / (1024 * 1024)
+        )
+    }
+}
+
+/// Home-confined entry point over [`read_confined_import_file_within`],
+/// resolving `$HOME` as the allowed root.
+pub fn read_confined_import_file(
+    path: &Path,
+    spec: &ConfinedImportSpec,
+) -> Result<Vec<u8>, String> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .filter(|home| !home.as_os_str().is_empty())
         .ok_or_else(|| "cannot determine your home directory to validate the import".to_string())?;
-    read_markdown_document_file_within(path, &home)
+    read_confined_import_file_within(path, &home, spec)
 }
 
-/// Confinement-root-injectable core of [`read_markdown_document_file`], kept
-/// separate so tests can point `allowed_root` at a scratch directory. The path is
-/// canonicalized (resolving symlinks and `..`) before any check, so the extension,
-/// location, type, and size tests all apply to the real target rather than to a
-/// symlink whose name merely ends in `.md`.
-fn read_markdown_document_file_within(path: &Path, allowed_root: &Path) -> Result<String, String> {
+/// Confinement-root-injectable core shared by every import file read, kept
+/// separate so tests can point `allowed_root` at a scratch directory. The path
+/// is canonicalized (resolving symlinks and `..`) before any check, so the
+/// extension, location, type, and size tests all apply to the real target
+/// rather than to a symlink whose name merely carries an allowed extension.
+/// Metadata and the limited stream are both checked so a file that grows
+/// between inspection and reading (or a special file) can't exceed the cap.
+pub(crate) fn read_confined_import_file_within(
+    path: &Path,
+    allowed_root: &Path,
+    spec: &ConfinedImportSpec,
+) -> Result<Vec<u8>, String> {
     let canonical = fs::canonicalize(path)
         .map_err(|err| format!("failed to resolve {}: {err}", path.display()))?;
     let root = fs::canonicalize(allowed_root).unwrap_or_else(|_| allowed_root.to_path_buf());
     if !canonical.starts_with(&root) {
-        return Err("only Markdown files under your home directory can be imported".to_string());
+        return Err(format!(
+            "only {} under your home directory can be imported",
+            spec.label
+        ));
     }
 
-    let is_markdown = canonical
+    let allowed_extension = canonical
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("md") || extension.eq_ignore_ascii_case("markdown")
+            spec.extensions
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         });
-    if !is_markdown {
-        return Err("only .md and .markdown files can be imported".to_string());
+    if !allowed_extension {
+        return Err(spec.extension_error());
     }
 
     let metadata = fs::metadata(&canonical)
@@ -1716,26 +1871,20 @@ fn read_markdown_document_file_within(path: &Path, allowed_root: &Path) -> Resul
     if !metadata.is_file() {
         return Err(format!("{} is not a regular file", canonical.display()));
     }
-    if metadata.len() > MAX_RESEARCH_DOCUMENT_BYTES as u64 {
-        return Err(format!(
-            "Markdown files are limited to {} MB",
-            MAX_RESEARCH_DOCUMENT_BYTES / (1024 * 1024)
-        ));
+    if metadata.len() > spec.max_bytes as u64 {
+        return Err(spec.size_error());
     }
 
     let file = fs::File::open(&canonical)
         .map_err(|err| format!("failed to open {}: {err}", canonical.display()))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    file.take(MAX_RESEARCH_DOCUMENT_BYTES as u64 + 1)
+    file.take(spec.max_bytes as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|err| format!("failed to read {}: {err}", canonical.display()))?;
-    if bytes.len() > MAX_RESEARCH_DOCUMENT_BYTES {
-        return Err(format!(
-            "Markdown files are limited to {} MB",
-            MAX_RESEARCH_DOCUMENT_BYTES / (1024 * 1024)
-        ));
+    if bytes.len() > spec.max_bytes {
+        return Err(spec.size_error());
     }
-    String::from_utf8(bytes).map_err(|_| "Markdown files must be valid UTF-8".to_string())
+    Ok(bytes)
 }
 
 pub fn validate_document_markdown(markdown: &str) -> Result<(), String> {
@@ -2903,6 +3052,11 @@ mod tests {
         assert_eq!(document_word_count("a\u{FEFF}b"), 1);
     }
 
+    fn read_markdown_within(path: &Path, root: &Path) -> Result<String, String> {
+        let bytes = read_confined_import_file_within(path, root, &MARKDOWN_DOCUMENT_IMPORT)?;
+        String::from_utf8(bytes).map_err(|_| "Markdown files must be valid UTF-8".to_string())
+    }
+
     #[test]
     fn markdown_file_import_is_bounded_and_requires_utf8_markdown() {
         let folder = temp_workspace();
@@ -2910,24 +3064,24 @@ mod tests {
         let markdown = folder.join("notes.MD");
         fs::write(&markdown, "# Imported\n\nBody").unwrap();
         assert_eq!(
-            read_markdown_document_file_within(&markdown, &folder).unwrap(),
+            read_markdown_within(&markdown, &folder).unwrap(),
             "# Imported\n\nBody"
         );
 
         let wrong_extension = folder.join("notes.txt");
         fs::write(&wrong_extension, "text").unwrap();
-        assert!(read_markdown_document_file_within(&wrong_extension, &folder).is_err());
+        assert!(read_markdown_within(&wrong_extension, &folder).is_err());
 
         let invalid_utf8 = folder.join("invalid.markdown");
         fs::write(&invalid_utf8, [0xff]).unwrap();
-        let error = read_markdown_document_file_within(&invalid_utf8, &folder).unwrap_err();
+        let error = read_markdown_within(&invalid_utf8, &folder).unwrap_err();
         assert!(error.contains("UTF-8"), "{error}");
 
         let oversized = folder.join("oversized.md");
         let file = fs::File::create(&oversized).unwrap();
         file.set_len(MAX_RESEARCH_DOCUMENT_BYTES as u64 + 1)
             .unwrap();
-        let error = read_markdown_document_file_within(&oversized, &folder).unwrap_err();
+        let error = read_markdown_within(&oversized, &folder).unwrap_err();
         assert!(error.contains("10 MB"), "{error}");
 
         fs::remove_dir_all(folder).unwrap();
@@ -2941,7 +3095,7 @@ mod tests {
         // A .md file outside the confinement root is refused even though it exists.
         let external = outside.join("external.md");
         fs::write(&external, "# outside").unwrap();
-        assert!(read_markdown_document_file_within(&external, &root).is_err());
+        assert!(read_markdown_within(&external, &root).is_err());
 
         // A .md symlink inside the root that points at a non-.md secret outside it is
         // rejected: canonicalization resolves the link, so both the location and the
@@ -2950,10 +3104,40 @@ mod tests {
         fs::write(&secret, "token=hunter2").unwrap();
         let link = root.join("innocent.md");
         std::os::unix::fs::symlink(&secret, &link).unwrap();
-        assert!(read_markdown_document_file_within(&link, &root).is_err());
+        assert!(read_markdown_within(&link, &root).is_err());
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn confined_import_reads_respect_each_specs_extensions_and_cap() {
+        let folder = temp_workspace();
+        const TINY_JSONL: ConfinedImportSpec = ConfinedImportSpec {
+            label: "transcript files",
+            extensions: &["jsonl", "json"],
+            max_bytes: 64,
+        };
+
+        let transcript = folder.join("session.jsonl");
+        fs::write(&transcript, b"{\"role\":\"user\"}\n").unwrap();
+        assert_eq!(
+            read_confined_import_file_within(&transcript, &folder, &TINY_JSONL).unwrap(),
+            b"{\"role\":\"user\"}\n"
+        );
+
+        // The Markdown spec refuses the same file: allowlists are per spec.
+        let error =
+            read_confined_import_file_within(&transcript, &folder, &MARKDOWN_DOCUMENT_IMPORT)
+                .unwrap_err();
+        assert!(error.contains(".md"), "{error}");
+
+        let oversized = folder.join("big.json");
+        fs::write(&oversized, vec![b'x'; 65]).unwrap();
+        let error = read_confined_import_file_within(&oversized, &folder, &TINY_JSONL).unwrap_err();
+        assert!(error.contains("transcript files are limited"), "{error}");
+
+        fs::remove_dir_all(folder).unwrap();
     }
 
     #[test]
@@ -3022,6 +3206,34 @@ mod tests {
     }
 
     #[test]
+    fn imported_conversations_claim_the_newest_archive_version() {
+        let folder = temp_workspace();
+        let mut archive = sample_detached_archive(&folder);
+        archive.nodes[0].kind = ResearchNodeKind::Conversation;
+        archive.nodes[0].origin = Some(ResearchNodeOrigin::ConversationImport);
+        archive.nodes[0].agent_id = None;
+        archive.nodes[0].native_session_id = None;
+        // Pre-import builds fail deserializing the unknown origin variant, so
+        // the archive must claim the newest version: the version gate then
+        // raises "upgrade this installation" instead of a serde error.
+        assert_eq!(
+            detached_archive_version(&archive.nodes),
+            DETACHED_RESEARCH_ARCHIVE_VERSION
+        );
+        validate_detached_archive(&archive).unwrap();
+
+        // The same content marked as a terminal export stays on the
+        // conversations tier — the import origin alone forces the bump.
+        let mut exported = archive.nodes.clone();
+        exported[0].origin = Some(ResearchNodeOrigin::TerminalExport);
+        assert_eq!(
+            detached_archive_version(&exported),
+            DETACHED_RESEARCH_ARCHIVE_VERSION_CONVERSATIONS
+        );
+        std::fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
     fn inline_follow_ups_bump_the_archive_version_and_normalize_on_repair() {
         let folder = temp_workspace();
         let mut archive = sample_detached_archive(&folder);
@@ -3032,11 +3244,11 @@ mod tests {
         inline_child.inline = true;
         inline_child.created_at = 5;
         archive.nodes.push(inline_child);
-        // An inline thread needs the newest readers even in a runs-only tree:
+        // An inline thread needs inline-tier readers even in a runs-only tree:
         // older builds would silently drop the flag, not fail.
         assert_eq!(
             detached_archive_version(&archive.nodes),
-            DETACHED_RESEARCH_ARCHIVE_VERSION
+            DETACHED_RESEARCH_ARCHIVE_VERSION_INLINE
         );
         validate_detached_archive(&archive).unwrap();
 
@@ -3716,12 +3928,12 @@ mod tests {
         }];
         validate_detached_archive(&archive).unwrap();
         // Builds that predate conversation highlights reject the archive, so it
-        // must claim the newest version rather than the conversations one —
+        // must claim the inline-tier version rather than the conversations one —
         // otherwise such a build accepts the version and then fails validation,
         // blaming the archive instead of its own age.
         assert_eq!(
             detached_archive_version(&archive.nodes),
-            DETACHED_RESEARCH_ARCHIVE_VERSION
+            DETACHED_RESEARCH_ARCHIVE_VERSION_INLINE
         );
         let mut unhighlighted = archive.nodes.clone();
         unhighlighted[0].highlights.clear();

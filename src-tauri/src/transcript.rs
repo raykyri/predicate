@@ -521,7 +521,7 @@ pub(crate) struct TranscriptCandidate {
 /// All `*.jsonl` transcript files in `dir`, each paired with its mtime and the
 /// session id read from its filename. Shared by auto-recovery and the manual
 /// session picker so both reason over the same candidate set.
-fn gather_transcript_candidates(dir: &Path) -> Result<Vec<TranscriptCandidate>, String> {
+pub(crate) fn gather_transcript_candidates(dir: &Path) -> Result<Vec<TranscriptCandidate>, String> {
     gather_transcript_candidates_in(dir, false)
 }
 

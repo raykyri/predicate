@@ -185,8 +185,10 @@ export type ResearchNodeStatus =
  * backend omits the field for runs, so absence means "run". */
 export type ResearchNodeKind = "run" | "document" | "conversation";
 
-/** Provenance for content that did not come from a research launch. */
-export type ResearchNodeOrigin = "terminalExport";
+/** Provenance for content that did not come from a research launch: a
+ * terminal conversation exported in place, or a conversation imported from an
+ * external source (claude.ai/ChatGPT export archive, Claude Code transcript). */
+export type ResearchNodeOrigin = "terminalExport" | "conversationImport";
 
 export interface ResearchTree {
   id: string;
@@ -270,6 +272,9 @@ export interface ResearchTreeSummary {
   rootNodeId: string;
   /** The root node's kind — what this sidebar item fundamentally is. */
   kind: ResearchNodeKind;
+  /** The root node's origin, distinguishing imported conversations from
+   * terminal exports in the sidebar. */
+  origin?: ResearchNodeOrigin;
   workspaceId: string;
   runningCount: number;
   failedCount: number;

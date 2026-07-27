@@ -125,9 +125,14 @@ import ResearchDocument from "./components/research/ResearchDocument";
 import EncyclopediaPage from "./components/research/EncyclopediaPage";
 import EncyclopediaSection from "./components/research/EncyclopediaSection";
 import ExportToResearchDialog from "./components/research/ExportToResearchDialog";
+import ImportConversationsDialog from "./components/research/ImportConversationsDialog";
 import NewDocumentPane from "./components/research/NewDocumentPane";
 import NewResearchDialog from "./components/research/NewResearchDialog";
-import { isMarkdownDocumentPath } from "./lib/researchDocuments";
+import {
+  isConversationArchivePath,
+  isConversationTranscriptPath,
+  isMarkdownDocumentPath,
+} from "./lib/researchDocuments";
 import {
   moveResearchTreeIdBy,
   replaceResearchTreeScopeOrder,
@@ -2534,6 +2539,19 @@ function MainApp() {
       setExportResearchPane(null);
     }
   }, [exportResearchPane, panes]);
+  // Non-null while the "Import conversations" dialog is open. A drag-dropped
+  // archive/transcript path pre-stages the dialog past its source step; an
+  // empty object opens it at the source picker.
+  const [importConversationsRequest, setImportConversationsRequest] = useState<{
+    archivePath?: string;
+    transcriptPath?: string;
+  } | null>(null);
+  // Stable open-at-source-step callback: the sidebar section is memoized, so
+  // an inline arrow prop would defeat its memo on every App render.
+  const openImportConversationsDialog = useCallback(
+    () => setImportConversationsRequest({}),
+    [],
+  );
   const [paneSplits, setPaneSplitsState] = useState<PaneSplitInfo[]>([]);
   paneSplitsRef.current = paneSplits;
   const [draggingPaneId, setDraggingPaneId] = useState<string | null>(null);
@@ -4815,6 +4833,7 @@ function MainApp() {
       closeDialog ||
       exitDialog ||
       exportResearchPane ||
+      importConversationsRequest ||
       exitPreflightRequest ||
       renamePaneId ||
       renameGroupId ||
@@ -7493,6 +7512,7 @@ function MainApp() {
       closeDialog ||
         exitDialog ||
         exportResearchPane ||
+        importConversationsRequest ||
         exitPreflightRequest ||
         renamePaneId ||
         renameGroupId ||
@@ -7536,6 +7556,13 @@ function MainApp() {
     // it); one holding a draft refuses, so the drop cannot erase edits.
     const composerRefusesImport = () =>
       newDocumentOpenRef.current && newDocumentDirtyRef.current;
+    // Markdown documents prefill the composer; conversation archives (.zip /
+    // conversations.json) and Claude Code transcripts (.jsonl) open the
+    // import dialog pre-staged instead.
+    const isImportDropPath = (path: string) =>
+      isMarkdownDocumentPath(path) ||
+      isConversationArchivePath(path) ||
+      isConversationTranscriptPath(path);
     const showDropTarget = (position: { x: number; y: number }) => {
       const active =
         markdownDragEligible &&
@@ -7587,7 +7614,7 @@ function MainApp() {
         }
         if (payload.type === "enter") {
           markdownDragEligible =
-            payload.paths.length === 1 && isMarkdownDocumentPath(payload.paths[0]);
+            payload.paths.length === 1 && isImportDropPath(payload.paths[0]);
           showDropTarget(payload.position);
           return;
         }
@@ -7598,7 +7625,7 @@ function MainApp() {
 
         const droppedPath = payload.paths.length === 1 ? payload.paths[0] : null;
         const shouldImport =
-          Boolean(droppedPath && isMarkdownDocumentPath(droppedPath)) &&
+          Boolean(droppedPath && isImportDropPath(droppedPath)) &&
           !markdownDropBlockedRef.current &&
           !composerRefusesImport() &&
           sidebarModeRef.current === "research" &&
@@ -7606,6 +7633,18 @@ function MainApp() {
         markdownDragEligible = false;
         setMarkdownDropTargetActive(false);
         if (!shouldImport || !droppedPath) {
+          return;
+        }
+        if (!isMarkdownDocumentPath(droppedPath)) {
+          // A conversation archive or transcript: open the import dialog with
+          // the dropped file already staged, skipping the source step.
+          setError(null);
+          setImportConversationsRequest(
+            isConversationTranscriptPath(droppedPath)
+              ? { transcriptPath: droppedPath }
+              : { archivePath: droppedPath },
+          );
+          setActiveSurface("research");
           return;
         }
         const requestSeq = ++markdownImportRequestSeqRef.current;
@@ -9004,6 +9043,12 @@ function MainApp() {
       title: "New document",
       hint: sidebarMode === "research" ? "⌘D" : undefined,
       action: () => void createDocumentFromSidebar(),
+    });
+    commands.push({
+      id: "action:import-conversations",
+      section: "Actions",
+      title: "Import conversations…",
+      action: () => setImportConversationsRequest({}),
     });
     commands.push({
       id: "action:new-terminal",
@@ -13083,6 +13128,7 @@ function MainApp() {
               shortcutIndexByTreeId={researchShortcutIndexByTreeId}
               onMultiSelectChange={changeResearchMultiSelection}
               onRequestCreateFolder={requestResearchFolderCreation}
+              onRequestImportConversations={openImportConversationsDialog}
               onAddToFolder={addResearchTreesToFolder}
               onRemoveFromFolder={removeResearchTreesFromFolder}
               onFolderCollapsedChange={setResearchFolderCollapsedFromSidebar}
@@ -15497,6 +15543,71 @@ function MainApp() {
             // Name the folder: the research sidebar shows one folder at a
             // time, so an export into another scope is otherwise invisible.
             showAppToast(`Exported to Research · ${workspace.name}`);
+          }}
+        />
+      ) : null}
+
+      {importConversationsRequest ? (
+        <ImportConversationsDialog
+          folders={researchGroups}
+          defaultFolderId={researchScope}
+          initialArchivePath={importConversationsRequest.archivePath}
+          initialTranscriptPath={importConversationsRequest.transcriptPath}
+          onResolveWorkspace={async (workspaceId) =>
+            (await resolveResearchComposerWorkspace(workspaceId)).id
+          }
+          onClose={() => setImportConversationsRequest(null)}
+          onImported={({ trees, folderName, skipped }) => {
+            // The other imported trees reach the sidebar via the navigation
+            // refresh; adoption below selects the first with detail in hand.
+            void refreshResearchNavigation().catch(() => undefined);
+            if (trees.length === 0) {
+              return;
+            }
+            const workspaceId = trees[0].tree.workspaceId;
+            if (folderName && trees.length > 1) {
+              const { state } = createResearchFolder(
+                researchFolderStateRef.current,
+                workspaceId,
+                trees.map((detail) => detail.tree.id),
+                folderName,
+              );
+              commitResearchFolderState(state);
+            }
+            adoptCreatedResearchTree(trees[0]);
+            const noun = trees.length === 1 ? "conversation" : "conversations";
+            showAppToast(
+              skipped.length > 0
+                ? `Imported ${trees.length} ${noun} · ${skipped.length} skipped`
+                : `Imported ${trees.length} ${noun}`,
+            );
+            // Freshly imported conversations are exactly the material the
+            // encyclopedia digests, so catch it up now instead of waiting for
+            // the auto-update debounce (which also requires the auto-update
+            // setting and only watches the scoped workspace — adoption's
+            // scope switch lands a render later). Addressed by workspace id
+            // for the same reason; best-effort like every status call.
+            void (async () => {
+              try {
+                const status = await fetchEncyclopediaStatus(workspaceId);
+                if (!status.enabled || status.updating) {
+                  return;
+                }
+                encyclopediaAutoAttemptAtRef.current = Date.now();
+                const next = await launchEncyclopediaUpdate(
+                  workspaceId,
+                  selectedLauncherAdapterId,
+                  null,
+                  false,
+                );
+                if (researchScopeRef.current === workspaceId) {
+                  setEncyclopediaStatus(next);
+                }
+              } catch {
+                // The imports themselves succeeded; a failed catch-up run
+                // surfaces through the encyclopedia sidebar's own status.
+              }
+            })();
           }}
         />
       ) : null}

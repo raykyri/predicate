@@ -76,6 +76,12 @@
   text-transform: uppercase;
 }
 
+.research-sidebar-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .research-sidebar-heading button {
   display: grid;
   width: 22px;
@@ -1163,6 +1169,197 @@
   margin: 4px 0 8px;
   color: var(--status-failed-fg);
   font-size: 12px;
+}
+
+/* Double-class specificity: the element also carries .confirm-dialog (width:
+   min(440px, 100%)) and .export-research-dialog (max-width: 420px), and at
+   equal specificity the cascade order decided the winner. */
+.confirm-dialog.import-conversations-dialog {
+  /* Wide enough that conversation titles read as titles, not ellipses. */
+  max-width: 820px;
+  width: min(820px, calc(100vw - 48px));
+}
+
+/* The source step is a short stack of buttons; full picker width leaves it
+   looking stranded, so it opens compact and widens on reaching the list. */
+.confirm-dialog.import-conversations-dialog.is-source-step {
+  max-width: 480px;
+  width: min(480px, calc(100vw - 32px));
+}
+
+.import-conversations-sources {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* Inline "Other transcript" control on the source step: a format select and
+   a file picker, one row, visually subordinate to the main source buttons. */
+.import-conversations-other {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.import-conversations-other-label {
+  color: var(--text-subtle);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.import-conversations-other select {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--control-h-lg);
+  padding: 0 8px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--field-bg);
+  color: var(--text-strong);
+  font-size: var(--fs-input);
+}
+
+.import-conversations-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.import-conversations-toolbar .export-research-input {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--control-h-lg);
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--field-bg);
+  color: var(--text-strong);
+  font-size: var(--fs-input);
+}
+
+.import-conversations-toolbar .export-research-input:focus {
+  outline: none;
+  border-color: var(--focus-ring);
+}
+
+.import-conversations-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-subtle);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.import-conversations-list {
+  /* Roughly half the viewport so long archives show a real page of rows,
+     without the dialog's fixed chrome pushing the actions off-screen. */
+  max-height: min(52vh, 560px);
+  margin-bottom: 8px;
+  padding: 4px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: var(--radius-md);
+  overflow-y: auto;
+}
+
+.import-conversations-group-label {
+  padding: 6px 6px 2px;
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-conversations-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 5px;
+  font-size: 12px;
+}
+
+.import-conversations-row:hover {
+  background: var(--surface-fill-hover);
+}
+
+.import-conversations-row.is-disabled {
+  color: var(--text-subtle);
+  opacity: 0.6;
+}
+
+.import-conversations-row input[type="checkbox"] {
+  flex: none;
+  align-self: center;
+}
+
+.import-conversations-row-title {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-conversations-row.is-disabled .import-conversations-row-title {
+  color: inherit;
+}
+
+.import-conversations-row-meta {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.import-conversations-empty {
+  margin: 4px 2px;
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.import-conversations-secondary {
+  margin-bottom: 8px;
+}
+
+.import-conversations-count,
+.import-conversations-progress {
+  margin: 0 0 8px;
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+.import-conversations-group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.import-conversations-summary-list {
+  max-height: min(40vh, 360px);
+  margin: 0 0 8px;
+  padding: 0 0 0 18px;
+  color: var(--text-subtle);
+  font-size: 12px;
+  overflow-y: auto;
+}
+
+.import-conversations-summary-list li {
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.import-conversations-summary-list strong {
+  color: var(--text-strong);
 }
 
 .research-response-empty {
