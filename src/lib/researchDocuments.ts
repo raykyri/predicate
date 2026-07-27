@@ -14,6 +14,18 @@ export function isMarkdownDocumentPath(path: string): boolean {
   return /\.(?:md|markdown)$/iu.test(path);
 }
 
+/** A dropped claude.ai/ChatGPT export: the archive .zip, or an extracted
+ * conversations.json. The backend re-validates on staging — this only decides
+ * whether a drop opens the conversation-import dialog. */
+export function isConversationArchivePath(path: string): boolean {
+  return /\.(?:zip|json)$/iu.test(path);
+}
+
+/** A dropped Claude Code session transcript (.jsonl). */
+export function isConversationTranscriptPath(path: string): boolean {
+  return /\.jsonl$/iu.test(path);
+}
+
 // Rust's split_whitespace uses the Unicode White_Space property. Spell the
 // small, stable set out so counting can scan UTF-16 code units without regex
 // match objects; all White_Space code points are in the BMP. Notably, NEL is

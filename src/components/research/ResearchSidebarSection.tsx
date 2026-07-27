@@ -8,10 +8,12 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
+  Download,
   FileText,
   Folder,
   FolderMinus,
   FolderPlus,
+  Import,
   LoaderCircle,
   MoreHorizontal,
   Pencil,
@@ -67,6 +69,7 @@ interface ResearchSidebarSectionProps {
   onRemove: (treeId: string) => Promise<void>;
   onReorder: (archived: boolean, orderedTreeIds: string[]) => void;
   onRequestCreateFolder: (treeIds: string[]) => void;
+  onRequestImportConversations: () => void;
   onAddToFolder: (folderId: string, treeIds: string[]) => void;
   onRemoveFromFolder: (treeIds: string[]) => void;
   onFolderCollapsedChange: (folderId: string, collapsed: boolean) => void;
@@ -115,7 +118,11 @@ function ResearchSidebarTitle({ tree }: { tree: ResearchTreeSummary }) {
       {tree.kind === "document" ? (
         <FileText className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
       ) : tree.kind === "conversation" ? (
-        <Terminal className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
+        tree.origin === "conversationImport" ? (
+          <Download className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
+        ) : (
+          <Terminal className="research-sidebar-doc-icon" size={12} aria-hidden="true" />
+        )
       ) : null}
       <span className="research-sidebar-title-text">{tree.title}</span>
     </span>
@@ -141,6 +148,7 @@ function ResearchSidebarSection({
   onRemove,
   onReorder,
   onRequestCreateFolder,
+  onRequestImportConversations,
   onAddToFolder,
   onRemoveFromFolder,
   onFolderCollapsedChange,
@@ -1197,16 +1205,27 @@ function ResearchSidebarSection({
       >
         <div className="research-sidebar-heading">
           <span>Research</span>
-          <button
-            className="control-button"
-            type="button"
-            title="New folder"
-            aria-label="New research folder"
-            disabled={!workspaceId}
-            onClick={() => onRequestCreateFolder([])}
-          >
-            <FolderPlus size={13} aria-hidden="true" />
-          </button>
+          <div className="research-sidebar-heading-actions">
+            <button
+              className="control-button"
+              type="button"
+              title="Import conversations"
+              aria-label="Import conversations"
+              onClick={() => onRequestImportConversations()}
+            >
+              <Import size={13} aria-hidden="true" />
+            </button>
+            <button
+              className="control-button"
+              type="button"
+              title="New folder"
+              aria-label="New research folder"
+              disabled={!workspaceId}
+              onClick={() => onRequestCreateFolder([])}
+            >
+              <FolderPlus size={13} aria-hidden="true" />
+            </button>
+          </div>
         </div>
         {activeListVisible && starredUnits.length > 0 ? (
           <div className="research-sidebar-starred" role="group" aria-label="Starred research">

@@ -1,6 +1,6 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Check, Copy, ExternalLink, Highlighter, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, ScrollText, Share2, Terminal, Trash2, Wrench, X } from "lucide-react";
+import { ArrowLeft, Check, Copy, Download, ExternalLink, Highlighter, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, ScrollText, Share2, Terminal, Trash2, Wrench, X } from "lucide-react";
 import { IS_MAC, isEditableTarget } from "../../lib/appHelpers";
 import {
   createResearchHighlight,
@@ -4968,6 +4968,14 @@ function ResearchDocument({
               >
                 <Terminal size={12} aria-hidden="true" />
                 Exported from terminal
+              </span>
+            ) : displayNode.origin === "conversationImport" ? (
+              <span
+                className="research-provenance-badge"
+                title="This conversation was imported from an external source: a point-in-time copy authored outside qmux. Review it before publishing."
+              >
+                <Download size={12} aria-hidden="true" />
+                Imported conversation
               </span>
             ) : null}
             {threadLength > 1 || legacyFollowupCount > 0 ? (
