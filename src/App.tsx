@@ -172,6 +172,7 @@ import {
   measureTerminalCellSize,
   selectPaneAfterClose,
   statusLabel,
+  upsertThreadGraphs,
 } from "./lib/appHelpers";
 import {
   agentTabStatusDotClass,
@@ -355,6 +356,7 @@ import {
   setOpenRouterKey,
   openRouterChatCompletion,
   getAgentDraft,
+  getThreadGraph,
   getGlobalTaskLauncherHotkey,
   openGlobalTaskLauncher,
   getShowHideShortcut,
@@ -378,7 +380,6 @@ import {
   createGlobalDraft,
   deleteGlobalDraft,
   assignGlobalDraft,
-  listThreadGraphs,
   listTurns,
   listPanes,
   listPublications,
@@ -1530,6 +1531,8 @@ function MainApp() {
     Record<string, string | null>
   >({});
   const [turns, setTurns] = useState<Turn[]>([]);
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
   const [threadGraphs, setThreadGraphs] = useState<ThreadGraph[]>([]);
   const [queuedTurnsByAgent, setQueuedTurnsByAgentState] = useState<Record<string, QueuedTurn[]>>({});
   // Application-global prompt drafts (the home Drafts rail). Backend-owned;
@@ -2574,6 +2577,113 @@ function MainApp() {
     () => panesForScope(panes, groups, "terminal"),
     [groups, panes],
   );
+  // Conversation history is deliberately demand-loaded. A workspace can retain
+  // hundreds of parked agents whose full thread graphs contain years of tool
+  // output; hydrating every one copied that history through Rust, IPC, JSON, and
+  // React at startup. Keep only histories the current surface needs: the active
+  // split in a terminal view, or every live terminal pane while Home renders its
+  // workstream rails.
+  const historyRequestKeyByAgentRef = useRef(new Map<string, string>());
+  const hydratedHistoryAgentIdsRef = useRef(new Set<string>());
+  const graphRequestByThreadRef = useRef(
+    new Map<string, Promise<ThreadGraph | null>>(),
+  );
+  const hydrateAgentHistory = useCallback(async (agent: AgentInfo) => {
+    const threadId = threadIdForAgent(agent);
+    const requestKey = [
+      threadId,
+      agent.branchId ?? "",
+      agent.sessionId ?? "",
+      agent.transcriptPath ?? "",
+    ].join("\0");
+    if (historyRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
+      return;
+    }
+    historyRequestKeyByAgentRef.current.set(agent.id, requestKey);
+    const turnsAtRequestStart = new Map(
+      turnsRef.current
+        .filter((turn) => turn.agentId === agent.id)
+        .map((turn) => [turn.id, turn]),
+    );
+    let graphRequest = graphRequestByThreadRef.current.get(threadId);
+    if (!graphRequest) {
+      graphRequest = getThreadGraph(threadId).catch((): ThreadGraph | null => null);
+      graphRequestByThreadRef.current.set(threadId, graphRequest);
+      void graphRequest.finally(() => {
+        if (graphRequestByThreadRef.current.get(threadId) === graphRequest) {
+          graphRequestByThreadRef.current.delete(threadId);
+        }
+      });
+    }
+    try {
+      const [existingTurns, graph] = await Promise.all([
+        listTurns(agent.id),
+        graphRequest ?? Promise.resolve(null),
+      ]);
+      // Do not let the boot snapshot overwrite turns delivered by the live event
+      // stream while the request was in flight. Same-id live objects win; genuinely
+      // new live turns are appended after the snapshot.
+      setTurns((current) => {
+        const liveById = new Map(
+          current
+            .filter((turn) => turn.agentId === agent.id)
+            .map((turn) => [turn.id, turn]),
+        );
+        const merged = existingTurns.map((turn) => {
+          const live = liveById.get(turn.id);
+          // Prefer only turns that arrived or changed after this request began.
+          // Previously hydrated same-id turns may belong to an old transcript
+          // generation and must be replaced by the new scoped snapshot.
+          return live && live !== turnsAtRequestStart.get(turn.id) ? live : turn;
+        });
+        const snapshotIds = new Set(existingTurns.map((turn) => turn.id));
+        for (const turn of liveById.values()) {
+          if (!snapshotIds.has(turn.id)) {
+            merged.push(turn);
+          }
+        }
+        const next = [
+          ...current.filter((turn) => turn.agentId !== agent.id),
+          ...merged,
+        ];
+        return next.length === current.length &&
+          next.every((turn, index) => turn === current[index])
+          ? current
+          : next;
+      });
+      if (graph) {
+        setThreadGraphs((current) =>
+          current.includes(graph) ? current : upsertThreadGraphs(current, [graph]),
+        );
+      }
+      // Subsequent live turn events may now refresh this graph. Events that
+      // raced the initial request remain visible through the pending-turn
+      // overlay, avoiding a stale initial response racing a targeted refresh.
+      hydratedHistoryAgentIdsRef.current.add(agent.id);
+    } catch (err) {
+      // A later surface transition should retry a failed demand load.
+      if (historyRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
+        historyRequestKeyByAgentRef.current.delete(agent.id);
+        hydratedHistoryAgentIdsRef.current.delete(agent.id);
+      }
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+  useEffect(() => {
+    const panesNeedingHistory = homeActive ? sidebarPanes : visibleTerminalPanes;
+    for (const pane of panesNeedingHistory) {
+      const agent = agentByPaneId.get(pane.id);
+      if (agent) {
+        void hydrateAgentHistory(agent);
+      }
+    }
+  }, [
+    agentByPaneId,
+    homeActive,
+    hydrateAgentHistory,
+    sidebarPanes,
+    visibleTerminalPanes,
+  ]);
   const researchNodeByPaneId = useMemo(
     () =>
       new Map(
@@ -2587,10 +2697,10 @@ function MainApp() {
   researchNodeByPaneIdRef.current = researchNodeByPaneId;
   // Every agent id ever bound to a research run. Grow-only on purpose: the
   // event hook consults it to suppress thread-graph refreshes (research runs
-  // have no graphs), and a settled run's trailing turn events arrive after the
-  // agent and its node bindings are gone — pruning the set would let exactly
-  // those events fall back to the full every-graph refetch this exists to
-  // prevent. Bounded by the number of research launches in one app session.
+  // have no graphs). A settled run's trailing turn events arrive after the
+  // agent and its node bindings are gone, so pruning the set would schedule
+  // pointless graph reads. Bounded by the number of research launches in one
+  // app session.
   const researchAgentIdsRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const node of researchActivity) {
@@ -5389,15 +5499,10 @@ function MainApp() {
 
     // Everything the first paint doesn't need, hydrated detached after the
     // window is revealed so startup is gated only by the pane/group/agent
-    // snapshot. Two independent passes: the fast one (settings, per-agent
-    // queues and drafts — small map lookups) applies within milliseconds, and
-    // the heavy one (the turn store — whole transcripts including tool
-    // results, by far the largest boot payload — plus thread graphs) fills in
-    // whenever it lands. Keeping them independent matters: the user can
-    // interact the moment the window shows, so the fast pass must not wait on
-    // listTurns, and everything it applies merges UNDER live state rather than
-    // clobbering edits or events that arrived while the snapshot was in
-    // flight.
+    // snapshot. Settings, per-agent queues, and drafts are small map lookups and
+    // apply within milliseconds. Turns and graphs are intentionally absent:
+    // the surface-driven hydration effect loads only the agents the user can
+    // currently see instead of copying the workspace's complete history.
     async function hydrateSecondaryFast(existingAgents: AgentInfo[]) {
       try {
         const [
@@ -5490,31 +5595,6 @@ function MainApp() {
       }
     }
 
-    async function hydrateSecondaryHeavy() {
-      try {
-        const [existingTurns, existingThreadGraphs] = await Promise.all([
-          listTurns(),
-          listThreadGraphs().catch((): ThreadGraph[] => []),
-        ]);
-        if (cancelled) {
-          return;
-        }
-        // The event stream is already live while this snapshot was in flight,
-        // so keep any turns it appended in the meantime instead of clobbering
-        // them with the (marginally older) snapshot.
-        setTurns((current) => {
-          const seen = new Set(existingTurns.map((turn) => turn.id));
-          const extras = current.filter((turn) => !seen.has(turn.id));
-          return extras.length === 0 ? existingTurns : [...existingTurns, ...extras];
-        });
-        setThreadGraphs(existingThreadGraphs);
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      }
-    }
-
     async function boot() {
       try {
         const [
@@ -5588,7 +5668,6 @@ function MainApp() {
         }
         setPublicationBindings(existingPublications);
         void hydrateSecondaryFast(existingAgents);
-        void hydrateSecondaryHeavy();
         const savedResearchTreeId = localStorage.getItem(ACTIVE_RESEARCH_TREE_KEY);
         const restoredResearchScope = resolveResearchScope(
           localStorage.getItem(RESEARCH_FOLDER_SCOPE_KEY),
@@ -7632,6 +7711,8 @@ function MainApp() {
       const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
       return agent ? threadIdForAgent(agent) : null;
     },
+    shouldRefreshAgentThreadGraph: (agentId: string) =>
+      hydratedHistoryAgentIdsRef.current.has(agentId),
     isResearchAgent: (agentId: string) => researchAgentIdsRef.current.has(agentId),
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
@@ -7664,18 +7745,13 @@ function MainApp() {
         return;
       }
 
-      const [latestPanes, latestAgents, latestTurns, latestThreadGraphs, latestGroups] =
-        await Promise.all([
-          listPanes(),
-          listAgents(),
-          listTurns(),
-          listThreadGraphs().catch((): ThreadGraph[] => []),
-          listGroups(),
-        ]);
+      const [latestPanes, latestAgents, latestGroups] = await Promise.all([
+        listPanes(),
+        listAgents(),
+        listGroups(),
+      ]);
       setPanesPreservingRecoveredDismissals(latestPanes);
       setAgents(latestAgents);
-      setTurns(latestTurns);
-      setThreadGraphs(latestThreadGraphs);
       setGroups(latestGroups);
       setActivePaneId(pane.id);
 
@@ -7683,6 +7759,7 @@ function MainApp() {
         (agent) => agent.paneId === pane.id || agent.id === pane.agentId,
       );
       if (restoredAgent) {
+        void hydrateAgentHistory(restoredAgent);
         void refreshAgentTurnQueue(restoredAgent.id).catch(() => undefined);
         void getAgentDraft(restoredAgent.id)
           .then((draft) => {

@@ -5,7 +5,6 @@ import {
   listAgents,
   listGroups,
   listPanes,
-  listThreadGraphs,
   listenToEvents,
   markEventsListenerReady,
 } from "../lib/api";
@@ -15,7 +14,6 @@ import {
   isQueuedTurn,
   isTurn,
   reconcileReplacedTurns,
-  reconcileThreadGraphs,
   transcriptHookEvent,
   upsertAgent,
   upsertThreadGraphs,
@@ -94,9 +92,11 @@ export interface UseQmuxEventsHandlers {
   // Resolves an agent id to its thread id (including the backend's synthetic
   // `thread-{agentId}` fallback), or null for an agent the app doesn't know yet.
   // Lets turn events refresh only the affected thread's graph instead of
-  // refetching every graph in the workspace; an unresolvable agent falls back
-  // to the full refetch.
+  // refetching every graph in the workspace.
   getAgentThreadId?: (agentId: string) => string | null;
+  // Thread graphs are demand-loaded by App. Hidden or parked agents still emit
+  // turn events, but those events must not populate an ever-growing graph cache.
+  shouldRefreshAgentThreadGraph?: (agentId: string) => boolean;
   // True for agents that belong to research runs. The backend deliberately
   // writes no thread graph for them (research follow-ups branch through the
   // research tree, not the fork-lineage graph), so a graph refresh for one can
@@ -164,6 +164,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     setAgentQueuedTurns,
     setGlobalDrafts,
     getAgentThreadId,
+    shouldRefreshAgentThreadGraph,
     isResearchAgent,
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
@@ -193,7 +194,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     // Same idea for pane-list refetches (a fork adds a pane backend-side).
     let panesRefreshSeq = 0;
     let groupsRefreshSeq = 0;
-    let threadGraphRefreshSeq = 0;
     // Turn events arrive in bursts — every appended line schedules a refresh,
     // and the transcript tail delivers a fresh burst every few hundred ms for
     // as long as an agent streams. A microtask-level collapse still refetched
@@ -203,53 +203,26 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     // one refetch per quiet window replaces several per second. The seq guard
     // still drops any stale response that loses a race.
     let threadGraphRefreshTimer: number | null = null;
-    // Agents whose turn activity arrived since the last flush. When every one of
-    // them resolves to a thread id, the flush fetches just those threads' graphs;
-    // graphs retain full transcript nodes, so refetching all of them per burst
-    // cost O(total workspace history) rather than O(the streaming thread).
+    // Agents whose turn activity arrived since the last flush. Only histories
+    // already requested by the active surface enter this set; hidden agents use
+    // their bounded live-turn window without populating the graph cache.
     const dirtyGraphAgentIds = new Set<string>();
-    // Set when a refresh request carried no agent id: the flush must then fall
-    // back to the full refetch even if resolvable agents are dirty too, or the
-    // anonymous event's thread would silently miss its refresh.
-    let graphRefreshNeedsFull = false;
     // Per-thread fetch sequence for targeted refreshes (see flush below).
     const threadGraphFetchSeqByThread = new Map<string, number>();
-    // Full refetch of every graph — hydration-grade recovery. Interlocked with
-    // the targeted path in both directions: a targeted apply bumps
-    // threadGraphRefreshSeq so a slower full response can't roll that thread
-    // back, and a full apply bumps every per-thread seq so a slower targeted
-    // response can't roll back the fresher full snapshot.
-    const refreshAllThreadGraphs = () => {
-      const seq = (threadGraphRefreshSeq += 1);
-      void listThreadGraphs()
-        .then((graphs) => {
-          if (!disposed && seq === threadGraphRefreshSeq) {
-            for (const [threadId, threadSeq] of threadGraphFetchSeqByThread) {
-              threadGraphFetchSeqByThread.set(threadId, threadSeq + 1);
-            }
-            // Reuse prior graph objects when their content is unchanged so
-            // the per-agent turn-info cache (keyed on graph identity) holds.
-            setThreadGraphs((current) => reconcileThreadGraphs(current, graphs));
-          }
-        })
-        .catch(() => undefined);
-    };
     const refreshThreadGraphs = (agentId?: string | null) => {
-      if (agentId && isResearchAgent?.(agentId)) {
+      if (
+        !agentId ||
+        isResearchAgent?.(agentId) ||
+        shouldRefreshAgentThreadGraph?.(agentId) === false
+      ) {
         // A research run's turn events (its start burst — the initial
         // transcript reset — and its settle flush are the densest) must not
-        // schedule graph work: no graph will ever exist for it, and the miss
-        // path's full refetch was a main-thread beachball at exactly those
-        // moments. This also covers a settled run's trailing turn events,
-        // which arrive after remove_pane dropped the agent and would
-        // otherwise resolve no thread id and force the full refetch.
+        // schedule graph work: no graph will ever exist for it. Hidden agents
+        // likewise stay on the bounded turn fallback until their surface asks
+        // for the graph.
         return;
       }
-      if (agentId) {
-        dirtyGraphAgentIds.add(agentId);
-      } else {
-        graphRefreshNeedsFull = true;
-      }
+      dirtyGraphAgentIds.add(agentId);
       if (threadGraphRefreshTimer !== null) {
         return;
       }
@@ -260,10 +233,8 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         }
         const dirtyAgents = [...dirtyGraphAgentIds];
         dirtyGraphAgentIds.clear();
-        const needsFull = graphRefreshNeedsFull;
-        graphRefreshNeedsFull = false;
         const threadIds =
-          !needsFull && getAgentThreadId && dirtyAgents.length > 0
+          getAgentThreadId && dirtyAgents.length > 0
             ? dirtyAgents.map((dirtyAgentId) => getAgentThreadId(dirtyAgentId))
             : null;
         if (threadIds && threadIds.every((threadId): threadId is string => threadId !== null)) {
@@ -277,41 +248,34 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
           // One state commit for the whole batch — per-promise applies would
           // re-render the app once per streaming thread per flush. Each result
           // still applies only if its per-thread seq is current, so a slower
-          // duplicate fetch or an interleaved full refresh wins by recency.
+          // duplicate fetch cannot roll back a fresher one.
           void Promise.all(fetches).then((results) => {
             if (disposed) {
               return;
             }
             const updates: ThreadGraph[] = [];
-            let missing = false;
             for (const result of results) {
-              if (result === null) {
+              if (result === null || result.graph === null) {
+                // A newly-created thread may not have a durable graph yet. Its
+                // bounded live turns remain the correct rendering fallback;
+                // the next turn event retries this targeted fetch.
                 continue;
               }
-              if (result.graph === null) {
-                // The backend has no graph under this id — the resolved thread
-                // id is wrong or the record is missing. Recover with the full
-                // refetch rather than silently never refreshing this thread.
-                missing = true;
-              } else if (threadGraphFetchSeqByThread.get(result.threadId) === result.seq) {
+              if (threadGraphFetchSeqByThread.get(result.threadId) === result.seq) {
                 updates.push(result.graph);
               }
             }
             if (updates.length > 0) {
-              threadGraphRefreshSeq += 1;
               // Content-identical refetches keep the prior graph object so the
               // per-agent turn-info cache (keyed on graph identity) holds.
               setThreadGraphs((current) => upsertThreadGraphs(current, updates));
             }
-            if (missing) {
-              refreshAllThreadGraphs();
-            }
           });
           return;
         }
-        // An event without a resolvable agent (or no resolver supplied): fall
-        // back to the full refetch — correctness recovery over efficiency.
-        refreshAllThreadGraphs();
+        // If an agent no longer resolves, keep its bounded live turns. Fetching
+        // every graph as a recovery path would reintroduce the memory spike this
+        // targeted cache exists to prevent.
       }, THREAD_GRAPH_REFRESH_DEBOUNCE_MS);
     };
 
