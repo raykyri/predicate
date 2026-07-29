@@ -245,13 +245,16 @@ import {
 } from "./lib/paneTree";
 import {
   adjacentPaneBelow,
+  canToggleTurnSidebar,
   detachPaneFromSplitMemberships,
   joinPaneSplit,
   normalizePaneSplitsForPanes,
+  paneSplitFlagIsEnabled,
   paneSplitForPane,
   paneSplitsEqual,
   paneSnapshotForPersistedPaneSplits,
   resizeSplitFractions,
+  setPaneSplitFlagEnabled,
   splitFractions,
 } from "./lib/paneSplits";
 import {
@@ -3568,8 +3571,9 @@ function MainApp() {
     splitMode = splitRightPaneMode,
   ) {
     if (splitMode) {
+      const paneIds = paneSplitForPane(paneSplitsRef.current, paneId)?.paneIds ?? [paneId];
       setSplitTranscriptExpandedByPane((current) =>
-        paneRecordWithFlag(current, paneId, expanded),
+        setPaneSplitFlagEnabled(current, paneIds, expanded),
       );
       return;
     }
@@ -3612,7 +3616,10 @@ function MainApp() {
 
   function toggleTranscriptExpandedForPane(paneId: string, splitMode = splitRightPaneMode) {
     if (splitMode) {
-      setSplitTranscriptExpandedByPane((current) => toggledPaneRecord(current, paneId));
+      const paneIds = paneSplitForPane(paneSplitsRef.current, paneId)?.paneIds ?? [paneId];
+      setSplitTranscriptExpandedByPane((current) =>
+        setPaneSplitFlagEnabled(current, paneIds, !paneSplitFlagIsEnabled(current, paneIds)),
+      );
       return;
     }
     setTranscriptExpandedByPane((current) => toggledPaneRecord(current, paneId));
@@ -3620,7 +3627,7 @@ function MainApp() {
 
   function toggleActiveTranscriptExpanded() {
     const paneId = activePane?.id;
-    if (!paneId || !activePaneHasTurnSidebar) {
+    if (!paneId || !activePaneCanToggleTurnSidebar) {
       return;
     }
 
@@ -3857,13 +3864,18 @@ function MainApp() {
       ? [activeTurnPaneSurface]
       : [];
   const activePaneHasTurnSidebar = Boolean(activeTurnPaneSurface?.hasTurnSidebar);
+  const activePaneCanToggleTurnSidebar = canToggleTurnSidebar(
+    activePaneHasTurnSidebar,
+    splitRightPaneMode,
+    splitTurnPaneSurfaces.length,
+  );
   const researchSidebarRestoreInHeader =
     leftSidebarCollapsed &&
     sidebarMode === "research" &&
     (researchStageView === "document" || researchStageView === "composer");
   const floatingLeftSidebarRestoreVisible =
     leftSidebarCollapsed && !researchSidebarRestoreInHeader;
-  const floatingRestoreButtonVisible = rightBarCollapsed && activePaneHasTurnSidebar;
+  const floatingRestoreButtonVisible = rightBarCollapsed && activePaneCanToggleTurnSidebar;
   const floatingPaneRestoreControlsVisible =
     floatingLeftSidebarRestoreVisible || floatingRestoreButtonVisible;
   const floatingPaneRestoreControlsLayoutKey = [
@@ -3882,13 +3894,13 @@ function MainApp() {
   const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
   const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
   const hasGlobalTurnSidebar = hasVisibleRightBar && !splitRightPaneMode;
-  const activeTranscriptExpanded = Boolean(
-    activePane &&
-      activePaneHasTurnSidebar &&
-      (splitRightPaneMode
-        ? splitTranscriptExpandedByPane[activePane.id]
-        : transcriptExpandedByPane[activePane.id]),
+  const splitTranscriptExpanded = Boolean(
+    activePaneSplit &&
+      paneSplitFlagIsEnabled(splitTranscriptExpandedByPane, activePaneSplit.paneIds),
   );
+  const activeTranscriptExpanded = splitRightPaneMode
+    ? splitTranscriptExpanded && splitTurnPaneSurfaces.length > 0
+    : Boolean(activePane && activePaneHasTurnSidebar && transcriptExpandedByPane[activePane.id]);
   const activeTranscriptVisibleExpanded = activeTranscriptExpanded && !rightBarCollapsed;
   const activePaneHasTurnPaneHeader =
     activePaneHasTurnSidebar && !splitRightPaneMode && !rightBarCollapsed;
@@ -9610,7 +9622,7 @@ function MainApp() {
     requestClosePaneRef.current = requestClosePane;
     splitPaneBelowRef.current = splitPaneBelow;
     canToggleActiveTranscriptExpandedRef.current = Boolean(
-      activeSurfaceRef.current === "pane" && activePane && activePaneHasTurnSidebar,
+      activeSurfaceRef.current === "pane" && activePane && activePaneCanToggleTurnSidebar,
     );
     toggleActiveTranscriptExpandedRef.current = toggleActiveTranscriptExpanded;
   });
@@ -11382,8 +11394,7 @@ function MainApp() {
     };
   }
 
-  function renderFloatingTurnPaneControls(surface: TurnPaneSurface) {
-    const expanded = surface.pane.id === activePane?.id && activeTranscriptExpanded;
+  function renderFloatingTurnPaneControls(surface: TurnPaneSurface, expanded: boolean) {
     const label = expanded ? "Restore transcript" : "Expand transcript";
     return (
       <div className="turn-pane-floating-controls">
@@ -13986,7 +13997,7 @@ function MainApp() {
                 >
                   {renderTurnPaneResizer()}
                   {renderTurnPaneSurface(surface, false)}
-                  {renderFloatingTurnPaneControls(surface)}
+                  {renderFloatingTurnPaneControls(surface, false)}
                 </section>
               ))
             : null}
@@ -14019,32 +14030,48 @@ function MainApp() {
         </div>
       </section>
 
-      {/* One aside serves both the expanded overlay and the docked right pane,
-          with stable child positions, so toggling Expand transcript restyles
-          the same TurnOverlay instance instead of remounting it — a remount
-          reset the scroll position to the bottom and dropped the find bar and
-          every open tool/thinking disclosure. (In split mode the docked
-          transcripts live in the split cells above, so entering/leaving the
-          expanded overlay still remounts there.) showHeader is
-          !splitRightPaneMode for both variants: the docked pane only renders
-          in single-pane mode, where that is always true. */}
-      {activeTurnPaneSurface &&
-      hasVisibleRightBar &&
-      (activeTranscriptVisibleExpanded || !splitRightPaneMode) ? (
+      {/* Split expansion covers the terminal stage with every open right pane.
+          The vertical split order becomes left-to-right order here, and flex
+          gives every transcript an equal-width column. */}
+      {activeTranscriptVisibleExpanded && splitRightPaneMode ? (
+        <aside className="turn-pane is-expanded is-headerless-expanded is-split-expanded">
+          {visibleRightBarSurfaces.map((surface) => (
+            <section
+              key={surface.pane.id}
+              className={`turn-pane-expanded-split-cell${
+                surface.pane.id === activePane?.id ? " is-active" : ""
+              }${
+                surface.agent && surface.agent.id === queueDropTargetAgentId
+                  ? " is-queue-drop-target"
+                  : ""
+              }`}
+              data-queue-drop-agent-id={surface.agent?.id}
+              onPointerDownCapture={() => activateTerminalPane(surface.pane.id)}
+              onFocusCapture={() => {
+                // As with the docked split cells, ignore WebKit restoring focus
+                // after the layout remount unless the user actually interacted.
+                if (userInputSinceWindowFocus()) {
+                  activateTerminalPane(surface.pane.id);
+                }
+              }}
+            >
+              {renderTurnPaneSurface(surface, false)}
+              {renderFloatingTurnPaneControls(surface, true)}
+            </section>
+          ))}
+        </aside>
+      ) : activeTurnPaneSurface && hasVisibleRightBar && !splitRightPaneMode ? (
+        /* One aside serves both the expanded overlay and the docked right pane,
+           with stable child positions, so toggling Expand transcript restyles
+           the same TurnOverlay instance instead of remounting it — a remount
+           resets its scroll position and transient disclosure state. */
         <aside
-          className={
-            activeTranscriptVisibleExpanded
-              ? `turn-pane is-expanded${splitRightPaneMode ? " is-headerless-expanded" : ""}`
-              : "turn-pane"
-          }
+          className={activeTranscriptVisibleExpanded ? "turn-pane is-expanded" : "turn-pane"}
           onPointerDownCapture={() => activateTerminalPane(activeTurnPaneSurface.pane.id)}
           onFocusCapture={() => activateTerminalPane(activeTurnPaneSurface.pane.id)}
         >
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
-          {renderTurnPaneSurface(activeTurnPaneSurface, !splitRightPaneMode)}
-          {activeTranscriptVisibleExpanded && splitRightPaneMode
-            ? renderFloatingTurnPaneControls(activeTurnPaneSurface)
-            : null}
+          {renderTurnPaneSurface(activeTurnPaneSurface, true)}
         </aside>
       ) : null}
       {renderFloatingPaneRestoreControls()}

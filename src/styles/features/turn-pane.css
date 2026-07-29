@@ -17,13 +17,14 @@
   pointer-events: none;
 }
 
-.turn-pane-split-cell.is-active::after {
+.turn-pane-split-cell.is-active::after,
+.turn-pane-expanded-split-cell.is-active::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
   /* Keep the indicator a single pixel inside the cell so it never bleeds onto
-     the terminal to its left. */
+     the terminal or neighboring transcript to its left. */
   left: 0;
   z-index: 9;
   width: 1px;
@@ -52,9 +53,38 @@
   background: var(--right-pane-active-bg);
 }
 
+.turn-pane-expanded-split-cell {
+  position: relative;
+  display: flex;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  min-height: 0;
+  background: var(--right-pane-bg);
+}
+
+.turn-pane-expanded-split-cell + .turn-pane-expanded-split-cell {
+  box-shadow: inset 1px 0 0 var(--surface-divider);
+}
+
+.turn-pane-expanded-split-cell.is-active,
+.turn-pane-expanded-split-cell.is-active .turn-sidebar {
+  background: var(--right-pane-active-bg);
+}
+
 /* A queued card dragged from another split hovers this cell: read as the drop
    target with an inset accent ring (kept inset so cell layout never shifts). */
 .turn-pane-split-cell.is-queue-drop-target {
+  box-shadow:
+    inset 0 0 0 2px var(--accent-color),
+    inset 1px 0 0 var(--surface-divider);
+}
+
+.turn-pane-expanded-split-cell.is-queue-drop-target {
+  box-shadow: inset 0 0 0 2px var(--accent-color);
+}
+
+.turn-pane-expanded-split-cell + .turn-pane-expanded-split-cell.is-queue-drop-target {
   box-shadow:
     inset 0 0 0 2px var(--accent-color),
     inset 1px 0 0 var(--surface-divider);

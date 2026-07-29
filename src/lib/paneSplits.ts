@@ -290,6 +290,37 @@ export function paneSplitForPane(splits: PaneSplitInfo[], paneId: string | null 
   return splits.find((split) => split.paneIds.includes(paneId)) ?? null;
 }
 
+export function paneSplitFlagIsEnabled(
+  flagsByPane: Readonly<Record<string, boolean>>,
+  paneIds: readonly string[],
+) {
+  return paneIds.some((paneId) => flagsByPane[paneId] === true);
+}
+
+export function setPaneSplitFlagEnabled(
+  flagsByPane: Record<string, boolean>,
+  paneIds: readonly string[],
+  enabled: boolean,
+) {
+  let next: Record<string, boolean> | null = null;
+  for (const paneId of paneIds) {
+    if (enabled) {
+      if (flagsByPane[paneId] === true) {
+        continue;
+      }
+      next ??= { ...flagsByPane };
+      next[paneId] = true;
+      continue;
+    }
+    if (!Object.prototype.hasOwnProperty.call(flagsByPane, paneId)) {
+      continue;
+    }
+    next ??= { ...flagsByPane };
+    delete next[paneId];
+  }
+  return next ?? flagsByPane;
+}
+
 export function paneSnapshotForPersistedPaneSplits(
   persistedSplits: PaneSplitInfo[],
   currentPanes: PaneInfo[],
@@ -446,4 +477,12 @@ export function resizeSplitFractions(
 
 export function paneSplitsEqual(a: PaneSplitInfo[], b: PaneSplitInfo[]) {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+export function canToggleTurnSidebar(
+  activePaneHasTurnSidebar: boolean,
+  splitRightPaneMode: boolean,
+  splitTurnSidebarCount: number,
+) {
+  return activePaneHasTurnSidebar || (splitRightPaneMode && splitTurnSidebarCount > 0);
 }
