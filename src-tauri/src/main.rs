@@ -98,12 +98,17 @@ fn handle_global_shortcut(
 const QUIT_MENU_ID: &str = "qmux-quit";
 #[cfg(desktop)]
 const NEW_WINDOW_MENU_ID: &str = "qmux-new-window";
+#[cfg(desktop)]
+const RELOAD_INTERFACE_MENU_ID: &str = "qmux-reload-interface";
 
 /// Reworks the default menu for qmux's single-window behavior:
 ///
 /// - Adds "New Window" to the otherwise-empty File menu. Since qmux owns one shared
 ///   session in one window, the action surfaces that window rather than constructing
 ///   a second webview over the same state.
+/// - Adds "Reload Interface" to the View menu. It is native (rather than a DOM
+///   shortcut) so it remains usable when WebKit's renderer is unhealthy, and reloads
+///   only the webview while preserving PTYs and native terminal surfaces.
 /// - Strips the native "Close Window" items (⌘W on macOS, Alt+F4 elsewhere) so the
 ///   webview receives ⌘W itself; the frontend then routes ⌘W to close the active pane.
 /// - On macOS, replaces the predefined "Quit" item with our own ⌘Q item. The native
@@ -130,6 +135,13 @@ fn customize_app_menu(app: &tauri::App) -> tauri::Result<()> {
                 .accelerator("CmdOrCtrl+N")
                 .build(app)?;
             submenu.insert(&new_window, 0)?;
+        }
+        if submenu_label == "View" {
+            let reload_interface =
+                MenuItemBuilder::with_id(RELOAD_INTERFACE_MENU_ID, "Reload Interface")
+                    .accelerator("CmdOrCtrl+Alt+R")
+                    .build(app)?;
+            submenu.insert(&reload_interface, 0)?;
         }
         for (index, sub_item) in submenu.items()?.into_iter().enumerate() {
             let MenuItemKind::Predefined(predefined) = &sub_item else {
@@ -162,6 +174,10 @@ fn customize_app_menu(app: &tauri::App) -> tauri::Result<()> {
 fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     if event.id().as_ref() == NEW_WINDOW_MENU_ID {
         show_main_window(app);
+        return;
+    }
+    if event.id().as_ref() == RELOAD_INTERFACE_MENU_ID {
+        reload_main_webview(app);
         return;
     }
     if event.id().as_ref() != QUIT_MENU_ID {
@@ -2056,6 +2072,27 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Clears document-owned native routing without touching terminal sessions.
+/// This is safe before the native host is initialized (the first page-load
+/// callback can run before setup) and idempotent across an explicit reload plus
+/// its ensuing PageLoadEvent::Started callback.
+fn prepare_main_webview_reload() {
+    native_terminal::set_events_listener_ready(false);
+    let _ = native_terminal::prepare_for_webview_reload();
+}
+
+#[cfg(desktop)]
+fn reload_main_webview(app: &tauri::AppHandle) {
+    prepare_main_webview_reload();
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("qmux: cannot reload interface because the main webview is missing");
+        return;
+    };
+    if let Err(err) = window.reload() {
+        eprintln!("qmux: failed to reload interface: {err}");
+    }
+}
+
 /// Arms or releases the macOS wake lock. The frontend calls this whenever its
 /// "prevent sleep" setting or the set of running agents changes.
 #[tauri::command(async)]
@@ -2103,7 +2140,7 @@ fn main() {
 
     let exit_state = state.clone();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Registered first so a duplicate launch exits before setup() can steal the
         // control socket and respawn the persisted session alongside the running
         // instance. Instances are deduped per app identifier and user session; the
@@ -2137,9 +2174,9 @@ fn main() {
         })
         .on_menu_event(handle_app_menu_event)
         // A page navigation (reload, dev HMR full-reload) tears down the old
-        // document's qmux-event listener; clear the readiness flag so native
-        // shortcut classifiers stop consuming chords until the new document
-        // re-subscribes and calls mark_events_listener_ready again.
+        // document's qmux-event listener and all DOM-owned native routing.
+        // Reset both so native shortcut classifiers stop consuming chords and
+        // stale pointer/keyboard ownership cannot outlive the old document.
         .on_page_load(|webview, payload| {
             // The quick-launch webview has its own event subscription. Loading
             // or reloading it must not revoke the main document's native
@@ -2147,9 +2184,27 @@ fn main() {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
-                native_terminal::set_events_listener_ready(false);
+                prepare_main_webview_reload();
             }
-        })
+        });
+
+    // Registering this replaces Tauri's default WebContent termination handler,
+    // so every webview must still be explicitly reloaded. The main document
+    // additionally clears terminal routing first; quick launch has no native
+    // terminal ownership to reset.
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_web_content_process_terminate(|webview| {
+        let label = webview.label();
+        eprintln!("qmux: WebContent process terminated for {label}; reloading");
+        if label == "main" {
+            prepare_main_webview_reload();
+        }
+        if let Err(err) = webview.reload() {
+            eprintln!("qmux: failed to reload webview {label}: {err}");
+        }
+    });
+
+    builder
         .setup({
             let state = state.clone();
             move |app| {

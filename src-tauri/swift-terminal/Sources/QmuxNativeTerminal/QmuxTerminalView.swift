@@ -42,26 +42,27 @@ final class QmuxTerminalView: TerminalView {
         {
             return true
         }
-        // System window-management chords must keep falling through to the
-        // app menu: Ghostty's catch-all would consume them for a focused
-        // terminal, so ⌘H (hide), ⌘⌥H (hide others), and ⌘M (minimize)
-        // simply died. Declining the key equivalent lets AppKit continue to
-        // the menu bar — the same reason ⌘C/⌘Q are deliberately left native
-        // in the shortcut monitor.
-        if event.type == .keyDown, Self.isSystemMenuChord(event) {
+        // Native menu chords must keep falling through to AppKit: Ghostty's
+        // catch-all would otherwise consume them for a focused terminal.
+        // This covers system window management and qmux's WebKit-independent
+        // Reload Interface escape hatch.
+        if event.type == .keyDown, Self.isNativeMenuChord(event) {
             return false
         }
         return super.performKeyEquivalent(with: event)
     }
 
-    private static func isSystemMenuChord(_ event: NSEvent) -> Bool {
+    private static func isNativeMenuChord(_ event: NSEvent) -> Bool {
         let mods = event.modifierFlags.intersection([.shift, .control, .option, .command])
         guard mods == .command || mods == [.command, .option],
               let key = event.charactersIgnoringModifiers?.lowercased()
         else {
             return false
         }
-        return key == "h" || key == "m"
+        // Hide/minimize are AppKit-owned window commands. Reload Interface is
+        // intentionally native too: it must remain available when the WebKit
+        // document and qmux's JavaScript shortcut listener are unhealthy.
+        return key == "h" || key == "m" || (mods == [.command, .option] && key == "r")
     }
 
     /// Key codes whose *unmodified* character is already a control byte

@@ -185,6 +185,10 @@ final class NativeTerminalPane: NSObject,
                 "super+shift+right_bracket",  // next_tab — qmux: cycle all tabs
                 "super+alt+up",  // qmux: move active sidebar item up
                 "super+alt+down",  // qmux: move active sidebar item down
+                // Native App-menu recovery for a dead WebKit renderer. The
+                // QmuxTerminalView key-equivalent override lets this fall
+                // through to AppKit instead of Ghostty's catch-all.
+                "super+alt+r",
                 // goto_tab 1-8 and last_tab — qmux: focus tab N. Ghostty's
                 // defaults bind the digits by physical key, so the unbind
                 // trigger must match that form exactly.

@@ -429,6 +429,31 @@ final class NativeTerminalHost {
         return true
     }
 
+    /// Drops routing state owned by the current DOM document before WKWebView
+    /// reloads. Terminal panes and their Ghostty surfaces deliberately survive;
+    /// the new document will republish layout, pointer policy, and keyboard
+    /// ownership after its event listener is live.
+    func prepareForWebViewReload() -> Bool {
+        guard container != nil else { return false }
+        desiredKeyboardOwnerPaneID = nil
+        _ = setKeyboardOwner(nil)
+        consumedAppShortcutKeyCodes.removeAll()
+        for pane in panes.values {
+            pane.consumedShortcutKeyCodes.removeAll()
+        }
+        pointerCapturePane = nil
+        webPointerRoutingClaimed = false
+        webPointerClaimClearsOnPointerUp = false
+        webGesturePointerActive = false
+        webOverlayRegions.removeAll()
+        iframeShortcutFallbackActive = false
+        clientDeferredGeometryPaneIDs.removeAll()
+        pendingPaneFrames.removeAll()
+        pendingFitPaneIDs.removeAll()
+        windowLiveResizeActive = false
+        return true
+    }
+
     func sendText(id: String, text: String) -> Bool {
         guard let pane = panes[id] else { return false }
         // Report a dead/not-yet-created surface as failure: the surface only

@@ -404,6 +404,7 @@ mod imp {
             visible: i32,
         ) -> i32;
         fn qmux_native_terminal_set_iframe_shortcut_fallback(active: i32) -> i32;
+        fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
         fn qmux_native_terminal_submit(pane_id: *const c_char) -> i32;
@@ -645,6 +646,16 @@ mod imp {
     pub fn set_iframe_shortcut_fallback(active: bool) -> Result<(), String> {
         // SAFETY: the scalar is copied synchronously on the main actor.
         if unsafe { qmux_native_terminal_set_iframe_shortcut_fallback(i32::from(active)) } == 1 {
+            Ok(())
+        } else {
+            Err("native terminal host is not attached".to_string())
+        }
+    }
+
+    pub fn prepare_for_webview_reload() -> Result<(), String> {
+        // SAFETY: the reset is synchronous main-actor state bookkeeping. It
+        // preserves every pane and Ghostty surface.
+        if unsafe { qmux_native_terminal_prepare_for_webview_reload() } == 1 {
             Ok(())
         } else {
             Err("native terminal host is not attached".to_string())
@@ -914,6 +925,10 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn prepare_for_webview_reload() -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn focus(_pane_id: &str) -> Result<(), String> {
         Err("native terminals are only available on macOS".to_string())
     }
@@ -954,9 +969,9 @@ mod imp {
 #[allow(unused_imports)]
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
-    paste_approved_text, receive, remove, seed_settings, send_text, set_iframe_shortcut_fallback,
-    set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
-    submit, update_settings,
+    paste_approved_text, prepare_for_webview_reload, receive, remove, seed_settings, send_text,
+    set_iframe_shortcut_fallback, set_layout, set_stage_backstop, set_web_overlay_region,
+    set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1451,6 +1466,11 @@ mod tests {
         assert_eq!(
             super::classify_app_shortcut("r", true, false, false, true),
             Some(AppShortcutCommand::FocusResearchMode)
+        );
+        assert_eq!(
+            super::classify_app_shortcut("r", false, false, true, true),
+            None,
+            "command-option-r belongs to the native Reload Interface menu item"
         );
         assert_eq!(
             super::classify_app_shortcut("`", false, false, false, true),

@@ -190,6 +190,13 @@ public func qmuxNativeTerminalSetIframeShortcutFallback(_ active: Int32) -> Int3
     }
 }
 
+@_cdecl("qmux_native_terminal_prepare_for_webview_reload")
+public func qmuxNativeTerminalPrepareForWebViewReload() -> Int32 {
+    onTerminalMain {
+        NativeTerminalHost.shared.prepareForWebViewReload() ? 1 : 0
+    }
+}
+
 @_cdecl("qmux_native_terminal_focus")
 public func qmuxNativeTerminalFocus(_ paneID: UnsafePointer<CChar>?) -> Int32 {
     guard let paneID = terminalString(paneID) else { return 0 }
