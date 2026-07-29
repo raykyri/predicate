@@ -741,11 +741,25 @@
   backdrop-filter: blur(6px);
 }
 
-.turn-pane-floating-restore-button {
+.turn-pane-floating-restore-controls {
   position: absolute;
   top: 8px;
   right: 12px;
   z-index: 9;
+  display: flex;
+}
+
+.turn-pane-floating-restore-controls.is-grouped
+  .turn-pane-floating-restore-button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.turn-pane-floating-restore-controls.is-grouped
+  .turn-pane-floating-restore-button:last-child {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 .turn-pane-fork {

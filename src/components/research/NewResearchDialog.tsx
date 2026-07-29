@@ -25,6 +25,10 @@ function modelPresetsFor(adapter: string): string[] {
 interface NewResearchDialogProps {
   open: boolean;
   inline?: boolean;
+  /** Whether an inline launcher is currently on screen. Inline launchers can
+   * stay mounted while hidden so their in-progress fields survive switching
+   * to another app surface. */
+  visible?: boolean;
   adapters: AgentAdapterMetadata[];
   requireCmdEnterToSend: boolean;
   workspaceId: string | null;
@@ -40,6 +44,7 @@ interface NewResearchDialogProps {
 export default function NewResearchDialog({
   open,
   inline = false,
+  visible = true,
   adapters: allAdapters,
   requireCmdEnterToSend,
   workspaceId,
@@ -93,10 +98,18 @@ export default function NewResearchDialog({
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, []);
   useLayoutEffect(() => {
-    if (open) {
+    if (open && visible) {
       growPromptInput();
     }
-  }, [growPromptInput, open]);
+  }, [growPromptInput, open, visible]);
+
+  useEffect(() => {
+    if (!open || !visible) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => promptRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, visible]);
 
   if (!open) {
     return null;
@@ -123,6 +136,13 @@ export default function NewResearchDialog({
         model: resolvedModel,
         workspaceId,
       });
+      // The modal unmounts on close, but the inline Research-home launcher is
+      // deliberately kept alive across surface switches. Clear a successfully
+      // submitted prompt explicitly so returning Home starts a fresh draft.
+      setPrompt("");
+      setModelChoice(null);
+      setCustomModel("");
+      setError(null);
       onClose();
     } catch (err) {
       // Surfaced here, where the user is looking; the dialog stays open with

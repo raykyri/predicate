@@ -53,6 +53,7 @@ import {
 import {
   isResearchNodeSelectionChange,
   pruneResearchNavigationNodes,
+  recordResearchFollowupDraft,
   recordResearchScrollPosition,
   researchNavigationStore,
   restoreResearchScrollPosition,
@@ -97,7 +98,11 @@ import TranscriptMarkdown, {
   type LinkActions,
 } from "../TranscriptMarkdown";
 import DocumentComposer from "./DocumentComposer";
-import { ResearchDocumentFrame, ResearchHistoryNav } from "./ResearchDocumentChrome";
+import {
+  ResearchDocumentFrame,
+  ResearchHistoryNav,
+  ResearchSidebarRestoreButton,
+} from "./ResearchDocumentChrome";
 
 interface ResearchDocumentProps {
   detail: ResearchTreeDetail | null;
@@ -137,6 +142,8 @@ interface ResearchDocumentProps {
   onPublish: (target: PublishDialogTarget) => void;
   publicationBinding?: PublicationBinding | null;
   onPublicationBindingChange: (binding: PublicationBinding) => void;
+  /** Reopens the application sidebar when research is using the full width. */
+  onShowSidebar?: () => void;
   /** Show held-⌘ shortcut badges (the ⌘J follow-ups hint). */
   shortcutHintsShown: boolean;
 }
@@ -1534,6 +1541,7 @@ function ResearchDocument({
   onPublish,
   publicationBinding,
   onPublicationBindingChange,
+  onShowSidebar,
   shortcutHintsShown,
 }: ResearchDocumentProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -1658,6 +1666,14 @@ function ResearchDocument({
   const contentByNodeRef = useRef(contentByNode);
   const contentErrorByNodeRef = useRef(contentErrorByNode);
   const askRef = useRef(ask);
+  // Set while a saved ordinary follow-up is being copied into React state.
+  // The persistence effect uses it to avoid treating the one transitional
+  // render (tree id loaded, state update not committed yet) as a user clear.
+  const restoringFollowupDraftRef = useRef<{
+    treeId: string;
+    text: string;
+    mode: "thread" | "branch";
+  } | null>(null);
   // The (status, snapshot) stamp each cached content was fetched under, so
   // the loader can tell a cache hit from a stale entry without refetching
   // unchanged segments every time the chain recomputes.
@@ -2302,6 +2318,27 @@ function ResearchDocument({
     setFullTraceNodes({});
     setFollowupMode("thread");
   }, [treeId, detail?.tree.rootNodeId]);
+
+  // Restore the ordinary composer independently of the targeted-ask restore
+  // below. The document unmounts when a terminal tab comes forward, so its
+  // local text and mode need to be copied back from the shared navigation
+  // store when this tree mounts again.
+  useEffect(() => {
+    if (!treeId) {
+      return;
+    }
+    const saved = navigationRef.current[treeId]?.followupDraft;
+    if (!saved) {
+      return;
+    }
+    restoringFollowupDraftRef.current = {
+      treeId,
+      text: saved.text,
+      mode: saved.mode,
+    };
+    setFollowup(saved.text);
+    setFollowupMode(saved.mode);
+  }, [treeId]);
 
   // Switches the displayed node without touching visit history: records the
   // outgoing scroll offset and applies the selection. A target inside the
@@ -3924,6 +3961,11 @@ function ResearchDocument({
     if (node?.status !== "complete") {
       return;
     }
+    const currentTreeId = treeIdRef.current;
+    const navigation = currentTreeId ? navigationRef.current[currentTreeId] : undefined;
+    if (navigation && recordResearchFollowupDraft(navigation, "", followupMode)) {
+      saveResearchNavigation();
+    }
     setAsk({ nodeId: highlightAction.nodeId, anchor: highlightAction.anchor });
     setHighlightAction(null);
     window.getSelection()?.removeAllRanges();
@@ -3934,7 +3976,7 @@ function ResearchDocument({
     window.requestAnimationFrame(() =>
       followupTextareaRef.current?.focus({ preventScroll: true }),
     );
-  }, [archived, highlightAction]);
+  }, [archived, followupMode, highlightAction]);
 
   // Removes the persisted ask for a node. Called from the explicit exits
   // (submit, Escape, the quote row's X) — the persist effect below never
@@ -3956,6 +3998,33 @@ function ResearchDocument({
     clearSavedAsk(askRef.current?.nodeId ?? null);
     setAsk(null);
   }, [clearSavedAsk]);
+
+  // Mirror the ordinary follow-up composer just like targeted asks. Store
+  // mutation is immediate so the unmount cleanup can flush it even if the
+  // 250ms localStorage debounce has not fired.
+  useEffect(() => {
+    if (!treeId || ask) {
+      return;
+    }
+    const restoring = restoringFollowupDraftRef.current;
+    if (restoring?.treeId === treeId) {
+      if (followup !== restoring.text || followupMode !== restoring.mode) {
+        return;
+      }
+      restoringFollowupDraftRef.current = null;
+    }
+    const navigation = (navigationRef.current[treeId] ??= { scrollByNode: {} });
+    if (!recordResearchFollowupDraft(navigation, followup, followupMode)) {
+      return;
+    }
+    if (navigationPersistTimerRef.current !== null) {
+      window.clearTimeout(navigationPersistTimerRef.current);
+    }
+    navigationPersistTimerRef.current = window.setTimeout(() => {
+      navigationPersistTimerRef.current = null;
+      saveResearchNavigation();
+    }, 250);
+  }, [ask, followup, followupMode, treeId]);
 
   // Ask mode paints its quoted passage with the CSS Highlight API rather than
   // retaining the browser selection. Once an empty composer is open, a click
@@ -4167,6 +4236,10 @@ function ResearchDocument({
     setSubmitting(true);
     try {
       const child = await onFork(target.id, prompt, null, askState?.anchor ?? null, inline);
+      const navigation = navigationRef.current[detail.tree.id];
+      if (navigation) {
+        recordResearchFollowupDraft(navigation, "", followupMode);
+      }
       setFollowup("");
       if (askState) {
         clearSavedAsk(askState.nodeId);
@@ -4481,7 +4554,12 @@ function ResearchDocument({
       : onRetryDetail;
     const headerTitle = detail?.tree.title ?? treeTitle ?? "Loading research…";
     return (
-      <ResearchDocumentFrame title={headerTitle}>
+      <ResearchDocumentFrame
+        title={headerTitle}
+        headerActions={
+          onShowSidebar ? <ResearchSidebarRestoreButton onClick={onShowSidebar} /> : undefined
+        }
+      >
         <div className="research-placeholder">
           {placeholderError ? null : (
             <LoaderCircle className="research-spinner" size={24} aria-hidden="true" />
@@ -4981,6 +5059,7 @@ function ResearchDocument({
                   : `${legacyFollowupCount} ${legacyFollowupCount === 1 ? "follow-up" : "follow-ups"}`}
               </span>
             ) : null}
+            {onShowSidebar ? <ResearchSidebarRestoreButton onClick={onShowSidebar} /> : null}
             {selectedView?.hasTranscriptActivity && selectedNodeId ? (
               <button
                 type="button"

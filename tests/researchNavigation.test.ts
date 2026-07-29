@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   isResearchNodeSelectionChange,
   isResearchTreeSelectionChange,
+  recordResearchFollowupDraft,
   recordResearchScrollPosition,
   RESEARCH_SCROLL_POSITION_TTL_MS,
   restoreResearchScrollPosition,
@@ -156,6 +157,23 @@ test("research scroll positions expire at 15 minutes", () => {
     ),
     0,
   );
+});
+
+test("research follow-up drafts retain text and composer mode until cleared", () => {
+  const navigation: SavedResearchNavigation = { scrollByNode: {} };
+
+  assert.equal(
+    recordResearchFollowupDraft(navigation, "compare the two approaches", "branch", 1_000),
+    true,
+  );
+  assert.deepEqual(navigation.followupDraft, {
+    text: "compare the two approaches",
+    mode: "branch",
+    updatedAt: 1_000,
+  });
+  assert.equal(recordResearchFollowupDraft(navigation, "", "thread", 2_000), true);
+  assert.equal(navigation.followupDraft, undefined);
+  assert.equal(recordResearchFollowupDraft(navigation, "", "thread", 3_000), false);
 });
 
 test("branch info includes every descendant but not siblings", () => {

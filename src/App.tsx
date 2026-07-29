@@ -36,6 +36,8 @@ import {
   MoreHorizontal,
   PanelBottomClose,
   PanelBottomOpen,
+  PanelLeftClose,
+  PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
   Pencil,
@@ -1351,10 +1353,10 @@ function MainApp() {
   const paneListRef = useRef<HTMLElement | null>(null);
   const mainStageRef = useRef<HTMLDivElement | null>(null);
   const terminalPaneRefs = useRef(new Map<string, TerminalPaneHandle>());
-  // Opening/closing the right bar resizes native terminal surfaces. Keep the
-  // final focus handoff after that layout commit scoped to the pane whose bar
-  // changed, especially in a split where a sibling surface is also visible.
-  const rightBarFocusFrameRef = useRef<number | null>(null);
+  // Opening/closing either side pane resizes native terminal surfaces. Keep the
+  // final focus handoff after that layout commit scoped to the active pane,
+  // especially in a split where a sibling surface is also visible.
+  const paneChromeFocusFrameRef = useRef<number | null>(null);
   // Becomes true once the single backend event subscription is live. Until then,
   // panes that want to attach are parked here so their pre-attach backlog is only
   // released after the listener can actually deliver it.
@@ -1823,6 +1825,11 @@ function MainApp() {
   const [shortcutHintsVisible, setShortcutHintsVisible] = useState(false);
   const [turnPaneWidth, setTurnPaneWidth] = useState(TURN_PANE_DEFAULT_WIDTH);
   const [sidebarWidth, setSidebarWidth] = useState(LEFT_SIDEBAR_DEFAULT_WIDTH);
+  const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
+  const effectiveSidebarWidth = leftSidebarCollapsed ? 0 : sidebarWidth;
+  const showLeftSidebarInResearch = useCallback(() => {
+    setLeftSidebarCollapsed(false);
+  }, []);
   // Application-level settings, loaded from localStorage once on mount and
   // persisted on every change. Shared by every pane. Font size is also adjustable
   // in-session with Cmd-=/Cmd--.
@@ -3569,22 +3576,38 @@ function MainApp() {
     setTranscriptExpandedByPane((current) => paneRecordWithFlag(current, paneId, expanded));
   }
 
-  function setRightBarCollapsedForPane(collapsed: boolean, paneId: string | null | undefined) {
-    setRightBarCollapsed(collapsed);
+  function focusTerminalPaneAfterChromeChange(paneId: string | null | undefined) {
     if (!paneId) {
       return;
     }
-    if (rightBarFocusFrameRef.current !== null) {
-      cancelAnimationFrame(rightBarFocusFrameRef.current);
+    if (paneChromeFocusFrameRef.current !== null) {
+      cancelAnimationFrame(paneChromeFocusFrameRef.current);
     }
-    rightBarFocusFrameRef.current = requestAnimationFrame(() => {
-      rightBarFocusFrameRef.current = null;
+    paneChromeFocusFrameRef.current = requestAnimationFrame(() => {
+      paneChromeFocusFrameRef.current = null;
       if (activePaneIdRef.current === paneId) {
         // TerminalPane.focus() re-checks visibility and all web/native input
         // blockers, so a composer or modal that still owns focus is preserved.
         terminalPaneRefs.current.get(paneId)?.focus();
       }
     });
+  }
+
+  function setRightBarCollapsedForPane(collapsed: boolean, paneId: string | null | undefined) {
+    setRightBarCollapsed(collapsed);
+    focusTerminalPaneAfterChromeChange(paneId);
+  }
+
+  function setLeftSidebarCollapsedForActivePane(collapsed: boolean) {
+    setLeftSidebarCollapsed(collapsed);
+    if (collapsed) {
+      setPaneContextMenu(null);
+      setGroupMenu(null);
+      setSettingsMenu(null);
+    }
+    focusTerminalPaneAfterChromeChange(
+      activeSurfaceRef.current === "pane" ? activePaneIdRef.current : null,
+    );
   }
 
   function toggleTranscriptExpandedForPane(paneId: string, splitMode = splitRightPaneMode) {
@@ -3834,12 +3857,27 @@ function MainApp() {
       ? [activeTurnPaneSurface]
       : [];
   const activePaneHasTurnSidebar = Boolean(activeTurnPaneSurface?.hasTurnSidebar);
-  // The restore button floats over the native terminal surface, so its rect
-  // must be registered with the native event router or its clicks would be
-  // forwarded to Ghostty instead of the DOM.
+  const researchSidebarRestoreInHeader =
+    leftSidebarCollapsed &&
+    sidebarMode === "research" &&
+    (researchStageView === "document" || researchStageView === "composer");
+  const floatingLeftSidebarRestoreVisible =
+    leftSidebarCollapsed && !researchSidebarRestoreInHeader;
   const floatingRestoreButtonVisible = rightBarCollapsed && activePaneHasTurnSidebar;
-  const floatingRestoreButtonRef = useNativeWebOverlayRegion<HTMLButtonElement>(
-    floatingRestoreButtonVisible,
+  const floatingPaneRestoreControlsVisible =
+    floatingLeftSidebarRestoreVisible || floatingRestoreButtonVisible;
+  const floatingPaneRestoreControlsLayoutKey = [
+    floatingLeftSidebarRestoreVisible ? "left" : "",
+    floatingRestoreButtonVisible ? "right" : "",
+    splitRightPaneMode ? activePane?.id : "",
+    splitRightPaneMode ? activeTurnPaneSurface?.topFraction : "",
+  ].join(":");
+  // These controls can float over a native terminal. Register the whole group,
+  // including the seam between two buttons, so Ghostty cannot capture any part
+  // of the rendered control area.
+  const floatingPaneRestoreControlsRef = useNativeWebOverlayRegion<HTMLDivElement>(
+    floatingPaneRestoreControlsVisible,
+    floatingPaneRestoreControlsLayoutKey,
   );
   const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
   const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
@@ -4996,7 +5034,7 @@ function MainApp() {
 
   function maxTurnPaneWidth() {
     const appWidth = appRef.current?.getBoundingClientRect().width ?? window.innerWidth;
-    const available = Math.floor(appWidth - sidebarWidth - TERMINAL_MIN_WIDTH);
+    const available = Math.floor(appWidth - effectiveSidebarWidth - TERMINAL_MIN_WIDTH);
     return Math.max(TURN_PANE_MIN_WIDTH, Math.min(TURN_PANE_MAX_WIDTH, available));
   }
 
@@ -5025,8 +5063,9 @@ function MainApp() {
     const reservedTurnPaneWidth = willShowTurnPane ? clampTurnPaneWidth(turnPaneWidth) : 0;
     const terminalWidth =
       appWidth !== undefined
-        ? appWidth - sidebarWidth - reservedTurnPaneWidth
-        : (stageRect?.width ?? window.innerWidth - sidebarWidth - reservedTurnPaneWidth);
+        ? appWidth - effectiveSidebarWidth - reservedTurnPaneWidth
+        : (stageRect?.width ??
+          window.innerWidth - effectiveSidebarWidth - reservedTurnPaneWidth);
     const terminalHeight = stageRect?.height ?? window.innerHeight;
     const cell = measureTerminalCellSize(terminalFontFamily, terminalFontSize);
     const cols = Math.floor((terminalWidth - TERMINAL_HORIZONTAL_PADDING) / cell.width);
@@ -5051,7 +5090,7 @@ function MainApp() {
 
   const appStyle = {
     "--font-ui": bodyFontFamily,
-    "--sidebar-width": `${sidebarWidth}px`,
+    "--sidebar-width": `${effectiveSidebarWidth}px`,
     "--browser-overlay-left": `${BROWSER_OVERLAY_LEFT_MARGIN}px`,
     "--turn-font-delta": `${turnFontDelta}px`,
     "--transcript-expanded-font-delta": `${transcriptExpandedFontDelta}px`,
@@ -11387,39 +11426,57 @@ function MainApp() {
     );
   }
 
-  function renderFloatingRightBarRestoreButton() {
-    if (!floatingRestoreButtonVisible || !activeTurnPaneSurface) {
+  function renderFloatingPaneRestoreControls() {
+    if (!floatingPaneRestoreControlsVisible) {
       return null;
     }
 
-    const surface = activeTurnPaneSurface;
+    const surface = floatingRestoreButtonVisible ? activeTurnPaneSurface : null;
     const splitIndex =
-      activePaneSplit ? activePaneSplit.paneIds.indexOf(surface.pane.id) : -1;
+      surface && activePaneSplit ? activePaneSplit.paneIds.indexOf(surface.pane.id) : -1;
     // In split mode this control must remain in the active pane's track. Leaving
     // it at the stage-wide `top: 8px` puts a lower pane's restore control over
     // the top terminal; native pointer routing can then grant that sibling the
     // keyboard during the opening gesture before the web overlay registration
     // has crossed the bridge.
     const style =
-      splitRightPaneMode && splitIndex >= 0
+      surface && splitRightPaneMode && splitIndex >= 0
         ? { top: splitTrackPosition(surface.topFraction, splitIndex, 8) }
         : undefined;
+    const grouped = floatingLeftSidebarRestoreVisible && floatingRestoreButtonVisible;
 
     return (
-      <button
-        ref={floatingRestoreButtonRef}
-        type="button"
-        className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
-        title="Show right bar"
-        aria-label="Show right bar"
+      <div
+        ref={floatingPaneRestoreControlsRef}
+        className={`turn-pane-floating-restore-controls${grouped ? " is-grouped" : ""}`}
         style={style}
-        onClick={() => {
-          activateTerminalPane(surface.pane.id);
-          setRightBarCollapsedForPane(false, surface.pane.id);
-        }}
       >
-        <PanelRightOpen size={14} aria-hidden="true" />
-      </button>
+        {floatingLeftSidebarRestoreVisible ? (
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+            title="Show left sidebar"
+            aria-label="Show left sidebar"
+            onClick={() => setLeftSidebarCollapsedForActivePane(false)}
+          >
+            <PanelLeftOpen size={14} aria-hidden="true" />
+          </button>
+        ) : null}
+        {floatingRestoreButtonVisible && surface ? (
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+            title="Show right bar"
+            aria-label="Show right bar"
+            onClick={() => {
+              activateTerminalPane(surface.pane.id);
+              setRightBarCollapsedForPane(false, surface.pane.id);
+            }}
+          >
+            <PanelRightOpen size={14} aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
     );
   }
 
@@ -11705,25 +11762,39 @@ function MainApp() {
       }`}
       style={appStyle}
     >
-      <div
-        className="sidebar-resizer"
-        role="separator"
-        aria-label="Resize sidebar"
-        aria-orientation="vertical"
-        aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
-        aria-valuemax={maxSidebarWidth()}
-        aria-valuenow={sidebarWidth}
-        tabIndex={0}
-        onPointerDown={startSidebarResize}
-        onKeyDown={resizeSidebarWithKeyboard}
-      />
-      <aside
-        ref={sidebarRef}
-        className={`sidebar${sidebarWidth < LEFT_SIDEBAR_COMPACT_WIDTH ? " is-narrow" : ""}${
-          settings.codeMode ? " is-code-mode" : ""
-        }${sidebarMode === "research" ? " is-research-mode" : ""}`}
-      >
-        <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
+      {!leftSidebarCollapsed ? (
+        <div
+          className="sidebar-resizer"
+          role="separator"
+          aria-label="Resize sidebar"
+          aria-orientation="vertical"
+          aria-valuemin={LEFT_SIDEBAR_MIN_WIDTH}
+          aria-valuemax={maxSidebarWidth()}
+          aria-valuenow={sidebarWidth}
+          tabIndex={0}
+          onPointerDown={startSidebarResize}
+          onKeyDown={resizeSidebarWithKeyboard}
+        />
+      ) : null}
+      {leftSidebarCollapsed ? (
+        <div className="sidebar-collapsed-placeholder" aria-hidden="true" />
+      ) : (
+        <aside
+          ref={sidebarRef}
+          className={`sidebar${sidebarWidth < LEFT_SIDEBAR_COMPACT_WIDTH ? " is-narrow" : ""}${
+            settings.codeMode ? " is-code-mode" : ""
+          }${sidebarMode === "research" ? " is-research-mode" : ""}`}
+        >
+          <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
+          <button
+            type="button"
+            className="icon-button sidebar-collapse-button"
+            title="Collapse left sidebar"
+            aria-label="Collapse left sidebar"
+            onClick={() => setLeftSidebarCollapsedForActivePane(true)}
+          >
+            <PanelLeftClose size={14} aria-hidden="true" />
+          </button>
         <SidebarModeToggle
           mode={sidebarMode}
           shortcutHintsShown={shortcutHintsShown}
@@ -12132,7 +12203,8 @@ function MainApp() {
             <span>Open it in a new document</span>
           </div>
         ) : null}
-      </aside>
+        </aside>
+      )}
 
       {settingsMenu ? (
         <div
@@ -13687,6 +13759,9 @@ function MainApp() {
               onClose={closeNewDocumentComposer}
               onCreate={submitNewDocument}
               onDirtyChange={handleNewDocumentDirtyChange}
+              onShowSidebar={
+                researchSidebarRestoreInHeader ? showLeftSidebarInResearch : undefined
+              }
             />
           ) : null}
           {researchStageView === "multi-select" ? (
@@ -13733,21 +13808,27 @@ function MainApp() {
                 ) ?? null
               }
               onPublicationBindingChange={handlePublicationBindingChange}
+              onShowSidebar={
+                researchSidebarRestoreInHeader ? showLeftSidebarInResearch : undefined
+              }
             />
           ) : null}
-          {researchStageView === "home" ? (
-            <div className="research-empty-state">
-              <NewResearchDialog
-                open
-                inline
-                adapters={config?.adapters ?? []}
-                requireCmdEnterToSend={settings.requireCmdEnterToSend}
-                workspaceId={researchScope}
-                onClose={() => undefined}
-                onCreate={submitNewResearch}
-              />
-            </div>
-          ) : null}
+          {/* Keep the Research-home launcher mounted while another tab or
+              Research view is forward. Its component state is the session
+              draft; hiding this wrapper preserves it without making it
+              durable across app launches. */}
+          <div className="research-empty-state" hidden={researchStageView !== "home"}>
+            <NewResearchDialog
+              open
+              inline
+              visible={researchStageView === "home"}
+              adapters={config?.adapters ?? []}
+              requireCmdEnterToSend={settings.requireCmdEnterToSend}
+              workspaceId={researchScope}
+              onClose={() => undefined}
+              onCreate={submitNewResearch}
+            />
+          </div>
           {homeActive ? (
             <div className="home-stage">
               <div className="home-launcher">{renderLauncher()}</div>
@@ -13966,7 +14047,7 @@ function MainApp() {
             : null}
         </aside>
       ) : null}
-      {renderFloatingRightBarRestoreButton()}
+      {renderFloatingPaneRestoreControls()}
 
       {activeBrowserOwnerId && activeBrowserOverlay?.open ? (
         <BrowserOverlay

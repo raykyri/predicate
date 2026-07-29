@@ -60,6 +60,10 @@
   user-select: none;
 }
 
+.sidebar-collapsed-placeholder {
+  min-width: 0;
+}
+
 /* Draggable strip over the cleared area at the top of the sidebar so the
    frameless window can still be moved. Sits below the resizer's stacking layer so
    the top-right resize grab keeps working, and below the native traffic-light
@@ -71,6 +75,25 @@
   right: 0;
   z-index: 1;
   height: 30px;
+}
+
+.sidebar-collapse-button {
+  position: absolute;
+  top: 3px;
+  right: 10px;
+  z-index: 2;
+  width: 24px;
+  height: 24px;
+  color: var(--text-muted);
+}
+
+.sidebar-collapse-button:hover {
+  background: var(--sidebar-switcher-hover-bg);
+}
+
+.sidebar-collapse-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
 }
 
 .sidebar-mode-toggle {

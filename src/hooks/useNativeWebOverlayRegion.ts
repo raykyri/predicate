@@ -10,9 +10,13 @@ let nextRegionSequence = 0;
  * a DOM control floating over the terminal never receives its clicks.
  *
  * Attach the returned ref to the floating element; pass `enabled: false` (or
- * unmount) to release the region.
+ * unmount) to release the region. `layoutKey` should change when the element
+ * moves without resizing (for example, between terminal split tracks).
  */
-export function useNativeWebOverlayRegion<T extends HTMLElement>(enabled: boolean) {
+export function useNativeWebOverlayRegion<T extends HTMLElement>(
+  enabled: boolean,
+  layoutKey?: unknown,
+) {
   const elementRef = useRef<T | null>(null);
   const regionIdRef = useRef<string | null>(null);
   // Bumped on every registration; release retries from an earlier
@@ -88,6 +92,26 @@ export function useNativeWebOverlayRegion<T extends HTMLElement>(enabled: boolea
       release(0);
     };
   }, [enabled]);
+
+  // Position-only changes do not notify ResizeObserver. Resync them without
+  // tearing down the registration: a release/register pair could briefly
+  // expose the moved control to native pointer routing.
+  useLayoutEffect(() => {
+    const regionId = regionIdRef.current;
+    const element = elementRef.current;
+    if (!enabled || layoutKey === undefined || !regionId || !element) {
+      return;
+    }
+    const rect = element.getBoundingClientRect();
+    void setNativeTerminalWebOverlayRegion({
+      regionId,
+      x: rect.left,
+      y: rect.top,
+      width: rect.width,
+      height: rect.height,
+      visible: rect.width > 0 && rect.height > 0,
+    }).catch(() => undefined);
+  }, [enabled, layoutKey]);
 
   return elementRef;
 }

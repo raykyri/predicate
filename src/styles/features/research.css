@@ -580,6 +580,10 @@
   background: var(--research-workspace-bg);
 }
 
+.research-empty-state[hidden] {
+  display: none;
+}
+
 /* Placeholder shown while several sidebar items are multi-selected: a large
    faint glyph with its caption, centered where the document would be. */
 .research-multi-select-state {
@@ -737,6 +741,7 @@
 
 .research-open-terminal,
 .research-cancel-run,
+.research-sidebar-restore,
 .research-trace-toggle {
   height: 28px;
   min-height: 0;
@@ -752,6 +757,7 @@
 
 .research-open-terminal:hover:not(:disabled),
 .research-cancel-run:hover:not(:disabled),
+.research-sidebar-restore:hover:not(:disabled),
 .research-trace-toggle:hover:not(:disabled) {
   background: var(--chrome-control-bg-hover);
   color: var(--text-strong);
@@ -759,12 +765,14 @@
 
 .research-open-terminal:disabled,
 .research-cancel-run:disabled,
+.research-sidebar-restore:disabled,
 .research-trace-toggle:disabled {
   background: var(--chrome-control-bg-disabled);
   color: var(--text-faint);
 }
 
-/* Icon-only toggle: square it up and center the glyph. */
+/* Icon-only toggles: square them up and center the glyphs. */
+.research-sidebar-restore,
 .research-trace-toggle {
   display: inline-flex;
   align-items: center;
@@ -787,6 +795,7 @@
 
 .research-open-terminal:focus-visible,
 .research-cancel-run:focus-visible,
+.research-sidebar-restore:focus-visible,
 .research-trace-toggle:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--accent-shadow);

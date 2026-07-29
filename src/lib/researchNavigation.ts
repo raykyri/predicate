@@ -21,6 +21,14 @@ export interface SavedResearchAsk {
   updatedAt: number;
 }
 
+/** The ordinary thread/branch composer draft. Unlike a targeted ask, this
+ * belongs to the tree's currently restored page rather than a passage. */
+export interface SavedResearchFollowupDraft {
+  text: string;
+  mode: "thread" | "branch";
+  updatedAt: number;
+}
+
 export interface SavedResearchNavigation {
   selectedNodeId?: string;
   scrollByNode: Record<string, SavedResearchScrollPosition>;
@@ -30,6 +38,8 @@ export interface SavedResearchNavigation {
   expandedByNode?: Record<string, boolean>;
   /** In-progress asks, keyed by the node they were started on. */
   askByNode?: Record<string, SavedResearchAsk>;
+  /** In-progress text in the ordinary thread/branch composer. */
+  followupDraft?: SavedResearchFollowupDraft;
 }
 
 const RESEARCH_NAVIGATION_KEY = "qmux.research-navigation.v1";
@@ -122,12 +132,27 @@ function load(): Record<string, SavedResearchNavigation> {
               : [];
           }),
         );
+        const followupDraft =
+          candidate.followupDraft &&
+          typeof candidate.followupDraft === "object" &&
+          typeof candidate.followupDraft.text === "string" &&
+          (candidate.followupDraft.mode === "thread" ||
+            candidate.followupDraft.mode === "branch") &&
+          typeof candidate.followupDraft.updatedAt === "number" &&
+          Number.isFinite(candidate.followupDraft.updatedAt)
+            ? {
+                text: candidate.followupDraft.text,
+                mode: candidate.followupDraft.mode,
+                updatedAt: candidate.followupDraft.updatedAt,
+              }
+            : undefined;
         return [[treeId, {
           selectedNodeId:
             typeof candidate.selectedNodeId === "string" ? candidate.selectedNodeId : undefined,
           scrollByNode,
           ...(Object.keys(expandedByNode).length > 0 ? { expandedByNode } : {}),
           ...(Object.keys(askByNode).length > 0 ? { askByNode } : {}),
+          ...(followupDraft ? { followupDraft } : {}),
         } satisfies SavedResearchNavigation]];
       }),
     );
@@ -167,6 +192,26 @@ export function restoreResearchScrollPosition(
     return 0;
   }
   return position.top;
+}
+
+/** Updates the ordinary composer draft and reports whether the stored value
+ * changed. Empty text removes the draft so successful sends and manual clears
+ * do not resurrect an empty composer mode. */
+export function recordResearchFollowupDraft(
+  navigation: SavedResearchNavigation,
+  text: string,
+  mode: SavedResearchFollowupDraft["mode"],
+  now = Date.now(),
+): boolean {
+  if (text.length === 0) {
+    if (!navigation.followupDraft) {
+      return false;
+    }
+    delete navigation.followupDraft;
+    return true;
+  }
+  navigation.followupDraft = { text, mode, updatedAt: now };
+  return true;
 }
 
 /** Drops navigation state for trees that no longer exist. */

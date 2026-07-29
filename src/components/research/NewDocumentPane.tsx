@@ -1,5 +1,8 @@
 import DocumentComposer from "./DocumentComposer";
-import { ResearchDocumentFrame } from "./ResearchDocumentChrome";
+import {
+  ResearchDocumentFrame,
+  ResearchSidebarRestoreButton,
+} from "./ResearchDocumentChrome";
 
 interface NewDocumentPaneProps {
   /** Kept mounted while hidden so a draft survives surface switches. */
@@ -13,6 +16,7 @@ interface NewDocumentPaneProps {
     workspaceId: string | null;
   }) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
+  onShowSidebar?: () => void;
 }
 
 /** Full-pane composer for adding a pasted or imported Markdown document as a
@@ -28,9 +32,16 @@ export default function NewDocumentPane({
   onClose,
   onCreate,
   onDirtyChange,
+  onShowSidebar,
 }: NewDocumentPaneProps) {
   return (
-    <ResearchDocumentFrame title="New document" hidden={hidden}>
+    <ResearchDocumentFrame
+      title="New document"
+      hidden={hidden}
+      headerActions={
+        onShowSidebar ? <ResearchSidebarRestoreButton onClick={onShowSidebar} /> : undefined
+      }
+    >
       <article className="research-document-scroll">
         <div className="research-document-content">
           <div className="research-response-grid">
