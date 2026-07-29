@@ -200,7 +200,10 @@ export default function NewResearchDialog({
             <div className="command-launcher-options new-research-model-controls">
               <LauncherSelect
                 value={selectedModel}
-                options={modelPresets.map((preset) => ({ value: preset, label: preset }))}
+                options={modelPresets.map((preset) => ({
+                  value: preset,
+                  label: `${preset.charAt(0).toUpperCase()}${preset.slice(1)}`,
+                }))}
                 ariaLabel="Model"
                 onChange={setModelChoice}
               />
