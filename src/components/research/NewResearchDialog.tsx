@@ -160,13 +160,6 @@ export default function NewResearchDialog({
     sessionDraftReady,
   ]);
 
-  useEffect(() => {
-    if (!open || adapters.some((candidate) => candidate.id === adapter)) {
-      return;
-    }
-    setAdapter(adapters.find((candidate) => candidate.default)?.id ?? adapters[0]?.id ?? "");
-  }, [adapter, adapters, open]);
-
   // Grow the textarea to fit its content, like the Home launcher: multi-line
   // prompts expand the composer until the CSS max-height caps it.
   const growPromptInput = useCallback(() => {
@@ -195,16 +188,27 @@ export default function NewResearchDialog({
     return null;
   }
 
+  // A stale adapter — a restored draft naming an uninstalled adapter, or any
+  // adapter while config is still loading and `adapters` is empty — resolves
+  // to the default at render time without mutating the stored choice, exactly
+  // like the model fallback below. Resetting the state in an effect instead
+  // would race config loading: the launcher mounts before config arrives, so
+  // a restored draft's adapter would be reset against the empty list and the
+  // save effect would persist that clobber over the stored draft.
+  const selectedAdapter = adapters.some((candidate) => candidate.id === adapter)
+    ? adapter
+    : (adapters.find((candidate) => candidate.default)?.id ?? adapters[0]?.id ?? "");
+
   // A stale choice (left over from another adapter) silently falls back to the
   // adapter's first preset, so the trigger always shows what will launch.
-  const modelPresets = modelPresetsFor(adapter);
+  const modelPresets = modelPresetsFor(selectedAdapter);
   const selectedModel =
     modelChoice && modelPresets.includes(modelChoice) ? modelChoice : modelPresets[0];
   const resolvedModel =
     selectedModel === CUSTOM_MODEL ? customModel.trim() || null : selectedModel;
 
   async function submit() {
-    if (!prompt.trim() || !adapter || submitting) {
+    if (!prompt.trim() || !selectedAdapter || submitting) {
       return;
     }
     setSubmitting(true);
@@ -212,7 +216,7 @@ export default function NewResearchDialog({
     try {
       await onCreate({
         prompt: prompt.trim(),
-        adapter,
+        adapter: selectedAdapter,
         model: resolvedModel,
         workspaceId,
       });
@@ -318,7 +322,7 @@ export default function NewResearchDialog({
           <div className="command-launcher-controls">
             <div className="command-launcher-adapter-select">
               <LauncherSelect
-                value={adapter}
+                value={selectedAdapter}
                 options={adapterOptions}
                 ariaLabel="Agent"
                 onChange={(nextAdapter) => {
@@ -330,7 +334,7 @@ export default function NewResearchDialog({
             <button
               type="submit"
               className="control-button command-launcher-send new-research-send"
-              disabled={!prompt.trim() || !adapter || submitting}
+              disabled={!prompt.trim() || !selectedAdapter || submitting}
               aria-label={submitting ? "Starting research" : "Start research"}
               title={submitting ? "Starting research" : "Start research"}
             >
