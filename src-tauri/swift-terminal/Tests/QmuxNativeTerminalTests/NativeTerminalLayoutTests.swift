@@ -69,6 +69,50 @@ final class NativeTerminalLayoutTests: XCTestCase {
         }
     }
 
+    func testFrameChangeWhileHiddenFitsOnReveal() async throws {
+        try await MainActor.run {
+            try Self.withPane { paneID, frame in
+                NativeTerminalCallbackRecorder.shared.reset()
+                let widerFrame = CGRect(
+                    x: frame.minX,
+                    y: frame.minY,
+                    width: frame.width + 180,
+                    height: frame.height
+                )
+
+                XCTAssertTrue(
+                    Self.setLayout(paneID: paneID, frame: frame, visible: false)
+                )
+                // A freshly reloaded document publishes a hidden pane's
+                // measured rect before it relearns the parked last-visible
+                // frame, moving the view while no fit can run.
+                XCTAssertTrue(
+                    Self.setLayout(
+                        paneID: paneID,
+                        frame: widerFrame,
+                        visible: false
+                    )
+                )
+                XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
+                // Revealing at that same frame must still fit: the grid is
+                // sized for the old frame.
+                XCTAssertTrue(
+                    Self.setLayout(
+                        paneID: paneID,
+                        frame: widerFrame,
+                        visible: true
+                    )
+                )
+
+                let resizes = NativeTerminalCallbackRecorder.shared.resizes
+                XCTAssertEqual(resizes.count, 1)
+                let resize = try XCTUnwrap(resizes.first)
+                XCTAssertGreaterThan(resize.columns, 0)
+                XCTAssertGreaterThan(resize.rows, 0)
+            }
+        }
+    }
+
     @MainActor
     private static func withPane(
         _ body: (_ paneID: String, _ frame: CGRect) throws -> Void

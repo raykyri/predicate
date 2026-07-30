@@ -97,6 +97,13 @@ final class NativeTerminalPane: NSObject,
     /// restored scrollback into it would be reflowed — and scrambled — by the
     /// first real fit; the host gates replay on this flag.
     var hasCommittedGeometry = false
+    /// True when this pane's frame changed (or a fit was requested) while its
+    /// view was hidden. Fits are skipped for hidden views, so the grid then no
+    /// longer matches the frame and the next visible geometry pass must fit
+    /// even though the frame no longer changes by then. The main source is a
+    /// freshly reloaded document publishing a hidden pane's measured rect
+    /// before it has relearned the pane's parked last-visible frame.
+    var needsRevealFit = false
     var consumedShortcutKeyCodes: Set<UInt16> = []
     private var lastUserInputReport = Date.distantPast
 

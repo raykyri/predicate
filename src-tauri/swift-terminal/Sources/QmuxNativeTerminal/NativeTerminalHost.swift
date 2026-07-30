@@ -395,7 +395,21 @@ final class NativeTerminalHost {
         if frameChanged {
             pane.view.frame = frame
         }
-        if !pane.view.isHidden, frameChanged || forceFit {
+        if pane.view.isHidden {
+            // The fit below is skipped while hidden, so a frame change (or a
+            // requested fit) leaves the grid sized for the old frame. Record
+            // the debt: the reveal that shows this frame must fit even though
+            // the frame no longer changes then. Without this, a hidden pane
+            // moved by a post-reload document (which has not yet relearned
+            // the pane's parked last-visible frame) would reveal with a grid
+            // and PTY size fitted for the pre-reload frame.
+            if frameChanged || forceFit {
+                pane.needsRevealFit = true
+            }
+            return
+        }
+        if frameChanged || forceFit || pane.needsRevealFit {
+            pane.needsRevealFit = false
             pane.view.fitToSize()
             // First fit to a real frame: the surface's grid now matches the
             // pane's actual size, so restored scrollback can replay without
