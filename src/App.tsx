@@ -1384,7 +1384,7 @@ function agentHistoryRequestKey(agent: AgentInfo) {
 interface HomeTurnHistoryState {
   requestKey: string;
   pastTurns: HomeRailPastTurn[];
-  nextBefore: number | null;
+  nextBefore: string | null;
   loading: boolean;
 }
 
@@ -2835,7 +2835,7 @@ function MainApp() {
     await Promise.all(requests);
   }, [fetchRetainedThreadGraph]);
   const fetchHomeTurnHistoryPage = useCallback(
-    async (agent: AgentInfo, before: number | null) => {
+    async (agent: AgentInfo, before: string | null) => {
       const requestKey = agentHistoryRequestKey(agent);
       const sequence = (homeHistoryRequestSequenceByAgentRef.current.get(agent.id) ?? 0) + 1;
       homeHistoryRequestSequenceByAgentRef.current.set(agent.id, sequence);

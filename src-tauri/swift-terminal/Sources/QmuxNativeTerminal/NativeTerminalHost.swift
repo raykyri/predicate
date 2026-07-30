@@ -471,9 +471,10 @@ final class NativeTerminalHost {
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
+        // Drop document-owned deferral flags; the new document will re-request
+        // geometry. Keep in-flight frames/fit IDs so a reload mid-resize does
+        // not strand panes at pre-reload sizes until the next set_layout pass.
         clientDeferredGeometryPaneIDs.removeAll()
-        pendingPaneFrames.removeAll()
-        pendingFitPaneIDs.removeAll()
         windowLiveResizeActive = false
         return true
     }

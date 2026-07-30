@@ -354,7 +354,7 @@ export function listTurns(agentId?: string | null) {
 
 export function listHomeTurnHistory(
   agentId: string,
-  before?: number | null,
+  before?: string | null,
   limit = 100,
 ) {
   return invoke<HomeTurnHistoryPage>("list_home_turn_history", {

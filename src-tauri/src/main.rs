@@ -729,12 +729,16 @@ fn list_turns(
 async fn list_home_turn_history(
     state: tauri::State<'_, AppState>,
     agent_id: String,
-    before: Option<usize>,
+    before: Option<String>,
     limit: Option<usize>,
 ) -> Result<thread_graph::HomeTurnHistoryPage, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.home_turn_history(&agent_id, before, limit.unwrap_or(100))
+        state.home_turn_history(
+            &agent_id,
+            before.as_deref(),
+            limit.unwrap_or(100),
+        )
     })
     .await
     .map_err(|err| format!("list_home_turn_history task failed: {err}"))?
@@ -2152,6 +2156,19 @@ impl InterfaceHealthTracker {
         state.reload_claimed = true;
         true
     }
+
+    /// True when a deferred reload retry for `generation` is still meaningful
+    /// (same generation, not yet claimed, and still unanswered when required).
+    fn reload_still_pending(&self, generation: u64, require_unanswered: bool) -> bool {
+        let state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.generation != generation || state.reload_claimed {
+            return false;
+        }
+        if require_unanswered && state.acknowledged {
+            return false;
+        }
+        true
+    }
 }
 
 static INTERFACE_HEALTH: InterfaceHealthTracker = InterfaceHealthTracker::new();
@@ -2195,6 +2212,13 @@ pub(crate) fn begin_interface_health_probe(state: AppState) -> u64 {
 /// or never completes. Reload only the webview; PTYs and Ghostty surfaces stay
 /// alive through the same reset path as the manual recovery command.
 #[cfg(desktop)]
+/// How long to wait before retrying a health-driven reload that was deferred
+/// because the main window was unfocused, minimized, or hidden. Short enough
+/// that returning to qmux recovers a hung document quickly; claim helpers
+/// no-op if the generation was cancelled or already reloaded.
+const INTERFACE_HEALTH_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(desktop)]
 pub(crate) fn request_unhealthy_interface_reload(
     state: AppState,
     generation: u64,
@@ -2205,6 +2229,7 @@ pub(crate) fn request_unhealthy_interface_reload(
         return;
     };
     let app_handle_on_main = app_handle.clone();
+    let state_for_retry = state.clone();
     let _ = app_handle.run_on_main_thread(move || {
         let Some(window) = app_handle_on_main.get_webview_window("main") else {
             return;
@@ -2213,6 +2238,20 @@ pub(crate) fn request_unhealthy_interface_reload(
             && !window.is_minimized().unwrap_or(true)
             && window.is_focused().unwrap_or(false);
         if !eligible {
+            // Do not claim the generation while ineligible — a later focus may
+            // still need to reload. Reschedule only while the probe is still
+            // open so an overnight unfocused window does not spin threads.
+            if INTERFACE_HEALTH.reload_still_pending(generation, require_unanswered) {
+                std::thread::spawn(move || {
+                    std::thread::sleep(INTERFACE_HEALTH_RETRY_DELAY);
+                    request_unhealthy_interface_reload(
+                        state_for_retry,
+                        generation,
+                        require_unanswered,
+                        reason,
+                    );
+                });
+            }
             return;
         }
         let claimed = if require_unanswered {

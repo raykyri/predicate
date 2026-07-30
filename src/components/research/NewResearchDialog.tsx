@@ -29,6 +29,18 @@ function modelPresetsFor(adapter: string): string[] {
   return MODEL_PRESETS_BY_ADAPTER[adapter] ?? [CUSTOM_MODEL];
 }
 
+/** Display label for a model preset: title-case each alphanumeric token so
+ * multi-part ids (`gpt-5.4`) read evenly rather than only uppercasing the first
+ * character (`Gpt-5.4`). */
+function formatResearchModelLabel(preset: string): string {
+  return preset.replace(/[A-Za-z]+/g, (token) => {
+    if (token.length === 0) {
+      return token;
+    }
+    return `${token.charAt(0).toUpperCase()}${token.slice(1).toLowerCase()}`;
+  });
+}
+
 interface NewResearchDialogProps {
   open: boolean;
   inline?: boolean;
@@ -281,7 +293,7 @@ export default function NewResearchDialog({
                 value={selectedModel}
                 options={modelPresets.map((preset) => ({
                   value: preset,
-                  label: `${preset.charAt(0).toUpperCase()}${preset.slice(1)}`,
+                  label: formatResearchModelLabel(preset),
                 }))}
                 ariaLabel="Model"
                 onChange={(choice) => {

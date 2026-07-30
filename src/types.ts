@@ -458,7 +458,8 @@ export interface HomeTurnSummary {
 
 export interface HomeTurnHistoryPage {
   turns: HomeTurnSummary[];
-  nextBefore: number | null;
+  /** Turn id cursor for the next older page (pass as `before` to listHomeTurnHistory). */
+  nextBefore: string | null;
 }
 
 export interface HandoffNode extends BaseThreadNode {

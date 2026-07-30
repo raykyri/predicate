@@ -2,6 +2,11 @@ import { getInterfaceDraft, setInterfaceDraft } from "./api";
 
 const STORAGE_PREFIX = "qmux.interface-draft.";
 const SAVE_DEBOUNCE_MS = 120;
+/** Small composers flush to the process-local backend immediately so a hard
+ * WebContent kill (which may skip `pagehide`) still keeps the latest draft.
+ * Large document bodies keep the short debounce and rely on visibility/pagehide
+ * flushes for the residual window. */
+const IMMEDIATE_BACKEND_FLUSH_MAX_CHARS = 4_096;
 
 export const SESSION_DRAFT_KEYS = {
   homeLauncher: "home-launcher",
@@ -50,6 +55,12 @@ function flushPending(key: string) {
   void setInterfaceDraft(key, entry.raw).catch(() => undefined);
 }
 
+function flushAllPending() {
+  for (const key of [...pending.keys()]) {
+    flushPending(key);
+  }
+}
+
 export function saveSessionDraftJson(key: string, value: unknown) {
   clearedKeys.delete(key);
   const raw = JSON.stringify(value);
@@ -61,6 +72,11 @@ export function saveSessionDraftJson(key: string, value: unknown) {
   const existing = pending.get(key);
   if (existing) {
     window.clearTimeout(existing.timer);
+  }
+  if (raw.length <= IMMEDIATE_BACKEND_FLUSH_MAX_CHARS) {
+    pending.delete(key);
+    void setInterfaceDraft(key, raw).catch(() => undefined);
+    return;
   }
   pending.set(key, {
     raw,
@@ -119,9 +135,10 @@ export async function loadSessionDraftJson<T>(key: string): Promise<T | null> {
 }
 
 if (typeof window !== "undefined") {
-  window.addEventListener("pagehide", () => {
-    for (const key of [...pending.keys()]) {
-      flushPending(key);
+  window.addEventListener("pagehide", flushAllPending);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") {
+      flushAllPending();
     }
   });
 }

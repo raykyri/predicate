@@ -508,7 +508,11 @@ pub struct HomeTurnSummary {
 #[serde(rename_all = "camelCase")]
 pub struct HomeTurnHistoryPage {
     pub turns: Vec<HomeTurnSummary>,
-    pub next_before: Option<usize>,
+    /// Opaque cursor for the next older page: the turn id of the earliest
+    /// summary on this page. Pass it as `before` to load summaries strictly
+    /// older than that id. Id-based (not index-based) so growth at the end of
+    /// the compact list cannot skip or reorder already-rendered cards.
+    pub next_before: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1144,10 +1148,14 @@ fn first_user_text(node: &TurnNode) -> Option<String> {
 /// user-card text and settlement timestamps cross IPC. The newest prompt is
 /// omitted because Home renders it as the current card from the live turn
 /// window.
+///
+/// `before` is a turn id cursor: the page ends just before that summary. Pass
+/// `None` for the newest page. When the cursor id is missing (deleted turn),
+/// returns an empty page so the UI stops paging rather than reshuffling.
 pub fn home_turn_history_page(
     graph: &ThreadGraph,
     branch_id: &str,
-    before: Option<usize>,
+    before: Option<&str>,
     limit: usize,
 ) -> HomeTurnHistoryPage {
     let mut summaries = Vec::new();
@@ -1172,11 +1180,22 @@ pub fn home_turn_history_page(
         }
     }
 
-    let end = before.unwrap_or(summaries.len()).min(summaries.len());
+    let end = match before {
+        None => summaries.len(),
+        Some(id) => match summaries.iter().position(|summary| summary.id == id) {
+            Some(index) => index,
+            None => {
+                return HomeTurnHistoryPage {
+                    turns: Vec::new(),
+                    next_before: None,
+                };
+            }
+        },
+    };
     let start = end.saturating_sub(limit.clamp(1, 200));
     HomeTurnHistoryPage {
         turns: summaries[start..end].to_vec(),
-        next_before: (start > 0).then_some(start),
+        next_before: (start > 0).then(|| summaries[start].id.clone()),
     }
 }
 
@@ -1492,9 +1511,10 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(newest.next_before, Some(2));
+        assert_eq!(newest.next_before.as_deref(), Some("user-2"));
 
-        let earlier = home_turn_history_page(&graph, "branch-1", newest.next_before, 2);
+        let earlier =
+            home_turn_history_page(&graph, "branch-1", newest.next_before.as_deref(), 2);
         assert_eq!(
             earlier
                 .turns
@@ -1504,6 +1524,36 @@ mod tests {
             vec!["user-0", "user-1"]
         );
         assert_eq!(earlier.next_before, None);
+
+        // Growth at the end must not shift an id cursor's older page. Another
+        // settled exchange flushes the previous pending newest into summaries.
+        let mut grown = turns.clone();
+        let mut user = sample_turn(&agent.id, "user-5", "user", 10);
+        user.blocks = vec![TurnBlock::Text {
+            text: "prompt 5".to_string(),
+        }];
+        user.timestamp = Some(550);
+        grown.push(user);
+        let mut assistant = sample_turn(&agent.id, "assistant-5", "assistant", 11);
+        assistant.timestamp = Some(600);
+        grown.push(assistant);
+        let grown_graph = ThreadStore::new(worktree.display().to_string())
+            .replace_agent_branch_turns(&agent, &grown)
+            .unwrap();
+        let still_earlier =
+            home_turn_history_page(&grown_graph, "branch-1", Some("user-2"), 2);
+        assert_eq!(
+            still_earlier
+                .turns
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-0", "user-1"]
+        );
+        assert_eq!(
+            home_turn_history_page(&grown_graph, "branch-1", Some("missing"), 2).turns,
+            Vec::<HomeTurnSummary>::new()
+        );
         fs::remove_dir_all(worktree).unwrap();
     }
 

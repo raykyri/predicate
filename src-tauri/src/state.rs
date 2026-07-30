@@ -2461,7 +2461,7 @@ impl AppState {
     pub fn home_turn_history(
         &self,
         agent_id: &str,
-        before: Option<usize>,
+        before: Option<&str>,
         limit: usize,
     ) -> Result<thread_graph::HomeTurnHistoryPage, String> {
         let (agent, record) = {
