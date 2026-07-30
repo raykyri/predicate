@@ -7,7 +7,6 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
-  type SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
 import { Check, Ellipsis } from "lucide-react";
@@ -131,9 +130,14 @@ interface HomeRailsProps {
   readRailScroll: (agentId: string) => HomeRailScrollPosition | null;
   saveRailScroll: (agentId: string, position: HomeRailScrollPosition) => void;
   /** In-progress composer text, keyed by rail id (agentId or DRAFTS_RAIL_ID).
-   * Held by the app so tab switches and interface reloads preserve it. */
-  composerDrafts: Record<string, string>;
-  setComposerDrafts: (update: SetStateAction<Record<string, string>>) => void;
+   * Seeded from and mirrored to an app-held store so tab switches and
+   * interface reloads preserve it — kept out of app state so keystrokes only
+   * re-render this component. */
+  readComposerDrafts: () => Record<string, string>;
+  saveComposerDrafts: (drafts: Record<string, string>) => void;
+  /** Late backend draft restore (sessionStorage came up empty after a reload),
+   * merged under anything typed since; null until it lands. */
+  restoredComposerDrafts: Record<string, string> | null;
 }
 
 interface LinkPath {
@@ -513,8 +517,9 @@ export default function HomeRails({
   onAssignDraft,
   readRailScroll,
   saveRailScroll,
-  composerDrafts,
-  setComposerDrafts,
+  readComposerDrafts,
+  saveComposerDrafts,
+  restoredComposerDrafts,
 }: HomeRailsProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -575,11 +580,24 @@ export default function HomeRails({
     },
     [],
   );
+  // Live composer text lives here so a keystroke re-renders only HomeRails;
+  // every change mirrors into the app-held store, which also persists it.
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>(() => ({
+    ...readComposerDrafts(),
+  }));
+  useEffect(() => {
+    saveComposerDrafts(composerDrafts);
+  }, [composerDrafts, saveComposerDrafts]);
+  useEffect(() => {
+    if (restoredComposerDrafts) {
+      setComposerDrafts((current) => ({ ...restoredComposerDrafts, ...current }));
+    }
+  }, [restoredComposerDrafts]);
   const setComposerDraft = useCallback(
     (railId: string, text: string) => {
       setComposerDrafts((current) => ({ ...current, [railId]: text }));
     },
-    [setComposerDrafts],
+    [],
   );
   // Recalling an item into a composer that already holds text would clobber it,
   // so guard the swap the same way the right pane's edit does.

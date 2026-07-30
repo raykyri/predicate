@@ -787,6 +787,13 @@
   display: flex;
 }
 
+/* Split right-bar cells render their own floating expand/collapse controls at
+   the stage's top right; the sidebar restore sits below them rather than on
+   top of them. */
+.turn-pane-floating-restore-controls.is-below-split-controls {
+  top: 48px;
+}
+
 .turn-pane-floating-restore-controls.is-grouped
   .turn-pane-floating-restore-button:first-child {
   border-top-right-radius: 0;

@@ -1579,6 +1579,8 @@ function MainApp() {
   const homeHistoryRequestSequenceByAgentRef = useRef(new Map<string, number>());
   /** One auto-retry budget per agent+requestKey after an initial history load fails. */
   const homeHistoryRetryBudgetByAgentRef = useRef(new Map<string, string>());
+  /** Read by the home-history retry timer, which must not fetch for a hidden Home. */
+  const homeActiveRef = useRef(false);
   const [queuedTurnsByAgent, setQueuedTurnsByAgentState] = useState<Record<string, QueuedTurn[]>>({});
   // Application-global prompt drafts (the home Drafts rail). Backend-owned;
   // hydrated at boot and kept fresh by drafts.changed events.
@@ -1831,12 +1833,25 @@ function MainApp() {
   const [initialHomeComposerDrafts] = useState(() =>
     readSessionDraftJson<Record<string, string>>(SESSION_DRAFT_KEYS.homeComposers),
   );
-  const [homeComposerDrafts, setHomeComposerDrafts] = useState<Record<string, string>>(
+  // Half-typed home-rail composer text, keyed by rail id. Held here (not inside
+  // HomeRails) so a tab away — which unmounts Home — doesn't discard it, and as
+  // a ref rather than app state: as app-root state every composer keystroke
+  // re-rendered the entire component tree (HomeRails keeps the live copy in its
+  // own local state and mirrors it here, like the rail scroll store above). The
+  // session-draft store restores it across WebKit reloads without carrying it
+  // across app restarts.
+  const homeComposerDraftsRef = useRef<Record<string, string>>(
     initialHomeComposerDrafts ?? {},
   );
-  const [homeComposerDraftsReady, setHomeComposerDraftsReady] = useState(
-    initialHomeComposerDrafts !== null,
-  );
+  // Backend copy restored after mount when sessionStorage came up empty (a
+  // reload that lost session storage). HomeRails merges it under anything typed
+  // since. Persistence stays paused until the restore settles so an early save
+  // cannot clobber the backend copy with a blank map.
+  const [restoredHomeComposerDrafts, setRestoredHomeComposerDrafts] = useState<Record<
+    string,
+    string
+  > | null>(null);
+  const homeComposerDraftsReadyRef = useRef(initialHomeComposerDrafts !== null);
   useEffect(() => {
     if (initialHomeComposerDrafts !== null) {
       return;
@@ -1845,29 +1860,35 @@ function MainApp() {
     void loadSessionDraftJson<Record<string, string>>(SESSION_DRAFT_KEYS.homeComposers)
       .then((restored) => {
         if (!disposed && restored) {
-          setHomeComposerDrafts((current) => ({ ...restored, ...current }));
+          homeComposerDraftsRef.current = {
+            ...restored,
+            ...homeComposerDraftsRef.current,
+          };
+          setRestoredHomeComposerDrafts(restored);
         }
       })
       .catch(() => undefined)
       .finally(() => {
         if (!disposed) {
-          setHomeComposerDraftsReady(true);
+          homeComposerDraftsReadyRef.current = true;
         }
       });
     return () => {
       disposed = true;
     };
   }, [initialHomeComposerDrafts]);
-  useEffect(() => {
-    if (!homeComposerDraftsReady) {
+  const readHomeComposerDrafts = useCallback(() => homeComposerDraftsRef.current, []);
+  const saveHomeComposerDrafts = useCallback((drafts: Record<string, string>) => {
+    homeComposerDraftsRef.current = drafts;
+    if (!homeComposerDraftsReadyRef.current) {
       return;
     }
-    if (Object.values(homeComposerDrafts).some(Boolean)) {
-      saveSessionDraftJson(SESSION_DRAFT_KEYS.homeComposers, homeComposerDrafts);
+    if (Object.values(drafts).some(Boolean)) {
+      saveSessionDraftJson(SESSION_DRAFT_KEYS.homeComposers, drafts);
     } else {
       clearSessionDraft(SESSION_DRAFT_KEYS.homeComposers);
     }
-  }, [homeComposerDrafts, homeComposerDraftsReady]);
+  }, []);
   const setActivePaneId = useCallback(
     (next: SetStateAction<string | null>) => {
       if (typeof next === "function") {
@@ -2375,6 +2396,7 @@ function MainApp() {
   const homeActive =
     activeSurface === "pane" &&
     (activePaneId === HOME_TAB_ID || (!selectedPane && panes.length === 0));
+  homeActiveRef.current = homeActive;
   const activePane = useMemo(
     () =>
       homeActive || researchActive || activeSurface !== "pane" ? undefined : selectedPane,
@@ -2899,6 +2921,14 @@ function MainApp() {
           ) {
             homeHistoryRetryBudgetByAgentRef.current.set(agent.id, requestKey);
             window.setTimeout(() => {
+              // The retry serves only a visible Home. Leaving Home clears the
+              // request keys, so without this guard the timer would pass the
+              // stamped-key check below and re-issue the fetch for a hidden
+              // surface — resurrecting history state the leave-Home eviction
+              // just dropped. Returning to Home re-issues the fetch anyway.
+              if (!homeActiveRef.current) {
+                return;
+              }
               if (homeHistoryRequestKeyByAgentRef.current.has(agent.id)) {
                 return;
               }
@@ -4364,18 +4394,34 @@ function MainApp() {
     splitRightPaneMode,
     splitTurnPaneSurfaces.length,
   );
+  const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
+  const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
+  const hasGlobalTurnSidebar = hasVisibleRightBar && !splitRightPaneMode;
   const researchSidebarRestoreInHeader =
     leftSidebarCollapsed &&
     sidebarMode === "research" &&
     (researchStageView === "document" || researchStageView === "composer");
+  // The unsplit right bar draws TurnPaneHeader across the stage's top right —
+  // exactly where the floating restore control renders — so the restore moves
+  // into that header instead, like the research document chrome does.
+  const turnPaneSidebarRestoreInHeader =
+    leftSidebarCollapsed && hasVisibleRightBar && !splitRightPaneMode;
   const floatingLeftSidebarRestoreVisible =
-    leftSidebarCollapsed && !researchSidebarRestoreInHeader;
+    leftSidebarCollapsed &&
+    !researchSidebarRestoreInHeader &&
+    !turnPaneSidebarRestoreInHeader;
   const floatingRestoreButtonVisible = rightBarCollapsed && activePaneCanToggleTurnSidebar;
+  // Split right-bar cells are headerless and render their own floating
+  // expand/collapse controls at the stage's top right; drop the sidebar
+  // restore below them instead of covering them.
+  const floatingRestoreBelowSplitControls =
+    floatingLeftSidebarRestoreVisible && splitRightPaneMode && hasVisibleRightBar;
   const floatingPaneRestoreControlsVisible =
     floatingLeftSidebarRestoreVisible || floatingRestoreButtonVisible;
   const floatingPaneRestoreControlsLayoutKey = [
     floatingLeftSidebarRestoreVisible ? "left" : "",
     floatingRestoreButtonVisible ? "right" : "",
+    floatingRestoreBelowSplitControls ? "below" : "",
     splitRightPaneMode ? activePane?.id : "",
     splitRightPaneMode ? activeTurnPaneSurface?.topFraction : "",
   ].join(":");
@@ -4386,9 +4432,12 @@ function MainApp() {
     floatingPaneRestoreControlsVisible,
     floatingPaneRestoreControlsLayoutKey,
   );
-  const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
-  const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
-  const hasGlobalTurnSidebar = hasVisibleRightBar && !splitRightPaneMode;
+  // With the sidebar collapsed its titlebar drag strip is gone and the stage —
+  // often a native terminal — runs under the macOS traffic lights. Keep that
+  // corner draggable so the frameless window can still be moved; the overlay
+  // region routes those pointer events to the web layer instead of Ghostty.
+  const collapsedTitlebarDragRef =
+    useNativeWebOverlayRegion<HTMLDivElement>(leftSidebarCollapsed);
   const splitTranscriptExpanded = Boolean(
     activePaneSplit &&
       paneSplitFlagIsEnabled(splitTranscriptExpandedByPane, activePaneSplit.paneIds),
@@ -11960,7 +12009,9 @@ function MainApp() {
     return (
       <div
         ref={floatingPaneRestoreControlsRef}
-        className={`turn-pane-floating-restore-controls${grouped ? " is-grouped" : ""}`}
+        className={`turn-pane-floating-restore-controls${grouped ? " is-grouped" : ""}${
+          floatingRestoreBelowSplitControls ? " is-below-split-controls" : ""
+        }`}
         style={style}
       >
         {floatingLeftSidebarRestoreVisible ? (
@@ -12098,6 +12149,11 @@ function MainApp() {
               onToggleTranscriptExpanded={toggleActiveTranscriptExpanded}
               onCollapseRightBar={() =>
                 setRightBarCollapsedForPane(true, surface.pane.id)
+              }
+              onShowSidebar={
+                turnPaneSidebarRestoreInHeader
+                  ? () => setLeftSidebarCollapsedForActivePane(false)
+                  : undefined
               }
               onInsertPrompt={
                 agent ? (text) => requestComposerInsert(agent.id, text) : undefined
@@ -12289,7 +12345,15 @@ function MainApp() {
         />
       ) : null}
       {leftSidebarCollapsed ? (
-        <div className="sidebar-collapsed-placeholder" aria-hidden="true" />
+        <>
+          <div className="sidebar-collapsed-placeholder" aria-hidden="true" />
+          <div
+            ref={collapsedTitlebarDragRef}
+            className="collapsed-titlebar-drag"
+            data-tauri-drag-region
+            aria-hidden="true"
+          />
+        </>
       ) : (
         <aside
           ref={sidebarRef}
@@ -14376,8 +14440,9 @@ function MainApp() {
                   onAssignDraft={(draftId, agentId) => void assignHomeDraft(draftId, agentId)}
                   readRailScroll={readHomeRailScroll}
                   saveRailScroll={saveHomeRailScroll}
-                  composerDrafts={homeComposerDrafts}
-                  setComposerDrafts={setHomeComposerDrafts}
+                  readComposerDrafts={readHomeComposerDrafts}
+                  saveComposerDrafts={saveHomeComposerDrafts}
+                  restoredComposerDrafts={restoredHomeComposerDrafts}
                 />
               </div>
             </div>

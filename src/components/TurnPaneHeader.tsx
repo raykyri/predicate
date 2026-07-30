@@ -3,6 +3,7 @@ import {
   GitBranch,
   Globe,
   Minimize2,
+  PanelLeftOpen,
   PanelRightClose,
   SquareCenterlineDashedVertical,
 } from "lucide-react";
@@ -61,6 +62,10 @@ interface TurnPaneHeaderProps {
   transcriptShortcutLabel: string;
   onToggleTranscriptExpanded: () => void;
   onCollapseRightBar: () => void;
+  // Reopens the collapsed app sidebar from this header. Present only while the
+  // sidebar is collapsed and this header occupies the stage's top right — the
+  // floating stage control would otherwise render on top of these buttons.
+  onShowSidebar?: () => void;
   // Inserts saved-prompt text into this pane's composer; absent when the pane
   // has no agent composer, which disables the prompt-library trigger.
   onInsertPrompt?: (text: string) => void;
@@ -122,6 +127,7 @@ export default function TurnPaneHeader({
   transcriptShortcutLabel,
   onToggleTranscriptExpanded,
   onCollapseRightBar,
+  onShowSidebar,
   onInsertPrompt,
   promptProjectDir,
   promptProjectPath,
@@ -602,6 +608,17 @@ export default function TurnPaneHeader({
         >
           <PanelRightClose size={14} aria-hidden="true" />
         </button>
+        {onShowSidebar ? (
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button"
+            title="Show left sidebar"
+            aria-label="Show left sidebar"
+            onClick={onShowSidebar}
+          >
+            <PanelLeftOpen size={14} aria-hidden="true" />
+          </button>
+        ) : null}
       </div>
       {/* Portaled to <body> so the fixed-position toast escapes the header's
           stacking context (position:absolute + z-index), which would otherwise

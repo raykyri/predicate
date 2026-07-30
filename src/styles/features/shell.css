@@ -64,6 +64,20 @@
   min-width: 0;
 }
 
+/* With the sidebar collapsed, its .titlebar-drag strip is gone and the stage
+   runs under the macOS traffic lights. Keep that corner draggable so the
+   frameless window can still be moved. Sized to the traffic-light cluster's
+   footprint — an area the buttons already sit on top of — so it steals no
+   useful clicks from the content beneath. */
+.collapsed-titlebar-drag {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 2;
+  width: 80px;
+  height: 30px;
+}
+
 /* Draggable strip over the cleared area at the top of the sidebar so the
    frameless window can still be moved. Sits below the resizer's stacking layer so
    the top-right resize grab keeps working, and below the native traffic-light
