@@ -8,7 +8,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 static THREAD_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
@@ -19,6 +19,9 @@ static GRAPH_CACHE_REVISION: AtomicU64 = AtomicU64::new(0);
 /// A streaming turn appends transcript lines every tail tick; without this each
 /// line re-wrote (and fsynced) the whole snapshot file.
 const GRAPH_FLUSH_DEBOUNCE: Duration = Duration::from_millis(500);
+const GRAPH_CACHE_CLEAN_TTL: Duration = Duration::from_secs(30);
+const GRAPH_CACHE_CLEANUP_INTERVAL: Duration = Duration::from_secs(5);
+const GRAPH_CACHE_MAX_CLEAN_BYTES: usize = 128 * 1024 * 1024;
 
 /// In-memory authority for thread graphs, keyed by (storage root, thread id).
 ///
@@ -28,17 +31,23 @@ const GRAPH_FLUSH_DEBOUNCE: Duration = Duration::from_millis(500);
 /// flusher thread writes dirty graphs on a debounce, and reads are served from
 /// the cache while an update is dirty or being flushed so they always observe
 /// the newest mutation rather than a yet-to-be-flushed disk file. Successfully
-/// flushed entries are evicted, and clean disk reads are not cached, so graphs
-/// that are no longer changing do not stay resident for the process lifetime.
-/// Test builds bypass the cache entirely (reads and writes stay synchronous on
-/// disk) so tests can assert snapshot files immediately after a mutation.
+/// flushed entries stay warm briefly so the next transcript line does not
+/// immediately read and parse the whole graph again. Clean entries are expired
+/// by idle time and least-recently-used order under a byte cap. Test builds
+/// bypass the global cache (reads and writes stay synchronous on disk) so tests
+/// can assert snapshot files immediately after a mutation; the cache policy
+/// itself is exercised against local maps below.
 ///
 /// A crash can lose at most the last debounce window of graph updates; graphs
 /// derive from transcripts, which the next launch re-tails.
 struct CachedGraph {
     graph: ThreadGraph,
     dirty: bool,
+    flushing: bool,
     revision: u64,
+    serialized_bytes: usize,
+    last_accessed_at: Instant,
+    last_access_sequence: u64,
 }
 
 struct PendingGraphFlush {
@@ -53,28 +62,114 @@ static GRAPH_FLUSH_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static GRAPH_FLUSH_PENDING: LazyLock<(Mutex<bool>, Condvar)> =
     LazyLock::new(|| (Mutex::new(false), Condvar::new()));
 static GRAPH_FLUSHER_SPAWNED: AtomicBool = AtomicBool::new(false);
+static GRAPH_CACHE_ACCESS_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn graph_cache_enabled() -> bool {
     !cfg!(test)
 }
 
 fn cached_graph(storage_root: &str, thread_id: &str) -> Option<ThreadGraph> {
-    let cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
-    cache
-        .get(&(storage_root.to_string(), thread_id.to_string()))
-        .map(|entry| entry.graph.clone())
+    let now = Instant::now();
+    let (graph, evicted) = {
+        let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
+        let evicted = prune_clean_graphs(
+            &mut cache,
+            now,
+            GRAPH_CACHE_CLEAN_TTL,
+            GRAPH_CACHE_MAX_CLEAN_BYTES,
+        );
+        let graph = cache
+            .get_mut(&(storage_root.to_string(), thread_id.to_string()))
+            .map(|entry| {
+                entry.last_accessed_at = now;
+                entry.last_access_sequence =
+                    GRAPH_CACHE_ACCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                entry.graph.clone()
+            });
+        (graph, evicted)
+    };
+    drop(evicted);
+    graph
 }
 
 fn cache_dirty_graph(storage_root: &str, thread_id: &str, graph: ThreadGraph) {
     let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
-    cache.insert(
+    let now = Instant::now();
+    let replaced = cache.insert(
         (storage_root.to_string(), thread_id.to_string()),
         CachedGraph {
             graph,
             dirty: true,
+            flushing: false,
             revision: GRAPH_CACHE_REVISION.fetch_add(1, Ordering::Relaxed),
+            serialized_bytes: 0,
+            last_accessed_at: now,
+            last_access_sequence: GRAPH_CACHE_ACCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed),
         },
     );
+    drop(cache);
+    drop(replaced);
+}
+
+fn cache_clean_graph(
+    storage_root: &str,
+    thread_id: &str,
+    graph: ThreadGraph,
+    serialized_bytes: usize,
+) -> ThreadGraph {
+    let now = Instant::now();
+    let (result, evicted) = {
+        let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
+        let key = (storage_root.to_string(), thread_id.to_string());
+        let result = if let Some(entry) = cache.get_mut(&key) {
+            // A mutation may have populated a newer dirty graph while the disk
+            // read was in flight. The in-memory authority wins.
+            entry.last_accessed_at = now;
+            entry.last_access_sequence =
+                GRAPH_CACHE_ACCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+            entry.graph.clone()
+        } else {
+            cache.insert(
+                key,
+                CachedGraph {
+                    graph: graph.clone(),
+                    dirty: false,
+                    flushing: false,
+                    revision: GRAPH_CACHE_REVISION.fetch_add(1, Ordering::Relaxed),
+                    serialized_bytes,
+                    last_accessed_at: now,
+                    last_access_sequence: GRAPH_CACHE_ACCESS_SEQUENCE
+                        .fetch_add(1, Ordering::Relaxed),
+                },
+            );
+            graph
+        };
+        let evicted = prune_clean_graphs(
+            &mut cache,
+            now,
+            GRAPH_CACHE_CLEAN_TTL,
+            GRAPH_CACHE_MAX_CLEAN_BYTES,
+        );
+        (result, evicted)
+    };
+    drop(evicted);
+    result
+}
+
+fn invalidate_clean_cached_graph(storage_root: &str, thread_id: &str) {
+    let removed = {
+        let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
+        let key = (storage_root.to_string(), thread_id.to_string());
+        if cache
+            .get(&key)
+            .is_some_and(|entry| !entry.dirty && !entry.flushing)
+        {
+            cache.remove(&key)
+        } else {
+            None
+        }
+    };
+    drop(removed);
 }
 
 fn take_dirty_graphs(cache: &mut HashMap<(String, String), CachedGraph>) -> Vec<PendingGraphFlush> {
@@ -83,6 +178,7 @@ fn take_dirty_graphs(cache: &mut HashMap<(String, String), CachedGraph>) -> Vec<
         .filter(|(_, entry)| entry.dirty)
         .map(|(key, entry)| {
             entry.dirty = false;
+            entry.flushing = true;
             PendingGraphFlush {
                 key: key.clone(),
                 graph: entry.graph.clone(),
@@ -97,23 +193,99 @@ fn complete_graph_flush(
     key: &(String, String),
     revision: u64,
     succeeded: bool,
-) -> Option<CachedGraph> {
+    serialized_bytes: usize,
+    now: Instant,
+    clean_ttl: Duration,
+    max_clean_bytes: usize,
+) -> Vec<CachedGraph> {
     let Some(entry) = cache.get_mut(key) else {
-        return None;
+        return Vec::new();
     };
     // A mutation may have replaced this entry while its older snapshot was on
-    // disk. Only the exact revision that was written may be evicted or retried.
+    // disk. Only the exact revision that was written may be marked clean or
+    // retried.
     if entry.revision != revision {
-        return None;
+        return Vec::new();
     }
+    entry.flushing = false;
     if succeeded {
         if !entry.dirty {
-            return cache.remove(key);
+            entry.serialized_bytes = serialized_bytes;
+            entry.last_accessed_at = now;
+            entry.last_access_sequence =
+                GRAPH_CACHE_ACCESS_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         }
     } else {
         entry.dirty = true;
     }
-    None
+    prune_clean_graphs(cache, now, clean_ttl, max_clean_bytes)
+}
+
+fn prune_clean_graphs(
+    cache: &mut HashMap<(String, String), CachedGraph>,
+    now: Instant,
+    clean_ttl: Duration,
+    max_clean_bytes: usize,
+) -> Vec<CachedGraph> {
+    let mut evicted = Vec::new();
+    let expired = cache
+        .iter()
+        .filter_map(|(key, entry)| {
+            (!entry.dirty
+                && !entry.flushing
+                && now.saturating_duration_since(entry.last_accessed_at) >= clean_ttl)
+                .then_some(key.clone())
+        })
+        .collect::<Vec<_>>();
+    for key in expired {
+        if let Some(entry) = cache.remove(&key) {
+            evicted.push(entry);
+        }
+    }
+
+    let clean_bytes = cache
+        .values()
+        .filter(|entry| !entry.dirty && !entry.flushing)
+        .map(|entry| entry.serialized_bytes)
+        .sum::<usize>();
+    if clean_bytes <= max_clean_bytes {
+        return evicted;
+    }
+    let mut clean_lru = cache
+        .iter()
+        .filter_map(|(key, entry)| {
+            (!entry.dirty && !entry.flushing).then_some((
+                entry.last_access_sequence,
+                key.clone(),
+                entry.serialized_bytes,
+            ))
+        })
+        .collect::<Vec<_>>();
+    clean_lru.sort_by_key(|(sequence, _, _)| *sequence);
+    let mut remaining = clean_bytes;
+    for (_, key, bytes) in clean_lru {
+        if remaining <= max_clean_bytes {
+            break;
+        }
+        if let Some(entry) = cache.remove(&key) {
+            remaining = remaining.saturating_sub(bytes);
+            evicted.push(entry);
+        }
+    }
+    evicted
+}
+
+fn prune_global_graph_cache() {
+    let evicted = {
+        let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
+        prune_clean_graphs(
+            &mut cache,
+            Instant::now(),
+            GRAPH_CACHE_CLEAN_TTL,
+            GRAPH_CACHE_MAX_CLEAN_BYTES,
+        )
+    };
+    drop(evicted);
 }
 
 fn schedule_graph_flush() {
@@ -131,13 +303,25 @@ fn schedule_graph_flush() {
 
 fn graph_flusher_loop() {
     loop {
-        {
+        let should_flush = {
             let (pending, wake) = &*GRAPH_FLUSH_PENDING;
             let mut pending = pending.lock().unwrap_or_else(|err| err.into_inner());
             while !*pending {
-                pending = wake.wait(pending).unwrap_or_else(|err| err.into_inner());
+                let (next, timeout) = wake
+                    .wait_timeout(pending, GRAPH_CACHE_CLEANUP_INTERVAL)
+                    .unwrap_or_else(|err| err.into_inner());
+                pending = next;
+                if timeout.timed_out() {
+                    break;
+                }
             }
+            let should_flush = *pending;
             *pending = false;
+            should_flush
+        };
+        if !should_flush {
+            prune_global_graph_cache();
+            continue;
         }
         // Let the rest of the burst land; marks made during the sleep are
         // covered by the flush below, so absorb them instead of re-looping.
@@ -179,7 +363,16 @@ pub fn flush_dirty_thread_graphs() {
         }
         let evicted = {
             let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|err| err.into_inner());
-            complete_graph_flush(&mut cache, &pending.key, pending.revision, result.is_ok())
+            complete_graph_flush(
+                &mut cache,
+                &pending.key,
+                pending.revision,
+                result.is_ok(),
+                result.as_ref().copied().unwrap_or_default(),
+                Instant::now(),
+                GRAPH_CACHE_CLEAN_TTL,
+                GRAPH_CACHE_MAX_CLEAN_BYTES,
+            )
         };
         // A graph can own substantial transcript/tool-result content. Destroy
         // it after releasing the cache mutex so other reads and mutations do
@@ -511,22 +704,22 @@ pub fn read_snapshot(storage_root: &str, thread_id: &str) -> Result<Option<Threa
         }
     }
     let loaded = read_snapshot_from_disk(storage_root, thread_id)?;
-    if graph_cache_enabled() {
-        // Check again after disk I/O without inserting the clean disk copy. A
-        // mutation may have populated the cache between the initial miss and
-        // this read; that newer in-memory graph wins. Otherwise the clean graph
-        // can be returned directly and released by its caller.
-        if let Some(graph) = cached_graph(storage_root, thread_id) {
-            return Ok(Some(graph));
-        }
+    match loaded {
+        Some((graph, serialized_bytes)) if graph_cache_enabled() => Ok(Some(cache_clean_graph(
+            storage_root,
+            thread_id,
+            graph,
+            serialized_bytes,
+        ))),
+        Some((graph, _)) => Ok(Some(graph)),
+        None => Ok(None),
     }
-    Ok(loaded)
 }
 
 fn read_snapshot_from_disk(
     storage_root: &str,
     thread_id: &str,
-) -> Result<Option<ThreadGraph>, String> {
+) -> Result<Option<(ThreadGraph, usize)>, String> {
     let path = snapshot_path(storage_root, thread_id);
     let raw = match fs::read_to_string(&path) {
         Ok(raw) => raw,
@@ -538,8 +731,9 @@ fn read_snapshot_from_disk(
             ));
         }
     };
+    let serialized_bytes = raw.len();
     serde_json::from_str::<ThreadGraph>(&raw)
-        .map(Some)
+        .map(|graph| Some((graph, serialized_bytes)))
         .map_err(|err| format!("invalid thread graph {}: {err}", path.display()))
 }
 
@@ -547,10 +741,14 @@ pub fn write_snapshot(storage_root: &str, graph: &ThreadGraph) -> Result<(), Str
     // Direct writers are synchronous. There is no need to retain their clean
     // graph; any dirty cache entry is newer in-memory authority and remains for
     // the debounced flusher to persist.
-    write_snapshot_to_disk(storage_root, graph)
+    write_snapshot_to_disk(storage_root, graph)?;
+    if graph_cache_enabled() {
+        invalidate_clean_cached_graph(storage_root, &graph.thread_id);
+    }
+    Ok(())
 }
 
-fn write_snapshot_to_disk(storage_root: &str, graph: &ThreadGraph) -> Result<(), String> {
+fn write_snapshot_to_disk(storage_root: &str, graph: &ThreadGraph) -> Result<usize, String> {
     let path = snapshot_path(storage_root, &graph.thread_id);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
@@ -578,7 +776,8 @@ fn write_snapshot_to_disk(storage_root: &str, graph: &ThreadGraph) -> Result<(),
     // in full on every flush, so pretty encoding was pure serialize+write cost.
     let raw = serde_json::to_vec(graph)
         .map_err(|err| format!("failed to encode thread graph {}: {err}", path.display()))?;
-    atomic_write_owner_only(&path, &raw)
+    atomic_write_owner_only(&path, &raw)?;
+    Ok(raw.len())
 }
 
 #[derive(Clone, Debug)]
@@ -1233,6 +1432,25 @@ mod tests {
         dir
     }
 
+    fn cached_entry(
+        agent: &AgentInfo,
+        dirty: bool,
+        revision: u64,
+        now: Instant,
+        last_access_sequence: u64,
+        serialized_bytes: usize,
+    ) -> CachedGraph {
+        CachedGraph {
+            graph: ThreadGraph::empty_for_agent(agent),
+            dirty,
+            flushing: false,
+            revision,
+            serialized_bytes,
+            last_accessed_at: now,
+            last_access_sequence,
+        }
+    }
+
     #[test]
     fn home_history_pages_compact_past_prompts_in_chronological_order() {
         let worktree = temp_worktree("qmux-thread-graph-home-history");
@@ -1290,55 +1508,55 @@ mod tests {
     }
 
     #[test]
-    fn successful_flush_evicts_matching_clean_graph() {
+    fn successful_flush_keeps_matching_clean_graph_warm() {
         let agent = sample_agent("/tmp/qmux-thread-graph-cache".to_string());
         let key = ("root".to_string(), "thread-1".to_string());
-        let mut cache = HashMap::from([(
-            key.clone(),
-            CachedGraph {
-                graph: ThreadGraph::empty_for_agent(&agent),
-                dirty: true,
-                revision: 7,
-            },
-        )]);
+        let now = Instant::now();
+        let mut cache = HashMap::from([(key.clone(), cached_entry(&agent, true, 7, now, 1, 0))]);
 
         let pending = take_dirty_graphs(&mut cache);
         assert_eq!(pending.len(), 1);
         assert!(!cache.get(&key).unwrap().dirty);
+        assert!(cache.get(&key).unwrap().flushing);
 
-        let evicted = complete_graph_flush(&mut cache, &key, pending[0].revision, true);
-        assert!(evicted.is_some());
-        assert!(
-            !cache.contains_key(&key),
-            "a persisted inactive graph should not remain cached"
+        let evicted = complete_graph_flush(
+            &mut cache,
+            &key,
+            pending[0].revision,
+            true,
+            4096,
+            now,
+            Duration::from_secs(30),
+            8192,
         );
+        assert!(evicted.is_empty());
+        let retained = cache.get(&key).expect("a freshly flushed graph stays warm");
+        assert!(!retained.dirty);
+        assert!(!retained.flushing);
+        assert_eq!(retained.serialized_bytes, 4096);
     }
 
     #[test]
     fn stale_flush_completion_preserves_newer_dirty_graph() {
         let agent = sample_agent("/tmp/qmux-thread-graph-cache-race".to_string());
         let key = ("root".to_string(), "thread-1".to_string());
-        let mut cache = HashMap::from([(
-            key.clone(),
-            CachedGraph {
-                graph: ThreadGraph::empty_for_agent(&agent),
-                dirty: true,
-                revision: 11,
-            },
-        )]);
+        let now = Instant::now();
+        let mut cache = HashMap::from([(key.clone(), cached_entry(&agent, true, 11, now, 1, 0))]);
         let pending = take_dirty_graphs(&mut cache);
-        cache.insert(
-            key.clone(),
-            CachedGraph {
-                graph: ThreadGraph::empty_for_agent(&agent),
-                dirty: true,
-                revision: 12,
-            },
+        cache.insert(key.clone(), cached_entry(&agent, true, 12, now, 2, 0));
+
+        let evicted = complete_graph_flush(
+            &mut cache,
+            &key,
+            pending[0].revision,
+            true,
+            4096,
+            now,
+            Duration::from_secs(30),
+            8192,
         );
 
-        let evicted = complete_graph_flush(&mut cache, &key, pending[0].revision, true);
-
-        assert!(evicted.is_none());
+        assert!(evicted.is_empty());
         let retained = cache.get(&key).expect("newer graph remains cached");
         assert!(retained.dirty);
         assert_eq!(retained.revision, 12);
@@ -1348,20 +1566,63 @@ mod tests {
     fn failed_flush_marks_matching_graph_dirty_for_retry() {
         let agent = sample_agent("/tmp/qmux-thread-graph-cache-retry".to_string());
         let key = ("root".to_string(), "thread-1".to_string());
-        let mut cache = HashMap::from([(
-            key.clone(),
-            CachedGraph {
-                graph: ThreadGraph::empty_for_agent(&agent),
-                dirty: true,
-                revision: 17,
-            },
-        )]);
+        let now = Instant::now();
+        let mut cache = HashMap::from([(key.clone(), cached_entry(&agent, true, 17, now, 1, 0))]);
         let pending = take_dirty_graphs(&mut cache);
 
-        let evicted = complete_graph_flush(&mut cache, &key, pending[0].revision, false);
+        let evicted = complete_graph_flush(
+            &mut cache,
+            &key,
+            pending[0].revision,
+            false,
+            0,
+            now,
+            Duration::from_secs(30),
+            8192,
+        );
 
-        assert!(evicted.is_none());
+        assert!(evicted.is_empty());
         assert!(cache.get(&key).unwrap().dirty);
+        assert!(!cache.get(&key).unwrap().flushing);
+    }
+
+    #[test]
+    fn clean_graph_cache_expires_idle_entries_and_evicts_lru_over_byte_cap() {
+        let agent = sample_agent("/tmp/qmux-thread-graph-cache-bounds".to_string());
+        let now = Instant::now();
+        let expired_key = ("root".to_string(), "expired".to_string());
+        let oldest_key = ("root".to_string(), "oldest".to_string());
+        let newest_key = ("root".to_string(), "newest".to_string());
+        let dirty_key = ("root".to_string(), "dirty".to_string());
+        let mut cache = HashMap::from([
+            (
+                expired_key.clone(),
+                cached_entry(&agent, false, 1, now - Duration::from_secs(31), 1, 4),
+            ),
+            (
+                oldest_key.clone(),
+                cached_entry(&agent, false, 2, now, 2, 6),
+            ),
+            (
+                newest_key.clone(),
+                cached_entry(&agent, false, 3, now, 3, 6),
+            ),
+            (
+                dirty_key.clone(),
+                cached_entry(&agent, true, 4, now - Duration::from_secs(60), 0, 100),
+            ),
+        ]);
+
+        let evicted = prune_clean_graphs(&mut cache, now, Duration::from_secs(30), 6);
+
+        assert_eq!(evicted.len(), 2);
+        assert!(!cache.contains_key(&expired_key));
+        assert!(!cache.contains_key(&oldest_key));
+        assert!(cache.contains_key(&newest_key));
+        assert!(
+            cache.contains_key(&dirty_key),
+            "dirty graphs are never evicted"
+        );
     }
 
     #[test]
