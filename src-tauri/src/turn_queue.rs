@@ -1329,9 +1329,7 @@ fn reclaim_unconfirmed_send(
             return;
         }
     };
-    eprintln!(
-        "qmux: a turn sent to agent {agent_id} never started; returned it to the queue"
-    );
+    eprintln!("qmux: a turn sent to agent {agent_id} never started; returned it to the queue");
     if let Ok(Some(agent)) = state.agent(agent_id)
         && matches!(agent.status, AgentStatus::Running | AgentStatus::Starting)
     {

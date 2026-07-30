@@ -707,11 +707,7 @@ async fn list_home_turn_history(
 ) -> Result<thread_graph::HomeTurnHistoryPage, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.home_turn_history(
-            &agent_id,
-            before.as_deref(),
-            limit.unwrap_or(100),
-        )
+        state.home_turn_history(&agent_id, before.as_deref(), limit.unwrap_or(100))
     })
     .await
     .map_err(|err| format!("list_home_turn_history task failed: {err}"))?
