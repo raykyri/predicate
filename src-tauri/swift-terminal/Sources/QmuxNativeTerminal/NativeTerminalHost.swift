@@ -76,12 +76,6 @@ final class NativeTerminalHost {
     /// small controls floating over the terminal, like the right-bar restore
     /// button. Unlike a web pointer claim, the rest of the terminal stays live.
     private var webOverlayRegions: [String: CGRect] = [:]
-    /// True while the frontend reports DOM focus inside a cross-document
-    /// iframe (the browser overlay's page). Keys typed there are delivered to
-    /// the framed document only — the host document's window-level shortcut
-    /// handlers never fire — so the key monitor must claim recognized ⌘ app
-    /// shortcuts itself or they die inside the frame.
-    private var iframeShortcutFallbackActive = false
     private var windowLiveResizeActive = false
     private var clientDeferredGeometryPaneIDs: Set<String> = []
     private var pendingPaneFrames: [String: CGRect] = [:]
@@ -443,12 +437,6 @@ final class NativeTerminalHost {
         return true
     }
 
-    func setIframeShortcutFallback(_ active: Bool) -> Bool {
-        guard container != nil else { return false }
-        iframeShortcutFallbackActive = active
-        return true
-    }
-
     /// Drops routing state owned by the current DOM document before WKWebView
     /// reloads. Terminal panes and their Ghostty surfaces deliberately survive;
     /// the new document will republish layout, pointer policy, and keyboard
@@ -470,7 +458,6 @@ final class NativeTerminalHost {
         webPointerClaimClearsOnPointerUp = false
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
-        iframeShortcutFallbackActive = false
         // Drop document-owned deferral flags; the new document will re-request
         // geometry. Keep in-flight frames/fit IDs so a reload mid-resize does
         // not strand panes at pre-reload sizes until the next set_layout pass.
@@ -591,7 +578,6 @@ final class NativeTerminalHost {
         webPointerClaimClearsOnPointerUp = false
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
-        iframeShortcutFallbackActive = false
         for pane in panes.values {
             pane.view.removeFromSuperview()
         }
@@ -1173,13 +1159,7 @@ final class NativeTerminalHost {
               event.window === window,
               shouldClaimWebAppShortcut(
                   hasTerminalKeyboardOwner: keyboardOwnerPane != nil,
-                  responderState: webAppShortcutResponderState(in: window),
-                  // Only ⌘ chords are pulled out of a focused iframe; option
-                  // and bare-control chords (word navigation, readline-style
-                  // editing) stay with the framed page, mirroring how the DOM
-                  // classifier defers those to editable targets.
-                  iframeFallbackEligible: iframeShortcutFallbackActive
-                      && event.modifierFlags.contains(.command)
+                  responderState: webAppShortcutResponderState(in: window)
               ),
               let shortcutKey = appShortcutKey(for: event)
         else {

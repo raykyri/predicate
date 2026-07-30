@@ -77,7 +77,7 @@ python scripts/verify_html.py --html [html_path] --md [md_path]
 - Pass: Proceed to open
 - Fail: Fix errors and re-run
 
-### Step 7: Open in Browser
+### Step 7: Open Externally
 ```bash
 open [html_path]
 ```

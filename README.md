@@ -44,9 +44,6 @@ matching UI adapter on the frontend.
 - (Experimental) git worktree creation for launched agents, with configurable
   global, local `.qmux/`, or local `.claude/` storage, dirty-worktree checks,
   and a delete-or-keep prompt when closing worktree-backed panes.
-- (Experimental) A tab-bound, resizable browser that renders a local file or a
-  `http://localhost` dev server in a panel over the terminal. Markdown
-  files render as styled HTML.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install
@@ -155,7 +152,7 @@ HOST=127.0.0.1 PORT=8787 npm run start:site
 ```
 
 `GITHUB_READER_TOKEN` is optional for the server. When set, it raises the GitHub
-API rate limit for publication reads; it is never sent to the browser.
+API rate limit for publication reads; it is never sent to clients.
 
 Hosted Gist comments use the OAuth App's web flow. Configure its callback URL as
 `https://qmux.app/auth/github/callback`, then provide the server-side client
@@ -206,9 +203,7 @@ hosted view can show proposal status without a separate collaboration database.
 - `Cmd-Shift-T`: switch back to Terminal from Research; otherwise restore the
   most recently closed pane.
 - `Cmd-Shift-H`: focus Home.
-- `Cmd-Shift-E` / `Ctrl-Shift-E`: expand or restore the active transcript pane,
-  or toggle the browser overlay on shell-only panes.
-- `Escape`: close the browser overlay when it is open and the key reaches qmux.
+- `Cmd-Shift-E` / `Ctrl-Shift-E`: expand or restore the active transcript pane.
 - `Cmd-D` / `Cmd-Shift-D`: split the active terminal downward (in Research,
   plain `Cmd-D` creates a new document instead).
 - `Cmd-W`: close the active pane.
@@ -254,11 +249,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Agent panes also receive `QMUX_AGENT_ID`.
 - Hooks call `qmux notify <event>` over the token-gated Unix socket; qmux routes
   the notification to the owning agent's adapter. The same socket, scoped to the
-  caller's pane, serves other in-pane commands (`qmux open`, `qmux fork`).
-- A loopback-only (`127.0.0.1`) HTTP server with per-pane random tokens backs
-  browser-overlay file targets. It serves only files under the workspace root, the
-  requesting pane's group directory, and the requesting pane's own cwd/worktree. The
-  frontend only ever sees fully-formed `http://127.0.0.1/...` URLs.
+  caller's pane, serves other in-pane commands such as `qmux fork`.
 - Transcript tailing starts once an adapter binds a transcript path: Claude via
   `SessionStart`, Codex via an explicit `SessionStart` path or session-id lookup,
   and OpenCode via qmux-managed JSONL.

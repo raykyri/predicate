@@ -188,10 +188,9 @@
   bottom: 0;
   /* Live at app-shell level rather than inside .sidebar: the sidebar must clip
      overflowing tab content, which otherwise also clips this terminal-side
-     half of the drag target. Keep it below the browser overlay (z-index 8), so
-     neither the divider nor the drag target pierces an open browser window. */
+     half of the drag target. */
   left: calc(var(--sidebar-width, 268px) - 5px);
-  z-index: 7;
+  z-index: 10;
   width: 10px;
   cursor: col-resize;
 }

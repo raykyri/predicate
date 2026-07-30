@@ -103,7 +103,7 @@ class HTMLVerifier:
     def _check_no_injected_scripts(self, html: str):
         """Flag executable markup that must never reach the auto-opened report.
 
-        The HTML is opened in the user's browser as a local file:// page, and its
+        The HTML is opened by the user's default application as a local file:// page, and its
         content originates from untrusted web sources. Any of these patterns means
         the markdown->HTML escaping in md_to_html.py failed (or was bypassed); the
         report must NOT be opened until fixed. Because content is HTML-escaped at

@@ -71,7 +71,7 @@ export interface TranscriptScrollPosition {
 interface TurnOverlayProps {
   turns: Turn[];
   assistantLabel: string;
-  // Top bar pinned across the top of the pane (session id + fork/browser controls).
+  // Top bar pinned across the top of the pane (session id + transcript controls).
   header?: ReactNode;
   input?: ReactNode;
   // Identifies the agent whose transcript is shown; a change means a different

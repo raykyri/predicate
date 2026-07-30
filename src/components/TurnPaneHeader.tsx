@@ -1,7 +1,6 @@
 import {
   Expand,
   GitBranch,
-  Globe,
   Minimize2,
   PanelRightClose,
   SquareCenterlineDashedVertical,
@@ -25,9 +24,8 @@ const SESSION_MENU_PREFERRED_WIDTH = 320;
 const FORK_MENU_PREFERRED_WIDTH = 300;
 
 // The top bar across the right pane: the active session's id on the left, and
-// session/browser/transcript controls on the right. Forking is only enabled for
-// supported sessions with a live id. Its height matches the browser overlay's
-// address bar so the two read as a single chrome line when the browser is open.
+// session/transcript controls on the right. Forking is only enabled for
+// supported sessions with a live id.
 interface TurnPaneHeaderProps {
   agentId?: string | null;
   // The active agent's session id, or null before SessionStart lands.
@@ -55,8 +53,6 @@ interface TurnPaneHeaderProps {
   showQueueSplit: boolean;
   queueSplit: boolean;
   onToggleQueueSplit: () => void;
-  browserOpen: boolean;
-  onToggleBrowser: () => void;
   transcriptExpanded: boolean;
   transcriptShortcutLabel: string;
   onToggleTranscriptExpanded: () => void;
@@ -116,8 +112,6 @@ export default function TurnPaneHeader({
   showQueueSplit,
   queueSplit,
   onToggleQueueSplit,
-  browserOpen,
-  onToggleBrowser,
   transcriptExpanded,
   transcriptShortcutLabel,
   onToggleTranscriptExpanded,
@@ -567,16 +561,6 @@ export default function TurnPaneHeader({
             <SquareCenterlineDashedVertical size={14} aria-hidden="true" />
           </button>
         ) : null}
-        <button
-          type="button"
-          className={`control-button turn-pane-header-button${browserOpen ? " is-active" : ""}`}
-          title={browserOpen ? "Hide browser" : "Show browser"}
-          aria-label={browserOpen ? "Hide browser" : "Show browser"}
-          aria-pressed={browserOpen}
-          onClick={onToggleBrowser}
-        >
-          <Globe size={14} aria-hidden="true" />
-        </button>
         <button
           type="button"
           className={`control-button turn-pane-header-button${transcriptExpanded ? " is-active" : ""}`}

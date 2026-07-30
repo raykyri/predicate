@@ -90,20 +90,3 @@ export type PaneDropTarget =
     };
 
 export type GroupDropTarget = { index: number };
-
-export type BrowserOverlaySize = {
-  width: number;
-  height: number;
-};
-
-// Per-pane browser overlay: the URL it's showing, whether it's visible, a nonce
-// bumped on open/refresh to force the iframe to remount (reload), whether the
-// iframe should be sandboxed (true for token-bearing file-server URLs), and an
-// optional user-resized size that survives tab switches in React state.
-export type BrowserOverlayState = {
-  url: string | null;
-  open: boolean;
-  reloadNonce: number;
-  sandbox: boolean;
-  size?: BrowserOverlaySize | null;
-};

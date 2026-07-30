@@ -305,7 +305,7 @@ test("only pane-targeted commands are withheld from an unknown origin pane", () 
   assert.equal(appShortcutTargetsActivePane({ type: "closePane" }), true);
   assert.equal(appShortcutTargetsActivePane({ type: "splitPaneBelow" }), true);
   assert.equal(
-    appShortcutTargetsActivePane({ type: "toggleTranscriptOrBrowser" }),
+    appShortcutTargetsActivePane({ type: "toggleTranscript" }),
     true,
   );
   // Reorders the active sidebar item, so a stale native chord must be dropped.

@@ -19,7 +19,7 @@ export type AppShortcutCommand =
   | { type: "newDocument" }
   | { type: "focusFollowups" }
   | { type: "openFolderMenu" }
-  | { type: "toggleTranscriptOrBrowser" }
+  | { type: "toggleTranscript" }
   | { type: "splitPaneBelow" }
   | { type: "restoreClosedPane" }
   | { type: "closePane" }
@@ -113,7 +113,7 @@ export function resolveAppShortcut(input: AppShortcutInput): AppShortcutCommand 
     return { type: "openCommandPalette" };
   }
   if (onePrimaryModifier && !option && shift && key === "e") {
-    return { type: "toggleTranscriptOrBrowser" };
+    return { type: "toggleTranscript" };
   }
   // Research-surface commands. Ghostty binds neither chord, so claiming them
   // while a terminal is focused costs nothing (its AppKit layer swallows any
@@ -183,7 +183,7 @@ export function contextualizeAppShortcut(
 }
 
 // Commands whose execution acts on the currently active pane (close, split,
-// the per-pane transcript/browser toggle). The native terminal shortcut path
+// the per-pane transcript toggle). The native terminal shortcut path
 // uses this to decide what may still run when the chord's origin pane no
 // longer exists in React: running one of these against a different pane than
 // the user aimed at would be worse than dropping the keystroke, while every
@@ -193,7 +193,7 @@ export function appShortcutTargetsActivePane(command: AppShortcutCommand): boole
   return (
     command.type === "closePane" ||
     command.type === "splitPaneBelow" ||
-    command.type === "toggleTranscriptOrBrowser" ||
+    command.type === "toggleTranscript" ||
     // Reorders the active sidebar item (pane or research tree). A native chord
     // from an already-removed pane must be dropped, not run against whatever is
     // active now, or it persistently reorders an unrelated item.
@@ -239,8 +239,8 @@ function appShortcutLabel(command: AppShortcutCommand): string {
       return "jump to the follow-ups";
     case "openFolderMenu":
       return "open the research folder menu";
-    case "toggleTranscriptOrBrowser":
-      return "toggle the transcript or browser";
+    case "toggleTranscript":
+      return "toggle the transcript";
     case "splitPaneBelow":
       return "split the terminal";
     case "restoreClosedPane":
@@ -345,7 +345,7 @@ export function parseAppShortcutCommand(
     case "newDocument":
     case "focusFollowups":
     case "openFolderMenu":
-    case "toggleTranscriptOrBrowser":
+    case "toggleTranscript":
     case "splitPaneBelow":
     case "restoreClosedPane":
     case "closePane":

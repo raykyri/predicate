@@ -4,7 +4,6 @@ mod config;
 mod connection_limit;
 mod control_socket;
 mod events;
-mod file_server;
 mod global_task_launcher;
 mod image_files;
 mod launch_path;
@@ -37,8 +36,7 @@ use control_socket::start_control_socket;
 use menu_bar::menu_bar_update;
 use native_terminal::{
     native_terminal_action, native_terminal_focus, native_terminal_paste_approved_text,
-    native_terminal_seed_settings, native_terminal_set_iframe_shortcut_fallback,
-    native_terminal_set_keyboard_owner, native_terminal_set_layout,
+    native_terminal_seed_settings, native_terminal_set_keyboard_owner, native_terminal_set_layout,
     native_terminal_set_stage_backstop, native_terminal_set_web_overlay_region,
     native_terminal_set_web_pointer_claimed, native_terminal_theme_catalog,
     native_terminal_update_settings,
@@ -196,11 +194,7 @@ fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) 
 
 #[tauri::command]
 fn get_runtime_config(state: tauri::State<'_, AppState>) -> RuntimeConfig {
-    let mut runtime = state.config().runtime();
-    // Surface the live file-server port so the frontend can identify token-bearing
-    // file-server URLs and always sandbox them (see `isFileServerUrl`).
-    runtime.file_server_port = state.file_server_port();
-    runtime
+    state.config().runtime()
 }
 
 // Commands below are marked `async` when they block: on this Tauri version a
@@ -496,32 +490,11 @@ fn pick_folder_dialog(app: &tauri::AppHandle, title: &str) -> Result<Option<Stri
 /// http(s)/mailto are accepted; the URL is passed as a single argv to the OS opener
 /// (no shell), so it can't trigger arbitrary scheme handlers or shell injection.
 #[tauri::command(async)]
-fn open_external_url(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
+fn open_external_url(url: String) -> Result<(), String> {
     if !(url.starts_with("http://") || url.starts_with("https://") || url.starts_with("mailto:")) {
         return Err("refusing to open a non-http(s)/mailto URL externally".to_string());
     }
-    // Never hand a token-bearing file-server URL to the OS opener: the default browser
-    // would load it as a normal same-origin document (leaking the token into history and
-    // to any local process) and could then read every sibling file under the pane's
-    // roots. Legit loopback dev-server URLs on any *other* port still open externally.
-    if let Some(port) = state.file_server_port()
-        && is_file_server_url(&url, port)
-    {
-        return Err(
-            "refusing to open a file-server URL externally (would leak the access token)"
-                .to_string(),
-        );
-    }
     open_in_os_browser(&url)
-}
-
-/// Whether `url` is a loopback URL on the file server's port — i.e. a token-bearing
-/// URL that must never leave the sandboxed overlay. Matches the frontend's
-/// `isFileServerUrl` port check; done with prefix comparison to avoid a URL-parsing
-/// dependency, mirroring the hand-rolled parsing in file_server.rs.
-fn is_file_server_url(url: &str, port: u16) -> bool {
-    url.starts_with(&format!("http://127.0.0.1:{port}/"))
-        || url.starts_with(&format!("http://localhost:{port}/"))
 }
 
 #[cfg(target_os = "macos")]
@@ -2361,8 +2334,7 @@ fn main() {
         // control socket and respawn the persisted session alongside the running
         // instance. Instances are deduped per app identifier and user session; the
         // second launch hands off to this callback in the surviving process, which
-        // just surfaces the existing window. (CLI subcommands returned above and
-        // never get here, so `qmux open` etc. are unaffected.)
+        // just surfaces the existing window. CLI subcommands return above.
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
@@ -2472,12 +2444,6 @@ fn main() {
                     }
                 }
                 start_control_socket(state.clone()).map_err(std::io::Error::other)?;
-                // Loopback static server for the browser overlay. Best-effort: if it
-                // can't bind, the app still runs (file:// opens just won't work).
-                match file_server::start_file_server(state.clone()) {
-                    Ok(info) => state.set_file_server(info.port),
-                    Err(err) => eprintln!("qmux: failed to start file server: {err}"),
-                }
                 // Refuse to continue if the saved session exists but can't be read:
                 // starting empty here would let the first save overwrite it with
                 // nothing and no backup. Abort loudly (terminal + GUI) so a relaunch
@@ -2659,7 +2625,6 @@ fn main() {
             native_terminal_set_stage_backstop,
             native_terminal_set_web_pointer_claimed,
             native_terminal_set_web_overlay_region,
-            native_terminal_set_iframe_shortcut_fallback,
             native_terminal_focus,
             native_terminal_action,
             native_terminal_paste_approved_text,

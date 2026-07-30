@@ -46,7 +46,7 @@ Key features:
 
 Reports saved to `~/Documents/[Topic]_Research_[Date]/`:
 - Markdown (primary source of truth)
-- HTML (McKinsey-style, auto-opened in browser)
+- HTML (McKinsey-style, auto-opened externally)
 - PDF (professional print via WeasyPrint)
 
 Reports >18K words auto-continue via recursive agent spawning with context preservation.

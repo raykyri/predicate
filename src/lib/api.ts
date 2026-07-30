@@ -872,17 +872,6 @@ export function setNativeTerminalWebOverlayRegion(region: NativeWebOverlayRegion
   return invoke<void>("native_terminal_set_web_overlay_region", { region });
 }
 
-/**
- * Reports whether DOM focus sits inside a cross-document iframe (the browser
- * overlay's page). Keys typed there are delivered to the framed document only
- * — window-level DOM shortcut handlers never fire — so while this is active
- * the native key monitor claims recognized ⌘ app shortcuts itself instead of
- * leaving them to die inside the frame.
- */
-export function setNativeTerminalIframeShortcutFallback(active: boolean) {
-  return invoke<void>("native_terminal_set_iframe_shortcut_fallback", { active });
-}
-
 let nativeTerminalWebPointerClaims = 0;
 let nativeTerminalWebPointerUpdate: Promise<void> = Promise.resolve();
 

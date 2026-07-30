@@ -22,7 +22,7 @@ def convert_markdown_to_html(markdown_text: str) -> Tuple[str, str]:
     """
     # SECURITY: Escape HTML metacharacters in the raw source text BEFORE any
     # markdown->HTML transformation. Report content is derived from untrusted web
-    # sources, and the resulting HTML is auto-opened in the user's browser as a
+    # sources, and the resulting HTML is auto-opened by the default application as a
     # local file:// page. Without this, a fetched title/quote/snippet containing
     # raw markup (e.g. <script>...</script> or <img onerror=...>) would pass
     # through verbatim and execute. Escaping first neutralizes tag and attribute

@@ -885,9 +885,9 @@ fn shell_agent_functions(cli: &str, shell_commands: &[ShellCommandIntegration]) 
         .join("\n")
 }
 
-/// Defines `qmux` as a passthrough to the bundled CLI so the user can run subcommands
-/// (e.g. `qmux open <file>` to load a file in the browser overlay) from the shell
-/// prompt without `qmux` being on PATH — mirroring the injected agent functions.
+/// Defines `qmux` as a passthrough to the bundled CLI so the user can run
+/// subcommands such as `qmux fork` from the shell prompt without `qmux` being
+/// on PATH — mirroring the injected agent functions.
 fn shell_qmux_function(cli: &str) -> String {
     format!("unalias qmux 2>/dev/null || true\nqmux() {{\n  {cli} \"$@\"\n}}")
 }
@@ -2606,7 +2606,7 @@ mod tests {
             assert!(!script.contains("agent-detach"));
             assert!(!script.contains("local __qmux_status=$?"));
             assert!(!script.contains("return $__qmux_status"));
-            // `qmux` itself is a passthrough so `qmux open <file>` works at the prompt
+            // `qmux` itself is a passthrough so its subcommands work at the prompt
             // without qmux being on PATH.
             assert!(script.contains("unalias qmux"));
             assert!(script.contains("qmux() {"));

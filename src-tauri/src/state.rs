@@ -142,11 +142,6 @@ pub struct AppState {
 struct AppStateInner {
     config: QmuxConfig,
     pane_tokens: Mutex<HashMap<String, String>>,
-    // Per-pane file-server tokens, distinct from the control-socket `pane_tokens`.
-    // A browser-overlay URL carries one of these in its path, so the loopback file
-    // server can resolve which pane the request is for and scope the served roots to
-    // that pane only (see `pane_for_file_token` / `pane_file_roots`).
-    file_tokens: Mutex<HashMap<String, String>>,
     model: Mutex<Model>,
     transcript_tails: Mutex<HashSet<String>>,
     next_id: AtomicU64,
@@ -194,9 +189,6 @@ struct AppStateInner {
     // EOF while kill_all_panes tears processes down; those removals must preserve
     // the journals referenced by the frozen snapshot for the next launch.
     exit_teardown_started: AtomicBool,
-    // Loopback file-server port, set once at startup. The control socket pairs it with
-    // a per-pane file token to build browser-overlay URLs.
-    file_server: Mutex<Option<u16>>,
     // (device, inode) of the control socket this process bound, recorded at bind time
     // so exit cleanup can tell its own socket apart from one a later instance bound
     // at the same path (see `owns_control_socket`).
@@ -744,15 +736,6 @@ fn wait_target_label_locked(model: &Model, target: &AgentInfo) -> Option<String>
         .or_else(|| target.model.clone())
 }
 
-/// Whether `ancestor` is `descendant` itself or one of its parent directories.
-/// Canonicalizes both best-effort (falling back to the literal path when a side can't be
-/// resolved, e.g. it doesn't exist) so symlinks and `.`/`..` can't defeat the check.
-fn path_is_ancestor_or_equal(ancestor: &std::path::Path, descendant: &std::path::Path) -> bool {
-    let ancestor = std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
-    let descendant = std::fs::canonicalize(descendant).unwrap_or_else(|_| descendant.to_path_buf());
-    descendant.starts_with(&ancestor)
-}
-
 fn queued_turn_wait_is_resolved_locked(model: &Model, wait_for: &QueuedTurnWait) -> bool {
     let Some(target) = model.agents.get(&wait_for.agent_id) else {
         // The target agent is gone entirely (e.g. its pane closed and the agent was
@@ -1138,7 +1121,6 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
-                file_tokens: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
                 transcript_tails: Mutex::new(HashSet::new()),
                 next_id: AtomicU64::new(1),
@@ -1154,7 +1136,6 @@ impl AppState {
                 preflighted_state: Mutex::new(None),
                 exit_confirmed: AtomicBool::new(false),
                 exit_teardown_started: AtomicBool::new(false),
-                file_server: Mutex::new(None),
                 control_socket_identity: Mutex::new(None),
                 pane_send_locks: Mutex::new(HashMap::new()),
                 shell_agent_jobs: Mutex::new(HashMap::new()),
@@ -1279,17 +1260,6 @@ impl AppState {
             .collect()
     }
 
-    /// Records the loopback file server's port + access token (set once at startup).
-    pub fn set_file_server(&self, port: u16) {
-        if let Ok(mut slot) = self.inner.file_server.lock() {
-            *slot = Some(port);
-        }
-    }
-
-    pub fn file_server_port(&self) -> Option<u16> {
-        self.inner.file_server.lock().ok().and_then(|slot| *slot)
-    }
-
     /// Records the (device, inode) of the control socket this process bound (set once
     /// at startup, right after the bind).
     pub fn set_control_socket_identity(&self, device: u64, inode: u64) {
@@ -1402,106 +1372,6 @@ impl AppState {
             .ok()
             .and_then(|prefs| prefs.use_login_shell)
             .unwrap_or(true)
-    }
-
-    /// Returns the file-server token scoped to a single pane, minting one on first use.
-    /// This token rides in the path of the browser-overlay URLs that pane opens, so the
-    /// loopback file server can map a request back to its pane and serve only that
-    /// pane's roots (`pane_file_roots`) — never the union of every pane's directories.
-    /// It is deliberately separate from the pane's control-socket token (`pane_token`):
-    /// it lands in URLs that flow through the frontend, so its only authority is reading
-    /// files under the one pane's roots, not driving the control socket.
-    pub fn pane_file_token(&self, pane_id: &str) -> Result<String, String> {
-        let mut tokens = self
-            .inner
-            .file_tokens
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(existing) = tokens.get(pane_id) {
-            return Ok(existing.clone());
-        }
-        let token = random_token()?;
-        Ok(tokens.entry(pane_id.to_string()).or_insert(token).clone())
-    }
-
-    /// Resolves the pane a presented file-server token belongs to, if any.
-    pub fn pane_for_file_token(&self, token: &str) -> Option<String> {
-        let tokens = self
-            .inner
-            .file_tokens
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        tokens
-            .iter()
-            .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
-    }
-
-    /// Roots a `browser.open` from a specific pane may reach. A known pane is scoped
-    /// strictly to its own working area — its group directory, its cwd, and (if any) its
-    /// agent's worktree — and deliberately *not* the whole workspace root. The workspace
-    /// root holds every group's directory, all transcripts, hook settings and
-    /// `.qmux/state.json`, so serving it to every pane would let one pane's file token
-    /// render another agent's private files. (Same-group panes intentionally share a
-    /// group directory.)
-    ///
-    /// A pane that isn't in the model resolves to *zero* roots (fail closed), so the
-    /// file server rejects every request (`resolve_under_roots` → 403) rather than
-    /// serving the whole workspace tree. The documented invariant is that no live file
-    /// token resolves to an out-of-model pane (`remove_pane` reclaims the token, and
-    /// `pane_for_file_token` 404s a stale one before roots are consulted), so failing
-    /// closed here costs nothing real while removing a fail-open widening that would
-    /// otherwise expose every group's directory, all transcripts, and
-    /// `.qmux/{state,preferences}.json` (the plaintext OpenRouter key) if that invariant
-    /// were ever broken by a spawn/teardown race or a poisoned lock.
-    pub fn pane_file_roots(&self, pane_id: &str) -> Vec<std::path::PathBuf> {
-        // Recover a poisoned lock, matching the sibling token accessors
-        // (`pane_token`/`pane_for_token`/…). Using `if let Ok(model)` here would fail
-        // *open* to the whole workspace after any unrelated panic that held this lock;
-        // recover instead so the per-pane scoping below still applies.
-        let model = self
-            .inner
-            .model
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        if let Some(pane) = model.panes.get(pane_id) {
-            let mut roots = Vec::new();
-            let group_dir = model
-                .groups
-                .get(&pane.info.group_id)
-                .map(|group| std::path::PathBuf::from(&group.dir));
-            if let Some(group_dir) = &group_dir {
-                roots.push(group_dir.clone());
-            }
-            // Serve the pane's cwd so `qmux open ./file` resolves — but keep it from
-            // widening the pane's scope past its own working area. `pane.set_cwd`
-            // accepts any existing absolute directory (a pane legitimately runs in
-            // arbitrary project dirs), so constrain what becomes a servable root:
-            //  - never at or above the workspace root (`/`, `~`, or the workspace
-            //    itself would expose every group's directory, all transcripts, and
-            //    `.qmux/{state,preferences}.json`), and
-            //  - never a *sibling group's* subtree. A cwd that lives *inside* the
-            //    workspace root is only served when it is under this pane's own group
-            //    dir; legitimate external project dirs live outside the workspace root
-            //    and stay served. The group dir and agent worktree are served
-            //    unconditionally above.
-            let cwd = std::path::PathBuf::from(&pane.info.cwd);
-            let workspace_root = &self.inner.config.workspace_root;
-            let cwd_at_or_above_workspace = path_is_ancestor_or_equal(&cwd, workspace_root);
-            let cwd_inside_workspace = path_is_ancestor_or_equal(workspace_root, &cwd);
-            let cwd_under_own_group = group_dir
-                .as_deref()
-                .is_some_and(|group_dir| path_is_ancestor_or_equal(group_dir, &cwd));
-            if !cwd_at_or_above_workspace && (!cwd_inside_workspace || cwd_under_own_group) {
-                roots.push(cwd);
-            }
-            for agent in model.agents.values() {
-                if agent.pane_id.as_deref() == Some(pane_id) {
-                    roots.push(std::path::PathBuf::from(&agent.worktree_dir));
-                }
-            }
-            return roots;
-        }
-        Vec::new()
     }
 
     pub fn config(&self) -> &QmuxConfig {
@@ -5790,12 +5660,6 @@ impl AppState {
         if let Ok(mut tokens) = self.inner.pane_tokens.lock() {
             tokens.remove(pane_id);
         }
-        // The pane's file-server token can never be used again once the pane is gone
-        // (it resolves only via `pane_for_file_token`), so reclaim it rather than let
-        // a live credential outlive the pane it scopes. Separate lock from `model`.
-        if let Ok(mut tokens) = self.inner.file_tokens.lock() {
-            tokens.remove(pane_id);
-        }
         // Drop the pane's send lock so the map doesn't grow for the process lifetime.
         // Separate lock from `model`.
         if let Ok(mut locks) = self.inner.pane_send_locks.lock() {
@@ -8346,12 +8210,9 @@ impl AppState {
         if cwd.chars().any(|ch| ch.is_control()) {
             return Err("pane cwd contains control characters; refusing to persist".to_string());
         }
-        // The cwd becomes a file-server root (see `pane_file_roots`), so only accept
-        // a value that names a real directory. A legitimate shell-integration report
-        // is always an existing absolute directory; rejecting anything else keeps a
-        // malformed or non-existent path (or a plain file) from being installed as a
-        // servable root. (This intentionally does not constrain *which* directory —
-        // panes legitimately run in arbitrary project dirs outside the workspace.)
+        // A legitimate shell-integration report is always an existing absolute
+        // directory; rejecting anything else keeps malformed values out of
+        // persisted state and ensures recovery has a usable working directory.
         let candidate = std::path::Path::new(&cwd);
         if !candidate.is_absolute() {
             return Err("pane cwd must be an absolute path; refusing to persist".to_string());
@@ -15262,130 +15123,6 @@ mod tests {
         state.restore_session();
         assert!(state.agent("agent-1").unwrap().is_none());
         std::fs::remove_dir_all(workspace).unwrap();
-    }
-
-    #[test]
-    fn pane_file_roots_are_scoped_to_the_requesting_pane() {
-        let workspace = temp_workspace();
-        let state = AppState::new(test_config(workspace));
-        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
-        state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
-        // update_pane_cwd requires a real directory, so create two to stand in for
-        // each pane's working directory.
-        let proj_a = std::env::temp_dir().join("qmux-test-proj-a");
-        let proj_b = std::env::temp_dir().join("qmux-test-proj-b");
-        std::fs::create_dir_all(&proj_a).unwrap();
-        std::fs::create_dir_all(&proj_b).unwrap();
-        state
-            .update_pane_cwd("pane-1", proj_a.display().to_string())
-            .unwrap();
-        state
-            .update_pane_cwd("pane-2", proj_b.display().to_string())
-            .unwrap();
-
-        // A pane's browser-open roots include its own cwd but not another pane's.
-        let roots = state.pane_file_roots("pane-1");
-        assert!(roots.iter().any(|r| r == proj_a.as_path()));
-        assert!(!roots.iter().any(|r| r == proj_b.as_path()));
-    }
-
-    #[test]
-    fn pane_file_roots_exclude_a_cwd_at_or_above_the_workspace_root() {
-        let workspace = temp_workspace();
-        let workspace_parent = workspace.parent().unwrap().to_path_buf();
-        let state = AppState::new(test_config(workspace.clone()));
-        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
-
-        // A pane that cd'd to an ancestor of the workspace (here its parent) must not turn
-        // its file token into a servable root over the whole workspace tree — that would
-        // expose every other group's directory and .qmux/state.json.
-        state
-            .update_pane_cwd("pane-1", workspace_parent.display().to_string())
-            .unwrap();
-        let roots = state.pane_file_roots("pane-1");
-        assert!(
-            !roots
-                .iter()
-                .any(|r| path_is_ancestor_or_equal(r, &workspace)),
-            "no served root should sit at or above the workspace root: {roots:?}"
-        );
-
-        // Setting it to the workspace root itself is likewise excluded.
-        state
-            .update_pane_cwd("pane-1", workspace.display().to_string())
-            .unwrap();
-        let roots = state.pane_file_roots("pane-1");
-        assert!(
-            !roots.iter().any(|r| {
-                std::fs::canonicalize(r).ok() == std::fs::canonicalize(&workspace).ok()
-            })
-        );
-    }
-
-    #[test]
-    fn pane_file_roots_are_empty_for_an_out_of_model_pane() {
-        let workspace = temp_workspace();
-        let state = AppState::new(test_config(workspace));
-        // No pane inserted: pane_file_roots must fail *closed* (zero roots) rather than
-        // fall back to serving the whole workspace root, so a token that ever resolves
-        // to an out-of-model pane (spawn/teardown race, poisoned lock) reads nothing.
-        assert!(state.pane_file_roots("ghost-pane").is_empty());
-    }
-
-    #[test]
-    fn pane_file_roots_exclude_a_sibling_group_cwd() {
-        let workspace = temp_workspace();
-        let group1_dir = workspace.join("group-1");
-        let group2_dir = workspace.join("group-2");
-        std::fs::create_dir_all(&group1_dir).unwrap();
-        std::fs::create_dir_all(&group2_dir).unwrap();
-
-        let state = AppState::new(test_config(workspace));
-        let mut group1 = sample_group_with_id("group-1");
-        group1.dir = group1_dir.display().to_string();
-        let mut group2 = sample_group_with_id("group-2");
-        group2.dir = group2_dir.display().to_string();
-        state.insert_group_after(group1, None).unwrap();
-        state.insert_group_after(group2, None).unwrap();
-
-        // pane-1 belongs to group-1 (sample_pane default group_id).
-        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
-        // A pane cd'ing into a *sibling* group's directory (a descendant of the
-        // workspace root) must not turn its file token into a servable root over that
-        // group's files — only its own group dir is served for in-workspace cwds.
-        state
-            .update_pane_cwd("pane-1", group2_dir.display().to_string())
-            .unwrap();
-
-        let roots = state.pane_file_roots("pane-1");
-        assert!(
-            roots.iter().any(|r| r == group1_dir.as_path()),
-            "the pane's own group dir should be served: {roots:?}"
-        );
-        assert!(
-            !roots.iter().any(|r| r == group2_dir.as_path()),
-            "a sibling group's dir must never be served: {roots:?}"
-        );
-    }
-
-    #[test]
-    fn pane_file_token_round_trips_and_is_reclaimed_on_close() {
-        let workspace = temp_workspace();
-        let state = AppState::new(test_config(workspace));
-        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
-
-        let token = state.pane_file_token("pane-1").unwrap();
-        // Stable across calls and resolvable back to its own pane.
-        assert_eq!(state.pane_file_token("pane-1").unwrap(), token);
-        assert_eq!(state.pane_for_file_token(&token).as_deref(), Some("pane-1"));
-        // A different pane gets a different token, distinct from the control token.
-        assert_ne!(state.pane_file_token("pane-2").unwrap(), token);
-        assert_ne!(state.pane_token("pane-1").unwrap(), token);
-
-        // Closing the pane reclaims the token so a live file credential can't outlive
-        // the pane it scopes.
-        state.remove_pane("pane-1").unwrap();
-        assert!(state.pane_for_file_token(&token).is_none());
     }
 
     #[test]

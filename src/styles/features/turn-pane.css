@@ -190,8 +190,7 @@
   outline: none;
 }
 
-/* Top bar across the right pane. Height matches the browser overlay's address bar
-   so the two line up when the browser is open. */
+/* Top bar across the right pane. */
 .turn-pane-header {
   position: absolute;
   top: 0;
@@ -293,7 +292,7 @@
   gap: 6px;
 }
 
-/* Shared by the prompt-library, fork, queue split, browser, transcript, and
+/* Shared by the prompt-library, fork, queue split, transcript, and
    collapse buttons. Some also carry .control-button, whose min-height (30px) and
    horizontal padding would otherwise leak in and make those buttons taller than
    the plain .icon-button ones; neutralizing both here keeps all header buttons a
@@ -329,9 +328,7 @@
   color: var(--text-faint);
 }
 
-/* Browser toggle when the overlay is open: reads as locked on / pushed in rather
-   than swapping to a close icon. An accent-tinted fill plus an inset shadow gives
-   the depressed look; it returns to the neutral skin once toggled off. */
+/* Active toggle state. */
 .turn-pane-header-button.is-active {
   border-color: var(--accent-color);
   background: var(--accent-shadow);

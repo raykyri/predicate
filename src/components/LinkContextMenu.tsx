@@ -1,26 +1,19 @@
 import { useEffect, useRef } from "react";
-import { ExternalLink, Globe } from "lucide-react";
+import { ExternalLink } from "lucide-react";
 
-// Right-click chooser for a link: open it in the internal browser overlay or the OS
-// browser. Positioned at the pointer (viewport coords); closes on outside click,
-// Escape, or either choice.
+// Right-click action for a link. Positioned at the pointer (viewport coords);
+// closes on outside click, Escape, or after opening the link externally.
 interface LinkContextMenuProps {
   x: number;
   y: number;
-  // Whether the link can render in the internal overlay (http/https). When false the
-  // bare "Open" entry is hidden and only the external-browser choice remains.
-  canOpenInternal: boolean;
-  onOpenInternal: () => void;
-  onOpenExternal: () => void;
+  onOpen: () => void;
   onClose: () => void;
 }
 
 export default function LinkContextMenu({
   x,
   y,
-  canOpenInternal,
-  onOpenInternal,
-  onOpenExternal,
+  onOpen,
   onClose,
 }: LinkContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -51,25 +44,14 @@ export default function LinkContextMenu({
       style={{ left: x, top: y }}
       role="menu"
     >
-      {canOpenInternal ? (
-        <button
-          type="button"
-          role="menuitem"
-          className="menu-item link-context-menu-item"
-          onClick={onOpenInternal}
-        >
-          <Globe size={14} aria-hidden="true" />
-          <span>Open</span>
-        </button>
-      ) : null}
       <button
         type="button"
         role="menuitem"
         className="menu-item link-context-menu-item"
-        onClick={onOpenExternal}
+        onClick={onOpen}
       >
         <ExternalLink size={14} aria-hidden="true" />
-        <span>Open in browser</span>
+        <span>Open externally</span>
       </button>
     </div>
   );

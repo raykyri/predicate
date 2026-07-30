@@ -361,36 +361,6 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
             )?;
             serde_json::to_value(pane).map_err(|err| format!("failed to encode forked pane: {err}"))
         }
-        "browser.open" => {
-            #[derive(Debug, Deserialize)]
-            #[serde(rename_all = "camelCase")]
-            struct BrowserOpen {
-                target: String,
-                #[serde(default)]
-                cwd: Option<String>,
-            }
-            let payload = serde_json::from_value::<BrowserOpen>(request.payload)
-                .map_err(|err| format!("invalid browser.open payload: {err}"))?;
-            // Resolve to a renderable URL: http(s) passes through (CSP gates it to
-            // loopback); a file is validated under an allowed root and served via the
-            // loopback file server. The overlay binds to the calling pane. `sandbox` is
-            // true for served files so the overlay loads them in an opaque origin (the
-            // served URL carries the access token, so its scripts must not be able to
-            // read other files back); passthrough URLs are not sandboxed.
-            let (url, sandbox) = resolve_browser_target(
-                state,
-                &authed_pane,
-                payload.target.trim(),
-                payload.cwd.as_deref(),
-            )?;
-            state.emit(QmuxEvent::new(
-                "browser.open",
-                Some(authed_pane.clone()),
-                None,
-                json!({ "url": url, "sandbox": sandbox }),
-            ));
-            Ok(json!({ "url": url, "sandbox": sandbox }))
-        }
         // Other agent spawning and turn queueing are management operations that belong
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
         other => Err(format!("unknown control command '{other}'")),
@@ -403,107 +373,6 @@ fn validate_control_launch_workspace(state: &AppState, pane_id: &str) -> Result<
         .ok_or_else(|| format!("pane {pane_id} has no workspace"))?;
     validate_launch_workspace(state, Some(&group_id), LaunchOrigin::Terminal)?;
     Ok(())
-}
-
-/// Turns an `open` target into a URL the browser overlay can load, plus whether the
-/// overlay should sandbox it. http(s) URLs pass through unchanged and unsandboxed
-/// (covering localhost dev servers; the webview CSP restricts which actually render).
-/// Anything else is treated as a file path: resolved against `cwd` when relative,
-/// required to live under one of the requesting pane's own roots (not the global
-/// union — so a pane can't open another pane's directory), served through the loopback
-/// file server, and flagged `sandbox = true` (its URL carries the file-server token).
-/// Whether an http(s) URL's host names a loopback address. Parses the authority
-/// by hand (no `url` crate in this build) but defends against the usual spoofs:
-/// `http://127.0.0.1@evil.com` (host is `evil.com`), `http://127.0.0.1.evil.com`
-/// (not a loopback literal), and userinfo/port/IPv6-bracket forms. Intentionally
-/// stricter than a browser — it accepts only `localhost` and parsed loopback IPs,
-/// not oddball encodings a browser would still resolve to loopback — so it fails
-/// closed.
-///
-/// A backslash is treated as an authority terminator too. WHATWG special-scheme
-/// parsing (what WebKit and `new URL()` use) maps `\` to `/`, so without this a
-/// target like `http://evil.com\@127.0.0.1/` would be judged loopback here (host
-/// after the last `@` is `127.0.0.1`) while the webview resolves host `evil.com`.
-/// Splitting on `\` makes this gate agree with WebKit and reject the spoof.
-fn is_loopback_http_url(url: &str) -> bool {
-    let Some((_scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    // The authority ends at the first '/', '\', '?' or '#'.
-    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or(rest);
-    // Drop any userinfo: the host is whatever follows the last '@'.
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    // Separate host from port, honoring the [ipv6]:port bracket form.
-    let host = if let Some(after_bracket) = host_port.strip_prefix('[') {
-        match after_bracket.split_once(']') {
-            Some((inner, _)) => inner,
-            None => return false,
-        }
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
-        return v4.is_loopback();
-    }
-    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
-        return v6.is_loopback();
-    }
-    false
-}
-
-fn resolve_browser_target(
-    state: &AppState,
-    authed_pane: &str,
-    target: &str,
-    cwd: Option<&str>,
-) -> Result<(String, bool), String> {
-    if target.is_empty() {
-        return Err("nothing to open".to_string());
-    }
-    if target.starts_with("http://") || target.starts_with("https://") {
-        // Only loopback origins may render unsandboxed. The webview CSP restricts
-        // frame-src to 127.0.0.1/localhost too, but enforce it here as the first
-        // gate so a prompt-injected agent can't force the overlay at an arbitrary
-        // origin (and gets a clear error rather than a silently-blank iframe).
-        if !is_loopback_http_url(target) {
-            return Err(format!(
-                "refusing to open '{target}': the browser overlay only loads http(s) URLs on localhost/127.0.0.1"
-            ));
-        }
-        return Ok((target.to_string(), false));
-    }
-
-    let requested = {
-        let path = std::path::Path::new(target);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            let base = cwd.ok_or_else(|| {
-                "cannot resolve a relative path without a working directory".to_string()
-            })?;
-            std::path::Path::new(base).join(path)
-        }
-    };
-
-    let roots = state.pane_file_roots(authed_pane);
-    let canonical =
-        crate::file_server::resolve_under_roots(&requested, &roots).ok_or_else(|| {
-            format!(
-                "'{target}' was not found under this pane's working directory and cannot be opened"
-            )
-        })?;
-    let port = state
-        .file_server_port()
-        .ok_or_else(|| "the file server is not running".to_string())?;
-    // The URL carries this pane's own file token, so the file server scopes the request
-    // back to `pane_file_roots(authed_pane)` — a pane can never reach another pane's
-    // files even if some pane has widened its cwd via `pane.set_cwd`.
-    let token = state.pane_file_token(authed_pane)?;
-    Ok((crate::file_server::file_url(port, &token, &canonical), true))
 }
 
 fn ensure_pane_scope(authed_pane: &str, requested_pane: &str) -> Result<(), String> {
@@ -550,36 +419,6 @@ mod tests {
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
         OpencodeAdapterConfig, QmuxConfig,
     };
-
-    #[test]
-    fn loopback_url_check_accepts_localhost_and_rejects_spoofs() {
-        // Loopback origins the overlay may render unsandboxed.
-        assert!(is_loopback_http_url("http://localhost:3000/app"));
-        assert!(is_loopback_http_url("http://127.0.0.1:8080"));
-        assert!(is_loopback_http_url("https://127.0.0.1/"));
-        assert!(is_loopback_http_url("http://127.1.2.3:5173/x?y=1#z"));
-        assert!(is_loopback_http_url("http://[::1]:3000/"));
-        assert!(is_loopback_http_url("http://LocalHost/"));
-
-        // Non-loopback and spoofed hosts must be refused.
-        assert!(!is_loopback_http_url("http://example.com/"));
-        assert!(!is_loopback_http_url("http://127.0.0.1.evil.com/"));
-        assert!(!is_loopback_http_url("http://127.0.0.1@evil.com/"));
-        assert!(!is_loopback_http_url("http://evil.com/#127.0.0.1"));
-        assert!(!is_loopback_http_url("http://evil.com/?x=127.0.0.1"));
-        assert!(!is_loopback_http_url("http://0.0.0.0/"));
-        assert!(!is_loopback_http_url("http://2130706433/"));
-        assert!(!is_loopback_http_url("not-a-url"));
-
-        // Backslash authority-terminator spoof: WebKit maps `\` to `/`, so the real
-        // host is `evil.com`. This must be rejected, matching the webview parser.
-        assert!(!is_loopback_http_url("http://evil.com\\@127.0.0.1/"));
-        assert!(!is_loopback_http_url("http://evil.com\\127.0.0.1/"));
-        assert!(!is_loopback_http_url("https://evil.com\\@localhost/app"));
-        // A genuine loopback host followed by a backslash path is still loopback
-        // (WebKit reads `http://127.0.0.1/@evil.com/`), so this stays allowed.
-        assert!(is_loopback_http_url("http://127.0.0.1\\@evil.com/"));
-    }
 
     use crate::workspace::{AgentInfo, AgentStatus};
     use std::io::Read;

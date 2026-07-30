@@ -49,6 +49,26 @@
   box-shadow: var(--context-menu-shadow);
 }
 
+/* Right-click action for a transcript/terminal link. */
+.link-context-menu {
+  z-index: var(--z-context-menu);
+  gap: 2px;
+  min-width: 200px;
+  max-width: calc(100vw - 16px);
+  padding: 4px;
+}
+
+.link-context-menu-item {
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.link-context-menu-item svg {
+  flex: none;
+  width: 14px;
+  height: 14px;
+}
+
 .menu-item {
   display: flex;
   align-items: center;
