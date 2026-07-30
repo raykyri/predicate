@@ -2067,6 +2067,150 @@ fn app_confirm_exit(
 static WINDOW_READY_REPORTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+#[derive(Default)]
+struct InterfaceHealthState {
+    generation: u64,
+    acknowledged: bool,
+    reload_claimed: bool,
+}
+
+/// Correlates native post-wake probes, document acknowledgements, compositor
+/// failures, and the single reload they may request. Keeping the whole state
+/// under one mutex makes the reload claim atomic with the generation check:
+/// the Rust event-loop timeout and Swift snapshot timeout can race, but only
+/// one of them can reload the current document.
+struct InterfaceHealthTracker {
+    state: std::sync::Mutex<InterfaceHealthState>,
+}
+
+impl InterfaceHealthTracker {
+    const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(InterfaceHealthState {
+                generation: 0,
+                acknowledged: false,
+                reload_claimed: false,
+            }),
+        }
+    }
+
+    fn begin(&self) -> u64 {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.generation = state.generation.wrapping_add(1);
+        state.acknowledged = false;
+        state.reload_claimed = false;
+        state.generation
+    }
+
+    fn acknowledge(&self, generation: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.generation != generation {
+            return false;
+        }
+        state.acknowledged = true;
+        true
+    }
+
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.generation = state.generation.wrapping_add(1);
+        state.acknowledged = false;
+        state.reload_claimed = false;
+    }
+
+    fn claim_unanswered_reload(&self, generation: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.generation != generation || state.acknowledged || state.reload_claimed {
+            return false;
+        }
+        state.reload_claimed = true;
+        true
+    }
+
+    fn claim_reload(&self, generation: u64) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|err| err.into_inner());
+        if state.generation != generation || state.reload_claimed {
+            return false;
+        }
+        state.reload_claimed = true;
+        true
+    }
+}
+
+static INTERFACE_HEALTH: InterfaceHealthTracker = InterfaceHealthTracker::new();
+const INTERFACE_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+
+pub(crate) fn cancel_interface_health_probe() {
+    INTERFACE_HEALTH.cancel();
+}
+
+#[tauri::command]
+fn acknowledge_interface_health_probe(generation: u64) {
+    let _ = INTERFACE_HEALTH.acknowledge(generation);
+}
+
+/// Called by the AppKit wake observer once qmux is active and its window is
+/// visible. The native side separately snapshots WKWebView to exercise the GPU
+/// compositor; this event/ack round trip proves the document's JavaScript event
+/// loop is also responsive.
+#[cfg(desktop)]
+pub(crate) fn begin_interface_health_probe(state: AppState) -> u64 {
+    let generation = INTERFACE_HEALTH.begin();
+    state.emit(events::QmuxEvent::new(
+        "app.interface_health_probe",
+        None,
+        None,
+        serde_json::json!({ "generation": generation }),
+    ));
+    std::thread::spawn(move || {
+        std::thread::sleep(INTERFACE_HEALTH_TIMEOUT);
+        request_unhealthy_interface_reload(
+            state,
+            generation,
+            true,
+            "frontend did not acknowledge the post-wake health probe",
+        );
+    });
+    generation
+}
+
+/// Called by the native WKWebView snapshot watchdog when the compositor fails
+/// or never completes. Reload only the webview; PTYs and Ghostty surfaces stay
+/// alive through the same reset path as the manual recovery command.
+#[cfg(desktop)]
+pub(crate) fn request_unhealthy_interface_reload(
+    state: AppState,
+    generation: u64,
+    require_unanswered: bool,
+    reason: &'static str,
+) {
+    let Some(app_handle) = state.app_handle() else {
+        return;
+    };
+    let app_handle_on_main = app_handle.clone();
+    let _ = app_handle.run_on_main_thread(move || {
+        let Some(window) = app_handle_on_main.get_webview_window("main") else {
+            return;
+        };
+        let eligible = window.is_visible().unwrap_or(false)
+            && !window.is_minimized().unwrap_or(true)
+            && window.is_focused().unwrap_or(false);
+        if !eligible {
+            return;
+        }
+        let claimed = if require_unanswered {
+            INTERFACE_HEALTH.claim_unanswered_reload(generation)
+        } else {
+            INTERFACE_HEALTH.claim_reload(generation)
+        };
+        if !claimed {
+            return;
+        }
+        eprintln!("qmux: {reason}; reloading interface");
+        reload_main_webview(&app_handle_on_main);
+    });
+}
+
 /// The window starts hidden (`visible: false` in tauri.conf.json) so startup
 /// never shows a blank translucent shell while the session restores and the
 /// webview boots. The frontend calls this once its boot snapshot is applied —
@@ -2092,6 +2236,7 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// callback can run before setup) and idempotent across an explicit reload plus
 /// its ensuing PageLoadEvent::Started callback.
 fn prepare_main_webview_reload() {
+    cancel_interface_health_probe();
     native_terminal::set_events_listener_ready(false);
     let _ = native_terminal::prepare_for_webview_reload();
 }
@@ -2351,6 +2496,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             app_window_ready,
+            acknowledge_interface_health_probe,
             get_runtime_config,
             launcher_adapter_preference_get,
             launcher_adapter_preference_set,
@@ -2531,4 +2677,43 @@ fn main() {
             }
             _ => {}
         });
+}
+
+#[cfg(test)]
+mod interface_health_tests {
+    use super::InterfaceHealthTracker;
+
+    #[test]
+    fn only_the_current_probe_can_be_acknowledged() {
+        let tracker = InterfaceHealthTracker::new();
+        let first = tracker.begin();
+        let second = tracker.begin();
+
+        assert!(!tracker.acknowledge(first));
+        assert!(tracker.claim_unanswered_reload(second));
+        assert!(!tracker.claim_reload(second));
+        let third = tracker.begin();
+        assert!(tracker.acknowledge(third));
+        assert!(!tracker.claim_unanswered_reload(third));
+    }
+
+    #[test]
+    fn cancellation_disarms_a_pending_probe() {
+        let tracker = InterfaceHealthTracker::new();
+        let generation = tracker.begin();
+
+        tracker.cancel();
+
+        assert!(!tracker.claim_reload(generation));
+    }
+
+    #[test]
+    fn snapshot_and_event_loop_watchdogs_share_one_reload_claim() {
+        let tracker = InterfaceHealthTracker::new();
+        let generation = tracker.begin();
+
+        assert!(tracker.claim_reload(generation));
+        assert!(!tracker.claim_reload(generation));
+        assert!(!tracker.claim_unanswered_reload(generation));
+    }
 }

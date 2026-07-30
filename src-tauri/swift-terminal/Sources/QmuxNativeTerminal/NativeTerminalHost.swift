@@ -15,6 +15,15 @@ private func nativeTerminalDidReceiveAppShortcut(
 @_silgen_name("qmux_native_terminal_did_commit_geometry")
 private func nativeTerminalDidCommitGeometry(_ paneID: UnsafePointer<CChar>)
 
+@_silgen_name("qmux_native_terminal_did_resume_after_wake")
+private func nativeTerminalDidResumeAfterWake() -> UInt64
+
+@_silgen_name("qmux_native_terminal_will_sleep")
+private func nativeTerminalWillSleep()
+
+@_silgen_name("qmux_native_terminal_did_detect_unhealthy_webview")
+private func nativeTerminalDidDetectUnhealthyWebView(_ generation: UInt64)
+
 @MainActor
 final class NativeTerminalHost {
     static let shared = NativeTerminalHost()
@@ -24,6 +33,17 @@ final class NativeTerminalHost {
     private var backstop: NSView?
     private var eventMonitor: Any?
     private var resignKeyObserver: NSObjectProtocol?
+    private var becomeKeyObserver: NSObjectProtocol?
+    private var appBecameActiveObserver: NSObjectProtocol?
+    private var appResignedActiveObserver: NSObjectProtocol?
+    private var windowMiniaturizedObserver: NSObjectProtocol?
+    private var workspaceWakeObserver: NSObjectProtocol?
+    private var workspaceWillSleepObserver: NSObjectProtocol?
+    private var wakeHealthCheckPending = false
+    private var wakeHealthCheckInFlight = false
+    private var webViewHealthProbeGeneration: UInt64 = 0
+    private var webViewHealthRustGeneration: UInt64?
+    private var webViewHealthSnapshotAttempt = 0
     /// React's logical keyboard target, ordered independently from geometry.
     /// The pane may not exist or be eligible yet; reconciliation applies it
     /// once creation/visibility catches up without letting a resize choose a
@@ -435,6 +455,10 @@ final class NativeTerminalHost {
     /// ownership after its event listener is live.
     func prepareForWebViewReload() -> Bool {
         guard container != nil else { return false }
+        webViewHealthProbeGeneration &+= 1
+        wakeHealthCheckPending = false
+        wakeHealthCheckInFlight = false
+        webViewHealthRustGeneration = nil
         desiredKeyboardOwnerPaneID = nil
         _ = setKeyboardOwner(nil)
         consumedAppShortcutKeyCodes.removeAll()
@@ -530,6 +554,34 @@ final class NativeTerminalHost {
             NotificationCenter.default.removeObserver(resignKeyObserver)
             self.resignKeyObserver = nil
         }
+        if let becomeKeyObserver {
+            NotificationCenter.default.removeObserver(becomeKeyObserver)
+            self.becomeKeyObserver = nil
+        }
+        if let appBecameActiveObserver {
+            NotificationCenter.default.removeObserver(appBecameActiveObserver)
+            self.appBecameActiveObserver = nil
+        }
+        if let appResignedActiveObserver {
+            NotificationCenter.default.removeObserver(appResignedActiveObserver)
+            self.appResignedActiveObserver = nil
+        }
+        if let windowMiniaturizedObserver {
+            NotificationCenter.default.removeObserver(windowMiniaturizedObserver)
+            self.windowMiniaturizedObserver = nil
+        }
+        if let workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceWakeObserver)
+            self.workspaceWakeObserver = nil
+        }
+        if let workspaceWillSleepObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(workspaceWillSleepObserver)
+            self.workspaceWillSleepObserver = nil
+        }
+        wakeHealthCheckPending = false
+        wakeHealthCheckInFlight = false
+        webViewHealthProbeGeneration &+= 1
+        webViewHealthRustGeneration = nil
         setKeyboardOwner(nil)
         desiredKeyboardOwnerPaneID = nil
         consumedAppShortcutKeyCodes.removeAll()
@@ -667,6 +719,214 @@ final class NativeTerminalHost {
         }
     }
 
+    private func systemDidWake() {
+        wakeHealthCheckPending = true
+        schedulePostWakeHealthCheckIfVisible()
+    }
+
+    private func systemWillSleep() {
+        wakeHealthCheckPending = false
+        wakeHealthCheckInFlight = false
+        webViewHealthProbeGeneration &+= 1
+        webViewHealthRustGeneration = nil
+        nativeTerminalWillSleep()
+    }
+
+    private func deferPostWakeHealthCheckIfNeeded(_ changedWindow: NSWindow? = nil) {
+        if let changedWindow, changedWindow !== window {
+            return
+        }
+        guard wakeHealthCheckPending || wakeHealthCheckInFlight ||
+                webViewHealthRustGeneration != nil
+        else { return }
+        wakeHealthCheckPending = true
+        wakeHealthCheckInFlight = false
+        webViewHealthProbeGeneration &+= 1
+        webViewHealthRustGeneration = nil
+        nativeTerminalWillSleep()
+    }
+
+    private func isEligibleForPostWakeHealthCheck(_ candidate: NSWindow) -> Bool {
+        NSApp.isActive &&
+            candidate === window &&
+            candidate.isVisible &&
+            !candidate.isMiniaturized
+    }
+
+    private func schedulePostWakeHealthCheckIfVisible() {
+        guard wakeHealthCheckPending,
+              NSApp.isActive,
+              let window,
+              window.isVisible,
+              !window.isMiniaturized
+        else { return }
+        wakeHealthCheckPending = false
+        wakeHealthCheckInFlight = true
+        webViewHealthProbeGeneration &+= 1
+        let generation = webViewHealthProbeGeneration
+        // Give WindowServer/WebKit a short grace period to reconnect after wake.
+        // The actual watchdog below is deliberately much longer, so ordinary
+        // resume scheduling or a busy frontend cannot trigger a reload.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            guard let self,
+                  generation == self.webViewHealthProbeGeneration
+            else { return }
+            guard NSApp.isActive,
+                  let window = self.window,
+                  window.isVisible,
+                  !window.isMiniaturized
+            else {
+                self.wakeHealthCheckPending = true
+                self.wakeHealthCheckInFlight = false
+                return
+            }
+            self.startPostWakeHealthCheck(in: window, generation: generation)
+        }
+    }
+
+    private func startPostWakeHealthCheck(in window: NSWindow, generation: UInt64) {
+        // This event requires an acknowledgement from the current document, so
+        // it catches a dead JavaScript event loop even when WebKit did not report
+        // a WebContent process termination.
+        let rustGeneration = nativeTerminalDidResumeAfterWake()
+        webViewHealthRustGeneration = rustGeneration == 0 ? nil : rustGeneration
+        webViewHealthSnapshotAttempt = 0
+        takePostWakeSnapshot(
+            in: window,
+            generation: generation,
+            rustGeneration: rustGeneration,
+            attempt: 0
+        )
+    }
+
+    private func takePostWakeSnapshot(
+        in window: NSWindow,
+        generation: UInt64,
+        rustGeneration: UInt64,
+        attempt: Int
+    ) {
+        guard generation == webViewHealthProbeGeneration,
+              attempt == webViewHealthSnapshotAttempt
+        else { return }
+        guard isEligibleForPostWakeHealthCheck(window) else {
+            deferPostWakeHealthCheckIfNeeded(window)
+            return
+        }
+        // A JavaScript round-trip alone is insufficient for the observed failure:
+        // WebKit's GPU process can die while WebContent remains responsive. A tiny
+        // native snapshot exercises the compositor without allocating a full-window
+        // image under the same memory pressure that caused the original failure.
+        guard let contentView = window.contentView,
+              let webView = findWebView(in: contentView) as? WKWebView,
+              webView.bounds.width > 0,
+              webView.bounds.height > 0
+        else {
+            finishPostWakeSnapshot(
+                generation: generation,
+                rustGeneration: rustGeneration,
+                attempt: attempt,
+                healthy: false
+            )
+            return
+        }
+        let configuration = WKSnapshotConfiguration()
+        configuration.rect = CGRect(
+            x: 0,
+            y: 0,
+            width: min(webView.bounds.width, 64),
+            height: min(webView.bounds.height, 64)
+        )
+        webView.takeSnapshot(with: configuration) { [weak self] image, error in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self?.finishPostWakeSnapshot(
+                        generation: generation,
+                        rustGeneration: rustGeneration,
+                        attempt: attempt,
+                        healthy: image != nil && error == nil
+                    )
+                }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in
+            guard let self,
+                  generation == self.webViewHealthProbeGeneration,
+                  attempt == self.webViewHealthSnapshotAttempt
+            else { return }
+            self.finishPostWakeSnapshot(
+                generation: generation,
+                rustGeneration: rustGeneration,
+                attempt: attempt,
+                healthy: false
+            )
+        }
+    }
+
+    private func finishPostWakeSnapshot(
+        generation: UInt64,
+        rustGeneration: UInt64,
+        attempt: Int,
+        healthy: Bool
+    ) {
+        guard generation == webViewHealthProbeGeneration,
+              attempt == webViewHealthSnapshotAttempt
+        else { return }
+        guard let window, isEligibleForPostWakeHealthCheck(window) else {
+            deferPostWakeHealthCheckIfNeeded()
+            return
+        }
+        if healthy {
+            wakeHealthCheckInFlight = false
+            webViewHealthProbeGeneration &+= 1
+            // Rust's event-loop watchdog owns the generation until its
+            // acknowledgement window closes. Forget it just after that so a
+            // much later app hide does not schedule a redundant wake probe.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.25) { [weak self] in
+                guard let self,
+                      self.webViewHealthRustGeneration == rustGeneration
+                else { return }
+                self.webViewHealthRustGeneration = nil
+            }
+            return
+        }
+        if attempt == 0 {
+            webViewHealthSnapshotAttempt = 1
+            // A first failed/missing snapshot can be transient while WebKit's
+            // GPU process reconnects. Retry once after a short foreground-only
+            // delay before allowing the compositor half to claim a reload.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+                guard let self,
+                      generation == self.webViewHealthProbeGeneration,
+                      self.webViewHealthSnapshotAttempt == 1
+                else { return }
+                guard let window = self.window,
+                      self.isEligibleForPostWakeHealthCheck(window)
+                else {
+                    self.deferPostWakeHealthCheckIfNeeded()
+                    return
+                }
+                self.takePostWakeSnapshot(
+                    in: window,
+                    generation: generation,
+                    rustGeneration: rustGeneration,
+                    attempt: 1
+                )
+            }
+            return
+        }
+        wakeHealthCheckInFlight = false
+        webViewHealthProbeGeneration &+= 1
+        if rustGeneration != 0 {
+            nativeTerminalDidDetectUnhealthyWebView(rustGeneration)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8.25) { [weak self] in
+                guard let self,
+                      self.webViewHealthRustGeneration == rustGeneration
+                else { return }
+                self.webViewHealthRustGeneration = nil
+            }
+        }
+    }
+
     private func installEventMonitor() {
         guard eventMonitor == nil else { return }
         if resignKeyObserver == nil {
@@ -681,6 +941,73 @@ final class NativeTerminalHost {
                 let resigned = notification.object as? NSWindow
                 MainActor.assumeIsolated {
                     NativeTerminalHost.shared.windowDidResignKey(resigned)
+                }
+            }
+        }
+        if becomeKeyObserver == nil {
+            becomeKeyObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didBecomeKeyNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.schedulePostWakeHealthCheckIfVisible()
+                }
+            }
+        }
+        if appBecameActiveObserver == nil {
+            appBecameActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.schedulePostWakeHealthCheckIfVisible()
+                }
+            }
+        }
+        if appResignedActiveObserver == nil {
+            appResignedActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didResignActiveNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.deferPostWakeHealthCheckIfNeeded()
+                }
+            }
+        }
+        if windowMiniaturizedObserver == nil {
+            windowMiniaturizedObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didMiniaturizeNotification,
+                object: nil,
+                queue: .main
+            ) { notification in
+                let changedWindow = notification.object as? NSWindow
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.deferPostWakeHealthCheckIfNeeded(changedWindow)
+                }
+            }
+        }
+        if workspaceWakeObserver == nil {
+            workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.systemDidWake()
+                }
+            }
+        }
+        if workspaceWillSleepObserver == nil {
+            workspaceWillSleepObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.willSleepNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.systemWillSleep()
                 }
             }
         }

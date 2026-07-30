@@ -1123,6 +1123,47 @@ fn emit_native_event(event_type: &str, pane_id: *const std::ffi::c_char) {
     });
 }
 
+/// AppKit observed a system wake followed by qmux becoming active with a visible
+/// window. Start the document event-loop half of the health check. A stale
+/// readiness flag is intentional here: if the old document died without a page
+/// navigation, the emitted probe is dropped and the timeout reloads it.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_resume_after_wake() -> u64 {
+    if !events_listener_ready() {
+        return 0;
+    }
+    let mut generation = 0;
+    with_app_state(|state| {
+        generation = crate::begin_interface_health_probe(state.clone());
+    });
+    generation
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_will_sleep() {
+    crate::cancel_interface_health_probe();
+}
+
+/// The native WKWebView snapshot failed or timed out after wake, which exercises
+/// the compositor even if JavaScript remains responsive after a GPU-process loss.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_detect_unhealthy_webview(generation: u64) {
+    if generation == 0 {
+        return;
+    }
+    with_app_state(|state| {
+        crate::request_unhealthy_interface_reload(
+            state.clone(),
+            generation,
+            false,
+            "WKWebView compositor failed its post-wake health check",
+        );
+    });
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn qmux_native_terminal_did_request_search(pane_id: *const std::ffi::c_char) {
     emit_native_event("terminal.search_requested", pane_id);

@@ -2117,6 +2117,17 @@ impl AppState {
         Ok(())
     }
 
+    /// Clones the process app handle without holding the mutex across caller
+    /// work. Native callbacks use this to schedule main-thread recovery after
+    /// WebKit health probes time out.
+    pub fn app_handle(&self) -> Option<AppHandle> {
+        self.inner
+            .app_handle
+            .lock()
+            .ok()
+            .and_then(|handle| handle.as_ref().cloned())
+    }
+
     pub fn next_id(&self, prefix: &str) -> String {
         let seq = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         let millis = SystemTime::now()
@@ -2132,12 +2143,7 @@ impl AppState {
         // the IPC; holding the mutex across that serialized every event in the
         // process behind one lock — including main-thread native-input callbacks
         // contending with transcript tails mid-serialize.
-        let app_handle = self
-            .inner
-            .app_handle
-            .lock()
-            .ok()
-            .and_then(|handle| handle.as_ref().cloned());
+        let app_handle = self.app_handle();
         if let Some(app_handle) = app_handle {
             let _ = app_handle.emit("qmux-event", event);
         }

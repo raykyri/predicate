@@ -1098,3 +1098,8 @@ export function listenToEvents(onEvent: (event: QmuxEvent) => void): Promise<Unl
 export function markEventsListenerReady() {
   return invoke<void>("mark_events_listener_ready");
 }
+
+/** Acknowledges the native post-wake document event-loop health probe. */
+export function acknowledgeInterfaceHealthProbe(generation: number) {
+  return invoke<void>("acknowledge_interface_health_probe", { generation });
+}

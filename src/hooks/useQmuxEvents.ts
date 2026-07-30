@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
+  acknowledgeInterfaceHealthProbe,
   listAgents,
   listGroups,
   listPanes,
@@ -202,6 +203,12 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     };
 
     const handleEvent = (event: QmuxEvent) => {
+      if (event.type === "app.interface_health_probe") {
+        const generation = event.payload.generation;
+        if (typeof generation === "number" && Number.isSafeInteger(generation)) {
+          void acknowledgeInterfaceHealthProbe(generation).catch(() => undefined);
+        }
+      }
       if (event.type.startsWith("research.")) {
         onResearchChanged?.(event);
       }
