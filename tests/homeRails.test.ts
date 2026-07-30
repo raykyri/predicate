@@ -6,7 +6,9 @@ import HomeGroupSelector from "../src/components/HomeGroupSelector";
 import { railLinkPath } from "../src/components/HomeRails";
 import {
   latestUserTurnTimestamp,
+  mergeRailPastTurns,
   railLatestUserTurn,
+  railPastTurnSummaries,
   railPastTurns,
   railQueuedTurnText,
 } from "../src/lib/homeRails";
@@ -117,6 +119,27 @@ test("railPastTurns caches by turns-array identity", () => {
     makeTurn({ role: "user", text: "second", timestamp: 200 }),
   ];
   assert.equal(railPastTurns(turns), railPastTurns(turns));
+});
+
+test("compact Home history merges with the live turn window without duplicates", () => {
+  const historical = railPastTurnSummaries([
+    { id: "old", text: "old prompt", settledAt: null },
+    { id: "overlap", text: "stale prompt", settledAt: null },
+    {
+      id: "instruction",
+      text: "<system-reminder>noise</system-reminder>",
+      settledAt: null,
+    },
+  ]);
+  const merged = mergeRailPastTurns(historical, [
+    { id: "overlap", text: "fresh prompt", settledAt: 200 },
+    { id: "recent", text: "recent prompt", settledAt: 300 },
+  ]);
+  assert.deepEqual(merged, [
+    { id: "old", text: "old prompt", settledAt: null },
+    { id: "overlap", text: "fresh prompt", settledAt: 200 },
+    { id: "recent", text: "recent prompt", settledAt: 300 },
+  ]);
 });
 
 test("rail text helpers strip instruction blocks with raw-text fallback", () => {

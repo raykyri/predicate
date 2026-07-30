@@ -69,14 +69,24 @@ import ConfirmDialogActionButton from "./components/ConfirmDialogActionButton";
 import { queuedTurnDeliveryLabel } from "./components/QueuedTurnCard";
 import {
   latestUserTurnTimestamp,
+  mergeRailPastTurns,
   railLatestUserTurn,
+  railPastTurnSummaries,
   railPastTurns,
   railQueuedTurnText,
 } from "./lib/homeRails";
+import {
+  ThreadGraphRequestTracker,
+  uniqueResolvedThreadIds,
+} from "./lib/threadGraphRefresh";
 import HomeGroupSelector from "./components/HomeGroupSelector";
 import type { HomeGroup } from "./components/HomeGroupSelector";
 import HomeRails from "./components/HomeRails";
-import type { HomeRailScrollPosition, HomeRailWorkstream } from "./components/HomeRails";
+import type {
+  HomeRailPastTurn,
+  HomeRailScrollPosition,
+  HomeRailWorkstream,
+} from "./components/HomeRails";
 import LinkContextMenu from "./components/LinkContextMenu";
 import PublishDialog, { type PublishDialogTarget } from "./components/PublishDialog";
 import SidebarModeToggle from "./components/SidebarModeToggle";
@@ -377,6 +387,7 @@ import {
   listAgentTranscripts,
   listAgentTurnQueue,
   listGlobalDrafts,
+  listHomeTurnHistory,
   createGlobalDraft,
   deleteGlobalDraft,
   assignGlobalDraft,
@@ -544,6 +555,9 @@ function researchBrowserOwnerId(treeId: string) {
 // How long after the user's last keystroke we keep holding the queue before letting a
 // finished turn auto-send the next queued message.
 const INPUT_DEQUEUE_HOLD_MS = 1500;
+// Full graphs are cosmetic relative to the bounded live timeline. Collapse a
+// streaming burst into one per-thread read after activity goes quiet.
+const THREAD_GRAPH_REFRESH_DEBOUNCE_MS = 300;
 // Trailing debounce for committing native terminal title changes into React
 // state (see handleTerminalTitleChange).
 const TERMINAL_TITLE_COMMIT_DEBOUNCE_MS = 200;
@@ -1351,6 +1365,21 @@ function latestUserTurnId(turns: Turn[]): string | null {
   return latest;
 }
 
+function agentHistoryRequestKey(agent: AgentInfo) {
+  return [
+    threadIdForAgent(agent),
+    agent.branchId ?? "",
+    agent.sessionId ?? "",
+    agent.transcriptPath ?? "",
+  ].join("\0");
+}
+
+interface HomeTurnHistoryState {
+  requestKey: string;
+  pastTurns: HomeRailPastTurn[];
+  nextBefore: number | null;
+  loading: boolean;
+}
 
 function MainApp() {
   const appRef = useRef<HTMLElement | null>(null);
@@ -1534,6 +1563,13 @@ function MainApp() {
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
   const [threadGraphs, setThreadGraphs] = useState<ThreadGraph[]>([]);
+  const [homeTurnHistoryByAgent, setHomeTurnHistoryByAgent] = useState<
+    Record<string, HomeTurnHistoryState>
+  >({});
+  const homeTurnHistoryByAgentRef = useRef(homeTurnHistoryByAgent);
+  homeTurnHistoryByAgentRef.current = homeTurnHistoryByAgent;
+  const homeHistoryRequestKeyByAgentRef = useRef(new Map<string, string>());
+  const homeHistoryRequestSequenceByAgentRef = useRef(new Map<string, number>());
   const [queuedTurnsByAgent, setQueuedTurnsByAgentState] = useState<Record<string, QueuedTurn[]>>({});
   // Application-global prompt drafts (the home Drafts rail). Backend-owned;
   // hydrated at boot and kept fresh by drafts.changed events.
@@ -2577,112 +2613,347 @@ function MainApp() {
     () => panesForScope(panes, groups, "terminal"),
     [groups, panes],
   );
-  // Conversation history is deliberately demand-loaded. A workspace can retain
+  // Conversation history is deliberately surface-owned. A workspace can retain
   // hundreds of parked agents whose full thread graphs contain years of tool
   // output; hydrating every one copied that history through Rust, IPC, JSON, and
-  // React at startup. Keep only histories the current surface needs: the active
-  // split in a terminal view, or every live terminal pane while Home renders its
-  // workstream rails.
-  const historyRequestKeyByAgentRef = useRef(new Map<string, string>());
-  const hydratedHistoryAgentIdsRef = useRef(new Set<string>());
-  const graphRequestByThreadRef = useRef(
-    new Map<string, Promise<ThreadGraph | null>>(),
-  );
-  const hydrateAgentHistory = useCallback(async (agent: AgentInfo) => {
-    const threadId = threadIdForAgent(agent);
-    const requestKey = [
-      threadId,
-      agent.branchId ?? "",
-      agent.sessionId ?? "",
-      agent.transcriptPath ?? "",
-    ].join("\0");
-    if (historyRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
-      return;
-    }
-    historyRequestKeyByAgentRef.current.set(agent.id, requestKey);
-    const turnsAtRequestStart = new Map(
-      turnsRef.current
-        .filter((turn) => turn.agentId === agent.id)
-        .map((turn) => [turn.id, turn]),
-    );
-    let graphRequest = graphRequestByThreadRef.current.get(threadId);
-    if (!graphRequest) {
-      graphRequest = getThreadGraph(threadId).catch((): ThreadGraph | null => null);
-      graphRequestByThreadRef.current.set(threadId, graphRequest);
-      void graphRequest.finally(() => {
-        if (graphRequestByThreadRef.current.get(threadId) === graphRequest) {
-          graphRequestByThreadRef.current.delete(threadId);
+  // React. Terminal views retain full graphs for their visible split only. Home
+  // retains the backend's bounded turn windows for its live workstream summaries,
+  // but never full graphs. Leaving either surface evicts what it owned.
+  const turnHistoryRequestKeyByAgentRef = useRef(new Map<string, string>());
+  const graphHistoryRequestKeyByAgentRef = useRef(new Map<string, string>());
+  const retainedTurnHistoryAgentIdsRef = useRef(new Set<string>());
+  const retainedGraphHistoryAgentIdsRef = useRef(new Set<string>());
+  const retainedGraphHistoryThreadIdsRef = useRef(new Set<string>());
+  const threadGraphRequestTrackerRef = useRef(new ThreadGraphRequestTracker());
+  const dirtyThreadGraphAgentIdsRef = useRef(new Set<string>());
+  const threadGraphRefreshTimerRef = useRef<number | null>(null);
+  const fetchRetainedThreadGraph = useCallback(
+    async (
+      threadId: string,
+      initialRequest?: { agentId: string; requestKey: string },
+    ): Promise<void> => {
+      const sequence = threadGraphRequestTrackerRef.current.begin(threadId);
+      try {
+        const graph = await getThreadGraph(threadId);
+        if (
+          !threadGraphRequestTrackerRef.current.isLatest(threadId, sequence) ||
+          !retainedGraphHistoryThreadIdsRef.current.has(threadId) ||
+          (initialRequest &&
+            graphHistoryRequestKeyByAgentRef.current.get(initialRequest.agentId) !==
+              initialRequest.requestKey)
+        ) {
+          return;
         }
-      });
-    }
-    try {
-      const [existingTurns, graph] = await Promise.all([
-        listTurns(agent.id),
-        graphRequest ?? Promise.resolve(null),
-      ]);
-      // Do not let the boot snapshot overwrite turns delivered by the live event
-      // stream while the request was in flight. Same-id live objects win; genuinely
-      // new live turns are appended after the snapshot.
-      setTurns((current) => {
-        const liveById = new Map(
-          current
-            .filter((turn) => turn.agentId === agent.id)
-            .map((turn) => [turn.id, turn]),
-        );
-        const merged = existingTurns.map((turn) => {
-          const live = liveById.get(turn.id);
-          // Prefer only turns that arrived or changed after this request began.
-          // Previously hydrated same-id turns may belong to an old transcript
-          // generation and must be replaced by the new scoped snapshot.
-          return live && live !== turnsAtRequestStart.get(turn.id) ? live : turn;
-        });
-        const snapshotIds = new Set(existingTurns.map((turn) => turn.id));
-        for (const turn of liveById.values()) {
-          if (!snapshotIds.has(turn.id)) {
-            merged.push(turn);
+        if (graph) {
+          setThreadGraphs((current) =>
+            current.includes(graph) ? current : upsertThreadGraphs(current, [graph]),
+          );
+        }
+      } catch (err) {
+        // Only the newest request owns retry state. An older hydration failure
+        // must not clear the marker installed by a newer transcript generation.
+        if (threadGraphRequestTrackerRef.current.isLatest(threadId, sequence)) {
+          if (
+            initialRequest &&
+            graphHistoryRequestKeyByAgentRef.current.get(initialRequest.agentId) ===
+              initialRequest.requestKey
+          ) {
+            graphHistoryRequestKeyByAgentRef.current.delete(initialRequest.agentId);
+          }
+          for (const agentId of retainedGraphHistoryAgentIdsRef.current) {
+            const currentAgent = agentsRef.current.find((agent) => agent.id === agentId);
+            if (currentAgent && threadIdForAgent(currentAgent) === threadId) {
+              graphHistoryRequestKeyByAgentRef.current.delete(agentId);
+            }
+          }
+          if (initialRequest) {
+            setError(err instanceof Error ? err.message : String(err));
           }
         }
-        const next = [
-          ...current.filter((turn) => turn.agentId !== agent.id),
-          ...merged,
-        ];
-        return next.length === current.length &&
-          next.every((turn, index) => turn === current[index])
-          ? current
-          : next;
+      }
+    },
+    [],
+  );
+  const hydrateAgentHistory = useCallback(async (agent: AgentInfo, includeGraph: boolean) => {
+    const threadId = threadIdForAgent(agent);
+    const requestKey = agentHistoryRequestKey(agent);
+    const needsTurns = turnHistoryRequestKeyByAgentRef.current.get(agent.id) !== requestKey;
+    const needsGraph =
+      includeGraph && graphHistoryRequestKeyByAgentRef.current.get(agent.id) !== requestKey;
+    if (!needsTurns && !needsGraph) {
+      return;
+    }
+    if (needsTurns) {
+      turnHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
+    }
+    if (needsGraph) {
+      graphHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
+    }
+    const requests: Promise<void>[] = [];
+    if (needsTurns) {
+      const turnsAtRequestStart = new Map(
+        turnsRef.current
+          .filter((turn) => turn.agentId === agent.id)
+          .map((turn) => [turn.id, turn]),
+      );
+      requests.push(
+        listTurns(agent.id)
+          .then((existingTurns) => {
+            if (
+              !retainedTurnHistoryAgentIdsRef.current.has(agent.id) ||
+              turnHistoryRequestKeyByAgentRef.current.get(agent.id) !== requestKey
+            ) {
+              return;
+            }
+            // Do not let the snapshot overwrite turns delivered by the live event
+            // stream while the request was in flight. Same-id live objects win;
+            // genuinely new live turns are appended after the snapshot.
+            setTurns((current) => {
+              const liveById = new Map(
+                current
+                  .filter((turn) => turn.agentId === agent.id)
+                  .map((turn) => [turn.id, turn]),
+              );
+              const merged = existingTurns.map((turn) => {
+                const live = liveById.get(turn.id);
+                // Prefer only turns that arrived or changed after this request
+                // began. Previously hydrated same-id turns may belong to an old
+                // transcript generation and must be replaced by this snapshot.
+                return live && live !== turnsAtRequestStart.get(turn.id) ? live : turn;
+              });
+              const snapshotIds = new Set(existingTurns.map((turn) => turn.id));
+              for (const turn of liveById.values()) {
+                if (!snapshotIds.has(turn.id)) {
+                  merged.push(turn);
+                }
+              }
+              const next = [
+                ...current.filter((turn) => turn.agentId !== agent.id),
+                ...merged,
+              ];
+              return next.length === current.length &&
+                next.every((turn, index) => turn === current[index])
+                ? current
+                : next;
+            });
+          })
+          .catch((err) => {
+            if (turnHistoryRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
+              turnHistoryRequestKeyByAgentRef.current.delete(agent.id);
+              setError(err instanceof Error ? err.message : String(err));
+            }
+          }),
+      );
+    }
+    if (needsGraph) {
+      requests.push(fetchRetainedThreadGraph(threadId, { agentId: agent.id, requestKey }));
+    }
+    await Promise.all(requests);
+  }, [fetchRetainedThreadGraph]);
+  const fetchHomeTurnHistoryPage = useCallback(
+    async (agent: AgentInfo, before: number | null) => {
+      const requestKey = agentHistoryRequestKey(agent);
+      const sequence = (homeHistoryRequestSequenceByAgentRef.current.get(agent.id) ?? 0) + 1;
+      homeHistoryRequestSequenceByAgentRef.current.set(agent.id, sequence);
+      setHomeTurnHistoryByAgent((current) => {
+        const existing = current[agent.id];
+        const next: HomeTurnHistoryState =
+          before !== null && existing?.requestKey === requestKey
+            ? { ...existing, loading: true }
+            : { requestKey, pastTurns: [], nextBefore: null, loading: true };
+        return { ...current, [agent.id]: next };
       });
-      if (graph) {
-        setThreadGraphs((current) =>
-          current.includes(graph) ? current : upsertThreadGraphs(current, [graph]),
+      try {
+        const page = await listHomeTurnHistory(agent.id, before);
+        if (
+          homeHistoryRequestSequenceByAgentRef.current.get(agent.id) !== sequence ||
+          homeHistoryRequestKeyByAgentRef.current.get(agent.id) !== requestKey
+        ) {
+          return;
+        }
+        const pageTurns = railPastTurnSummaries(page.turns);
+        setHomeTurnHistoryByAgent((current) => {
+          const existing = current[agent.id];
+          if (!existing || existing.requestKey !== requestKey) {
+            return current;
+          }
+          return {
+            ...current,
+            [agent.id]: {
+              requestKey,
+              pastTurns:
+                before === null
+                  ? pageTurns
+                  : mergeRailPastTurns(pageTurns, existing.pastTurns),
+              nextBefore: page.nextBefore,
+              loading: false,
+            },
+          };
+        });
+      } catch (err) {
+        if (
+          homeHistoryRequestSequenceByAgentRef.current.get(agent.id) === sequence &&
+          homeHistoryRequestKeyByAgentRef.current.get(agent.id) === requestKey
+        ) {
+          setHomeTurnHistoryByAgent((current) => {
+            const existing = current[agent.id];
+            return existing?.requestKey === requestKey
+              ? { ...current, [agent.id]: { ...existing, loading: false } }
+              : current;
+          });
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      }
+    },
+    [],
+  );
+  const historyTargetAgents = useMemo(
+    () =>
+      (homeActive ? sidebarPanes : visibleTerminalPanes).flatMap((pane) => {
+        const agent = agentByPaneId.get(pane.id);
+        return agent ? [agent] : [];
+      }),
+    [agentByPaneId, homeActive, sidebarPanes, visibleTerminalPanes],
+  );
+  const retainedTurnHistoryAgentIds = useMemo(
+    () => new Set(historyTargetAgents.map((agent) => agent.id)),
+    [historyTargetAgents],
+  );
+  const retainedGraphHistoryAgentIds = useMemo(
+    () => new Set(homeActive ? [] : historyTargetAgents.map((agent) => agent.id)),
+    [historyTargetAgents, homeActive],
+  );
+  const retainedGraphHistoryThreadIds = useMemo(
+    () =>
+      new Set(
+        homeActive ? [] : historyTargetAgents.map((agent) => threadIdForAgent(agent)),
+      ),
+    [historyTargetAgents, homeActive],
+  );
+  retainedTurnHistoryAgentIdsRef.current = retainedTurnHistoryAgentIds;
+  retainedGraphHistoryAgentIdsRef.current = retainedGraphHistoryAgentIds;
+  retainedGraphHistoryThreadIdsRef.current = retainedGraphHistoryThreadIds;
+  useEffect(() => {
+    if (!homeActive) {
+      for (const agentId of homeHistoryRequestSequenceByAgentRef.current.keys()) {
+        homeHistoryRequestSequenceByAgentRef.current.set(
+          agentId,
+          (homeHistoryRequestSequenceByAgentRef.current.get(agentId) ?? 0) + 1,
         );
       }
-      // Subsequent live turn events may now refresh this graph. Events that
-      // raced the initial request remain visible through the pending-turn
-      // overlay, avoiding a stale initial response racing a targeted refresh.
-      hydratedHistoryAgentIdsRef.current.add(agent.id);
-    } catch (err) {
-      // A later surface transition should retry a failed demand load.
-      if (historyRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
-        historyRequestKeyByAgentRef.current.delete(agent.id);
-        hydratedHistoryAgentIdsRef.current.delete(agent.id);
-      }
-      setError(err instanceof Error ? err.message : String(err));
+      homeHistoryRequestKeyByAgentRef.current.clear();
+      setHomeTurnHistoryByAgent((current) =>
+        Object.keys(current).length > 0 ? {} : current,
+      );
+      return;
     }
-  }, []);
-  useEffect(() => {
-    const panesNeedingHistory = homeActive ? sidebarPanes : visibleTerminalPanes;
-    for (const pane of panesNeedingHistory) {
-      const agent = agentByPaneId.get(pane.id);
-      if (agent) {
-        void hydrateAgentHistory(agent);
+    const liveAgentIds = new Set(historyTargetAgents.map((agent) => agent.id));
+    setHomeTurnHistoryByAgent((current) => {
+      const entries = Object.entries(current).filter(([agentId]) => liveAgentIds.has(agentId));
+      return entries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(entries);
+    });
+    for (const agentId of homeHistoryRequestKeyByAgentRef.current.keys()) {
+      if (!liveAgentIds.has(agentId)) {
+        homeHistoryRequestKeyByAgentRef.current.delete(agentId);
       }
+    }
+    for (const agent of historyTargetAgents) {
+      const requestKey = agentHistoryRequestKey(agent);
+      if (homeHistoryRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
+        continue;
+      }
+      homeHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
+      void fetchHomeTurnHistoryPage(agent, null);
+    }
+  }, [fetchHomeTurnHistoryPage, historyTargetAgents, homeActive]);
+  const loadEarlierHomeTurnHistory = useCallback(
+    (agentId: string) => {
+      const history = homeTurnHistoryByAgentRef.current[agentId];
+      const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
+      if (!agent || !history || history.loading || history.nextBefore === null) {
+        return;
+      }
+      void fetchHomeTurnHistoryPage(agent, history.nextBefore);
+    },
+    [fetchHomeTurnHistoryPage],
+  );
+  const flushDirtyThreadGraphs = useCallback(() => {
+    threadGraphRefreshTimerRef.current = null;
+    const dirtyAgentIds = [...dirtyThreadGraphAgentIdsRef.current];
+    dirtyThreadGraphAgentIdsRef.current.clear();
+    const threadIds = uniqueResolvedThreadIds(dirtyAgentIds, (agentId) => {
+      if (!retainedGraphHistoryAgentIdsRef.current.has(agentId)) {
+        return null;
+      }
+      const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
+      return agent ? threadIdForAgent(agent) : null;
+    });
+    for (const threadId of threadIds) {
+      void fetchRetainedThreadGraph(threadId);
+    }
+  }, [fetchRetainedThreadGraph]);
+  const scheduleAgentThreadGraphRefresh = useCallback(
+    (agentId: string) => {
+      if (!retainedGraphHistoryAgentIdsRef.current.has(agentId)) {
+        return;
+      }
+      dirtyThreadGraphAgentIdsRef.current.add(agentId);
+      if (threadGraphRefreshTimerRef.current === null) {
+        threadGraphRefreshTimerRef.current = window.setTimeout(
+          flushDirtyThreadGraphs,
+          THREAD_GRAPH_REFRESH_DEBOUNCE_MS,
+        );
+      }
+    },
+    [flushDirtyThreadGraphs],
+  );
+  useEffect(
+    () => () => {
+      if (threadGraphRefreshTimerRef.current !== null) {
+        window.clearTimeout(threadGraphRefreshTimerRef.current);
+        threadGraphRefreshTimerRef.current = null;
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    setTurns((current) => {
+      const retained = current.filter((turn) => retainedTurnHistoryAgentIds.has(turn.agentId));
+      return retained.length === current.length ? current : retained;
+    });
+    setThreadGraphs((current) => {
+      const retained = current.filter((graph) =>
+        retainedGraphHistoryThreadIds.has(graph.threadId),
+      );
+      return retained.length === current.length ? current : retained;
+    });
+    for (const agentId of turnHistoryRequestKeyByAgentRef.current.keys()) {
+      if (!retainedTurnHistoryAgentIds.has(agentId)) {
+        turnHistoryRequestKeyByAgentRef.current.delete(agentId);
+      }
+    }
+    for (const agentId of graphHistoryRequestKeyByAgentRef.current.keys()) {
+      if (!retainedGraphHistoryAgentIds.has(agentId)) {
+        graphHistoryRequestKeyByAgentRef.current.delete(agentId);
+      }
+    }
+    for (const agentId of dirtyThreadGraphAgentIdsRef.current) {
+      if (!retainedGraphHistoryAgentIds.has(agentId)) {
+        dirtyThreadGraphAgentIdsRef.current.delete(agentId);
+      }
+    }
+    for (const agent of historyTargetAgents) {
+      void hydrateAgentHistory(agent, !homeActive);
     }
   }, [
-    agentByPaneId,
+    historyTargetAgents,
     homeActive,
     hydrateAgentHistory,
-    sidebarPanes,
-    visibleTerminalPanes,
+    retainedGraphHistoryAgentIds,
+    retainedGraphHistoryThreadIds,
+    retainedTurnHistoryAgentIds,
   ]);
   const researchNodeByPaneId = useMemo(
     () =>
@@ -4129,6 +4400,7 @@ function MainApp() {
       }
       const statusClass = agent.status === "awaitingInput" ? "status-awaiting-input" : "";
       const turnInfo = turnInfoForAgent(agent);
+      const homeHistory = homeTurnHistoryByAgent[agent.id];
       return [
         {
           agentId: agent.id,
@@ -4142,7 +4414,12 @@ function MainApp() {
           latestUserTurn: railLatestUserTurn(turnInfo.turns),
           currentStartedAt: latestUserTurnTimestamp(turnInfo.turns),
           currentSettledAt: latestTurnTimestamp(turnInfo.turns),
-          pastTurns: railPastTurns(turnInfo.turns),
+          pastTurns: mergeRailPastTurns(
+            homeHistory?.pastTurns ?? [],
+            railPastTurns(turnInfo.turns),
+          ),
+          hasEarlierPastTurns: homeHistory?.nextBefore != null,
+          loadingEarlierPastTurns: homeHistory?.loading ?? false,
           queuedTurns: (queuedTurnsByAgent[agent.id] ?? []).map((turn) => ({
             id: turn.id,
             text: railQueuedTurnText(turn.text),
@@ -4160,6 +4437,7 @@ function MainApp() {
     agentTurnInfoById,
     groupById,
     homeActive,
+    homeTurnHistoryByAgent,
     queuedTurnsByAgent,
     sidebarPanes,
     terminalTitleByPane,
@@ -7698,21 +7976,15 @@ function MainApp() {
     setGroups,
     setThinkingAgentIds,
     setTurns,
-    setThreadGraphs,
     setTranscriptNoticeByAgent,
     setShellJobByAgent: setShellJobByAgentFromEvent,
     setAgentQueuedTurns,
     setGlobalDrafts,
-    // Reads through agentsRef (not the captured `agents` render value) because
-    // useQmuxEvents captures its handlers once on mount. threadIdForAgent
-    // mirrors the backend's thread-id fallback so agents without an explicit
-    // threadId still resolve.
-    getAgentThreadId: (agentId: string) => {
-      const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
-      return agent ? threadIdForAgent(agent) : null;
-    },
     shouldRefreshAgentThreadGraph: (agentId: string) =>
-      hydratedHistoryAgentIdsRef.current.has(agentId),
+      retainedGraphHistoryAgentIdsRef.current.has(agentId),
+    onAgentThreadGraphDirty: scheduleAgentThreadGraphRefresh,
+    shouldRetainAgentTurns: (agentId: string) =>
+      retainedTurnHistoryAgentIdsRef.current.has(agentId),
     isResearchAgent: (agentId: string) => researchAgentIdsRef.current.has(agentId),
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
@@ -7759,7 +8031,6 @@ function MainApp() {
         (agent) => agent.paneId === pane.id || agent.id === pane.agentId,
       );
       if (restoredAgent) {
-        void hydrateAgentHistory(restoredAgent);
         void refreshAgentTurnQueue(restoredAgent.id).catch(() => undefined);
         void getAgentDraft(restoredAgent.id)
           .then((draft) => {
@@ -13935,6 +14206,7 @@ function MainApp() {
                   draftsVisible={homeDraftsVisible}
                   onShowDrafts={showHomeDrafts}
                   onActivatePane={focusPaneTab}
+                  onLoadEarlierPastTurns={loadEarlierHomeTurnHistory}
                   onReorderQueuedTurn={(agentId, fromIndex, toIndex, text, expectedId) =>
                     void reorderHomeQueuedTurn(agentId, fromIndex, toIndex, text, expectedId)
                   }

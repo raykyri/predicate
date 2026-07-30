@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import {
-  getThreadGraph,
   listAgents,
   listGroups,
   listPanes,
@@ -16,7 +15,6 @@ import {
   reconcileReplacedTurns,
   transcriptHookEvent,
   upsertAgent,
-  upsertThreadGraphs,
 } from "../lib/appHelpers";
 import { parseAppShortcutCommand, type AppShortcutCommand } from "../lib/appShortcuts";
 import type { ExitPreflightRequest, PaneContextMenuState } from "../appTypes";
@@ -28,7 +26,6 @@ import type {
   QmuxEvent,
   QueuedTurn,
   ShellAgentJobInfo,
-  ThreadGraph,
   TranscriptHookEvent,
   Turn,
 } from "../types";
@@ -48,13 +45,6 @@ import type {
 // of queued pane/agent events would let a shortcut act on state the queued
 // events are about to change, and one frame is imperceptible for those actions.
 const EVENT_COALESCE_MS = 16;
-
-// Trailing debounce for thread-graph refetches raised by turn events. Graphs
-// back branch pickers and fork lineage — cosmetic relative to the timeline
-// itself — so a few hundred milliseconds of staleness is invisible, while
-// refetching per event burst was a full IPC round-trip plus a JSON diff of
-// every graph several times a second during streaming.
-const THREAD_GRAPH_REFRESH_DEBOUNCE_MS = 300;
 
 // Mirror the backend's per-agent turn cap (MAX_TURNS_PER_AGENT in state.rs). The
 // backend only ever holds the most recent N turns per agent, but the frontend
@@ -84,25 +74,26 @@ export interface UseQmuxEventsHandlers {
   // agent restored into a working status never falsely shows it (see below).
   setThinkingAgentIds: Dispatch<SetStateAction<Set<string>>>;
   setTurns: Dispatch<SetStateAction<Turn[]>>;
-  setThreadGraphs: Dispatch<SetStateAction<ThreadGraph[]>>;
   setTranscriptNoticeByAgent: Dispatch<SetStateAction<Record<string, string | null>>>;
   setShellJobByAgent: Dispatch<SetStateAction<Record<string, ShellAgentJobInfo>>>;
   setAgentQueuedTurns: (agentId: string, queuedTurns: QueuedTurn[]) => void;
   setGlobalDrafts: Dispatch<SetStateAction<GlobalDraft[]>>;
-  // Resolves an agent id to its thread id (including the backend's synthetic
-  // `thread-{agentId}` fallback), or null for an agent the app doesn't know yet.
-  // Lets turn events refresh only the affected thread's graph instead of
-  // refetching every graph in the workspace.
-  getAgentThreadId?: (agentId: string) => string | null;
   // Thread graphs are demand-loaded by App. Hidden or parked agents still emit
   // turn events, but those events must not populate an ever-growing graph cache.
   shouldRefreshAgentThreadGraph?: (agentId: string) => boolean;
+  // App owns graph request sequencing alongside initial hydration. Keeping both
+  // paths behind one coordinator prevents a slow initial read from overwriting a
+  // newer event-driven read of the same thread.
+  onAgentThreadGraphDirty?: (agentId: string) => void;
+  // Turn snapshots follow the same surface ownership policy. App can rehydrate
+  // the backend's bounded window when a hidden agent becomes visible, so retaining
+  // every hidden agent's live window here would only turn the frontend into an
+  // app-lifetime cache again.
+  shouldRetainAgentTurns?: (agentId: string) => boolean;
   // True for agents that belong to research runs. The backend deliberately
   // writes no thread graph for them (research follow-ups branch through the
-  // research tree, not the fork-lineage graph), so a graph refresh for one can
-  // only miss — and a miss escalates to the full every-graph refetch, an
-  // O(workspace history) fetch that fires on every research turn burst. Their
-  // turn events must skip graph refreshes entirely.
+  // research tree, not the fork-lineage graph), so a graph refresh can only
+  // miss. Their dense turn-event bursts must skip graph work entirely.
   isResearchAgent?: (agentId: string) => boolean;
   refreshAgentTurnQueue: (agentId: string) => Promise<void>;
   refreshTranscriptOptions: (agentId: string) => Promise<void>;
@@ -158,13 +149,13 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     setGroups,
     setThinkingAgentIds,
     setTurns,
-    setThreadGraphs,
     setTranscriptNoticeByAgent,
     setShellJobByAgent,
     setAgentQueuedTurns,
     setGlobalDrafts,
-    getAgentThreadId,
     shouldRefreshAgentThreadGraph,
+    onAgentThreadGraphDirty,
+    shouldRetainAgentTurns,
     isResearchAgent,
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
@@ -194,21 +185,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     // Same idea for pane-list refetches (a fork adds a pane backend-side).
     let panesRefreshSeq = 0;
     let groupsRefreshSeq = 0;
-    // Turn events arrive in bursts — every appended line schedules a refresh,
-    // and the transcript tail delivers a fresh burst every few hundred ms for
-    // as long as an agent streams. A microtask-level collapse still refetched
-    // (and re-serialized, re-parsed, and JSON-diffed) every thread graph once
-    // per burst. Debounce with a trailing timer instead: the timeline renders
-    // from `turns` directly, so graph freshness is not latency-critical, and
-    // one refetch per quiet window replaces several per second. The seq guard
-    // still drops any stale response that loses a race.
-    let threadGraphRefreshTimer: number | null = null;
-    // Agents whose turn activity arrived since the last flush. Only histories
-    // already requested by the active surface enter this set; hidden agents use
-    // their bounded live-turn window without populating the graph cache.
-    const dirtyGraphAgentIds = new Set<string>();
-    // Per-thread fetch sequence for targeted refreshes (see flush below).
-    const threadGraphFetchSeqByThread = new Map<string, number>();
     const refreshThreadGraphs = (agentId?: string | null) => {
       if (
         !agentId ||
@@ -222,61 +198,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         // for the graph.
         return;
       }
-      dirtyGraphAgentIds.add(agentId);
-      if (threadGraphRefreshTimer !== null) {
-        return;
-      }
-      threadGraphRefreshTimer = window.setTimeout(() => {
-        threadGraphRefreshTimer = null;
-        if (disposed) {
-          return;
-        }
-        const dirtyAgents = [...dirtyGraphAgentIds];
-        dirtyGraphAgentIds.clear();
-        const threadIds =
-          getAgentThreadId && dirtyAgents.length > 0
-            ? dirtyAgents.map((dirtyAgentId) => getAgentThreadId(dirtyAgentId))
-            : null;
-        if (threadIds && threadIds.every((threadId): threadId is string => threadId !== null)) {
-          const fetches = [...new Set(threadIds)].map((threadId) => {
-            const seq = (threadGraphFetchSeqByThread.get(threadId) ?? 0) + 1;
-            threadGraphFetchSeqByThread.set(threadId, seq);
-            return getThreadGraph(threadId)
-              .then((graph) => ({ threadId, seq, graph }))
-              .catch(() => null);
-          });
-          // One state commit for the whole batch — per-promise applies would
-          // re-render the app once per streaming thread per flush. Each result
-          // still applies only if its per-thread seq is current, so a slower
-          // duplicate fetch cannot roll back a fresher one.
-          void Promise.all(fetches).then((results) => {
-            if (disposed) {
-              return;
-            }
-            const updates: ThreadGraph[] = [];
-            for (const result of results) {
-              if (result === null || result.graph === null) {
-                // A newly-created thread may not have a durable graph yet. Its
-                // bounded live turns remain the correct rendering fallback;
-                // the next turn event retries this targeted fetch.
-                continue;
-              }
-              if (threadGraphFetchSeqByThread.get(result.threadId) === result.seq) {
-                updates.push(result.graph);
-              }
-            }
-            if (updates.length > 0) {
-              // Content-identical refetches keep the prior graph object so the
-              // per-agent turn-info cache (keyed on graph identity) holds.
-              setThreadGraphs((current) => upsertThreadGraphs(current, updates));
-            }
-          });
-          return;
-        }
-        // If an agent no longer resolves, keep its bounded live turns. Fetching
-        // every graph as a recovery path would reintroduce the memory spike this
-        // targeted cache exists to prevent.
-      }, THREAD_GRAPH_REFRESH_DEBOUNCE_MS);
+      onAgentThreadGraphDirty?.(agentId);
     };
 
     const handleEvent = (event: QmuxEvent) => {
@@ -523,37 +445,39 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "turn.appended") {
         const turn = event.payload.turn;
         if (isTurn(turn)) {
-          setTurns((current) => {
-            const existingIndex = current.findIndex((existing) => existing.id === turn.id);
-            if (existingIndex !== -1) {
-              // Positional turn ids can be reused across a transcript
-              // rewrite/rebind, so a same-id append carries the id's newest
-              // content and belongs at the tail. An identical re-delivery
-              // keeps the array (and downstream memos) untouched.
-              if (JSON.stringify(current[existingIndex]) === JSON.stringify(turn)) {
-                return current;
+          if (shouldRetainAgentTurns?.(turn.agentId) !== false) {
+            setTurns((current) => {
+              const existingIndex = current.findIndex((existing) => existing.id === turn.id);
+              if (existingIndex !== -1) {
+                // Positional turn ids can be reused across a transcript
+                // rewrite/rebind, so a same-id append carries the id's newest
+                // content and belongs at the tail. An identical re-delivery
+                // keeps the array (and downstream memos) untouched.
+                if (JSON.stringify(current[existingIndex]) === JSON.stringify(turn)) {
+                  return current;
+                }
+                return [...current.filter((_, index) => index !== existingIndex), turn];
               }
-              return [...current.filter((_, index) => index !== existingIndex), turn];
-            }
-            const next = [...current, turn];
-            const agentTurnCount = next.reduce(
-              (count, existing) => (existing.agentId === turn.agentId ? count + 1 : count),
-              0,
-            );
-            if (agentTurnCount <= MAX_TURNS_PER_AGENT) {
-              return next;
-            }
-            // Over the cap: drop the oldest turns for this agent (the earliest matches in
-            // arrival order) so the global array can't grow without bound.
-            let toDrop = agentTurnCount - MAX_TURNS_PER_AGENT;
-            return next.filter((existing) => {
-              if (toDrop > 0 && existing.agentId === turn.agentId) {
-                toDrop -= 1;
-                return false;
+              const next = [...current, turn];
+              const agentTurnCount = next.reduce(
+                (count, existing) => (existing.agentId === turn.agentId ? count + 1 : count),
+                0,
+              );
+              if (agentTurnCount <= MAX_TURNS_PER_AGENT) {
+                return next;
               }
-              return true;
+              // Over the cap: drop the oldest turns for this agent (the earliest matches in
+              // arrival order) so the global array can't grow without bound.
+              let toDrop = agentTurnCount - MAX_TURNS_PER_AGENT;
+              return next.filter((existing) => {
+                if (toDrop > 0 && existing.agentId === turn.agentId) {
+                  toDrop -= 1;
+                  return false;
+                }
+                return true;
+              });
             });
-          });
+          }
           refreshThreadGraphs(turn.agentId);
         }
       }
@@ -569,7 +493,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         // Reuse prior turn objects for content-identical replacements so the
         // per-agent turn caches (and per-message memos) hold across a reset;
         // see reconcileReplacedTurns.
-        setTurns((current) => reconcileReplacedTurns(current, agentId, replacementTurns));
+        if (!agentId || shouldRetainAgentTurns?.(agentId) !== false) {
+          setTurns((current) => reconcileReplacedTurns(current, agentId, replacementTurns));
+        }
         refreshThreadGraphs(agentId);
       }
       if (
@@ -636,9 +562,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       disposed = true;
       if (coalesceTimer !== null) {
         clearTimeout(coalesceTimer);
-      }
-      if (threadGraphRefreshTimer !== null) {
-        clearTimeout(threadGraphRefreshTimer);
       }
       unlisten?.();
     };

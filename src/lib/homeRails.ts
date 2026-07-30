@@ -1,5 +1,5 @@
 import type { HomeRailPastTurn } from "../components/HomeRails";
-import type { Turn } from "../types";
+import type { HomeTurnSummary, Turn } from "../types";
 import { firstUserTurnText } from "./appHelpers";
 import { stripTaggedInstructionBlocksForPreview } from "./taggedInstructions";
 
@@ -74,4 +74,25 @@ export function railPastTurns(turns: Turn[]): HomeRailPastTurn[] {
   // The dangling pending prompt is the latest user turn — the current card.
   railPastTurnsCache.set(turns, result);
   return result;
+}
+
+export function railPastTurnSummaries(summaries: HomeTurnSummary[]): HomeRailPastTurn[] {
+  return summaries.flatMap((summary) => {
+    const text = stripTaggedInstructionBlocksForPreview(summary.text).trim();
+    return text
+      ? [{ id: summary.id, text, settledAt: summary.settledAt }]
+      : [];
+  });
+}
+
+export function mergeRailPastTurns(
+  historical: HomeRailPastTurn[],
+  recent: HomeRailPastTurn[],
+): HomeRailPastTurn[] {
+  const recentById = new Map(recent.map((turn) => [turn.id, turn]));
+  const historicalIds = new Set(historical.map((turn) => turn.id));
+  return [
+    ...historical.map((turn) => recentById.get(turn.id) ?? turn),
+    ...recent.filter((turn) => !historicalIds.has(turn.id)),
+  ];
 }

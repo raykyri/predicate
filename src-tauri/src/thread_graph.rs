@@ -299,6 +299,23 @@ pub struct ThreadTurnContent {
     pub blocks: Vec<TurnBlock>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeTurnSummary {
+    pub id: String,
+    pub text: String,
+    pub settled_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeTurnHistoryPage {
+    pub turns: Vec<HomeTurnSummary>,
+    pub next_before: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -852,6 +869,7 @@ fn turn_node_from_turn(
             role: turn.role.clone(),
             blocks: turn.blocks.clone(),
             source_index: Some(turn.source_index),
+            timestamp: turn.timestamp,
         },
         native: Some(NativeTurnRef {
             adapter: agent.adapter.clone(),
@@ -863,6 +881,103 @@ fn turn_node_from_turn(
             native_message_id: turn.native_message_id.clone(),
             source_index: turn.source_index,
         }),
+    }
+}
+
+fn focused_branch_turn_nodes<'a>(graph: &'a ThreadGraph, branch_id: &str) -> Vec<&'a TurnNode> {
+    let mut selection = HashMap::<String, Option<u64>>::new();
+    let mut current_branch_id = Some(branch_id.to_string());
+    let mut max_created_order = None;
+    let mut visited = HashSet::new();
+    while let Some(current) = current_branch_id {
+        if !visited.insert(current.clone()) {
+            break;
+        }
+        selection.insert(current.clone(), max_created_order);
+        let Some(branch) = graph.branches.get(&current) else {
+            break;
+        };
+        let base_turn_id = branch
+            .base_turn_id
+            .as_ref()
+            .or(branch.created_from_turn_id.as_ref());
+        max_created_order = base_turn_id
+            .and_then(|turn_id| graph.nodes.get(turn_id))
+            .map(node_created_order);
+        current_branch_id = branch.parent_branch_id.clone();
+    }
+
+    let mut nodes = graph
+        .nodes
+        .values()
+        .filter_map(|node| match node {
+            ThreadNode::Turn(turn) => {
+                let max_order = selection.get(&turn.base.branch_id)?;
+                if max_order.is_none_or(|order| turn.base.created_order <= order) {
+                    Some(turn)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| {
+        left.base
+            .created_order
+            .cmp(&right.base.created_order)
+            .then(left.base.id.cmp(&right.base.id))
+    });
+    nodes
+}
+
+fn first_user_text(node: &TurnNode) -> Option<String> {
+    if node.turn.role != "user" || node.base.status == Some(TurnStatus::Superseded) {
+        return None;
+    }
+    node.turn.blocks.iter().find_map(|block| match block {
+        TurnBlock::Text { text } if !text.trim().is_empty() => Some(text.trim().to_string()),
+        _ => None,
+    })
+}
+
+/// Compact, paged prompt history for Home. The full graph stays in Rust; only
+/// user-card text and settlement timestamps cross IPC. The newest prompt is
+/// omitted because Home renders it as the current card from the live turn
+/// window.
+pub fn home_turn_history_page(
+    graph: &ThreadGraph,
+    branch_id: &str,
+    before: Option<usize>,
+    limit: usize,
+) -> HomeTurnHistoryPage {
+    let mut summaries = Vec::new();
+    let mut pending: Option<HomeTurnSummary> = None;
+    let mut exchange_last_timestamp = None;
+    for node in focused_branch_turn_nodes(graph, branch_id) {
+        if let Some(text) = first_user_text(node) {
+            if let Some(mut summary) = pending.take() {
+                summary.settled_at = exchange_last_timestamp.or(summary.settled_at);
+                summaries.push(summary);
+            }
+            pending = Some(HomeTurnSummary {
+                id: node.base.id.clone(),
+                text,
+                settled_at: node.turn.timestamp,
+            });
+            exchange_last_timestamp = None;
+        } else if node.base.status != Some(TurnStatus::Superseded)
+            && let Some(timestamp) = node.turn.timestamp
+        {
+            exchange_last_timestamp = Some(timestamp);
+        }
+    }
+
+    let end = before.unwrap_or(summaries.len()).min(summaries.len());
+    let start = end.saturating_sub(limit.clamp(1, 200));
+    HomeTurnHistoryPage {
+        turns: summaries[start..end].to_vec(),
+        next_before: (start > 0).then_some(start),
     }
 }
 
@@ -1116,6 +1231,62 @@ mod tests {
             std::env::temp_dir().join(format!("{prefix}-{}-{millis}-{seq}", std::process::id(),));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn home_history_pages_compact_past_prompts_in_chronological_order() {
+        let worktree = temp_worktree("qmux-thread-graph-home-history");
+        let agent = sample_agent(worktree.display().to_string());
+        let mut turns = Vec::new();
+        for index in 0..5 {
+            let mut user = sample_turn(&agent.id, &format!("user-{index}"), "user", index * 2);
+            user.blocks = vec![TurnBlock::Text {
+                text: format!("prompt {index}"),
+            }];
+            user.timestamp = Some((index * 100) as i64);
+            turns.push(user);
+            let mut assistant = sample_turn(
+                &agent.id,
+                &format!("assistant-{index}"),
+                "assistant",
+                index * 2 + 1,
+            );
+            assistant.timestamp = Some((index * 100 + 50) as i64);
+            turns.push(assistant);
+        }
+        let graph = ThreadStore::new(worktree.display().to_string())
+            .replace_agent_branch_turns(&agent, &turns)
+            .unwrap();
+
+        let newest = home_turn_history_page(&graph, "branch-1", None, 2);
+        assert_eq!(
+            newest.turns,
+            vec![
+                HomeTurnSummary {
+                    id: "user-2".to_string(),
+                    text: "prompt 2".to_string(),
+                    settled_at: Some(250),
+                },
+                HomeTurnSummary {
+                    id: "user-3".to_string(),
+                    text: "prompt 3".to_string(),
+                    settled_at: Some(350),
+                },
+            ]
+        );
+        assert_eq!(newest.next_before, Some(2));
+
+        let earlier = home_turn_history_page(&graph, "branch-1", newest.next_before, 2);
+        assert_eq!(
+            earlier
+                .turns
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-0", "user-1"]
+        );
+        assert_eq!(earlier.next_before, None);
+        fs::remove_dir_all(worktree).unwrap();
     }
 
     #[test]

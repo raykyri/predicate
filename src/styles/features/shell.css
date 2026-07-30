@@ -2834,6 +2834,25 @@
   display: none;
 }
 
+.home-rail-load-earlier {
+  align-self: center;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-xs);
+  cursor: pointer;
+}
+
+.home-rail-load-earlier:hover:not(:disabled) {
+  color: var(--text-secondary);
+}
+
+.home-rail-load-earlier:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
 /* Bottom-anchor short columns while keeping long ones scrollable. */
 .home-rail-scroll > :first-child {
   margin-top: auto;

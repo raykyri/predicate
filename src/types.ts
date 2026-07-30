@@ -445,8 +445,20 @@ export interface TurnNode extends BaseThreadNode {
     role: string;
     blocks: TurnBlock[];
     sourceIndex?: number | null;
+    timestamp?: number | null;
   };
   native?: NativeTurnRef | null;
+}
+
+export interface HomeTurnSummary {
+  id: string;
+  text: string;
+  settledAt: number | null;
+}
+
+export interface HomeTurnHistoryPage {
+  turns: HomeTurnSummary[];
+  nextBefore: number | null;
 }
 
 export interface HandoffNode extends BaseThreadNode {

@@ -20,6 +20,7 @@ import type {
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
   GroupInfo,
+  HomeTurnHistoryPage,
   InitialPaneSize,
   MessageAnchor,
   MoveQueuedAgentTurnResult,
@@ -349,6 +350,18 @@ export function listAgents() {
 
 export function listTurns(agentId?: string | null) {
   return invoke<Turn[]>("list_turns", { agentId: agentId ?? null });
+}
+
+export function listHomeTurnHistory(
+  agentId: string,
+  before?: number | null,
+  limit = 100,
+) {
+  return invoke<HomeTurnHistoryPage>("list_home_turn_history", {
+    agentId,
+    before: before ?? null,
+    limit,
+  });
 }
 
 export function listThreadGraphs() {

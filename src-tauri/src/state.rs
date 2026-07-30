@@ -2432,6 +2432,47 @@ impl AppState {
         }
     }
 
+    pub fn home_turn_history(
+        &self,
+        agent_id: &str,
+        before: Option<usize>,
+        limit: usize,
+    ) -> Result<thread_graph::HomeTurnHistoryPage, String> {
+        let (agent, record) = {
+            let model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let agent = model
+                .agents
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+            let thread_id = thread_graph::agent_thread_id(&agent);
+            (agent, model.threads.get(&thread_id).cloned())
+        };
+        let Some(record) = record else {
+            return Ok(thread_graph::HomeTurnHistoryPage {
+                turns: Vec::new(),
+                next_before: None,
+            });
+        };
+        let store = thread_graph::ThreadStore::new(record.storage_root);
+        let Some(graph) = store.read_thread(&record.id)? else {
+            return Ok(thread_graph::HomeTurnHistoryPage {
+                turns: Vec::new(),
+                next_before: None,
+            });
+        };
+        Ok(thread_graph::home_turn_history_page(
+            &graph,
+            &thread_graph::agent_branch_id(&agent),
+            before,
+            limit,
+        ))
+    }
+
     pub fn list_thread_graphs(&self) -> Result<Vec<thread_graph::ThreadGraph>, String> {
         let records = {
             let model = self

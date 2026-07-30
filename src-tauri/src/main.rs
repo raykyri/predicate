@@ -726,6 +726,21 @@ fn list_turns(
 }
 
 #[tauri::command]
+async fn list_home_turn_history(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    before: Option<usize>,
+    limit: Option<usize>,
+) -> Result<thread_graph::HomeTurnHistoryPage, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.home_turn_history(&agent_id, before, limit.unwrap_or(100))
+    })
+    .await
+    .map_err(|err| format!("list_home_turn_history task failed: {err}"))?
+}
+
+#[tauri::command]
 async fn list_thread_graphs(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<thread_graph::ThreadGraph>, String> {
@@ -2374,6 +2389,7 @@ fn main() {
             agent_branches,
             recent_session_resume,
             list_turns,
+            list_home_turn_history,
             list_thread_graphs,
             get_thread_graph,
             list_research_trees,

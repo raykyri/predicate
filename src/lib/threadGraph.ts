@@ -171,6 +171,7 @@ export function focusedBranchTurns(graph: ThreadGraph, agent: AgentInfo): Turn[]
       role: node.turn.role,
       blocks: node.turn.blocks,
       sourceIndex: node.turn.sourceIndex ?? node.native?.sourceIndex ?? 0,
+      timestamp: node.turn.timestamp ?? null,
       participant: node.participant,
       status: node.status === "active" ? null : node.status,
       statusReason: node.statusReason ?? null,

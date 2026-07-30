@@ -64,6 +64,8 @@ export interface HomeRailWorkstream {
   /** When the transcript last moved — the settled receipt for done agents. */
   currentSettledAt: number | null;
   pastTurns: HomeRailPastTurn[];
+  hasEarlierPastTurns: boolean;
+  loadingEarlierPastTurns: boolean;
   queuedTurns: HomeRailQueuedTurn[];
 }
 
@@ -82,6 +84,7 @@ interface HomeRailsProps {
   /** Reveal the Drafts rail when its app shortcut is used while hidden. */
   onShowDrafts: () => void;
   onActivatePane: (paneId: string) => void;
+  onLoadEarlierPastTurns: (agentId: string) => void;
   onReorderQueuedTurn: (
     agentId: string,
     fromIndex: number,
@@ -496,6 +499,7 @@ export default function HomeRails({
   draftsVisible,
   onShowDrafts,
   onActivatePane,
+  onLoadEarlierPastTurns,
   onReorderQueuedTurn,
   onMoveQueuedTurn,
   onQueueTurn,
@@ -1378,6 +1382,16 @@ export default function HomeRails({
                     handleRailScroll(workstream.agentId, event.currentTarget)
                   }
                 >
+                  {workstream.hasEarlierPastTurns ? (
+                    <button
+                      type="button"
+                      className="home-rail-load-earlier"
+                      disabled={workstream.loadingEarlierPastTurns}
+                      onClick={() => onLoadEarlierPastTurns(workstream.agentId)}
+                    >
+                      {workstream.loadingEarlierPastTurns ? "Loading…" : "Load earlier"}
+                    </button>
+                  ) : null}
                   {workstream.pastTurns.map((turn) => (
                     <QueuedTurnCard
                       key={turn.id}
