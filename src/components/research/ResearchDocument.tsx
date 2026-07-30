@@ -2316,28 +2316,33 @@ function ResearchDocument({
     // never flips the default view for the next. The composer mode is
     // likewise a per-answer choice.
     setFullTraceNodes({});
+    // Clear follow-up text here so a tree switch cannot keep the previous
+    // tree's composer contents for even one paint of the persist effect.
+    setFollowup("");
     setFollowupMode("thread");
   }, [treeId, detail?.tree.rootNodeId]);
 
   // Restore the ordinary composer independently of the targeted-ask restore
   // below. The document unmounts when a terminal tab comes forward, so its
   // local text and mode need to be copied back from the shared navigation
-  // store when this tree mounts again.
+  // store when this tree mounts again. Always apply the destination tree's
+  // draft (including empty) so text from the previous tree cannot leak into
+  // the store via the persist effect below.
   useEffect(() => {
     if (!treeId) {
+      restoringFollowupDraftRef.current = null;
+      setFollowup("");
+      setFollowupMode("thread");
       return;
     }
     const saved = navigationRef.current[treeId]?.followupDraft;
-    if (!saved) {
-      return;
-    }
     restoringFollowupDraftRef.current = {
       treeId,
-      text: saved.text,
-      mode: saved.mode,
+      text: saved?.text ?? "",
+      mode: saved?.mode ?? "thread",
     };
-    setFollowup(saved.text);
-    setFollowupMode(saved.mode);
+    setFollowup(saved?.text ?? "");
+    setFollowupMode(saved?.mode ?? "thread");
   }, [treeId]);
 
   // Switches the displayed node without touching visit history: records the

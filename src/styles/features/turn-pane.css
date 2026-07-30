@@ -116,6 +116,14 @@
   box-shadow: inset 1px 0 0 var(--surface-divider);
 }
 
+/* Multi-pane split expand: equal-width columns left-to-right (vertical dock
+   order). Cells use flex: 1 1 0; this host makes the row direction explicit. */
+.turn-pane.is-split-expanded {
+  display: flex;
+  flex-direction: row;
+  min-width: 0;
+}
+
 /* The pane's left edge is drawn solely by the resizer's ::before line so there's
    a single border top-to-bottom. It sits above the header (z-index 3) so the line
    is continuous across the header too, rather than being painted over by it. */

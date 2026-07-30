@@ -118,13 +118,15 @@ func nativeTerminalDidReceiveAppShortcutStub(
 func nativeTerminalDidCommitGeometryStub(_: UnsafePointer<CChar>) {}
 
 @_cdecl("qmux_native_terminal_did_resume_after_wake")
-func nativeTerminalDidResumeAfterWakeStub() {}
+func nativeTerminalDidResumeAfterWakeStub() -> UInt64 {
+    0
+}
 
 @_cdecl("qmux_native_terminal_will_sleep")
 func nativeTerminalWillSleepStub() {}
 
 @_cdecl("qmux_native_terminal_did_detect_unhealthy_webview")
-func nativeTerminalDidDetectUnhealthyWebViewStub() {}
+func nativeTerminalDidDetectUnhealthyWebViewStub(_: UInt64) {}
 
 @_cdecl("qmux_global_task_launcher_did_trigger")
 func globalTaskLauncherDidTriggerStub() {}

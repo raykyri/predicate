@@ -174,6 +174,29 @@ test("research follow-up drafts retain text and composer mode until cleared", ()
   assert.equal(recordResearchFollowupDraft(navigation, "", "thread", 2_000), true);
   assert.equal(navigation.followupDraft, undefined);
   assert.equal(recordResearchFollowupDraft(navigation, "", "thread", 3_000), false);
+
+  assert.equal(
+    recordResearchFollowupDraft(navigation, "same text", "thread", 4_000),
+    true,
+  );
+  assert.equal(
+    recordResearchFollowupDraft(navigation, "same text", "thread", 5_000),
+    false,
+  );
+  assert.deepEqual(navigation.followupDraft, {
+    text: "same text",
+    mode: "thread",
+    updatedAt: 4_000,
+  });
+  assert.equal(
+    recordResearchFollowupDraft(navigation, "same text", "branch", 6_000),
+    true,
+  );
+  assert.deepEqual(navigation.followupDraft, {
+    text: "same text",
+    mode: "branch",
+    updatedAt: 6_000,
+  });
 });
 
 test("branch info includes every descendant but not siblings", () => {

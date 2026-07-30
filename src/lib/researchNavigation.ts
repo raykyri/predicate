@@ -210,6 +210,10 @@ export function recordResearchFollowupDraft(
     delete navigation.followupDraft;
     return true;
   }
+  const existing = navigation.followupDraft;
+  if (existing && existing.text === text && existing.mode === mode) {
+    return false;
+  }
   navigation.followupDraft = { text, mode, updatedAt: now };
   return true;
 }

@@ -1577,6 +1577,8 @@ function MainApp() {
   homeTurnHistoryByAgentRef.current = homeTurnHistoryByAgent;
   const homeHistoryRequestKeyByAgentRef = useRef(new Map<string, string>());
   const homeHistoryRequestSequenceByAgentRef = useRef(new Map<string, number>());
+  /** One auto-retry budget per agent+requestKey after an initial history load fails. */
+  const homeHistoryRetryBudgetByAgentRef = useRef(new Map<string, string>());
   const [queuedTurnsByAgent, setQueuedTurnsByAgentState] = useState<Record<string, QueuedTurn[]>>({});
   // Application-global prompt drafts (the home Drafts rail). Backend-owned;
   // hydrated at boot and kept fresh by drafts.changed events.
@@ -2877,6 +2879,13 @@ function MainApp() {
           homeHistoryRequestSequenceByAgentRef.current.get(agent.id) === sequence &&
           homeHistoryRequestKeyByAgentRef.current.get(agent.id) === requestKey
         ) {
+          // Initial loads stamp the request key before the IPC call. On failure
+          // drop it so leaving/returning home or a soft retry can re-issue the
+          // same key instead of treating the blank history as a permanent load.
+          // "Load earlier" keeps the key so the button can retry the same page.
+          if (before === null) {
+            homeHistoryRequestKeyByAgentRef.current.delete(agent.id);
+          }
           setHomeTurnHistoryByAgent((current) => {
             const existing = current[agent.id];
             return existing?.requestKey === requestKey
@@ -2884,6 +2893,23 @@ function MainApp() {
               : current;
           });
           setError(err instanceof Error ? err.message : String(err));
+          if (
+            before === null &&
+            homeHistoryRetryBudgetByAgentRef.current.get(agent.id) !== requestKey
+          ) {
+            homeHistoryRetryBudgetByAgentRef.current.set(agent.id, requestKey);
+            window.setTimeout(() => {
+              if (homeHistoryRequestKeyByAgentRef.current.has(agent.id)) {
+                return;
+              }
+              const live = agentsRef.current.find((candidate) => candidate.id === agent.id);
+              if (!live || agentHistoryRequestKey(live) !== requestKey) {
+                return;
+              }
+              homeHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
+              void fetchHomeTurnHistoryPage(live, null);
+            }, 1_500);
+          }
         }
       }
     },
@@ -2924,6 +2950,7 @@ function MainApp() {
         );
       }
       homeHistoryRequestKeyByAgentRef.current.clear();
+      homeHistoryRetryBudgetByAgentRef.current.clear();
       setHomeTurnHistoryByAgent((current) =>
         Object.keys(current).length > 0 ? {} : current,
       );
@@ -2939,12 +2966,17 @@ function MainApp() {
     for (const agentId of homeHistoryRequestKeyByAgentRef.current.keys()) {
       if (!liveAgentIds.has(agentId)) {
         homeHistoryRequestKeyByAgentRef.current.delete(agentId);
+        homeHistoryRetryBudgetByAgentRef.current.delete(agentId);
       }
     }
     for (const agent of historyTargetAgents) {
       const requestKey = agentHistoryRequestKey(agent);
       if (homeHistoryRequestKeyByAgentRef.current.get(agent.id) === requestKey) {
         continue;
+      }
+      // New session identity gets a fresh retry budget.
+      if (homeHistoryRetryBudgetByAgentRef.current.get(agent.id) !== requestKey) {
+        homeHistoryRetryBudgetByAgentRef.current.delete(agent.id);
       }
       homeHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
       void fetchHomeTurnHistoryPage(agent, null);
