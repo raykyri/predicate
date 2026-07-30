@@ -94,6 +94,10 @@ const MAX_LAST_OSC_TITLE_CHARS: usize = 160;
 const MAX_INTERFACE_DRAFT_KEY_BYTES: usize = 128;
 const MAX_INTERFACE_DRAFT_VALUE_BYTES: usize = 12 * 1024 * 1024;
 const MAX_INTERFACE_DRAFT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+/// The total-byte budget only counts values, so it cannot bound a flood of
+/// distinct keys with tiny values. The frontend uses a handful of fixed keys;
+/// cap entries far above that but low enough that keys stay bounded too.
+const MAX_INTERFACE_DRAFT_ENTRIES: usize = 512;
 
 fn validate_interface_draft_key(key: &str) -> Result<(), String> {
     if key.is_empty()
@@ -7843,6 +7847,15 @@ impl AppState {
             .interface_drafts
             .lock()
             .map_err(|_| "interface draft lock poisoned".to_string())?;
+        if value.is_some()
+            && !drafts.contains_key(key)
+            && drafts.len() >= MAX_INTERFACE_DRAFT_ENTRIES
+        {
+            return Err(format!(
+                "interface drafts exceed {} entries",
+                MAX_INTERFACE_DRAFT_ENTRIES
+            ));
+        }
         let existing_bytes = drafts.get(key).map_or(0, String::len);
         let next_bytes = value.as_ref().map_or(0, String::len);
         let total_bytes = drafts
@@ -9913,6 +9926,32 @@ mod tests {
             .unwrap();
         let restarted = AppState::new(test_config(workspace));
         assert_eq!(restarted.interface_draft("home-launcher").unwrap(), None);
+    }
+
+    #[test]
+    fn interface_drafts_are_bounded_in_entry_count() {
+        let state = AppState::new(test_config(PathBuf::from(
+            "/tmp/qmux-state-interface-draft-entries",
+        )));
+        for index in 0..MAX_INTERFACE_DRAFT_ENTRIES {
+            state
+                .set_interface_draft(&format!("key-{index}"), Some("x".to_string()))
+                .unwrap();
+        }
+        assert!(
+            state
+                .set_interface_draft("one-too-many", Some("x".to_string()))
+                .is_err()
+        );
+        // Updating and clearing existing keys still works at the cap, and
+        // clearing frees a slot for a new key.
+        state
+            .set_interface_draft("key-0", Some("updated".to_string()))
+            .unwrap();
+        state.set_interface_draft("key-1", None).unwrap();
+        state
+            .set_interface_draft("one-too-many", Some("x".to_string()))
+            .unwrap();
     }
 
     #[test]
