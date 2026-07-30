@@ -34,6 +34,7 @@
     "test:research-prompt-markdown": "node --import tsx --test tests/researchPromptMarkdown.test.ts",
     "test:tagged-instructions": "node scripts/test-tagged-instructions.mjs",
     "test:thread-graph-overlay": "node scripts/test-thread-graph-overlay.mjs",
+    "test:thread-graph-refresh": "node --import tsx --test tests/threadGraphRefresh.test.ts",
     "test:workspace-scope": "node scripts/test-workspace-scope.mjs",
     "test:turn-timeline": "node scripts/test-turn-timeline.mjs",
     "test:handoff": "node scripts/test-handoff.mjs",

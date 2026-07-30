@@ -1513,8 +1513,7 @@ mod tests {
         );
         assert_eq!(newest.next_before.as_deref(), Some("user-2"));
 
-        let earlier =
-            home_turn_history_page(&graph, "branch-1", newest.next_before.as_deref(), 2);
+        let earlier = home_turn_history_page(&graph, "branch-1", newest.next_before.as_deref(), 2);
         assert_eq!(
             earlier
                 .turns
@@ -1540,8 +1539,7 @@ mod tests {
         let grown_graph = ThreadStore::new(worktree.display().to_string())
             .replace_agent_branch_turns(&agent, &grown)
             .unwrap();
-        let still_earlier =
-            home_turn_history_page(&grown_graph, "branch-1", Some("user-2"), 2);
+        let still_earlier = home_turn_history_page(&grown_graph, "branch-1", Some("user-2"), 2);
         assert_eq!(
             still_earlier
                 .turns
