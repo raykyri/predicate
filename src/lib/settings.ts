@@ -44,6 +44,12 @@ export const BODY_FONT_OPTIONS: BodyFontOption[] = [
     localNames: ["Inter Regular", "Inter-Regular"],
   },
   {
+    id: "dm-sans",
+    label: "DM Sans",
+    // Latin and Latin Extended variable faces are bundled with qmux under the SIL OFL 1.1.
+    stack: `"DM Sans", ${SYSTEM_BODY_FONT_STACK}`,
+  },
+  {
     id: "anthropic-sans-text",
     label: "Anthropic Sans Text",
     // Personal-use font referenced from the host system; do not bundle its files.
