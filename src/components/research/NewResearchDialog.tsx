@@ -8,6 +8,13 @@ import {
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "../../lib/adapterIcons";
 import { CLAUDE_ADAPTER_ID } from "../../adapters/claude";
 import { CODEX_ADAPTER_ID } from "../../adapters/codex";
+import {
+  clearSessionDraft,
+  loadSessionDraftJson,
+  readSessionDraftJson,
+  saveSessionDraftJson,
+  SESSION_DRAFT_KEYS,
+} from "../../lib/sessionDrafts";
 
 // Model presets per adapter; "custom" reveals a free-form input. Adapters
 // without a curated list only offer "custom".
@@ -56,6 +63,11 @@ export default function NewResearchDialog({
   const [modelChoice, setModelChoice] = useState<string | null>(null);
   const [customModel, setCustomModel] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [sessionDraftReady, setSessionDraftReady] = useState(false);
+  const sessionDraftTouchedRef = useRef(false);
+  const draftKey = inline
+    ? SESSION_DRAFT_KEYS.newResearchInline
+    : SESSION_DRAFT_KEYS.newResearchModal;
   // Shown inside the dialog: a global banner renders behind the modal
   // backdrop, so a failed launch (bad model name, missing folder…) looked
   // like an unresponsive Start button. Fields are kept for the retry.
@@ -71,14 +83,70 @@ export default function NewResearchDialog({
 
   useEffect(() => {
     if (!open) {
+      setSessionDraftReady(false);
       return;
     }
-    setPrompt("");
-    setModelChoice(null);
-    setCustomModel("");
+    sessionDraftTouchedRef.current = false;
+    const restored = readSessionDraftJson<{
+      prompt: string;
+      adapter: string;
+      modelChoice: string | null;
+      customModel: string;
+    }>(draftKey);
+    setPrompt(restored?.prompt ?? "");
+    setModelChoice(restored?.modelChoice ?? null);
+    setCustomModel(restored?.customModel ?? "");
     setError(null);
-    setAdapter(adapters.find((candidate) => candidate.default)?.id ?? adapters[0]?.id ?? "");
-  }, [open]);
+    setAdapter(
+      restored?.adapter ??
+        adapters.find((candidate) => candidate.default)?.id ??
+        adapters[0]?.id ??
+        "",
+    );
+    let disposed = false;
+    void loadSessionDraftJson<{
+      prompt: string;
+      adapter: string;
+      modelChoice: string | null;
+      customModel: string;
+    }>(draftKey)
+      .then((backendDraft) => {
+        if (!disposed && backendDraft && !sessionDraftTouchedRef.current) {
+          setPrompt(backendDraft.prompt);
+          setAdapter(backendDraft.adapter);
+          setModelChoice(backendDraft.modelChoice);
+          setCustomModel(backendDraft.customModel);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) {
+          setSessionDraftReady(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [draftKey, open]);
+
+  useEffect(() => {
+    if (!open || !sessionDraftReady) {
+      return;
+    }
+    if (!prompt && !modelChoice && !customModel) {
+      clearSessionDraft(draftKey);
+      return;
+    }
+    saveSessionDraftJson(draftKey, { prompt, adapter, modelChoice, customModel });
+  }, [
+    adapter,
+    customModel,
+    draftKey,
+    modelChoice,
+    open,
+    prompt,
+    sessionDraftReady,
+  ]);
 
   useEffect(() => {
     if (!open || adapters.some((candidate) => candidate.id === adapter)) {
@@ -143,6 +211,7 @@ export default function NewResearchDialog({
       setModelChoice(null);
       setCustomModel("");
       setError(null);
+      clearSessionDraft(draftKey);
       onClose();
     } catch (err) {
       // Surfaced here, where the user is looking; the dialog stays open with
@@ -151,6 +220,15 @@ export default function NewResearchDialog({
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function close() {
+    clearSessionDraft(draftKey);
+    setPrompt("");
+    setModelChoice(null);
+    setCustomModel("");
+    setError(null);
+    onClose();
   }
 
   const adapterOptions: LauncherSelectOption[] = adapters.map((candidate) => ({
@@ -168,7 +246,7 @@ export default function NewResearchDialog({
       aria-label="New research"
       onKeyDown={(event) => {
         if (!inline && event.key === "Escape" && !submitting) {
-          onClose();
+          close();
         }
       }}
       onSubmit={(event) => {
@@ -185,6 +263,7 @@ export default function NewResearchDialog({
           value={prompt}
           placeholder="What would you like to investigate?"
           onChange={(event) => {
+            sessionDraftTouchedRef.current = true;
             setPrompt(event.currentTarget.value);
             growPromptInput();
           }}
@@ -205,7 +284,10 @@ export default function NewResearchDialog({
                   label: `${preset.charAt(0).toUpperCase()}${preset.slice(1)}`,
                 }))}
                 ariaLabel="Model"
-                onChange={setModelChoice}
+                onChange={(choice) => {
+                  sessionDraftTouchedRef.current = true;
+                  setModelChoice(choice);
+                }}
               />
               {selectedModel === CUSTOM_MODEL ? (
                 <input
@@ -213,7 +295,10 @@ export default function NewResearchDialog({
                   value={customModel}
                   placeholder="Model name"
                   aria-label="Custom model"
-                  onChange={(event) => setCustomModel(event.currentTarget.value)}
+                  onChange={(event) => {
+                    sessionDraftTouchedRef.current = true;
+                    setCustomModel(event.currentTarget.value);
+                  }}
                 />
               ) : null}
             </div>
@@ -224,7 +309,10 @@ export default function NewResearchDialog({
                 value={adapter}
                 options={adapterOptions}
                 ariaLabel="Agent"
-                onChange={setAdapter}
+                onChange={(nextAdapter) => {
+                  sessionDraftTouchedRef.current = true;
+                  setAdapter(nextAdapter);
+                }}
               />
             </div>
             <button
@@ -269,7 +357,7 @@ export default function NewResearchDialog({
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && !submitting) {
-          onClose();
+          close();
         }
       }}
     >

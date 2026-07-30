@@ -10,6 +10,12 @@ import {
   ComposerSubmitShortcutGlyph,
   isComposerSubmitShortcut,
 } from "../ComposerSubmitShortcut";
+import {
+  clearSessionDraft,
+  loadSessionDraftJson,
+  readSessionDraftJson,
+  saveSessionDraftJson,
+} from "../../lib/sessionDrafts";
 
 interface DocumentComposerProps {
   mode: "create" | "edit";
@@ -28,6 +34,7 @@ interface DocumentComposerProps {
   /** Reports edits so the app can tell a pristine composer (safe to dismiss on
    * navigation) from one holding a draft. */
   onDirtyChange?: (dirty: boolean) => void;
+  sessionDraftKey?: string;
 }
 
 /** Shared Markdown composer for new and existing research documents. The edit
@@ -45,11 +52,22 @@ export default function DocumentComposer({
   onClose,
   onSubmit,
   onDirtyChange,
+  sessionDraftKey,
 }: DocumentComposerProps) {
-  const [markdown, setMarkdown] = useState("");
-  const [title, setTitle] = useState("");
+  const [initialSessionDraft] = useState(() =>
+    sessionDraftKey
+      ? readSessionDraftJson<{ markdown: string; title: string }>(sessionDraftKey)
+      : null,
+  );
+  const [markdown, setMarkdown] = useState(initialSessionDraft?.markdown ?? "");
+  const [title, setTitle] = useState(initialSessionDraft?.title ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sessionDraftReady, setSessionDraftReady] = useState(
+    !sessionDraftKey || initialSessionDraft !== null,
+  );
+  const sessionDraftTouchedRef = useRef(false);
+  const initialResetRef = useRef(true);
   const markdownRef = useRef<HTMLTextAreaElement | null>(null);
   // Dirty reports go through a ref so the effects below (including the
   // unmount cleanup, which captures its closure once) always reach the
@@ -58,11 +76,51 @@ export default function DocumentComposer({
   onDirtyChangeRef.current = onDirtyChange;
 
   useEffect(() => {
+    if (initialResetRef.current) {
+      initialResetRef.current = false;
+      if (initialSessionDraft) {
+        return;
+      }
+    }
     setMarkdown(initialMarkdown);
     setTitle(initialTitle);
     setSubmitting(false);
     setError(null);
   }, [resetKey]);
+
+  useEffect(() => {
+    if (!sessionDraftKey || initialSessionDraft) {
+      return;
+    }
+    let disposed = false;
+    void loadSessionDraftJson<{ markdown: string; title: string }>(sessionDraftKey)
+      .then((restored) => {
+        if (!disposed && restored && !sessionDraftTouchedRef.current) {
+          setMarkdown(restored.markdown);
+          setTitle(restored.title);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) {
+          setSessionDraftReady(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [initialSessionDraft, sessionDraftKey]);
+
+  useEffect(() => {
+    if (!sessionDraftKey || !sessionDraftReady) {
+      return;
+    }
+    if (!markdown && !title) {
+      clearSessionDraft(sessionDraftKey);
+    } else {
+      saveSessionDraftJson(sessionDraftKey, { markdown, title });
+    }
+  }, [markdown, sessionDraftKey, sessionDraftReady, title]);
 
   // Autogrow: the textarea tracks its content height. In the dialog variant
   // the card's max-height caps it — the flex layout shrinks the textarea back
@@ -135,12 +193,19 @@ export default function DocumentComposer({
     setError(null);
     try {
       await onSubmit({ markdown, title: title.trim() || null });
-      onClose();
+      close();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function close() {
+    if (sessionDraftKey) {
+      clearSessionDraft(sessionDraftKey);
+    }
+    onClose();
   }
 
   const dialog = variant === "dialog";
@@ -153,7 +218,7 @@ export default function DocumentComposer({
         aria-describedby={warningId}
         onKeyDown={(event) => {
           if (event.key === "Escape" && pristine && !submitting) {
-            onClose();
+            close();
           }
         }}
         onSubmit={(event) => {
@@ -168,7 +233,10 @@ export default function DocumentComposer({
           value={title}
           placeholder={derivedTitle || "Title (uses the first line if left blank)"}
           aria-label="Document title"
-          onChange={(event) => setTitle(event.currentTarget.value)}
+          onChange={(event) => {
+            sessionDraftTouchedRef.current = true;
+            setTitle(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
             // Document submission is deliberate (Cmd+Enter or the button),
             // never an implicit side effect of Enter in the title field.
@@ -184,7 +252,10 @@ export default function DocumentComposer({
           value={markdown}
           placeholder="Paste or write Markdown…"
           aria-label="Document markdown"
-          onChange={(event) => setMarkdown(event.currentTarget.value)}
+          onChange={(event) => {
+            sessionDraftTouchedRef.current = true;
+            setMarkdown(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
             if (isComposerSubmitShortcut(event, true)) {
               event.preventDefault();
@@ -219,7 +290,7 @@ export default function DocumentComposer({
               </p>
             ) : null}
             <div className="confirm-dialog-actions">
-              <button className="control-button" type="button" disabled={submitting} onClick={onClose}>
+              <button className="control-button" type="button" disabled={submitting} onClick={close}>
                 Cancel
               </button>
               <button className="control-button" type="submit" disabled={!canSubmit}>
@@ -251,7 +322,7 @@ export default function DocumentComposer({
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget && pristine && !submitting) {
-          onClose();
+          close();
         }
       }}
     >

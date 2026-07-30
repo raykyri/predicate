@@ -783,6 +783,14 @@ export function getAgentDraft(agentId: string) {
   return invoke<string | null>("agent_get_draft", { agentId });
 }
 
+export function getInterfaceDraft(key: string) {
+  return invoke<string | null>("interface_draft_get", { key });
+}
+
+export function setInterfaceDraft(key: string, value: string | null) {
+  return invoke<void>("interface_draft_set", { key, value });
+}
+
 export function acknowledgeAgent(agentId: string, includeFailed = false) {
   return invoke<AgentInfo>("agent_acknowledge", { agentId, includeFailed });
 }

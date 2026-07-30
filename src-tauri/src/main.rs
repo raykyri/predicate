@@ -1983,6 +1983,23 @@ fn agent_get_draft(
     state.agent_draft(&agent_id)
 }
 
+#[tauri::command]
+fn interface_draft_get(
+    state: tauri::State<'_, AppState>,
+    key: String,
+) -> Result<Option<String>, String> {
+    state.interface_draft(&key)
+}
+
+#[tauri::command]
+fn interface_draft_set(
+    state: tauri::State<'_, AppState>,
+    key: String,
+    value: Option<String>,
+) -> Result<(), String> {
+    state.set_interface_draft(&key, value)
+}
+
 // Async like the turn-queue commands above, and for the same send-lock
 // invariant: acknowledging releases waiters and clearing a working status
 // routes through advance_after_idle — both can drain a queued turn into a
@@ -2627,6 +2644,8 @@ fn main() {
             agent_set_typing,
             agent_set_draft,
             agent_get_draft,
+            interface_draft_get,
+            interface_draft_set,
             agent_acknowledge,
             agent_clear_working_status,
             worktree_status,

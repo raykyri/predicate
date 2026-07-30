@@ -298,6 +298,13 @@ import {
 } from "./lib/sidebarMode";
 import { stripTaggedUserInstructionBlocks } from "./lib/taggedInstructions";
 import {
+  clearSessionDraft,
+  loadSessionDraftJson,
+  readSessionDraftJson,
+  saveSessionDraftJson,
+  SESSION_DRAFT_KEYS,
+} from "./lib/sessionDrafts";
+import {
   bodyFontStackFor,
   clampConfirmPasteOverChars,
   clampFontSize,
@@ -1816,14 +1823,49 @@ function MainApp() {
   const saveHomeRailScroll = useCallback((agentId: string, position: HomeRailScrollPosition) => {
     homeRailScrollByAgentRef.current[agentId] = position;
   }, []);
-  // Half-typed home-rail composer text, keyed by rail id. Held here (not inside
-  // HomeRails) so a tab away — which unmounts Home — doesn't discard it.
-  // Ephemeral by design: dropped on app restart, like the scroll store above.
-  const homeComposerDraftsRef = useRef<Record<string, string>>({});
-  const readHomeComposerDrafts = useCallback(() => homeComposerDraftsRef.current, []);
-  const saveHomeComposerDrafts = useCallback((drafts: Record<string, string>) => {
-    homeComposerDraftsRef.current = drafts;
-  }, []);
+  // Half-typed home-rail composer text, keyed by rail id. App-owned so a tab
+  // away can unmount Home without losing it; the transient backend mirror also
+  // restores it after a WebKit reload without carrying it across app restarts.
+  const [initialHomeComposerDrafts] = useState(() =>
+    readSessionDraftJson<Record<string, string>>(SESSION_DRAFT_KEYS.homeComposers),
+  );
+  const [homeComposerDrafts, setHomeComposerDrafts] = useState<Record<string, string>>(
+    initialHomeComposerDrafts ?? {},
+  );
+  const [homeComposerDraftsReady, setHomeComposerDraftsReady] = useState(
+    initialHomeComposerDrafts !== null,
+  );
+  useEffect(() => {
+    if (initialHomeComposerDrafts !== null) {
+      return;
+    }
+    let disposed = false;
+    void loadSessionDraftJson<Record<string, string>>(SESSION_DRAFT_KEYS.homeComposers)
+      .then((restored) => {
+        if (!disposed && restored) {
+          setHomeComposerDrafts((current) => ({ ...restored, ...current }));
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) {
+          setHomeComposerDraftsReady(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [initialHomeComposerDrafts]);
+  useEffect(() => {
+    if (!homeComposerDraftsReady) {
+      return;
+    }
+    if (Object.values(homeComposerDrafts).some(Boolean)) {
+      saveSessionDraftJson(SESSION_DRAFT_KEYS.homeComposers, homeComposerDrafts);
+    } else {
+      clearSessionDraft(SESSION_DRAFT_KEYS.homeComposers);
+    }
+  }, [homeComposerDrafts, homeComposerDraftsReady]);
   const setActivePaneId = useCallback(
     (next: SetStateAction<string | null>) => {
       if (typeof next === "function") {
@@ -1880,8 +1922,17 @@ function MainApp() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [newResearchOpen, setNewResearchOpen] = useState(false);
-  const [newDocumentOpen, setNewDocumentOpen] = useState(false);
+  const [newResearchOpen, setNewResearchOpen] = useState(
+    () => readSessionDraftJson(SESSION_DRAFT_KEYS.newResearchModal) !== null,
+  );
+  const [recoveredNewDocumentContext] = useState(() =>
+    readSessionDraftJson<{
+      workspaceId: string | null;
+    }>(SESSION_DRAFT_KEYS.newDocumentContext),
+  );
+  const [newDocumentOpen, setNewDocumentOpen] = useState(
+    () => recoveredNewDocumentContext !== null,
+  );
   const newDocumentOpenRef = useRef(newDocumentOpen);
   newDocumentOpenRef.current = newDocumentOpen;
   // True while the new-document composer holds an unsaved draft. Sidebar
@@ -1893,12 +1944,16 @@ function MainApp() {
   // The draft's destination folder, captured when the composer opens. Binding
   // the live sidebar scope instead would silently retarget an open draft when
   // the user peeks at another folder mid-composition.
-  const [newDocumentWorkspaceId, setNewDocumentWorkspaceId] = useState<string | null>(null);
+  const [newDocumentWorkspaceId, setNewDocumentWorkspaceId] = useState<string | null>(
+    recoveredNewDocumentContext?.workspaceId ?? null,
+  );
   const closeNewDocumentComposer = useCallback(() => {
     newDocumentDirtyRef.current = false;
     newDocumentOpenRef.current = false;
     setNewDocumentOpen(false);
     setNewDocumentInitialMarkdown("");
+    clearSessionDraft(SESSION_DRAFT_KEYS.newDocumentContext);
+    clearSessionDraft(SESSION_DRAFT_KEYS.newDocumentFields);
   }, []);
   const dismissPristineNewDocumentComposer = useCallback(() => {
     if (newDocumentOpenRef.current && !newDocumentDirtyRef.current) {
@@ -1907,6 +1962,30 @@ function MainApp() {
   }, [closeNewDocumentComposer]);
   const handleNewDocumentDirtyChange = useCallback((dirty: boolean) => {
     newDocumentDirtyRef.current = dirty;
+  }, []);
+  useEffect(() => {
+    let disposed = false;
+    void loadSessionDraftJson<{ workspaceId: string | null }>(
+      SESSION_DRAFT_KEYS.newDocumentContext,
+    )
+      .then((restored) => {
+        if (!disposed && restored && !newDocumentOpenRef.current) {
+          setNewDocumentWorkspaceId(restored.workspaceId);
+          newDocumentOpenRef.current = true;
+          setNewDocumentOpen(true);
+        }
+      })
+      .catch(() => undefined);
+    void loadSessionDraftJson<{ prompt?: string }>(SESSION_DRAFT_KEYS.newResearchModal)
+      .then((restored) => {
+        if (!disposed && restored?.prompt) {
+          setNewResearchOpen(true);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
   }, []);
   // Multi-selecting in the sidebar is navigation like a single click: it must
   // dismiss a pristine composer, or its placeholder stays hidden behind the
@@ -2184,7 +2263,10 @@ function MainApp() {
   // re-rendered the entire component tree on every keystroke (the composer had
   // the same problem and got a component-local draft). The textarea runs
   // uncontrolled; this ref tracks the live text for submit.
-  const promptRef = useRef("");
+  const [initialHomeLauncherPrompt] = useState(
+    () => readSessionDraftJson<{ text: string }>(SESSION_DRAFT_KEYS.homeLauncher)?.text ?? "",
+  );
+  const promptRef = useRef(initialHomeLauncherPrompt);
   const [launcherAdapterId, setLauncherAdapterId] = useState<string | null>(null);
   const [launcherOptionsByAdapter, setLauncherOptionsByAdapter] = useState<
     Record<string, Record<string, unknown>>
@@ -6752,6 +6834,11 @@ function MainApp() {
     }
     setNewDocumentWorkspaceId(researchScopeRef.current);
     setNewDocumentInitialMarkdown("");
+    clearSessionDraft(SESSION_DRAFT_KEYS.newDocumentFields);
+    saveSessionDraftJson(SESSION_DRAFT_KEYS.newDocumentContext, {
+      workspaceId: researchScopeRef.current,
+    });
+    newDocumentOpenRef.current = true;
     setNewDocumentOpen(true);
   }, [setActiveSurface, setSidebarMode]);
 
@@ -6901,6 +6988,14 @@ function MainApp() {
             }
             setNewDocumentWorkspaceId(researchScopeRef.current);
             setNewDocumentInitialMarkdown(markdown);
+            saveSessionDraftJson(SESSION_DRAFT_KEYS.newDocumentFields, {
+              markdown,
+              title: "",
+            });
+            saveSessionDraftJson(SESSION_DRAFT_KEYS.newDocumentContext, {
+              workspaceId: researchScopeRef.current,
+            });
+            newDocumentOpenRef.current = true;
             setNewDocumentOpen(true);
             setActiveSurface("research");
           })
@@ -11086,11 +11181,30 @@ function MainApp() {
   }, []);
   const clearLauncherPrompt = useCallback(() => {
     promptRef.current = "";
+    clearSessionDraft(SESSION_DRAFT_KEYS.homeLauncher);
     const textarea = launcherInputRef.current;
     if (textarea) {
       textarea.value = "";
     }
     growLauncherInput();
+  }, [growLauncherInput]);
+  useEffect(() => {
+    let disposed = false;
+    void loadSessionDraftJson<{ text: string }>(SESSION_DRAFT_KEYS.homeLauncher)
+      .then((restored) => {
+        if (disposed || !restored?.text || promptRef.current) {
+          return;
+        }
+        promptRef.current = restored.text;
+        if (launcherInputRef.current) {
+          launcherInputRef.current.value = restored.text;
+          growLauncherInput();
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
   }, [growLauncherInput]);
   useLayoutEffect(() => {
     if (!homeActive) {
@@ -11349,6 +11463,13 @@ function MainApp() {
         defaultValue={promptRef.current}
         onChange={(event) => {
           promptRef.current = event.currentTarget.value;
+          if (promptRef.current) {
+            saveSessionDraftJson(SESSION_DRAFT_KEYS.homeLauncher, {
+              text: promptRef.current,
+            });
+          } else {
+            clearSessionDraft(SESSION_DRAFT_KEYS.homeLauncher);
+          }
           growLauncherInput();
         }}
         rows={2}
@@ -14118,6 +14239,7 @@ function MainApp() {
               onClose={closeNewDocumentComposer}
               onCreate={submitNewDocument}
               onDirtyChange={handleNewDocumentDirtyChange}
+              sessionDraftKey={SESSION_DRAFT_KEYS.newDocumentFields}
               onShowSidebar={
                 researchSidebarRestoreInHeader ? showLeftSidebarInResearch : undefined
               }
@@ -14173,9 +14295,8 @@ function MainApp() {
             />
           ) : null}
           {/* Keep the Research-home launcher mounted while another tab or
-              Research view is forward. Its component state is the session
-              draft; hiding this wrapper preserves it without making it
-              durable across app launches. */}
+              Research view is forward. Its in-memory session draft also
+              survives a WebKit reload without becoming durable app state. */}
           <div className="research-empty-state" hidden={researchStageView !== "home"}>
             <NewResearchDialog
               open
@@ -14223,8 +14344,8 @@ function MainApp() {
                   onAssignDraft={(draftId, agentId) => void assignHomeDraft(draftId, agentId)}
                   readRailScroll={readHomeRailScroll}
                   saveRailScroll={saveHomeRailScroll}
-                  readComposerDrafts={readHomeComposerDrafts}
-                  saveComposerDrafts={saveHomeComposerDrafts}
+                  composerDrafts={homeComposerDrafts}
+                  setComposerDrafts={setHomeComposerDrafts}
                 />
               </div>
             </div>

@@ -17,6 +17,7 @@ interface NewDocumentPaneProps {
   }) => Promise<void>;
   onDirtyChange?: (dirty: boolean) => void;
   onShowSidebar?: () => void;
+  sessionDraftKey?: string;
 }
 
 /** Full-pane composer for adding a pasted or imported Markdown document as a
@@ -33,6 +34,7 @@ export default function NewDocumentPane({
   onCreate,
   onDirtyChange,
   onShowSidebar,
+  sessionDraftKey,
 }: NewDocumentPaneProps) {
   return (
     <ResearchDocumentFrame
@@ -52,6 +54,7 @@ export default function NewDocumentPane({
                 visible={!hidden}
                 initialMarkdown={initialMarkdown}
                 resetKey={initialMarkdown}
+                sessionDraftKey={sessionDraftKey}
                 onClose={onClose}
                 onDirtyChange={onDirtyChange}
                 onSubmit={({ markdown, title }) =>

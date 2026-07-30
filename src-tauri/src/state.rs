@@ -91,6 +91,21 @@ const LAST_OSC_TITLE_PERSIST_INTERVAL: Duration = Duration::from_secs(3);
 /// Matches the frontend's display cap. OSC titles are untrusted terminal
 /// output, so normalize and bound them before they enter persisted state.
 const MAX_LAST_OSC_TITLE_CHARS: usize = 160;
+const MAX_INTERFACE_DRAFT_KEY_BYTES: usize = 128;
+const MAX_INTERFACE_DRAFT_VALUE_BYTES: usize = 12 * 1024 * 1024;
+const MAX_INTERFACE_DRAFT_TOTAL_BYTES: usize = 32 * 1024 * 1024;
+
+fn validate_interface_draft_key(key: &str) -> Result<(), String> {
+    if key.is_empty()
+        || key.len() > MAX_INTERFACE_DRAFT_KEY_BYTES
+        || !key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+    {
+        return Err("invalid interface draft key".to_string());
+    }
+    Ok(())
+}
 
 const RECENT_SESSION_PREVIEW_MAX_CHARS: usize = 90;
 
@@ -196,6 +211,10 @@ struct AppStateInner {
     /// foreground ownership die with this app process, so none of this belongs in
     /// state.json; recovered shells register their freshly resumed job again.
     shell_agent_jobs: Mutex<HashMap<String, ShellAgentJob>>,
+    /// UI-only drafts that must survive a WebKit document/process reload but
+    /// not a full qmux restart. Kept outside Model so persistence snapshots
+    /// never make them durable.
+    interface_drafts: Mutex<HashMap<String, String>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1139,6 +1158,7 @@ impl AppState {
                 control_socket_identity: Mutex::new(None),
                 pane_send_locks: Mutex::new(HashMap::new()),
                 shell_agent_jobs: Mutex::new(HashMap::new()),
+                interface_drafts: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -7797,6 +7817,54 @@ impl AppState {
         Ok(model.agent_drafts.get(agent_id).cloned())
     }
 
+    pub fn interface_draft(&self, key: &str) -> Result<Option<String>, String> {
+        validate_interface_draft_key(key)?;
+        let drafts = self
+            .inner
+            .interface_drafts
+            .lock()
+            .map_err(|_| "interface draft lock poisoned".to_string())?;
+        Ok(drafts.get(key).cloned())
+    }
+
+    pub fn set_interface_draft(&self, key: &str, value: Option<String>) -> Result<(), String> {
+        validate_interface_draft_key(key)?;
+        if value
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_INTERFACE_DRAFT_VALUE_BYTES)
+        {
+            return Err(format!(
+                "interface draft exceeds {} bytes",
+                MAX_INTERFACE_DRAFT_VALUE_BYTES
+            ));
+        }
+        let mut drafts = self
+            .inner
+            .interface_drafts
+            .lock()
+            .map_err(|_| "interface draft lock poisoned".to_string())?;
+        let existing_bytes = drafts.get(key).map_or(0, String::len);
+        let next_bytes = value.as_ref().map_or(0, String::len);
+        let total_bytes = drafts
+            .values()
+            .map(String::len)
+            .sum::<usize>()
+            .saturating_sub(existing_bytes)
+            .saturating_add(next_bytes);
+        if total_bytes > MAX_INTERFACE_DRAFT_TOTAL_BYTES {
+            return Err(format!(
+                "interface drafts exceed {} bytes",
+                MAX_INTERFACE_DRAFT_TOTAL_BYTES
+            ));
+        }
+        if let Some(value) = value {
+            drafts.insert(key.to_string(), value);
+        } else {
+            drafts.remove(key);
+        }
+        Ok(())
+    }
+
     pub fn record_agent_send(
         &self,
         agent_id: &str,
@@ -9817,6 +9885,34 @@ mod tests {
 
         assert!(state.delete_global_draft("missing").is_err());
         assert!(state.delete_global_draft(&draft.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn interface_drafts_survive_webview_reloads_but_not_app_restarts() {
+        let workspace = PathBuf::from("/tmp/qmux-state-interface-drafts");
+        let state = AppState::new(test_config(workspace.clone()));
+        state
+            .set_interface_draft(
+                "new-document-fields",
+                Some(r#"{"markdown":"unfinished"}"#.to_string()),
+            )
+            .unwrap();
+        assert_eq!(
+            state.interface_draft("new-document-fields").unwrap(),
+            Some(r#"{"markdown":"unfinished"}"#.to_string())
+        );
+
+        state
+            .set_interface_draft("new-document-fields", None)
+            .unwrap();
+        assert_eq!(state.interface_draft("new-document-fields").unwrap(), None);
+        assert!(state.interface_draft("../invalid").is_err());
+
+        state
+            .set_interface_draft("home-launcher", Some("keep in process".to_string()))
+            .unwrap();
+        let restarted = AppState::new(test_config(workspace));
+        assert_eq!(restarted.interface_draft("home-launcher").unwrap(), None);
     }
 
     #[test]

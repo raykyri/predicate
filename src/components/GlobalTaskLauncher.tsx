@@ -47,6 +47,13 @@ import {
 import { parseComposerSlashCommand } from "../lib/composerSlashCommands";
 import { bodyFontStackFor, loadSettings } from "../lib/settings";
 import {
+  clearSessionDraft,
+  loadSessionDraftJson,
+  readSessionDraftJson,
+  saveSessionDraftJson,
+  SESSION_DRAFT_KEYS,
+} from "../lib/sessionDrafts";
+import {
   ComposerSubmitShortcutGlyph,
   isComposerSubmitShortcut,
 } from "./ComposerSubmitShortcut";
@@ -206,7 +213,12 @@ export default function GlobalTaskLauncher() {
   const [targets, setTargets] = useState<LauncherTarget[]>([]);
   const [selectedAgentId, setSelectedAgentId] = useState<string>(loadLastTargetAgentId);
   const [filter, setFilter] = useState("");
-  const [value, setValue] = useState("");
+  const [initialDraftValue] = useState(
+    () => readSessionDraftJson<{ text: string }>(SESSION_DRAFT_KEYS.globalTaskLauncher)?.text ?? "",
+  );
+  const [value, setValue] = useState(initialDraftValue);
+  const [sessionDraftReady, setSessionDraftReady] = useState(Boolean(initialDraftValue));
+  const valueTouchedRef = useRef(false);
   const [queueMenuOpen, setQueueMenuOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -227,6 +239,39 @@ export default function GlobalTaskLauncher() {
   // Bumped on each window show so the effect below refetches through the
   // just-cleared cache even when the selected target didn't change.
   const [exchangeEpoch, setExchangeEpoch] = useState(0);
+
+  useEffect(() => {
+    if (initialDraftValue) {
+      return;
+    }
+    let disposed = false;
+    void loadSessionDraftJson<{ text: string }>(SESSION_DRAFT_KEYS.globalTaskLauncher)
+      .then((restored) => {
+        if (!disposed && restored?.text && !valueTouchedRef.current) {
+          setValue(restored.text);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) {
+          setSessionDraftReady(true);
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [initialDraftValue]);
+
+  useEffect(() => {
+    if (!sessionDraftReady) {
+      return;
+    }
+    if (value) {
+      saveSessionDraftJson(SESSION_DRAFT_KEYS.globalTaskLauncher, { text: value });
+    } else {
+      clearSessionDraft(SESSION_DRAFT_KEYS.globalTaskLauncher);
+    }
+  }, [sessionDraftReady, value]);
 
   useLayoutEffect(() => {
     const settings = loadSettings();
@@ -572,6 +617,7 @@ export default function GlobalTaskLauncher() {
       // which selectTarget never sees.
       saveLastTargetAgentId(selected.agent.id);
       setValue("");
+      clearSessionDraft(SESSION_DRAFT_KEYS.globalTaskLauncher);
       setQueueMenuOpen(false);
       // Explicit dismissal: hand focus back to the app the launcher was
       // summoned from rather than leaving qmux activated.
@@ -819,7 +865,10 @@ export default function GlobalTaskLauncher() {
           value={value}
           disabled={!selected && !loading}
           placeholder={loading ? "Loading agent tabs…" : "Describe a task…"}
-          onChange={(event) => setValue(event.currentTarget.value)}
+          onChange={(event) => {
+            valueTouchedRef.current = true;
+            setValue(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
             if (isComposerSubmitShortcut(event, requireCmdEnterToSend)) {
               event.preventDefault();

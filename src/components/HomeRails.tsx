@@ -7,6 +7,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
+  type SetStateAction,
 } from "react";
 import { createPortal } from "react-dom";
 import { Check, Ellipsis } from "lucide-react";
@@ -130,9 +131,9 @@ interface HomeRailsProps {
   readRailScroll: (agentId: string) => HomeRailScrollPosition | null;
   saveRailScroll: (agentId: string, position: HomeRailScrollPosition) => void;
   /** In-progress composer text, keyed by rail id (agentId or DRAFTS_RAIL_ID).
-   * Held by the app so half-typed drafts survive Home unmounting on a tab away. */
-  readComposerDrafts: () => Record<string, string>;
-  saveComposerDrafts: (drafts: Record<string, string>) => void;
+   * Held by the app so tab switches and interface reloads preserve it. */
+  composerDrafts: Record<string, string>;
+  setComposerDrafts: (update: SetStateAction<Record<string, string>>) => void;
 }
 
 interface LinkPath {
@@ -512,8 +513,8 @@ export default function HomeRails({
   onAssignDraft,
   readRailScroll,
   saveRailScroll,
-  readComposerDrafts,
-  saveComposerDrafts,
+  composerDrafts,
+  setComposerDrafts,
 }: HomeRailsProps) {
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const innerRef = useRef<HTMLDivElement | null>(null);
@@ -558,15 +559,6 @@ export default function HomeRails({
     dropRailAgentIdRef.current = agentId;
     setDropRailAgentIdState(agentId);
   };
-  // Seed from the app-held store so text typed before a tab away comes back.
-  const [composerDrafts, setComposerDrafts] = useState<Record<string, string>>(() => ({
-    ...readComposerDrafts(),
-  }));
-  // Mirror every keystroke back to the store; Home unmounts on a tab away, so the
-  // store (not this state) is what survives to the next mount.
-  useEffect(() => {
-    saveComposerDrafts(composerDrafts);
-  }, [composerDrafts, saveComposerDrafts]);
   // Composer textareas by rail id — used to focus the field (⌘D, edit recall).
   const composerRefs = useRef(new Map<string, HTMLTextAreaElement>());
   // Rails with an in-flight submission. onSubmit fires per Enter keydown, and
@@ -583,9 +575,12 @@ export default function HomeRails({
     },
     [],
   );
-  const setComposerDraft = useCallback((railId: string, text: string) => {
-    setComposerDrafts((current) => ({ ...current, [railId]: text }));
-  }, []);
+  const setComposerDraft = useCallback(
+    (railId: string, text: string) => {
+      setComposerDrafts((current) => ({ ...current, [railId]: text }));
+    },
+    [setComposerDrafts],
+  );
   // Recalling an item into a composer that already holds text would clobber it,
   // so guard the swap the same way the right pane's edit does.
   const { confirm, dialog: confirmDialog } = useConfirm();
