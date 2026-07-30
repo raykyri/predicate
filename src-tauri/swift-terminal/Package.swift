@@ -27,5 +27,9 @@ let package = Package(
                 .product(name: "GhosttyTheme", package: "libghostty-spm"),
             ]
         ),
+        .testTarget(
+            name: "QmuxNativeTerminalTests",
+            dependencies: ["QmuxNativeTerminal"]
+        ),
     ]
 )

@@ -19,6 +19,10 @@ import {
 } from "../lib/api";
 import { TERMINAL_PANE_CLASS } from "../lib/appHelpers";
 import { readClipboardText } from "../lib/clipboard";
+import {
+  nativeTerminalLayoutRect,
+  type NativeTerminalRect,
+} from "../lib/nativeTerminalLayout";
 import { inspectPaste } from "../lib/paste";
 import type { PasteProtectionSettings } from "../lib/paste";
 import type { PaneInfo } from "../types";
@@ -103,6 +107,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
 ) {
   const visible = visibleProp ?? active;
   const hostRef = useRef<HTMLDivElement | null>(null);
+  const lastVisibleRectRef = useRef<NativeTerminalRect | null>(null);
   const activeRef = useRef(active);
   const visibleRef = useRef(visible);
   const inputBlockedRef = useRef(inputBlocked);
@@ -321,8 +326,17 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
     let frame: number | null = null;
     const syncLayout = () => {
       frame = null;
-      const rect = host.getBoundingClientRect();
-      const wantSurfaceVisible = visible && rect.width > 0 && rect.height > 0;
+      const measuredRect = host.getBoundingClientRect();
+      const wantSurfaceVisible =
+        visible && measuredRect.width > 0 && measuredRect.height > 0;
+      const rect = nativeTerminalLayoutRect(
+        measuredRect,
+        wantSurfaceVisible,
+        lastVisibleRectRef.current,
+      );
+      if (wantSurfaceVisible) {
+        lastVisibleRectRef.current = rect;
+      }
       let surfaceVisible = wantSurfaceVisible;
       // When a pane that is fully covered by the opaque expanded-transcript overlay
       // becomes visible, its native surface's hidden→visible transition can reach

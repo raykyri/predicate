@@ -252,6 +252,13 @@ final class NativeTerminalHost {
             pane.view.isHidden = !visible
             pane.view.setSurfaceVisible(visible)
         }
+        // A newly-created surface starts with Ghostty's zero-frame grid and
+        // must be fitted on its first reveal even when its NSView already has
+        // the requested frame. Once real geometry has been committed, merely
+        // hiding and showing that same frame must not fit again: Ghostty treats
+        // the fit as a terminal resize, which resets a parked scroll viewport.
+        let needsInitialRevealFit =
+            visible && visibilityChanged && !pane.hasCommittedGeometry
 
         if deferGeometry {
             clientDeferredGeometryPaneIDs.insert(id)
@@ -264,7 +271,7 @@ final class NativeTerminalHost {
             || container?.inLiveResize == true
         if shouldDeferGeometry {
             pendingPaneFrames[id] = frame
-            if visible, visibilityChanged {
+            if needsInitialRevealFit {
                 pendingFitPaneIDs.insert(id)
             }
         } else {
@@ -273,7 +280,7 @@ final class NativeTerminalHost {
             applyGeometry(
                 frame,
                 to: pane,
-                forceFit: visibilityChanged || needsDeferredFit
+                forceFit: needsInitialRevealFit || needsDeferredFit
             )
         }
         // Layout is never allowed to select or transfer keyboard ownership.
