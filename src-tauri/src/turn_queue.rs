@@ -1014,16 +1014,66 @@ struct TurnSendError {
     text_delivered: bool,
 }
 
+/// Encode a qMux-authored Grok turn as ordinary terminal input rather than a
+/// bracketed paste. Grok treats every bracketed-paste event as an instruction to
+/// inspect the host clipboard for attachments; a sidebar send could therefore
+/// append an unrelated clipboard image to the text qMux supplied. Alt+Enter is
+/// Grok's documented, terminal-portable newline chord, so it preserves multiline
+/// drafts without generating a paste event.
+///
+/// Tabs cannot be delivered as ordinary bytes because Grok interprets Tab as an
+/// autocomplete key. Expand them to the conventional four spaces. Other C0
+/// controls are omitted: unlike bracketed paste, this path is terminal input and
+/// must never let prompt text forge control sequences.
+fn grok_typed_turn_data(text: &str) -> String {
+    let mut data = String::with_capacity(text.len());
+    let mut previous_was_cr = false;
+    for character in text.chars() {
+        match character {
+            '\r' => {
+                data.push_str("\x1b\r");
+                previous_was_cr = true;
+            }
+            '\n' if previous_was_cr => {
+                previous_was_cr = false;
+            }
+            '\n' => {
+                data.push_str("\x1b\r");
+                previous_was_cr = false;
+            }
+            '\t' => {
+                data.push_str("    ");
+                previous_was_cr = false;
+            }
+            character if character.is_control() => {
+                previous_was_cr = false;
+            }
+            character => {
+                data.push(character);
+                previous_was_cr = false;
+            }
+        }
+    }
+    data
+}
+
 /// The pane write for one turn: a `possibly_pasted` turn's text is (very likely)
 /// already sitting in the composer from a failed prior attempt, so it submits a
 /// bare Return instead of pasting a second copy — the concatenation that tag
 /// exists to prevent. The outstanding-send record still carries the full text, so
 /// the prompt-submit echo of the already-pasted content confirms it normally.
-fn turn_write_options(pane_id: String, turn: &QueuedTurn) -> PaneWriteOptions {
+fn turn_write_options(agent: &AgentInfo, pane_id: String, turn: &QueuedTurn) -> PaneWriteOptions {
     if turn.possibly_pasted {
         PaneWriteOptions {
             pane_id,
             data: String::new(),
+            paste: false,
+            submit: true,
+        }
+    } else if agent.adapter == "grok" {
+        PaneWriteOptions {
+            pane_id,
+            data: grok_typed_turn_data(&turn.text),
             paste: false,
             submit: true,
         }
@@ -1064,7 +1114,7 @@ fn send_agent_turn(
             None
         }
     };
-    if let Err(failure) = write_pane_detailed(state, turn_write_options(pane_id, turn)) {
+    if let Err(failure) = write_pane_detailed(state, turn_write_options(agent, pane_id, turn)) {
         if let Some(send_id) = send_id {
             let _ = state.remove_agent_outstanding_send_id(&agent.id, send_id);
         }
@@ -1817,8 +1867,9 @@ mod tests {
 
     #[test]
     fn possibly_pasted_turns_submit_without_repasting() {
+        let agent = sample_agent(AgentStatus::AwaitingInput);
         let mut turn = QueuedTurn::new("commit".to_string());
-        let options = turn_write_options("pane-1".to_string(), &turn);
+        let options = turn_write_options(&agent, "pane-1".to_string(), &turn);
         assert_eq!(options.data, "commit");
         assert!(options.paste);
         assert!(options.submit);
@@ -1826,10 +1877,31 @@ mod tests {
         // A retry of a turn whose text already reached the composer sends only the
         // Return, so it can never concatenate a second copy of the text.
         turn.possibly_pasted = true;
-        let options = turn_write_options("pane-1".to_string(), &turn);
+        let options = turn_write_options(&agent, "pane-1".to_string(), &turn);
         assert_eq!(options.data, "");
         assert!(!options.paste);
         assert!(options.submit);
+    }
+
+    #[test]
+    fn grok_turns_are_typed_without_triggering_clipboard_attachment_paste() {
+        let mut agent = sample_agent(AgentStatus::AwaitingInput);
+        agent.adapter = "grok".to_string();
+        let turn = QueuedTurn::new("hello\nworld\tindented".to_string());
+
+        let options = turn_write_options(&agent, "pane-1".to_string(), &turn);
+
+        assert_eq!(options.data, "hello\x1b\rworld    indented");
+        assert!(!options.paste);
+        assert!(options.submit);
+    }
+
+    #[test]
+    fn grok_typed_turns_cannot_inject_terminal_controls() {
+        assert_eq!(
+            grok_typed_turn_data("safe\x1b[201~\r\nnext\u{7}"),
+            "safe[201~\x1b\rnext"
+        );
     }
 
     #[test]
