@@ -264,6 +264,7 @@ import {
   setPaneSplitFlagEnabled,
   splitFractions,
 } from "./lib/paneSplits";
+import { leftSidebarRestorePlacement } from "./lib/sidebarControls";
 import {
   TERMINAL_FONT_SIZE,
   TERMINAL_FONT_SIZE_MAX,
@@ -4224,12 +4225,21 @@ function MainApp() {
     splitRightPaneMode,
     splitTurnPaneSurfaces.length,
   );
+  const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
+  const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
   const researchSidebarRestoreInHeader =
     leftSidebarCollapsed &&
     sidebarMode === "research" &&
     (researchStageView === "document" || researchStageView === "composer");
+  const leftSidebarRestore = leftSidebarRestorePlacement({
+    leftSidebarCollapsed,
+    researchHeaderOwnsRestore: researchSidebarRestoreInHeader,
+    splitRightPaneMode,
+    activePaneId: activePane?.id,
+    visibleRightBarPaneIds: visibleRightBarSurfaces.map((surface) => surface.pane.id),
+  });
   const floatingLeftSidebarRestoreVisible =
-    leftSidebarCollapsed && !researchSidebarRestoreInHeader;
+    leftSidebarRestore.kind === "floating";
   const floatingRestoreButtonVisible = rightBarCollapsed && activePaneCanToggleTurnSidebar;
   const floatingPaneRestoreControlsVisible =
     floatingLeftSidebarRestoreVisible || floatingRestoreButtonVisible;
@@ -4246,8 +4256,6 @@ function MainApp() {
     floatingPaneRestoreControlsVisible,
     floatingPaneRestoreControlsLayoutKey,
   );
-  const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
-  const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
   const hasGlobalTurnSidebar = hasVisibleRightBar && !splitRightPaneMode;
   const splitTranscriptExpanded = Boolean(
     activePaneSplit &&
@@ -11718,6 +11726,9 @@ function MainApp() {
 
   function renderFloatingTurnPaneControls(surface: TurnPaneSurface, expanded: boolean) {
     const label = expanded ? "Restore transcript" : "Expand transcript";
+    const restoresLeftSidebar =
+      leftSidebarRestore.kind === "split-turn-pane" &&
+      leftSidebarRestore.paneId === surface.pane.id;
     return (
       <div className="turn-pane-floating-controls">
         <button
@@ -11741,20 +11752,39 @@ function MainApp() {
             <Expand size={14} aria-hidden="true" />
           )}
         </button>
-        <button
-          type="button"
-          className="icon-button turn-pane-header-button turn-pane-floating-collapse-button"
-          title="Collapse right bar"
-          aria-label="Collapse right bar"
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            activateTerminalPane(surface.pane.id);
-            setRightBarCollapsedForPane(true, surface.pane.id);
-          }}
+        <div
+          className={`turn-pane-sidebar-controls${restoresLeftSidebar ? " is-grouped" : ""}`}
         >
-          <PanelRightClose size={14} aria-hidden="true" />
-        </button>
+          {restoresLeftSidebar ? (
+            <button
+              type="button"
+              className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+              title="Show left sidebar"
+              aria-label="Show left sidebar"
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                setLeftSidebarCollapsedForActivePane(false);
+              }}
+            >
+              <PanelLeftOpen size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button turn-pane-floating-collapse-button"
+            title="Collapse right bar"
+            aria-label="Collapse right bar"
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              activateTerminalPane(surface.pane.id);
+              setRightBarCollapsedForPane(true, surface.pane.id);
+            }}
+          >
+            <PanelRightClose size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
     );
   }
@@ -11917,6 +11947,11 @@ function MainApp() {
               onToggleTranscriptExpanded={toggleActiveTranscriptExpanded}
               onCollapseRightBar={() =>
                 setRightBarCollapsedForPane(true, surface.pane.id)
+              }
+              onRestoreLeftSidebar={
+                leftSidebarRestore.kind === "turn-pane-header"
+                  ? () => setLeftSidebarCollapsedForActivePane(false)
+                  : undefined
               }
               onInsertPrompt={
                 agent ? (text) => requestComposerInsert(agent.id, text) : undefined

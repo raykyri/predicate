@@ -2,6 +2,7 @@ import {
   Expand,
   GitBranch,
   Minimize2,
+  PanelLeftOpen,
   PanelRightClose,
   SquareCenterlineDashedVertical,
 } from "lucide-react";
@@ -57,6 +58,7 @@ interface TurnPaneHeaderProps {
   transcriptShortcutLabel: string;
   onToggleTranscriptExpanded: () => void;
   onCollapseRightBar: () => void;
+  onRestoreLeftSidebar?: () => void;
   // Inserts saved-prompt text into this pane's composer; absent when the pane
   // has no agent composer, which disables the prompt-library trigger.
   onInsertPrompt?: (text: string) => void;
@@ -116,6 +118,7 @@ export default function TurnPaneHeader({
   transcriptShortcutLabel,
   onToggleTranscriptExpanded,
   onCollapseRightBar,
+  onRestoreLeftSidebar,
   onInsertPrompt,
   promptProjectDir,
   promptProjectPath,
@@ -577,15 +580,30 @@ export default function TurnPaneHeader({
             <Expand size={14} aria-hidden="true" />
           )}
         </button>
-        <button
-          type="button"
-          className="icon-button turn-pane-header-button"
-          title="Collapse right bar"
-          aria-label="Collapse right bar"
-          onClick={onCollapseRightBar}
+        <div
+          className={`turn-pane-sidebar-controls${onRestoreLeftSidebar ? " is-grouped" : ""}`}
         >
-          <PanelRightClose size={14} aria-hidden="true" />
-        </button>
+          {onRestoreLeftSidebar ? (
+            <button
+              type="button"
+              className="icon-button turn-pane-header-button"
+              title="Show left sidebar"
+              aria-label="Show left sidebar"
+              onClick={onRestoreLeftSidebar}
+            >
+              <PanelLeftOpen size={14} aria-hidden="true" />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button"
+            title="Collapse right bar"
+            aria-label="Collapse right bar"
+            onClick={onCollapseRightBar}
+          >
+            <PanelRightClose size={14} aria-hidden="true" />
+          </button>
+        </div>
       </div>
       {/* Portaled to <body> so the fixed-position toast escapes the header's
           stacking context (position:absolute + z-index), which would otherwise

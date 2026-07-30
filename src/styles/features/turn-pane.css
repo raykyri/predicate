@@ -292,6 +292,21 @@
   gap: 6px;
 }
 
+.turn-pane-sidebar-controls {
+  display: flex;
+}
+
+.turn-pane-sidebar-controls.is-grouped > .turn-pane-header-button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.turn-pane-sidebar-controls.is-grouped > .turn-pane-header-button:last-child {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
 /* Shared by the prompt-library, fork, queue split, transcript, and
    collapse buttons. Some also carry .control-button, whose min-height (30px) and
    horizontal padding would otherwise leak in and make those buttons taller than
