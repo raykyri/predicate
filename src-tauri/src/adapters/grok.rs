@@ -755,11 +755,17 @@ impl GrokAdapter {
             }
             "Stop" | "StopFailure" => {
                 let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
-                    if state.agent_has_active_subagents(&agent.id)? {
+                    if grok_stop_has_active_subagents(&notification.payload) {
                         agent.status = AgentStatus::Running;
                         state.set_agent_status(&agent.id, agent.status)?;
                         true
                     } else {
+                        // Grok's Stop payload is the authoritative snapshot of work
+                        // that can still wake this turn. Reconcile the advisory
+                        // SubagentStart/SubagentStop tracker here so one lost stop
+                        // hook cannot suppress this and every future idle boundary,
+                        // stranding the qMux queue behind a permanently Running tab.
+                        state.clear_agent_subagents(&agent.id);
                         false
                     }
                 } else {
@@ -828,6 +834,26 @@ impl GrokAdapter {
             event_payload,
         )))
     }
+}
+
+/// Grok includes the currently live background work in every main-agent Stop
+/// payload. Prefer that point-in-time snapshot over qMux's hook-derived tracker:
+/// the latter is useful between events, but a missing SubagentStop must not veto an
+/// authoritative idle boundary forever.
+fn grok_stop_has_active_subagents(payload: &Value) -> bool {
+    payload
+        .get("backgroundTasks")
+        .or_else(|| payload.get("background_tasks"))
+        .and_then(Value::as_array)
+        .is_some_and(|tasks| {
+            tasks.iter().any(|task| {
+                task.get("type").and_then(Value::as_str) == Some("subagent")
+                    && !matches!(
+                        task.get("status").and_then(Value::as_str),
+                        Some("completed" | "failed" | "cancelled" | "canceled")
+                    )
+            })
+        })
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -2252,7 +2278,20 @@ mod tests {
         assert_eq!(event.event_type, "agent.subagent_started");
         assert!(state.agent_has_active_subagents("agent-1").unwrap());
 
-        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        let event = ingest(
+            &state,
+            hook_for_agent(
+                "Stop",
+                "agent-1",
+                json!({
+                    "backgroundTasks": [{
+                        "id": "child-1",
+                        "type": "subagent",
+                        "status": "running"
+                    }]
+                }),
+            ),
+        );
         assert_eq!(event.event_type, "agent.running");
 
         let event = ingest(
@@ -2275,6 +2314,45 @@ mod tests {
 
         let event = ingest(&state, hook_for_agent("SessionEnd", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.session_end");
+    }
+
+    #[test]
+    fn stop_reconciles_stale_subagent_tracking_before_settling() {
+        let state = test_state();
+        let mut agent = sample_agent();
+        agent.status = AgentStatus::Running;
+        state.insert_agent(agent).unwrap();
+        state
+            .agent_subagent_started("agent-1", Some("lost-child"))
+            .unwrap();
+
+        let event = ingest(
+            &state,
+            hook_for_agent("Stop", "agent-1", json!({ "backgroundTasks": [] })),
+        );
+
+        assert_eq!(event.event_type, "agent.done");
+        assert!(!state.agent_has_active_subagents("agent-1").unwrap());
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Done
+        ));
+    }
+
+    #[test]
+    fn grok_stop_background_task_snapshot_ignores_settled_subagents() {
+        assert!(!grok_stop_has_active_subagents(&json!({
+            "backgroundTasks": [
+                { "type": "shell", "status": "running" },
+                { "type": "subagent", "status": "completed" },
+                { "type": "subagent", "status": "cancelled" }
+            ]
+        })));
+        assert!(grok_stop_has_active_subagents(&json!({
+            "background_tasks": [
+                { "type": "subagent", "status": "running" }
+            ]
+        })));
     }
 
     #[test]
