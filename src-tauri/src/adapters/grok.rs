@@ -1673,11 +1673,15 @@ fn parse_grok_chat_history_value(
             if value.get("synthetic_reason").is_some() {
                 return None;
             }
-            (
-                "user".to_string(),
-                parse_grok_synthetic_message_blocks(value.get("content"))?,
-                None,
-            )
+            let mut blocks = parse_grok_synthetic_message_blocks(value.get("content"))?;
+            for block in &mut blocks {
+                if let TurnBlock::Text { text } = block {
+                    if let Some(query) = unwrap_grok_user_query(text) {
+                        *text = query.to_string();
+                    }
+                }
+            }
+            ("user".to_string(), blocks, None)
         }
         "assistant" => {
             let mut blocks =
@@ -1741,6 +1745,19 @@ fn parse_grok_chat_history_value(
         parent_native_id: None,
         native_message_id,
     })
+}
+
+/// Current Grok chat histories wrap user-authored text in a `<user_query>`
+/// envelope. Leaving that envelope in the transcript makes qMux's generic
+/// injected-instruction detector classify the whole user turn as private
+/// harness context, hiding its role label and normal message affordances.
+fn unwrap_grok_user_query(text: &str) -> Option<&str> {
+    const OPEN: &str = "<user_query>";
+    const CLOSE: &str = "</user_query>";
+
+    let wrapped = text.trim();
+    let query = wrapped.strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
+    Some(query.trim_matches(['\r', '\n']))
 }
 
 fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEvent> {
@@ -2444,6 +2461,26 @@ mod tests {
             &result_turn.blocks[0],
             TurnBlock::ToolResult { tool_use_id, content, .. }
                 if tool_use_id.as_deref() == Some("call-1") && content == "no matches"
+        ));
+    }
+
+    #[test]
+    fn unwraps_native_grok_user_query_envelope() {
+        let user = json!({
+            "type": "user",
+            "content": [{
+                "type": "text",
+                "text": "<user_query>\ninspect the repo\n</user_query>"
+            }]
+        })
+        .to_string();
+
+        let turn = parse_transcript_line("agent-1", 10, &user).unwrap();
+
+        assert_eq!(turn.role, "user");
+        assert!(matches!(
+            &turn.blocks[0],
+            TurnBlock::Text { text } if text == "inspect the repo"
         ));
     }
 
