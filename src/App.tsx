@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import type {
   CSSProperties,
@@ -62,7 +63,11 @@ import {
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import ImageLightbox from "./components/ImageLightbox";
-import { closeImageLightbox, getImageLightbox } from "./lib/imageLightbox";
+import {
+  closeImageLightbox,
+  getImageLightbox,
+  subscribeImageLightbox,
+} from "./lib/imageLightbox";
 import ConfirmDialogActionButton from "./components/ConfirmDialogActionButton";
 import { queuedTurnDeliveryLabel } from "./components/QueuedTurnCard";
 import {
@@ -4288,6 +4293,16 @@ function MainApp() {
     agentByPaneId.get(pane.id)?.status !== "awaitingPermission" &&
     agentByPaneId.get(pane.id)?.status !== "awaitingInput";
   const activePaneReadOnly = Boolean(activePane && terminalPaneIsReadOnly(activePane));
+  // The lightbox store is intentionally app-global rather than threaded
+  // through App state. Subscribe here too so opening it participates in the
+  // native input policy: AppKit must hand first responder from Ghostty to
+  // WebKit before the app-level Escape dispatcher can close the lightbox and
+  // consume the key.
+  const imageLightbox = useSyncExternalStore(
+    subscribeImageLightbox,
+    getImageLightbox,
+    getImageLightbox,
+  );
   // This is the shared hard-input policy for every visible native surface and
   // for the logical owner calculation below. Keeping it single-sourced avoids
   // a modal disabling pointer claims while the owner coordinator still grants
@@ -4304,6 +4319,7 @@ function MainApp() {
   );
   const nativeTerminalInputBlocked = Boolean(
     settingsOpen ||
+      imageLightbox !== null ||
       newResearchOpen ||
       // The new-document composer is absent here on purpose: it lives in the
       // research surface rather than stacking over the terminal stage, so an
