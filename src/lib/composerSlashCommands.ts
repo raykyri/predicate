@@ -1,4 +1,4 @@
-export type ComposerSlashCommandName = "fork" | "worktree" | "loop";
+export type ComposerSlashCommandName = "fork" | "worktree" | "loop" | "btw";
 
 /** How many times /loop re-sends its message before stopping regardless of
  * whether the agent is still making changes. Surfaced in the command tooltips. */
@@ -6,7 +6,7 @@ export const LOOP_MAX_ITERATIONS = 6;
 
 /** What a command does when submitted: fork a new session, or loop a message to
  * the current agent. Fork-only fields (useWorktree) are ignored for other kinds. */
-export type ComposerSlashCommandKind = "fork" | "loop";
+export type ComposerSlashCommandKind = "fork" | "loop" | "btw";
 
 export interface ComposerSlashCommand {
   name: ComposerSlashCommandName;
@@ -14,6 +14,7 @@ export interface ComposerSlashCommand {
   description: string;
   kind: ComposerSlashCommandKind;
   useWorktree: boolean;
+  rightPaneOnly?: boolean;
 }
 
 export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
@@ -38,7 +39,25 @@ export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     kind: "loop",
     useWorktree: false,
   },
+  {
+    name: "btw",
+    token: "/btw",
+    description: "Fork this session below the current terminal and send immediately",
+    kind: "btw",
+    useWorktree: false,
+    rightPaneOnly: true,
+  },
 ];
+
+export interface ComposerSlashCommandParseOptions {
+  surface?: "rightPane" | "globalLauncher";
+}
+
+function commandsForSurface(options?: ComposerSlashCommandParseOptions) {
+  return options?.surface === "globalLauncher"
+    ? COMPOSER_SLASH_COMMANDS.filter((command) => !command.rightPaneOnly)
+    : COMPOSER_SLASH_COMMANDS;
+}
 
 /** True when the agent TUI would intercept this message as a shell escape (`!`)
  * or slash command (`/`) rather than a plain turn. Such commands may emit no
@@ -56,12 +75,15 @@ export type ParsedComposerSlashCommand =
 
 /** Commands are recognized only at byte zero and only when their exact token is
  * followed by a space or tab. Unknown slash commands remain ordinary agent input. */
-export function parseComposerSlashCommand(value: string): ParsedComposerSlashCommand {
+export function parseComposerSlashCommand(
+  value: string,
+  options?: ComposerSlashCommandParseOptions,
+): ParsedComposerSlashCommand {
   if (!value.startsWith("/")) {
     return { kind: "none" };
   }
 
-  for (const command of COMPOSER_SLASH_COMMANDS) {
+  for (const command of commandsForSurface(options)) {
     if (value === command.token) {
       return { kind: "incomplete", command };
     }
@@ -83,11 +105,14 @@ export function parseComposerSlashCommand(value: string): ParsedComposerSlashCom
 
 /** Returns prefix matches only while the entire draft is still the first slash
  * token. Once the user starts the message, the typeahead gets out of the way. */
-export function matchingComposerSlashCommands(value: string): readonly ComposerSlashCommand[] {
+export function matchingComposerSlashCommands(
+  value: string,
+  options?: ComposerSlashCommandParseOptions,
+): readonly ComposerSlashCommand[] {
   if (!/^\/[^\s]*$/.test(value)) {
     return [];
   }
-  return COMPOSER_SLASH_COMMANDS.filter((command) => command.token.startsWith(value));
+  return commandsForSurface(options).filter((command) => command.token.startsWith(value));
 }
 
 export function completeComposerSlashCommand(command: ComposerSlashCommand): string {

@@ -487,7 +487,10 @@ export default function GlobalTaskLauncher() {
   );
   const canFork = agentCanFork(selected?.agent);
   const hasValue = value.trim().length > 0;
-  const parsedSlashCommand = useMemo(() => parseComposerSlashCommand(value), [value]);
+  const parsedSlashCommand = useMemo(
+    () => parseComposerSlashCommand(value, { surface: "globalLauncher" }),
+    [value],
+  );
   const permissionActions =
     selected?.agent.status === "awaitingPermission" ? (policy?.permissionActions ?? []) : [];
 

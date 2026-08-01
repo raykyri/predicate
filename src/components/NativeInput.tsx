@@ -144,6 +144,7 @@ interface NativeInputProps {
   onForkWithPrompt: (options: {
     useWorktree: boolean;
     prompt: string;
+    btw?: boolean;
   }) => Promise<boolean>;
   // Starts a /loop for this agent: re-sends `prompt` after each completed turn
   // until the agent makes no changes (or the iteration cap is hit). Resolves true
@@ -483,7 +484,9 @@ export default function NativeInput({
     parsedSlashCommand.command.kind === "loop" &&
     isTuiCommandMessage(parsedSlashCommand.prompt);
   const slashSubmitLabel =
-    slashCommand?.kind === "loop"
+    slashCommand?.kind === "btw"
+      ? "Fork below & send now"
+      : slashCommand?.kind === "loop"
       ? slashLoopRunsOnce
         ? "Send once"
         : "Loop & send"
@@ -792,14 +795,15 @@ export default function NativeInput({
       }
       return;
     }
-    if (plan.kind === "fork") {
+    if (plan.kind === "fork" || plan.kind === "btw") {
       setMenuOpen(false);
       setWaitOpen(false);
       setSubmitting(true);
       try {
         const forked = await onForkWithPrompt({
-          useWorktree: plan.useWorktree,
+          useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
           prompt: plan.prompt,
+          btw: plan.kind === "btw",
         });
         if (forked) {
           recordRecentMessage(trimmed);

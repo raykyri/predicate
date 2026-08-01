@@ -39,6 +39,23 @@ test("removes nested and consecutive tagged instruction blocks", () => {
   assert.equal(stripTaggedUserInstructionBlocks(message), "\nUser-authored message");
 });
 
+test("removes the attributed qmux agent-driver instruction block", () => {
+  const message = [
+    '<qmux_instruction source="agent_driver">',
+    "Do not change the working tree or codebase unless explicitly instructed to.",
+    "</qmux_instruction>",
+    "Inspect the failing request.",
+  ].join("\n");
+
+  assert.equal(stripTaggedUserInstructionBlocks(message), "\nInspect the failing request.");
+});
+
+test("does not treat arbitrary attributed XML blocks as injected instructions", () => {
+  const message = ['<note source="user">', "Keep this content.", "</note>"].join("\n");
+
+  assert.equal(stripTaggedUserInstructionBlocks(message), message);
+});
+
 test("preserves inline tag examples that are part of user-authored prose", () => {
   const message = "Explain how <strong>important</strong> is rendered.";
 

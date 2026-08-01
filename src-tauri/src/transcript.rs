@@ -1242,6 +1242,9 @@ fn parse_opening_tag(line: &str) -> Option<&str> {
         return None;
     }
     let tag = &line[1..line.len() - 1];
+    if tag == r#"qmux_instruction source="agent_driver""# {
+        return Some("qmux_instruction");
+    }
     is_instruction_tag_name(tag).then_some(tag)
 }
 
@@ -2134,7 +2137,14 @@ mod tests {
             strip_leading_tagged_instruction_blocks("<config>\nkey = value"),
             Some("<config>\nkey = value")
         );
-        // A tag line with attributes is not an instruction tag.
+        // The exact attributed qmux driver block is trusted and stripped.
+        assert_eq!(
+            strip_leading_tagged_instruction_blocks(
+                "<qmux_instruction source=\"agent_driver\">\nsafety\n</qmux_instruction>\nkept"
+            ),
+            Some("kept")
+        );
+        // Other tag lines with attributes are not instruction tags.
         assert_eq!(
             strip_leading_tagged_instruction_blocks("<ide_context file=\"a.rs\">\nbody"),
             Some("<ide_context file=\"a.rs\">\nbody")

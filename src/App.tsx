@@ -10041,15 +10041,31 @@ function MainApp() {
       useWorktree: boolean;
       prompt?: string;
       anchor?: MessageAnchor;
+      btw?: boolean;
     },
   ): Promise<boolean> {
     setError(null);
     try {
       const fork = await forkAgent(pane.id, options);
-      setPanesPreservingRecoveredDismissals((current) =>
-        current.some((existing) => existing.id === fork.id) ? current : [...current, fork],
-      );
-      setActivePaneId(fork.id);
+      if (options.btw) {
+        const orderedPanes = placePaneAfterOptimistically(fork, pane.id);
+        setPanesPreservingRecoveredDismissals(orderedPanes);
+        savePaneSplits(
+          joinPaneSplit(paneSplitsRef.current, orderedPanes, pane.id, fork.id, {
+            insertedPaneId: fork.id,
+            source: "command",
+          }),
+          orderedPanes,
+        );
+        // The branch is already running its launch prompt; leave the calling
+        // terminal focused so /btw never interrupts the work it branched from.
+        setActivePaneId(pane.id);
+      } else {
+        setPanesPreservingRecoveredDismissals((current) =>
+          current.some((existing) => existing.id === fork.id) ? current : [...current, fork],
+        );
+        setActivePaneId(fork.id);
+      }
       expandNewAgentTranscriptByDefault(fork);
       if (options.prompt && fork.agentId) {
         pendingFirstTitleByAgentRef.current.set(
@@ -12345,11 +12361,12 @@ function MainApp() {
                 onDraftChange={setAgentDraft}
                 registerDraftFlusher={registerComposerDraftFlusher}
                 onWaitTargetHover={setWaitTargetHoverAgentId}
-                onForkWithPrompt={({ useWorktree, prompt }) =>
+                onForkWithPrompt={({ useWorktree, prompt, btw }) =>
                   forkPane(surface.pane, {
                     nest: true,
                     useWorktree,
                     prompt,
+                    btw,
                   })
                 }
                 onLoopWithPrompt={({ prompt }) => startAgentLoop(agent.id, prompt)}
