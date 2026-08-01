@@ -6,6 +6,7 @@ import {
   assistantTextFromTimelineItems,
   buildTimelineItems,
   formatAbsoluteMessageTimestamp,
+  formatJumpTargetLabel,
   formatMessageTimestamp,
   formatPlainTextTranscript,
   messageItemCopyText,
@@ -695,6 +696,22 @@ test("jump targets skip prompts with no plain text", () => {
     transcriptJumpTargets(turns, 20).map((target) => target.text),
     ["real prompt"],
   );
+});
+
+test("jump target labels collapse multiline whitespace for the menu clamp", () => {
+  assert.equal(
+    formatJumpTargetLabel("ok show me\n\na sample\nof 20 or so\n"),
+    "ok show me a sample of 20 or so",
+  );
+
+  nextIndex = 0;
+  const targets = transcriptJumpTargets(
+    [turn("user", [text("first line\nsecond line\n\nthird")])],
+    20,
+  );
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].text, "first line second line third");
+  assert.doesNotMatch(targets[0].text, /\n/);
 });
 
 test("message items carry the latest folded turn timestamp", () => {

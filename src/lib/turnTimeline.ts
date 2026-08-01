@@ -157,7 +157,9 @@ export interface TranscriptJumpTarget {
  * "Go to…" menu. Only user messages qualify: they are what a reader navigates
  * by, and assistant replies are long enough that a truncated label carries no
  * information. Text is the same plain-text fold the copy-transcript path uses,
- * so tagged instruction wrappers are already stripped.
+ * so tagged instruction wrappers are already stripped. Internal newlines are
+ * collapsed so the menu's two-line CSS clamp soft-wraps instead of treating
+ * each hard break as a line (which stacked long prompts into unreadable mess).
  */
 export function transcriptJumpTargets(turns: Turn[], limit: number): TranscriptJumpTarget[] {
   const targets = buildTimelineItems(turns, false).flatMap((item) => {
@@ -165,9 +167,14 @@ export function transcriptJumpTargets(turns: Turn[], limit: number): TranscriptJ
       return [];
     }
     const text = plainTextMessageItemText(item);
-    return text ? [{ key: item.key, text }] : [];
+    return text ? [{ key: item.key, text: formatJumpTargetLabel(text) }] : [];
   });
   return targets.slice(Math.max(0, targets.length - limit));
+}
+
+/** Single-line-ish label for the "Go to…" menu: collapse runs of whitespace. */
+export function formatJumpTargetLabel(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 function plainTextMessageItemText(item: MessageItem) {

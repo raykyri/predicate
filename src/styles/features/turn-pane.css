@@ -960,9 +960,14 @@
 }
 
 .turn-pane-jump-item {
+  /* menu-item is display:flex; keep items top-aligned and let the button grow
+     with the clamped label (up to two lines) instead of a single-line min-height. */
   align-items: flex-start;
-  padding-block: 4px;
+  height: auto;
+  min-height: 0;
+  padding-block: 6px;
   padding-inline: 10px;
+  white-space: normal;
   text-align: left;
 }
 
@@ -973,16 +978,24 @@
    in full. Keeping the button's padding off the clamped box also avoids
    WebKit letting a third line bleed into padding-bottom instead of
    ellipsizing. `overflow-wrap` keeps an unbroken token — a URL or a long path
-   — from pushing the menu wider than its measured width. */
+   — from pushing the menu wider than its measured width. The flex child must
+   take the full button width (`flex: 1; min-width: 0`) or -webkit-box never
+   measures a finite line length and the clamp fails. */
 .turn-pane-jump-text {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
+  max-height: calc(1.35em * 2);
   overflow: hidden;
   overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
   line-height: 1.35;
+  text-overflow: ellipsis;
 }
 
 .turn-pane-branch-item {
