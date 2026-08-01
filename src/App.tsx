@@ -1915,6 +1915,15 @@ function MainApp() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [themePickerOpen, setThemePickerOpen] = useState(false);
+  const [previewThemeId, setPreviewThemeId] = useState<string | null>(null);
+  const themePickerRef = useRef<HTMLDivElement | null>(null);
+  const themePickerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const themeOptionRefs = useRef(new Map<string, HTMLButtonElement>());
+  const closeThemePicker = useCallback(() => {
+    setThemePickerOpen(false);
+    setPreviewThemeId(null);
+  }, []);
   const [newResearchOpen, setNewResearchOpen] = useState(
     () => readSessionDraftJson(SESSION_DRAFT_KEYS.newResearchModal) !== null,
   );
@@ -2094,10 +2103,11 @@ function MainApp() {
   const terminalScrollSensitivity = scrollSensitivityFor(settings.mouseWheelSensitivity);
   // The application color theme only adjusts qmux's built-in terminal palette;
   // explicitly selected Ghostty themes keep their authored backgrounds.
+  const effectiveThemeId = previewThemeId ?? settings.themeId;
   const terminalThemeName =
-    settings.themeId === DEFAULT_THEME_ID && settings.colorTheme === "orange-blob"
+    effectiveThemeId === DEFAULT_THEME_ID && settings.colorTheme === "orange-blob"
       ? WARM_QMUX_TERMINAL_THEME_ID
-      : settings.themeId;
+      : effectiveThemeId;
 
   // Apply the app accent before paint so switching (and restoring) color themes
   // does not flash the default green palette.
@@ -2227,6 +2237,10 @@ function MainApp() {
     () => themeCatalog?.find((theme) => theme.name === settings.themeId) ?? null,
     [settings.themeId, themeCatalog],
   );
+  const effectiveTheme = useMemo(
+    () => themeCatalog?.find((theme) => theme.name === effectiveThemeId) ?? null,
+    [effectiveThemeId, themeCatalog],
+  );
   const themeGroups = useMemo(() => {
     const named = (themeCatalog ?? []).filter((theme) => theme.name !== DEFAULT_THEME_ID);
     return {
@@ -2234,22 +2248,135 @@ function MainApp() {
       light: named.filter((theme) => !theme.isDark),
     };
   }, [themeCatalog]);
+  const themeOptionNames = useMemo(() => {
+    const names = [DEFAULT_THEME_ID];
+    if (selectedTheme === null && settings.themeId !== DEFAULT_THEME_ID) {
+      names.push(settings.themeId);
+    }
+    names.push(...themeGroups.dark.map((theme) => theme.name));
+    names.push(...themeGroups.light.map((theme) => theme.name));
+    return names;
+  }, [selectedTheme, settings.themeId, themeGroups]);
+
+  const focusThemeOption = useCallback((themeId: string) => {
+    themeOptionRefs.current.get(themeId)?.focus();
+  }, []);
+
+  const openThemePicker = useCallback(() => {
+    setThemePickerOpen(true);
+    setPreviewThemeId(null);
+    requestAnimationFrame(() => focusThemeOption(settingsRef.current.themeId));
+  }, [focusThemeOption]);
+
+  const chooseTheme = useCallback((themeId: string) => {
+    setSettings((current) => ({ ...current, themeId }));
+    setThemePickerOpen(false);
+    setPreviewThemeId(null);
+    requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
+  }, []);
+
+  const handleThemeOptionKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>, themeId: string) => {
+      let nextIndex: number | null = null;
+      const currentIndex = themeOptionNames.indexOf(themeId);
+      if (event.key === "ArrowDown") {
+        nextIndex = Math.min(currentIndex + 1, themeOptionNames.length - 1);
+      } else if (event.key === "ArrowUp") {
+        nextIndex = Math.max(currentIndex - 1, 0);
+      } else if (event.key === "Home") {
+        nextIndex = 0;
+      } else if (event.key === "End") {
+        nextIndex = themeOptionNames.length - 1;
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeThemePicker();
+        requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
+        return;
+      } else {
+        return;
+      }
+
+      event.preventDefault();
+      const nextThemeId = themeOptionNames[nextIndex];
+      if (nextThemeId) {
+        focusThemeOption(nextThemeId);
+      }
+    },
+    [closeThemePicker, focusThemeOption, themeOptionNames],
+  );
+
+  function renderThemeOption(
+    themeId: string,
+    label: string,
+    theme: NativeTerminalTheme | null,
+  ) {
+    const selected = settings.themeId === themeId;
+    const previewed = effectiveThemeId === themeId;
+    return (
+      <button
+        key={themeId}
+        ref={(node) => {
+          if (node) {
+            themeOptionRefs.current.set(themeId, node);
+          } else {
+            themeOptionRefs.current.delete(themeId);
+          }
+        }}
+        type="button"
+        role="option"
+        aria-selected={selected}
+        className={`settings-theme-option${previewed ? " is-previewed" : ""}`}
+        onMouseEnter={() => setPreviewThemeId(themeId)}
+        onFocus={() => setPreviewThemeId(themeId)}
+        onClick={() => chooseTheme(themeId)}
+        onKeyDown={(event) => handleThemeOptionKeyDown(event, themeId)}
+      >
+        <span className="settings-theme-option-name">{label}</span>
+        {theme ? (
+          <span className="settings-theme-option-preview" aria-hidden="true">
+            {themePreviewColors(theme).map((color, index) => (
+              <span key={index} style={{ background: color }} />
+            ))}
+          </span>
+        ) : null}
+        <Check
+          size={13}
+          className="settings-theme-option-check"
+          aria-hidden="true"
+        />
+      </button>
+    );
+  }
+
+  useEffect(() => {
+    if (!themePickerOpen) {
+      return;
+    }
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!themePickerRef.current?.contains(event.target as Node)) {
+        closeThemePicker();
+      }
+    };
+    window.addEventListener("mousedown", handlePointerDown, true);
+    return () => window.removeEventListener("mousedown", handlePointerDown, true);
+  }, [closeThemePicker, themePickerOpen]);
   // Chrome that sits flush against terminal pixels (the stage, split gutters,
   // the empty state) follows a selected Ghostty theme. The built-in qmux theme
   // removes the inline override so the application surface token can tint it.
   useEffect(() => {
     const background =
-      settings.themeId === DEFAULT_THEME_ID
+      effectiveThemeId === DEFAULT_THEME_ID
         ? null
-        : selectedTheme
-          ? themeCssColor(selectedTheme.background)
+        : effectiveTheme
+          ? themeCssColor(effectiveTheme.background)
           : null;
     if (background) {
       document.documentElement.style.setProperty("--terminal-bg", background);
     } else {
       document.documentElement.style.removeProperty("--terminal-bg");
     }
-  }, [selectedTheme, settings.themeId]);
+  }, [effectiveTheme, effectiveThemeId]);
   const pasteProtection = useMemo(() => pasteProtectionFor(settings), [settings]);
   const shortcutHintsShown = settings.showShortcutHints && shortcutHintsVisible;
   // The launcher prompt is deliberately NOT React state: as app-root state it
@@ -10327,6 +10454,7 @@ function MainApp() {
     resolvingClose,
     quitting,
     settingsOpen,
+    themePickerOpen,
     error,
   });
   useEffect(() => {
@@ -10341,6 +10469,7 @@ function MainApp() {
       resolvingClose,
       quitting,
       settingsOpen,
+      themePickerOpen,
       error,
     };
   });
@@ -10367,6 +10496,16 @@ function MainApp() {
         event.stopPropagation();
         event.stopImmediatePropagation();
         closeImageLightbox();
+        return;
+      }
+
+      // The theme list is a child popup of Settings. Dismiss it first so a
+      // preview can be cancelled without also closing the entire panel.
+      if (overlays.themePickerOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeThemePicker();
+        requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
         return;
       }
 
@@ -10419,7 +10558,7 @@ function MainApp() {
 
     window.addEventListener("keydown", handleKeyDown, true);
     return () => window.removeEventListener("keydown", handleKeyDown, true);
-  }, []);
+  }, [closeThemePicker]);
 
   // The error banner floats over the terminal stage. Register its rect as a
   // web-owned pointer region so clicks on the banner (and its dismiss control)
@@ -10611,12 +10750,15 @@ function MainApp() {
   // lives in the app-level Escape dispatcher; this effect only resets the
   // settings panel's transient state when it closes.
   useEffect(() => {
+    if (!settingsOpen || settingsTab !== "theme") {
+      closeThemePicker();
+    }
     if (!settingsOpen) {
       setOpenRouterKeyVisible(false);
       setSettingsTab("basic");
       setShowHideShortcutCapturing(false);
     }
-  }, [settingsOpen]);
+  }, [closeThemePicker, settingsOpen, settingsTab]);
 
   // Focus and select the name when the rename dialog opens, so the user can type
   // a new name straight away.
@@ -13039,46 +13181,97 @@ function MainApp() {
               <label htmlFor="settings-theme" className="settings-label">
                 Terminal theme
               </label>
-              <div className="settings-theme-field">
-                <select
+              <div
+                className="settings-theme-field"
+                ref={themePickerRef}
+                onBlur={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget)) {
+                    closeThemePicker();
+                  }
+                }}
+              >
+                <button
                   id="settings-theme"
-                  className="settings-select"
-                  value={settings.themeId}
-                  onChange={(event) => {
-                    // Read the value synchronously before React resets currentTarget.
-                    const themeId = event.currentTarget.value;
-                    setSettings((current) => ({ ...current, themeId }));
+                  ref={themePickerTriggerRef}
+                  type="button"
+                  className="settings-select settings-theme-trigger"
+                  role="combobox"
+                  aria-haspopup="listbox"
+                  aria-expanded={themePickerOpen}
+                  aria-controls={themePickerOpen ? "settings-theme-options" : undefined}
+                  onClick={() => {
+                    if (themePickerOpen) {
+                      closeThemePicker();
+                    } else {
+                      openThemePicker();
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if (
+                      !themePickerOpen &&
+                      (event.key === "ArrowDown" || event.key === "ArrowUp")
+                    ) {
+                      event.preventDefault();
+                      openThemePicker();
+                    }
                   }}
                 >
-                  <option value={DEFAULT_THEME_ID}>qmux (default)</option>
-                  {selectedTheme === null && settings.themeId !== DEFAULT_THEME_ID ? (
-                    // A stored theme the catalog doesn't have (or the catalog
-                    // is still loading): keep the select controlled without
-                    // silently jumping the visible selection to the default.
-                    <option value={settings.themeId}>{settings.themeId}</option>
-                  ) : null}
-                  {themeGroups.dark.length > 0 ? (
-                    <optgroup label="Dark">
-                      {themeGroups.dark.map((theme) => (
-                        <option key={theme.name} value={theme.name}>
-                          {theme.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                  {themeGroups.light.length > 0 ? (
-                    <optgroup label="Light">
-                      {themeGroups.light.map((theme) => (
-                        <option key={theme.name} value={theme.name}>
-                          {theme.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ) : null}
-                </select>
-                {selectedTheme ? (
+                  <span>
+                    {settings.themeId === DEFAULT_THEME_ID
+                      ? "qmux (default)"
+                      : settings.themeId}
+                  </span>
+                </button>
+                {themePickerOpen ? (
+                  <div
+                    id="settings-theme-options"
+                    className="settings-theme-options"
+                    role="listbox"
+                    aria-label="Terminal themes"
+                    onMouseLeave={() => setPreviewThemeId(null)}
+                  >
+                    {renderThemeOption(
+                      DEFAULT_THEME_ID,
+                      "qmux (default)",
+                      themeCatalog?.find((theme) => theme.name === DEFAULT_THEME_ID) ?? null,
+                    )}
+                    {selectedTheme === null && settings.themeId !== DEFAULT_THEME_ID
+                      ? // A stored theme the catalog doesn't have (or the catalog
+                        // is still loading): keep it available without silently
+                        // jumping the visible selection to the default.
+                        renderThemeOption(settings.themeId, settings.themeId, null)
+                      : null}
+                    {themeGroups.dark.length > 0 ? (
+                      <div role="group" aria-labelledby="settings-theme-dark-label">
+                        <div
+                          id="settings-theme-dark-label"
+                          className="settings-theme-group-label"
+                        >
+                          Dark
+                        </div>
+                        {themeGroups.dark.map((theme) =>
+                          renderThemeOption(theme.name, theme.name, theme),
+                        )}
+                      </div>
+                    ) : null}
+                    {themeGroups.light.length > 0 ? (
+                      <div role="group" aria-labelledby="settings-theme-light-label">
+                        <div
+                          id="settings-theme-light-label"
+                          className="settings-theme-group-label"
+                        >
+                          Light
+                        </div>
+                        {themeGroups.light.map((theme) =>
+                          renderThemeOption(theme.name, theme.name, theme),
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {effectiveTheme ? (
                   <span className="settings-theme-preview" aria-hidden="true">
-                    {themePreviewColors(selectedTheme).map((color, index) => (
+                    {themePreviewColors(effectiveTheme).map((color, index) => (
                       <span key={index} style={{ background: color }} />
                     ))}
                   </span>
