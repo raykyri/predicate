@@ -4,6 +4,29 @@ import XCTest
 @testable import QmuxNativeTerminal
 
 final class NativeTerminalLayoutTests: XCTestCase {
+    func testStaleSettingsCannotReplaceNewerTheme() async throws {
+        try await MainActor.run {
+            let pane = NativeTerminalPane(
+                paneID: "native-settings-revision-test-pane",
+                workingDirectory: nil,
+                themeName: QmuxTerminalTheme.defaultName
+            )
+            var newer = Self.settings
+            newer.revision = 2
+            newer.themeName = "Cursor Dark"
+            XCTAssertTrue(pane.applySettings(newer))
+
+            var stale = Self.settings
+            stale.revision = 1
+            XCTAssertTrue(pane.applySettings(stale))
+
+            XCTAssertEqual(
+                pane.controller.theme,
+                QmuxTerminalTheme.theme(named: "Cursor Dark")
+            )
+        }
+    }
+
     func testUnchangedTabRevealDoesNotEmitResizeOrMoveViewport() async throws {
         try await MainActor.run {
             try Self.withPane { paneID, frame in
@@ -113,6 +136,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
     }
 
     private static let settings = TerminalPaneSettings(
+        revision: 1,
         fontSize: 13,
         fontFamily: "Menlo",
         letterSpacing: 0,

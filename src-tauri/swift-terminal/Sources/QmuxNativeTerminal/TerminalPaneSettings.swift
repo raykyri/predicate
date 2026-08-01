@@ -3,6 +3,7 @@
 /// can build its Ghostty surface at creation time instead of waiting for its
 /// own mount-time settings round-trip from the webview.
 struct TerminalPaneSettings {
+    var revision: UInt64
     var fontSize: Double
     var fontFamily: String
     var letterSpacing: Double

@@ -259,6 +259,7 @@ public func qmuxNativeTerminalPasteApprovedText(
 @_cdecl("qmux_native_terminal_update_settings")
 public func qmuxNativeTerminalUpdateSettings(
     _ paneID: UnsafePointer<CChar>?,
+    _ revision: UInt64,
     _ fontSize: Double,
     _ fontFamily: UnsafePointer<CChar>?,
     _ letterSpacing: Double,
@@ -280,6 +281,7 @@ public func qmuxNativeTerminalUpdateSettings(
         return 0
     }
     let settings = TerminalPaneSettings(
+        revision: revision,
         fontSize: fontSize,
         fontFamily: fontFamily,
         letterSpacing: letterSpacing,
@@ -300,6 +302,7 @@ public func qmuxNativeTerminalUpdateSettings(
 
 @_cdecl("qmux_native_terminal_seed_settings")
 public func qmuxNativeTerminalSeedSettings(
+    _ revision: UInt64,
     _ fontSize: Double,
     _ fontFamily: UnsafePointer<CChar>?,
     _ letterSpacing: Double,
@@ -320,6 +323,7 @@ public func qmuxNativeTerminalSeedSettings(
         return 0
     }
     let settings = TerminalPaneSettings(
+        revision: revision,
         fontSize: fontSize,
         fontFamily: fontFamily,
         letterSpacing: letterSpacing,

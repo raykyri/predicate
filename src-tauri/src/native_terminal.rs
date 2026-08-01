@@ -141,6 +141,7 @@ pub struct NativeWebOverlayRegion {
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalSettings {
     pub pane_id: String,
+    pub revision: u64,
     pub font_size: f64,
     pub font_family: String,
     pub letter_spacing: f64,
@@ -162,6 +163,7 @@ pub struct NativeTerminalSettings {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeTerminalSeedSettings {
+    pub revision: u64,
     pub font_size: f64,
     pub font_family: String,
     pub letter_spacing: f64,
@@ -414,6 +416,7 @@ mod imp {
         fn qmux_native_terminal_action(pane_id: *const c_char, action: *const c_char) -> i32;
         fn qmux_native_terminal_update_settings(
             pane_id: *const c_char,
+            revision: u64,
             font_size: f64,
             font_family: *const c_char,
             letter_spacing: f64,
@@ -428,6 +431,7 @@ mod imp {
             theme_name: *const c_char,
         ) -> i32;
         fn qmux_native_terminal_seed_settings(
+            revision: u64,
             font_size: f64,
             font_family: *const c_char,
             letter_spacing: f64,
@@ -752,6 +756,7 @@ mod imp {
         if unsafe {
             qmux_native_terminal_update_settings(
                 pane_id.as_ptr(),
+                settings.revision,
                 settings.font_size,
                 font_family.as_ptr(),
                 settings.letter_spacing,
@@ -793,6 +798,7 @@ mod imp {
         // SAFETY: Swift copies strings and scalar settings synchronously.
         if unsafe {
             qmux_native_terminal_seed_settings(
+                settings.revision,
                 settings.font_size,
                 font_family.as_ptr(),
                 settings.letter_spacing,

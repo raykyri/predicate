@@ -98,6 +98,10 @@ final class NativeTerminalPane: NSObject,
     /// first real fit; the host gates replay on this flag.
     var hasCommittedGeometry = false
     var consumedShortcutKeyCodes: Set<UInt16> = []
+    /// Tauri settings invokes may complete out of order while a theme is being
+    /// previewed. Once a newer snapshot reaches this pane, an older one must
+    /// never repaint it.
+    private var settingsRevision: UInt64 = 0
     private var lastUserInputReport = Date.distantPast
 
     init(
@@ -354,6 +358,8 @@ final class NativeTerminalPane: NSObject,
     }
 
     func applySettings(_ settings: TerminalPaneSettings) -> Bool {
+        guard settings.revision > settingsRevision else { return true }
+        settingsRevision = settings.revision
         let style = TerminalCursorStyle(rawValue: settings.cursorStyle) ?? .block
         let scrollbackBytes = max(UInt64(settings.scrollbackRows) * 1024, 1_048_576)
         let configuration = TerminalConfiguration { builder in

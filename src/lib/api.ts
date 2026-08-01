@@ -959,6 +959,20 @@ export interface NativeTerminalSettings {
   themeName: string;
 }
 
+// Seed from wall time so a webview/module reload cannot restart revisions below
+// the native host's last applied value. Theme previews can publish settings much
+// faster than their Tauri invokes complete, so every snapshot needs ordering at
+// the native boundary rather than relying on promise completion order.
+let nativeTerminalSettingsRevision = Date.now() * 1_000;
+
+function nextNativeTerminalSettingsRevision(): number {
+  nativeTerminalSettingsRevision = Math.max(
+    nativeTerminalSettingsRevision + 1,
+    Date.now() * 1_000,
+  );
+  return nativeTerminalSettingsRevision;
+}
+
 export interface NativeTerminalTheme {
   name: string;
   /** Bare RRGGBB hex, no leading '#'. */
@@ -979,7 +993,12 @@ export function pasteApprovedNativeTerminalText(paneId: string, text: string) {
 }
 
 export function updateNativeTerminalSettings(settings: NativeTerminalSettings) {
-  return invoke<void>("native_terminal_update_settings", { settings });
+  return invoke<void>("native_terminal_update_settings", {
+    settings: {
+      ...settings,
+      revision: nextNativeTerminalSettingsRevision(),
+    },
+  });
 }
 
 /**
@@ -989,7 +1008,12 @@ export function updateNativeTerminalSettings(settings: NativeTerminalSettings) {
  * whenever terminal settings change.
  */
 export function seedNativeTerminalSettings(settings: Omit<NativeTerminalSettings, "paneId">) {
-  return invoke<void>("native_terminal_seed_settings", { settings });
+  return invoke<void>("native_terminal_seed_settings", {
+    settings: {
+      ...settings,
+      revision: nextNativeTerminalSettingsRevision(),
+    },
+  });
 }
 
 /**

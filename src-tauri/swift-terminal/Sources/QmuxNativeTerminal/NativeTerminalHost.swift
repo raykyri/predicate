@@ -84,7 +84,7 @@ final class NativeTerminalHost {
     /// frontend sends one theme for all of them; new panes and the stage
     /// backstop read this instead of waiting for their first settings update.
     private var currentThemeName = QmuxTerminalTheme.defaultName
-    /// The most recent full settings snapshot, seeded by the frontend at
+    /// The newest revisioned full settings snapshot, seeded by the frontend at
     /// startup and refreshed by every per-pane settings update. A pane created
     /// while a snapshot exists applies it immediately, which assigns its
     /// view's controller and creates the Ghostty surface at creation time —
@@ -524,6 +524,9 @@ final class NativeTerminalHost {
     }
 
     private func rememberSettings(_ settings: TerminalPaneSettings) {
+        guard currentSettings == nil || settings.revision > currentSettings!.revision else {
+            return
+        }
         currentSettings = settings
         if settings.themeName != currentThemeName {
             currentThemeName = settings.themeName
