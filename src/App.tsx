@@ -231,8 +231,9 @@ import type { PublicationBinding } from "./lib/publication";
 import { useNativeWebOverlayRegion } from "./hooks/useNativeWebOverlayRegion";
 import { useQmuxEvents } from "./hooks/useQmuxEvents";
 import type {
-  BrowserOverlayState,
+  BrowserOverlayMode,
   BrowserOverlaySize,
+  BrowserOverlayState,
   CloseGroupContinuation,
   CloseDialogState,
   ExitDialogState,
@@ -4093,6 +4094,7 @@ function MainApp() {
         open: true,
         reloadNonce: (current[paneId]?.reloadNonce ?? 0) + 1,
         sandbox: effectiveSandbox,
+        mode: effectiveSandbox ? "webkit" : (current[paneId]?.mode ?? "webkit"),
         size: current[paneId]?.size ?? null,
       },
     }));
@@ -4126,6 +4128,7 @@ function MainApp() {
           open: !(prev?.open ?? false),
           reloadNonce: prev?.reloadNonce ?? 0,
           sandbox: prev?.sandbox ?? false,
+          mode: prev?.mode ?? "webkit",
           size: prev?.size ?? null,
         },
       };
@@ -4158,6 +4161,45 @@ function MainApp() {
         return current;
       }
       return { ...current, [paneId]: { ...prev, size } };
+    });
+  }
+
+  function setBrowserOverlayMode(
+    paneId: string,
+    mode: BrowserOverlayMode,
+    currentUrl?: string | null,
+  ) {
+    setBrowserOverlayByPane((current) => {
+      const prev = current[paneId];
+      if (!prev || (prev.sandbox && mode === "agent")) {
+        return current;
+      }
+      const transferableUrl = (() => {
+        if (!currentUrl) {
+          return null;
+        }
+        try {
+          const parsed = new URL(currentUrl);
+          return parsed.protocol === "http:" || parsed.protocol === "https:"
+            ? parsed.href
+            : null;
+        } catch {
+          return null;
+        }
+      })();
+      const nextUrl = mode === "webkit" && transferableUrl ? transferableUrl : prev.url;
+      return {
+        ...current,
+        [paneId]: {
+          ...prev,
+          mode,
+          url: nextUrl,
+          reloadNonce:
+            mode === "webkit" && nextUrl !== prev.url
+              ? prev.reloadNonce + 1
+              : prev.reloadNonce,
+        },
+      };
     });
   }
 
@@ -4317,8 +4359,8 @@ function MainApp() {
     [],
   );
 
-  // Navigate the overlay's isolated automation browser. A bare host (no scheme)
-  // gets http:// so `localhost:5173` works; file paths still go through `qmux open`.
+  // Navigate the overlay's selected browser. A bare host (no scheme) gets http://
+  // so `localhost:5173` works; file paths still go through `qmux open`.
   function navigateActiveBrowserOverlay(rawInput: string) {
     const trimmed = rawInput.trim();
     if (!activeBrowserOwnerId || !trimmed) {
@@ -14868,10 +14910,12 @@ function MainApp() {
 
       {activeBrowserOwnerId && activeBrowserOverlay?.open ? (
         <BrowserOverlay
+          key={activeBrowserOwnerId}
           paneId={activeBrowserOwnerId}
           url={activeBrowserOverlay.url}
           reloadNonce={activeBrowserOverlay.reloadNonce}
           sandbox={activeBrowserOverlay.sandbox}
+          mode={activeBrowserOverlay.mode}
           bodyFontId={settings.bodyFontId}
           size={activeBrowserOverlay.size}
           toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
@@ -14888,6 +14932,9 @@ function MainApp() {
             }
           }}
           onClose={toggleActiveBrowserOverlay}
+          onModeChange={(mode, currentUrl) =>
+            setBrowserOverlayMode(activeBrowserOwnerId, mode, currentUrl)
+          }
           onResize={(size) => setBrowserOverlaySize(activeBrowserOwnerId, size)}
         />
       ) : null}

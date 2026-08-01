@@ -28,7 +28,7 @@
   max-width: calc(100% - var(--browser-overlay-left, 64px) - 20px);
 }
 
-/* Navigation bar across the top; refresh + close controls sit on the right. */
+/* Navigation bar across the top; close sits on the left and engine selection on the right. */
 .browser-overlay-nav {
   flex: 0 0 auto;
   display: flex;
@@ -51,6 +51,58 @@
   flex: 0 0 auto;
   display: flex;
   gap: 6px;
+}
+
+.browser-overlay-close-button {
+  flex: 0 0 auto;
+}
+
+.browser-overlay-mode-group {
+  display: inline-flex;
+  height: 28px;
+  overflow: hidden;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--chrome-control-bg);
+}
+
+.browser-overlay-mode-button {
+  min-width: 54px;
+  padding: 0 9px;
+  border: 0;
+  border-right: 1px solid var(--control-border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.browser-overlay-mode-button:last-child {
+  border-right: 0;
+}
+
+.browser-overlay-mode-button:hover:not(:disabled):not(.is-active) {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
+}
+
+.browser-overlay-mode-button.is-active {
+  background: var(--accent-color);
+  color: var(--accent-foreground, #fff);
+}
+
+.browser-overlay-mode-button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.browser-overlay-mode-button:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--accent-shadow);
 }
 
 .browser-overlay-url {

@@ -771,8 +771,12 @@ export type BrowserAutomationSnapshot = {
   error: string | null;
 };
 
-export function getBrowserAutomationSnapshot(paneId: string) {
-  return invoke<BrowserAutomationSnapshot>("browser_automation_snapshot", { paneId });
+export function getBrowserAutomationSnapshot(paneId: string, width: number, height: number) {
+  return invoke<BrowserAutomationSnapshot>("browser_automation_snapshot", {
+    paneId,
+    width,
+    height,
+  });
 }
 
 export function navigateBrowserAutomation(paneId: string, url: string) {
@@ -785,11 +789,14 @@ export function reloadBrowserAutomation(paneId: string) {
 
 export function sendBrowserAutomationMouse(
   paneId: string,
-  kind: "move" | "click" | "scroll",
+  kind: "move" | "down" | "up" | "click" | "scroll",
   x: number,
   y: number,
   deltaX?: number,
   deltaY?: number,
+  button?: "left" | "middle" | "right" | "none",
+  buttons?: number,
+  modifiers?: number,
 ) {
   return invoke<void>("browser_automation_mouse", {
     paneId,
@@ -798,6 +805,9 @@ export function sendBrowserAutomationMouse(
     y,
     deltaX: deltaX ?? null,
     deltaY: deltaY ?? null,
+    button: button ?? null,
+    buttons: buttons ?? null,
+    modifiers: modifiers ?? null,
   });
 }
 
@@ -810,12 +820,14 @@ export function sendBrowserAutomationKey(
   key: string,
   code: string,
   windowsVirtualKeyCode: number,
+  modifiers = 0,
 ) {
   return invoke<void>("browser_automation_key", {
     paneId,
     key,
     code,
     windowsVirtualKeyCode,
+    modifiers,
   });
 }
 

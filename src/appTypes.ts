@@ -96,14 +96,16 @@ export type BrowserOverlaySize = {
   height: number;
 };
 
+export type BrowserOverlayMode = "webkit" | "agent";
+
 // Per-pane browser overlay: the URL it's showing, whether it's visible, a nonce
-// bumped on open/refresh to force the iframe to remount (reload), whether the
-// iframe should be sandboxed (true for token-bearing file-server URLs), and an
-// optional user-resized size that survives tab switches in React state.
+// bumped on open/refresh, the selected WebKit/Agent engine, whether file content
+// needs an opaque-origin sandbox, and an optional size that survives tab switches.
 export type BrowserOverlayState = {
   url: string | null;
   open: boolean;
   reloadNonce: number;
   sandbox: boolean;
+  mode: BrowserOverlayMode;
   size?: BrowserOverlaySize | null;
 };

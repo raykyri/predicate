@@ -5,7 +5,7 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
-import type { BrowserOverlaySize } from "../appTypes";
+import type { BrowserOverlayMode, BrowserOverlaySize } from "../appTypes";
 import {
   claimNativeTerminalPointerForWebDrag,
   getBrowserAutomationSnapshot,
@@ -16,7 +16,6 @@ import {
   sendBrowserAutomationMouse,
   setNativeTerminalIframeShortcutFallback,
 } from "../lib/api";
-import { canRenderInLocalPreviewFrame } from "../lib/links";
 
 const MIN_BROWSER_OVERLAY_WIDTH = 360;
 const MIN_BROWSER_OVERLAY_HEIGHT = 240;
@@ -52,17 +51,18 @@ function cssPixelValue(value: string, fallback: number) {
 
 // The browser overlay floats over the sidebar + center terminal (leaving a left
 // strip of the tabs visible) and renders a URL bound to the active tab. A minimal
-// navigation bar at the top shows the current URL and lets the user navigate, with
-// refresh + close controls pinned to its right.
+// navigation bar at the top shows the current URL and lets the user navigate. The
+// close control stays on the left while browser-engine selection stays on the right.
 interface BrowserOverlayProps {
   paneId: string;
   url: string | null;
-  // Bumped on open/refresh so the iframe key changes and the page reloads.
+  // Bumped on open/refresh so WebKit reloads and Agent navigation is replayed.
   reloadNonce: number;
   // True for token-bearing file-server URLs: sandbox the frame so served (possibly
   // untrusted) content gets an opaque origin and can't read the token back to fetch
-  // other workspace files. Normal URLs render through isolated Chromium instead.
+  // other workspace files. Protected previews are always kept in WebKit mode.
   sandbox: boolean;
+  mode: BrowserOverlayMode;
   // Passed to the token-gated file server so Markdown documents rendered in
   // this isolated frame use the same body font as the application. Arbitrary
   // localhost pages remain untouched.
@@ -77,6 +77,8 @@ interface BrowserOverlayProps {
   onOpenExternal: (currentUrl?: string) => void;
   // Close the overlay.
   onClose: () => void;
+  // Switch between the native WebKit preview and the mirrored Chromium target.
+  onModeChange: (mode: BrowserOverlayMode, currentUrl?: string | null) => void;
   // Persist a user-resized overlay size in the app's per-pane React state.
   onResize: (size: BrowserOverlaySize) => void;
 }
@@ -86,6 +88,7 @@ export default function BrowserOverlay({
   url,
   reloadNonce,
   sandbox,
+  mode,
   bodyFontId,
   size,
   toggleShortcutLabel,
@@ -93,6 +96,7 @@ export default function BrowserOverlay({
   onRefresh,
   onOpenExternal,
   onClose,
+  onModeChange,
   onResize,
 }: BrowserOverlayProps) {
   // Editable copy of the address, re-synced whenever the loaded URL changes so the
@@ -103,15 +107,19 @@ export default function BrowserOverlay({
     Awaited<ReturnType<typeof getBrowserAutomationSnapshot>> | null
   >(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const addressInputRef = useRef<HTMLInputElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const lastAutomationMoveRef = useRef(0);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
 
-  const automated = !sandbox;
+  const automated = mode === "agent" && !sandbox;
   const displayedUrl = automated ? (automationSnapshot?.url ?? url) : url;
 
   useEffect(() => {
-    setDraft(displayedUrl ?? "");
+    if (document.activeElement !== addressInputRef.current) {
+      setDraft(displayedUrl ?? "");
+    }
   }, [displayedUrl]);
 
   useEffect(() => {
@@ -127,7 +135,14 @@ export default function BrowserOverlay({
       }
       polling = true;
       try {
-        const snapshot = await getBrowserAutomationSnapshot(paneId);
+        const bodyRect = bodyRef.current?.getBoundingClientRect();
+        const width = Math.round(
+          clampSize(bodyRect?.width ?? 1280, MIN_BROWSER_OVERLAY_WIDTH, 4096),
+        );
+        const height = Math.round(
+          clampSize(bodyRect?.height ?? 900, MIN_BROWSER_OVERLAY_HEIGHT, 4096),
+        );
+        const snapshot = await getBrowserAutomationSnapshot(paneId, width, height);
         if (!cancelled) {
           setAutomationSnapshot(snapshot);
         }
@@ -189,7 +204,7 @@ export default function BrowserOverlay({
   // focusin/focusout to this one. The rAF matches the app-level samplers:
   // activeElement settles after the event.
   useEffect(() => {
-    if (!url) {
+    if (!url || automated) {
       return;
     }
     let frame: number | null = null;
@@ -226,7 +241,7 @@ export default function BrowserOverlay({
       // the claim explicitly instead of leaving it wedged on.
       report(false);
     };
-  }, [url, reloadNonce]);
+  }, [automated, url, reloadNonce]);
 
   useEffect(() => {
     return () => {
@@ -327,14 +342,6 @@ export default function BrowserOverlay({
       return url;
     }
   })();
-  const fallbackFrameUrl =
-    automated &&
-    automationSnapshot?.available === false &&
-    frameUrl &&
-    canRenderInLocalPreviewFrame(frameUrl)
-      ? frameUrl
-      : null;
-
   function automationPoint(event: {
     clientX: number;
     clientY: number;
@@ -347,6 +354,30 @@ export default function BrowserOverlay({
       x: ((event.clientX - rect.left) / rect.width) * width,
       y: ((event.clientY - rect.top) / rect.height) * height,
     };
+  }
+
+  function automationButton(button: number) {
+    if (button === 1) {
+      return "middle" as const;
+    }
+    if (button === 2) {
+      return "right" as const;
+    }
+    return "left" as const;
+  }
+
+  function automationModifiers(event: {
+    altKey: boolean;
+    ctrlKey: boolean;
+    metaKey: boolean;
+    shiftKey: boolean;
+  }) {
+    return (
+      (event.altKey ? 1 : 0) |
+      (event.ctrlKey ? 2 : 0) |
+      (event.metaKey ? 4 : 0) |
+      (event.shiftKey ? 8 : 0)
+    );
   }
 
   function handleAutomationKey(event: ReactKeyboardEvent<HTMLImageElement>) {
@@ -376,7 +407,15 @@ export default function BrowserOverlay({
     const virtualKey = virtualKeys[event.key];
     if (virtualKey !== undefined) {
       event.preventDefault();
-      ignoreBrowserCommand(sendBrowserAutomationKey(paneId, event.key, event.code, virtualKey));
+      ignoreBrowserCommand(
+        sendBrowserAutomationKey(
+          paneId,
+          event.key,
+          event.code,
+          virtualKey,
+          automationModifiers(event),
+        ),
+      );
     }
   }
 
@@ -389,6 +428,15 @@ export default function BrowserOverlay({
       aria-label="Browser overlay"
     >
       <div className="browser-overlay-nav">
+        <button
+          type="button"
+          className="icon-button browser-overlay-button browser-overlay-close-button"
+          title={closeTitle}
+          aria-label="Hide browser"
+          onClick={onClose}
+        >
+          <X size={14} aria-hidden="true" />
+        </button>
         <form
           className="browser-overlay-nav-form"
           onSubmit={(event) => {
@@ -398,10 +446,12 @@ export default function BrowserOverlay({
           }}
         >
           <input
+            ref={addressInputRef}
             type="text"
             className="form-field browser-overlay-url"
             value={draft}
             onChange={(event) => setDraft(event.currentTarget.value)}
+            onBlur={() => setDraft(displayedUrl ?? "")}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 setDraft(displayedUrl ?? "");
@@ -448,18 +498,34 @@ export default function BrowserOverlay({
           >
             <ExternalLink size={14} aria-hidden="true" />
           </button>
-          <button
-            type="button"
-            className="icon-button browser-overlay-button"
-            title={closeTitle}
-            aria-label="Hide browser"
-            onClick={onClose}
-          >
-            <X size={14} aria-hidden="true" />
-          </button>
+          <div className="browser-overlay-mode-group" role="group" aria-label="Browser engine">
+            <button
+              type="button"
+              className={`browser-overlay-mode-button${mode === "webkit" ? " is-active" : ""}`}
+              title="Use the WebKit browser"
+              aria-pressed={mode === "webkit"}
+              onClick={() => onModeChange("webkit", automationSnapshot?.url ?? url)}
+            >
+              WebKit
+            </button>
+            <button
+              type="button"
+              className={`browser-overlay-mode-button${mode === "agent" ? " is-active" : ""}`}
+              title={
+                sandbox
+                  ? "Agent browser is unavailable for protected file previews"
+                  : "Use the mirrored Chromium agent browser"
+              }
+              aria-pressed={mode === "agent"}
+              disabled={sandbox}
+              onClick={() => onModeChange("agent", url)}
+            >
+              Agent
+            </button>
+          </div>
         </div>
       </div>
-      <div className="browser-overlay-body">
+      <div ref={bodyRef} className="browser-overlay-body">
         {automated && automationSnapshot?.imageDataUrl ? (
           <img
             className="browser-overlay-frame is-automated"
@@ -467,12 +533,60 @@ export default function BrowserOverlay({
             alt={automationSnapshot.title || "Automated browser tab"}
             draggable={false}
             tabIndex={0}
-            onClick={(event) => {
+            onPointerDown={(event) => {
+              event.preventDefault();
+              const point = automationPoint(event);
+              event.currentTarget.setPointerCapture(event.pointerId);
+              event.currentTarget.focus();
+              ignoreBrowserCommand(
+                sendBrowserAutomationMouse(
+                  paneId,
+                  "down",
+                  point.x,
+                  point.y,
+                  undefined,
+                  undefined,
+                  automationButton(event.button),
+                  event.buttons,
+                  automationModifiers(event),
+                ),
+              );
+            }}
+            onPointerUp={(event) => {
+              event.preventDefault();
               const point = automationPoint(event);
               ignoreBrowserCommand(
-                sendBrowserAutomationMouse(paneId, "click", point.x, point.y),
+                sendBrowserAutomationMouse(
+                  paneId,
+                  "up",
+                  point.x,
+                  point.y,
+                  undefined,
+                  undefined,
+                  automationButton(event.button),
+                  event.buttons,
+                  automationModifiers(event),
+                ),
               );
-              event.currentTarget.focus();
+              if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+            }}
+            onPointerCancel={(event) => {
+              const point = automationPoint(event);
+              ignoreBrowserCommand(
+                sendBrowserAutomationMouse(
+                  paneId,
+                  "up",
+                  point.x,
+                  point.y,
+                  undefined,
+                  undefined,
+                  automationButton(event.button),
+                  0,
+                  automationModifiers(event),
+                ),
+              );
             }}
             onPointerMove={(event) => {
               const now = performance.now();
@@ -482,9 +596,20 @@ export default function BrowserOverlay({
               lastAutomationMoveRef.current = now;
               const point = automationPoint(event);
               ignoreBrowserCommand(
-                sendBrowserAutomationMouse(paneId, "move", point.x, point.y),
+                sendBrowserAutomationMouse(
+                  paneId,
+                  "move",
+                  point.x,
+                  point.y,
+                  undefined,
+                  undefined,
+                  "none",
+                  event.buttons,
+                  automationModifiers(event),
+                ),
               );
             }}
+            onContextMenu={(event) => event.preventDefault()}
             onWheel={(event) => {
               event.preventDefault();
               const point = automationPoint(event);
@@ -496,6 +621,9 @@ export default function BrowserOverlay({
                   point.y,
                   event.deltaX,
                   event.deltaY,
+                  "none",
+                  event.buttons,
+                  automationModifiers(event),
                 ),
               );
             }}
@@ -508,15 +636,6 @@ export default function BrowserOverlay({
               event.preventDefault();
               ignoreBrowserCommand(insertBrowserAutomationText(paneId, text));
             }}
-          />
-        ) : fallbackFrameUrl ? (
-          <iframe
-            key={`${fallbackFrameUrl}::${reloadNonce}`}
-            ref={frameRef}
-            className="browser-overlay-frame"
-            src={fallbackFrameUrl}
-            title="Browser overlay"
-            referrerPolicy="no-referrer"
           />
         ) : automated ? (
           <div className="browser-overlay-empty">

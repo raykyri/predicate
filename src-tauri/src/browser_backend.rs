@@ -35,6 +35,7 @@ struct BrowserBackend {
     pane_by_session: Mutex<HashMap<String, String>>,
     tab_by_pane: Mutex<HashMap<String, u64>>,
     pane_by_tab: Mutex<HashMap<u64, String>>,
+    viewport_by_pane: Mutex<HashMap<String, (u64, u32, u32)>>,
 }
 
 /// Managed by Tauri so a clean app shutdown removes the discoverable socket.
@@ -111,6 +112,7 @@ pub fn start_browser_discovery(
         pane_by_session: Mutex::new(HashMap::new()),
         tab_by_pane: Mutex::new(HashMap::new()),
         pane_by_tab: Mutex::new(HashMap::new()),
+        viewport_by_pane: Mutex::new(HashMap::new()),
     });
     let listener_backend = Arc::clone(&backend);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -374,6 +376,21 @@ fn remember_tab_owner(
         lock_or_recover(&backend.tab_by_pane).insert(pane_id.to_string(), tab_id);
         lock_or_recover(&backend.pane_by_tab).insert(tab_id, pane_id.to_string());
     }
+    if method == "executeCdp"
+        && request
+            .pointer("/params/method")
+            .and_then(Value::as_str)
+            .is_some_and(|method| {
+                matches!(
+                    method,
+                    "Emulation.setDeviceMetricsOverride"
+                        | "Emulation.clearDeviceMetricsOverride"
+                        | "Page.setDeviceMetricsOverride"
+                )
+            })
+    {
+        lock_or_recover(&backend.viewport_by_pane).remove(pane_id);
+    }
 }
 
 fn request_tab_id(request: &Value) -> Option<u64> {
@@ -452,6 +469,10 @@ fn scope_result_to_pane(
     }
     lock_or_recover(&backend.tab_by_pane)
         .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
+    let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
+    lock_or_recover(&backend.viewport_by_pane).retain(|owner, (tab_id, _, _)| {
+        selected_tabs.get(owner) == Some(tab_id) && live_tab_ids.contains(tab_id)
+    });
     lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
     let owners = lock_or_recover(&backend.pane_by_tab);
     tabs.retain(|tab| {
@@ -634,9 +655,13 @@ impl BrowserDiscoverySocket {
 #[tauri::command(async)]
 pub fn browser_automation_snapshot(
     pane_id: String,
+    width: u32,
+    height: u32,
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> BrowserAutomationSnapshot {
     let result = (|| -> Result<BrowserAutomationSnapshot, String> {
+        let width = width.clamp(320, 4096);
+        let height = height.clamp(240, 4096);
         let mut tab_id = browser.tab_id_for_pane(&pane_id)?;
         let mut tabs = browser.engine()?.call("getTabs", json!({}))?;
         let mut tab = tabs
@@ -649,6 +674,7 @@ pub fn browser_automation_snapshot(
         if tab.is_none() {
             lock_or_recover(&browser._backend.pane_by_tab).remove(&tab_id);
             lock_or_recover(&browser._backend.tab_by_pane).remove(&pane_id);
+            lock_or_recover(&browser._backend.viewport_by_pane).remove(&pane_id);
             tab_id = browser.tab_id_for_pane(&pane_id)?;
             tabs = browser.engine()?.call("getTabs", json!({}))?;
             tab = tabs
@@ -660,10 +686,36 @@ pub fn browser_automation_snapshot(
                 .cloned();
         }
         let tab = tab.ok_or_else(|| format!("browser tab {tab_id} no longer exists"))?;
+        let viewport = (tab_id, width, height);
+        let viewport_changed = lock_or_recover(&browser._backend.viewport_by_pane)
+            .get(&pane_id)
+            .copied()
+            != Some(viewport);
+        if viewport_changed {
+            browser.execute_for_pane(
+                &pane_id,
+                "Emulation.setDeviceMetricsOverride",
+                json!({
+                    "width": width,
+                    "height": height,
+                    "deviceScaleFactor": 1,
+                    "mobile": false,
+                    "screenWidth": width,
+                    "screenHeight": height
+                }),
+            )?;
+            lock_or_recover(&browser._backend.viewport_by_pane).insert(pane_id.clone(), viewport);
+        }
         let screenshot = browser.execute_for_pane(
             &pane_id,
             "Page.captureScreenshot",
-            json!({ "format": "jpeg", "quality": 78, "fromSurface": true }),
+            json!({
+                "format": "jpeg",
+                "quality": 78,
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+                "optimizeForSpeed": true
+            }),
         )?;
         let data = screenshot
             .get("data")
@@ -675,8 +727,8 @@ pub fn browser_automation_snapshot(
             url: tab.get("url").and_then(Value::as_str).map(str::to_string),
             title: tab.get("title").and_then(Value::as_str).map(str::to_string),
             image_data_url: Some(format!("data:image/jpeg;base64,{data}")),
-            width: 1280,
-            height: 900,
+            width: u64::from(width),
+            height: u64::from(height),
             error: None,
         })
     })();
@@ -686,8 +738,8 @@ pub fn browser_automation_snapshot(
         url: None,
         title: None,
         image_data_url: None,
-        width: 1280,
-        height: 900,
+        width: u64::from(width.clamp(320, 4096)),
+        height: u64::from(height.clamp(240, 4096)),
         error: Some(error),
     })
 }
@@ -719,24 +771,61 @@ pub fn browser_automation_mouse(
     y: f64,
     delta_x: Option<f64>,
     delta_y: Option<f64>,
+    button: Option<String>,
+    buttons: Option<u32>,
+    modifiers: Option<u32>,
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> Result<(), String> {
     if !x.is_finite() || !y.is_finite() {
         return Err("browser pointer coordinates must be finite".to_string());
     }
-    let x = x.clamp(0.0, 1280.0);
-    let y = y.clamp(0.0, 900.0);
+    let viewport = lock_or_recover(&browser._backend.viewport_by_pane)
+        .get(&pane_id)
+        .copied();
+    let x = x.clamp(0.0, f64::from(viewport.map_or(1280, |(_, width, _)| width)));
+    let y = y.clamp(
+        0.0,
+        f64::from(viewport.map_or(900, |(_, _, height)| height)),
+    );
     let delta_x = delta_x.unwrap_or(0.0);
     let delta_y = delta_y.unwrap_or(0.0);
     if !delta_x.is_finite() || !delta_y.is_finite() {
         return Err("browser scroll deltas must be finite".to_string());
     }
+    let button = button.unwrap_or_else(|| "none".to_string());
+    if !matches!(button.as_str(), "none" | "left" | "middle" | "right") {
+        return Err(format!("unsupported browser mouse button '{button}'"));
+    }
+    let buttons = buttons.unwrap_or(0).min(7);
+    let modifiers = modifiers.unwrap_or(0).min(15);
     match kind.as_str() {
         "move" => {
             browser.execute_for_pane(
                 &pane_id,
                 "Input.dispatchMouseEvent",
-                json!({ "type": "mouseMoved", "x": x, "y": y, "button": "none" }),
+                json!({
+                    "type": "mouseMoved",
+                    "x": x,
+                    "y": y,
+                    "button": "none",
+                    "buttons": buttons,
+                    "modifiers": modifiers
+                }),
+            )?;
+        }
+        "down" | "up" => {
+            browser.execute_for_pane(
+                &pane_id,
+                "Input.dispatchMouseEvent",
+                json!({
+                    "type": if kind == "down" { "mousePressed" } else { "mouseReleased" },
+                    "x": x,
+                    "y": y,
+                    "button": button,
+                    "buttons": buttons,
+                    "modifiers": modifiers,
+                    "clickCount": 1
+                }),
             )?;
         }
         "click" => {
@@ -749,6 +838,7 @@ pub fn browser_automation_mouse(
                         "x": x,
                         "y": y,
                         "button": "left",
+                        "modifiers": modifiers,
                         "clickCount": 1
                     }),
                 )?;
@@ -763,7 +853,8 @@ pub fn browser_automation_mouse(
                     "x": x,
                     "y": y,
                     "deltaX": delta_x.clamp(-10_000.0, 10_000.0),
-                    "deltaY": delta_y.clamp(-10_000.0, 10_000.0)
+                    "deltaY": delta_y.clamp(-10_000.0, 10_000.0),
+                    "modifiers": modifiers
                 }),
             )?;
         }
@@ -791,10 +882,14 @@ pub fn browser_automation_key(
     key: String,
     code: String,
     windows_virtual_key_code: u32,
+    modifiers: u32,
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> Result<(), String> {
     if windows_virtual_key_code > 255 {
         return Err("browser virtual key code is out of range".to_string());
+    }
+    if modifiers > 15 {
+        return Err("browser key modifiers are out of range".to_string());
     }
     for event_type in ["rawKeyDown", "keyUp"] {
         browser.execute_for_pane(
@@ -805,7 +900,8 @@ pub fn browser_automation_key(
                 "key": key,
                 "code": code,
                 "windowsVirtualKeyCode": windows_virtual_key_code,
-                "nativeVirtualKeyCode": windows_virtual_key_code
+                "nativeVirtualKeyCode": windows_virtual_key_code,
+                "modifiers": modifiers
             }),
         )?;
     }
@@ -862,6 +958,7 @@ mod tests {
             pane_by_session: Mutex::new(HashMap::new()),
             tab_by_pane: Mutex::new(HashMap::new()),
             pane_by_tab: Mutex::new(HashMap::new()),
+            viewport_by_pane: Mutex::new(HashMap::new()),
         }
     }
 
@@ -903,6 +1000,27 @@ mod tests {
             json!(1),
         );
         assert_eq!(response["error"]["code"], -32001);
+    }
+
+    #[test]
+    fn agent_viewport_changes_invalidate_the_mirror_cache() {
+        let backend = unavailable_backend();
+        lock_or_recover(&backend.viewport_by_pane).insert("pane-1".to_string(), (7, 1280, 900));
+
+        remember_tab_owner(
+            &backend,
+            Some("pane-1"),
+            "executeCdp",
+            &json!({
+                "params": {
+                    "target": { "tabId": 7 },
+                    "method": "Emulation.setDeviceMetricsOverride"
+                }
+            }),
+            &Value::Null,
+        );
+
+        assert!(lock_or_recover(&backend.viewport_by_pane).is_empty());
     }
 
     #[test]
