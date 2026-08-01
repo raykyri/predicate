@@ -585,28 +585,36 @@ impl GrokAdapter {
                     // Grok's SessionStart hook reports the rollout transcript path when
                     // it has one (Claude-compatible). Prefer it so the timeline tails
                     // Grok's own transcript.
-                    let hook_transcript_path =
-                        super::string_field(&notification.payload, "transcript_path")
-                            .or_else(|| {
-                                super::string_field(&notification.payload, "transcriptPath")
-                            })
-                            // The hook arrives over the control socket under the pane's
-                            // token, so a prompt-injected agent can forge this path.
-                            // Reject a non-.jsonl or non-sibling path before tailing it;
-                            // a rejected path falls back to the qMux-managed transcript
-                            // path under workspace_root.
-                            .filter(|candidate| {
-                                hook_transcript_path_acceptable(
-                                    current.transcript_path.as_deref(),
-                                    candidate,
-                                )
-                            });
-                    // Current Grok versions report sessionId + cwd, not a transcript
-                    // path. Bind their native chat history directly so the right pane
-                    // does not wait forever on the legacy qMux-managed fallback file.
+                    let reported_transcript_path =
+                        super::string_field(&notification.payload, "transcript_path").or_else(
+                            || super::string_field(&notification.payload, "transcriptPath"),
+                        );
+                    let reported_updates_stream = reported_transcript_path
+                        .as_deref()
+                        .is_some_and(grok_transcript_path_is_updates_stream);
+                    let hook_transcript_path = reported_transcript_path
+                        // The hook arrives over the control socket under the pane's
+                        // token, so a prompt-injected agent can forge this path.
+                        // Reject a non-.jsonl or non-sibling path before tailing it;
+                        // a rejected path falls back to the qMux-managed transcript
+                        // path under workspace_root.
+                        .filter(|candidate| {
+                            grok_hook_transcript_path_acceptable(
+                                current.transcript_path.as_deref(),
+                                candidate,
+                            )
+                        });
+                    // Bind current Grok sessions to native chat history. On resume,
+                    // `transcriptPath` can name the unrelated updates stream instead;
+                    // session id + cwd identify the conversation file reliably.
                     let native_transcript_path = session_id
                         .as_deref()
-                        .zip(session_cwd.as_deref())
+                        .zip(session_cwd.as_deref().or_else(|| {
+                            // Explicit resumes can omit cwd when they report the
+                            // unusable updates stream. The agent workspace is the exact
+                            // --cwd qMux launched, so it is the safe repair lookup.
+                            reported_updates_stream.then_some(current.worktree_dir.as_str())
+                        }))
                         .and_then(|(session_id, cwd)| {
                             grok_home().ok().and_then(|home| {
                                 grok_session_transcript_path(&home, cwd, session_id)
@@ -1034,6 +1042,26 @@ fn grok_session_transcript_path(grok_home: &Path, cwd: &str, session_id: &str) -
     // filesystem is briefly behind, return the predictable path and let the tail's
     // normal warm-up polling wait for chat_history.jsonl to appear.
     (encoded_cwd.len() <= 255).then_some(conventional)
+}
+
+/// Whether a Grok hook-reported path contains conversation records qMux can render.
+///
+/// Current Grok versions report `updates.jsonl` as `transcript_path` when resuming a
+/// session. That sibling file is an internal JSON-RPC/UI update stream, not chat
+/// history. Accepting it moves an already-correct `chat_history.jsonl` tail to a file
+/// that parses into zero turns, leaving the right pane blank. Keep accepting legacy
+/// rollout paths, but let the session-id/cwd lookup select native chat history when
+/// Grok reports its updates stream.
+fn grok_hook_transcript_path_acceptable(current: Option<&str>, candidate: &str) -> bool {
+    hook_transcript_path_acceptable(current, candidate)
+        && !grok_transcript_path_is_updates_stream(candidate)
+}
+
+fn grok_transcript_path_is_updates_stream(candidate: &str) -> bool {
+    Path::new(candidate)
+        .file_name()
+        .and_then(|name| name.to_str())
+        == Some("updates.jsonl")
 }
 
 /// Grok reports the working directory used to group native sessions. Hook payloads
@@ -2651,6 +2679,52 @@ mod tests {
         );
         // Nor blank a recorded session id.
         assert_eq!(agent.session_id.as_deref(), Some("grok-session-1"));
+    }
+
+    #[test]
+    fn resumed_session_rebinds_hook_updates_stream_to_chat_history() {
+        let state = test_state();
+        let mut agent = sample_agent();
+        agent.status = AgentStatus::Idle;
+        agent.session_id = Some("grok-session-1".to_string());
+        agent.transcript_path =
+            Some("/home/user/.grok/sessions/project/grok-session-1/updates.jsonl".to_string());
+        state.insert_agent(agent).unwrap();
+
+        let event = ingest(
+            &state,
+            hook_for_agent(
+                "SessionStart",
+                "agent-1",
+                json!({
+                    "sessionId": "grok-session-1",
+                    "transcriptPath": "/home/user/.grok/sessions/project/grok-session-1/updates.jsonl"
+                }),
+            ),
+        );
+
+        assert_eq!(event.event_type, "agent.session_start");
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(
+            agent
+                .transcript_path
+                .as_deref()
+                .is_some_and(|path| path.ends_with("/grok-session-1/chat_history.jsonl"))
+        );
+    }
+
+    #[test]
+    fn hook_transcript_filter_rejects_updates_but_keeps_legacy_rollouts() {
+        let current = "/home/user/.grok/sessions/project/session/chat_history.jsonl";
+
+        assert!(!grok_hook_transcript_path_acceptable(
+            Some(current),
+            "/home/user/.grok/sessions/project/session/updates.jsonl"
+        ));
+        assert!(grok_hook_transcript_path_acceptable(
+            Some(current),
+            "/home/user/.grok/sessions/project/session/rollout.jsonl"
+        ));
     }
 
     #[test]
