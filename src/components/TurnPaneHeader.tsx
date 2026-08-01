@@ -19,6 +19,7 @@ const COPIED_TOAST_MS = 1600;
 
 // Preferred natural widths for the header menus; placement clamps them to the pane.
 const SESSION_MENU_PREFERRED_WIDTH = 320;
+const SESSION_MENU_MAX_HEIGHT = 400;
 
 // The top bar across the right pane: the active session's id on the left, and
 // session/browser/transcript controls on the right. Its height matches the
@@ -148,7 +149,10 @@ export default function TurnPaneHeader({
     setSessionPos(
       placePanePopover({
         triggerRect: trigger.getBoundingClientRect(),
-        popoverSize: { width: SESSION_MENU_PREFERRED_WIDTH, height },
+        popoverSize: {
+          width: SESSION_MENU_PREFERRED_WIDTH,
+          height: Math.min(height, SESSION_MENU_MAX_HEIGHT),
+        },
         paneRect: turnPaneRectFrom(trigger),
         align: "start",
         prefer: "below",
@@ -224,7 +228,7 @@ export default function TurnPaneHeader({
                     ? {
                         left: sessionPos.left,
                         top: sessionPos.top,
-                        maxHeight: sessionPos.maxHeight,
+                        maxHeight: Math.min(SESSION_MENU_MAX_HEIGHT, sessionPos.maxHeight),
                         width: Math.min(SESSION_MENU_PREFERRED_WIDTH, sessionPos.maxWidth),
                         maxWidth: sessionPos.maxWidth,
                       }
