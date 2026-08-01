@@ -1411,6 +1411,17 @@ final class NativeTerminalHost {
                 else { return }
                 self.window?.makeFirstResponder(pane.view)
             }
+            // WebKit only needs an early press in the sequence to activate the
+            // React pane. A third press makes the transparent terminal host look
+            // like a selectable web paragraph; the resulting DOM selection trips
+            // the web-selection keyboard guard and releases this native owner.
+            // Ghostty already received the press above, so consume only WebKit's
+            // duplicate while preserving native line selection and TUI mouse input.
+            if event.type == .leftMouseDown,
+               !shouldForwardTerminalLeftMouseDownToWeb(clickCount: event.clickCount)
+            {
+                return nil
+            }
             return event
         }
         // The terminal container deliberately opts out of hit testing, so

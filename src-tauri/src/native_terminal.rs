@@ -370,6 +370,7 @@ mod imp {
             has_terminal_keyboard_owner: i32,
             responder_state: i32,
         ) -> i32;
+        fn qmux_native_terminal_should_forward_left_mouse_down_to_web(click_count: i32) -> i32;
         fn qmux_native_terminal_initialize(native_view: *mut c_void) -> i32;
         fn qmux_native_terminal_create_host_managed(
             pane_id: *const c_char,
@@ -472,6 +473,11 @@ mod imp {
                 responder_state,
             ) == 1
         }
+    }
+
+    pub fn should_forward_left_mouse_down_to_web(click_count: i32) -> bool {
+        // SAFETY: the argument is scalar and the linked Swift helper is pure.
+        unsafe { qmux_native_terminal_should_forward_left_mouse_down_to_web(click_count) == 1 }
     }
 
     pub fn initialize(native_view: *mut c_void, state: AppState) -> Result<(), String> {
@@ -1415,6 +1421,14 @@ mod tests {
             false,
             WEB_VIEW_DESCENDANT,
         ));
+    }
+
+    #[test]
+    fn swift_terminal_pointer_routing_keeps_triple_clicks_native() {
+        assert!(super::imp::should_forward_left_mouse_down_to_web(1));
+        assert!(super::imp::should_forward_left_mouse_down_to_web(2));
+        assert!(!super::imp::should_forward_left_mouse_down_to_web(3));
+        assert!(!super::imp::should_forward_left_mouse_down_to_web(4));
     }
 
     #[test]
