@@ -1712,6 +1712,13 @@ fn parse_grok_chat_history_value(
         "assistant" => {
             let mut blocks =
                 parse_grok_synthetic_message_blocks(value.get("content")).unwrap_or_default();
+            // Grok emits `content: ""` for tool-only assistant records. Keeping
+            // that as a text block creates an empty message boundary between
+            // tool batches, preventing the transcript timeline from grouping
+            // consecutive calls into one disclosure.
+            blocks.retain(
+                |block| !matches!(block, TurnBlock::Text { text } if text.trim().is_empty()),
+            );
             if let Some(tool_calls) = value.get("tool_calls").and_then(Value::as_array) {
                 for tool_call in tool_calls {
                     let arguments = match tool_call.get("arguments") {
@@ -2539,6 +2546,24 @@ mod tests {
             &result_turn.blocks[0],
             TurnBlock::ToolResult { tool_use_id, content, .. }
                 if tool_use_id.as_deref() == Some("call-1") && content == "no matches"
+        ));
+
+        let tool_only_assistant = json!({
+            "type": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-2",
+                "name": "write",
+                "arguments": {"file_path": "notes.md"}
+            }]
+        })
+        .to_string();
+        let tool_only_turn = parse_transcript_line("agent-1", 13, &tool_only_assistant).unwrap();
+        assert_eq!(tool_only_turn.blocks.len(), 1);
+        assert!(matches!(
+            &tool_only_turn.blocks[0],
+            TurnBlock::ToolUse { id, name, .. }
+                if id.as_deref() == Some("call-2") && name == "write"
         ));
     }
 
