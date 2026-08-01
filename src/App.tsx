@@ -12027,6 +12027,7 @@ function MainApp() {
         }
         showActivityDetail={settings.showToolCalls}
         stickyUserMessages={settings.stickyUserMessages}
+        showAssistantTimestamps={settings.showAssistantTimestamps}
         agentId={agent?.id ?? surface.pane.id}
         getTranscriptScroll={getTranscriptScroll}
         saveTranscriptScroll={saveTranscriptScroll}
@@ -13441,6 +13442,23 @@ function MainApp() {
                 }}
               />
             </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Show assistant message timestamps</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showAssistantTimestamps}
+                onChange={(event) => {
+                  const showAssistantTimestamps = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showAssistantTimestamps }));
+                }}
+              />
+            </label>
+            <p className="settings-hint settings-hint-weak">
+              Places a time under each assistant reply, right before the next
+              user message or at the end of the transcript.
+            </p>
 
             <div className="settings-row">
               <label

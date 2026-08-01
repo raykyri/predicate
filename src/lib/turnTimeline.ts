@@ -30,6 +30,11 @@ export interface MessageItem {
    * first turn folded into the card, so forking from a card that merged
    * back-to-back prompts branches before the first of them. */
   anchor?: MessageAnchor | null;
+  /**
+   * Latest native timestamp among the turns folded into this item. Used for
+   * the optional end-of-assistant-group timestamp footer.
+   */
+  timestamp?: number | null;
 }
 
 export interface ToolEntry {
@@ -301,12 +306,21 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
 
   const nextKey = (prefix: string) => `${prefix}-${keyBase}`;
 
+  const applyTimestamp = (item: MessageItem, timestamp?: number | null) => {
+    if (typeof timestamp === "number") {
+      // Turns arrive in order; keep the latest so end-of-group footers reflect
+      // when the assistant last wrote into this card.
+      item.timestamp = timestamp;
+    }
+  };
+
   const createMessageItem = (
     role: string,
     block?: MessageBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
     anchor?: MessageAnchor | null,
+    timestamp?: number | null,
   ): MessageItem => ({
     type: "message",
     key: nextKey(`message-${role}`),
@@ -316,6 +330,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     activities: [],
     status,
     anchor,
+    timestamp: typeof timestamp === "number" ? timestamp : null,
   });
 
   const pushMessageBlock = (
@@ -324,6 +339,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
     anchor?: MessageAnchor | null,
+    timestamp?: number | null,
   ) => {
     const previous = items[items.length - 1];
     if (
@@ -335,14 +351,16 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       // Deliberately keeps the existing anchor: the card now spans several
       // turns, and a fork from it must branch before the earliest.
       previous.blocks.push(block);
+      applyTimestamp(previous, timestamp);
       return;
     }
-    items.push(createMessageItem(role, block, status, participant, anchor));
+    items.push(createMessageItem(role, block, status, participant, anchor, timestamp));
   };
 
   const assistantActivityOwner = (
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
+    timestamp?: number | null,
   ) => {
     // Walk back only across assistant items: a user (or system) message is a
     // hard boundary. Without it, a reply that opens with thinking or a tool
@@ -358,10 +376,18 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
         items[index].status === status &&
         participantKey(items[index].participant) === participantKey(participant)
       ) {
+        applyTimestamp(items[index], timestamp);
         return items[index];
       }
     }
-    const fallback = createMessageItem("assistant", undefined, status, participant);
+    const fallback = createMessageItem(
+      "assistant",
+      undefined,
+      status,
+      participant,
+      null,
+      timestamp,
+    );
     items.push(fallback);
     return fallback;
   };
@@ -370,8 +396,9 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     value: unknown,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
+    timestamp?: number | null,
   ) => {
-    const owner = assistantActivityOwner(status, participant);
+    const owner = assistantActivityOwner(status, participant, timestamp);
     const previousActivity = owner.activities[owner.activities.length - 1];
     if (previousActivity?.type === "thinking" && previousActivity.status === status) {
       previousActivity.values.push(value);
@@ -389,14 +416,16 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     entry: ToolEntry,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
+    timestamp?: number | null,
   ) => {
-    assistantActivityOwner(status, participant).activities.push(entry);
+    assistantActivityOwner(status, participant, timestamp).activities.push(entry);
   };
 
   const registerToolUse = (
     block: ToolUseBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
+    timestamp?: number | null,
   ) => {
     const entry: ToolEntry = {
       type: "tool",
@@ -407,7 +436,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       isError: false,
       status,
     };
-    pushToolEntry(entry, status, participant);
+    pushToolEntry(entry, status, participant, timestamp);
     queueFor(pendingByStatus, statusKey(status)).push(entry);
     if (entry.id) {
       queueFor(pendingById, entry.id).push(entry);
@@ -418,6 +447,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     block: ToolResultBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
+    timestamp?: number | null,
   ) => {
     const toolUseId = block.toolUseId ?? null;
 
@@ -449,20 +479,26 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     }
 
     // A result with no pending call at all — surface it on its own row.
-    pushToolEntry({
-      type: "tool",
-      key: nextKey("tool-result"),
-      id: toolUseId,
-      name: block.isError ? "Tool error" : "Tool result",
-      result: block.content,
-      isError: block.isError,
+    pushToolEntry(
+      {
+        type: "tool",
+        key: nextKey("tool-result"),
+        id: toolUseId,
+        name: block.isError ? "Tool error" : "Tool result",
+        result: block.content,
+        isError: block.isError,
+        status,
+      },
       status,
-    }, status, participant);
+      participant,
+      timestamp,
+    );
   };
 
   for (const turn of turns) {
     const status = timelineStatus(turn.status);
     const participant = turn.participant ?? null;
+    const timestamp = turn.timestamp ?? null;
     const anchor: MessageAnchor = {
       nativeId: turn.nativeId ?? null,
       parentNativeId: turn.parentNativeId ?? null,
@@ -472,25 +508,25 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       keyBase = `${turn.id}:${blockIndex}`;
       switch (block.type) {
         case "text":
-          pushMessageBlock(turn.role, block, status, participant, anchor);
+          pushMessageBlock(turn.role, block, status, participant, anchor, timestamp);
           break;
         case "toolUse":
           if (showActivityDetail) {
-            registerToolUse(block, status, participant);
+            registerToolUse(block, status, participant, timestamp);
           }
           break;
         case "toolResult":
           if (showActivityDetail) {
-            attachToolResult(block, status, participant);
+            attachToolResult(block, status, participant, timestamp);
           }
           break;
         case "raw":
           if (turn.role === "assistant") {
             if (showActivityDetail) {
-              pushThinkingValue(block.value, status, participant);
+              pushThinkingValue(block.value, status, participant, timestamp);
             }
           } else {
-            pushMessageBlock(turn.role, block, status, participant, anchor);
+            pushMessageBlock(turn.role, block, status, participant, anchor, timestamp);
           }
           break;
       }
@@ -619,11 +655,90 @@ export function sameMessageItem(a: MessageItem, b: MessageItem): boolean {
     a.key === b.key &&
     a.role === b.role &&
     a.status === b.status &&
+    a.timestamp === b.timestamp &&
     participantKey(a.participant) === participantKey(b.participant) &&
     sameMessageBlockList(a.blocks, b.blocks) &&
     a.activities.length === b.activities.length &&
     a.activities.every((activity, index) => sameActivityItem(activity, b.activities[index]))
   );
+}
+
+/**
+ * Latest timestamp across a trailing run of assistant items ending at
+ * `endIndex` (inclusive). Returns null when none of the items carry a native
+ * timestamp, so the footer can stay hidden rather than invent a time.
+ */
+export function assistantGroupTimestamp(
+  items: MessageItem[],
+  endIndex: number,
+): number | null {
+  if (endIndex < 0 || endIndex >= items.length || items[endIndex].role !== "assistant") {
+    return null;
+  }
+  let latest: number | null = null;
+  for (let index = endIndex; index >= 0; index -= 1) {
+    if (items[index].role !== "assistant") {
+      break;
+    }
+    const timestamp = items[index].timestamp;
+    if (typeof timestamp === "number" && (latest === null || timestamp > latest)) {
+      latest = timestamp;
+    }
+  }
+  return latest;
+}
+
+/** Absolute wall-clock label (also used as the hover title on relative labels). */
+export function formatAbsoluteMessageTimestamp(
+  ms: number,
+  now = Date.now(),
+  locale?: string,
+): string {
+  const date = new Date(ms);
+  const nowDate = new Date(now);
+  const time = date.toLocaleTimeString(locale, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  const sameDay =
+    date.getFullYear() === nowDate.getFullYear() &&
+    date.getMonth() === nowDate.getMonth() &&
+    date.getDate() === nowDate.getDate();
+  if (sameDay) {
+    return time;
+  }
+  const sameYear = date.getFullYear() === nowDate.getFullYear();
+  const day = date.toLocaleDateString(
+    locale,
+    sameYear
+      ? { month: "short", day: "numeric" }
+      : { month: "short", day: "numeric", year: "numeric" },
+  );
+  return `${day}, ${time}`;
+}
+
+/**
+ * End-of-assistant-group footer label: relative when under 24 hours old
+ * ("just now", "5 min ago", "6 hours ago"), otherwise absolute wall clock.
+ */
+export function formatMessageTimestamp(
+  ms: number,
+  now = Date.now(),
+  locale?: string,
+): string {
+  const ageMs = now - ms;
+  if (ageMs < 60_000) {
+    return "just now";
+  }
+  if (ageMs < 60 * 60_000) {
+    const minutes = Math.floor(ageMs / 60_000);
+    return `${minutes} min ago`;
+  }
+  if (ageMs < 24 * 60 * 60_000) {
+    const hours = Math.floor(ageMs / (60 * 60_000));
+    return hours === 1 ? "1 hour ago" : `${hours} hours ago`;
+  }
+  return formatAbsoluteMessageTimestamp(ms, now, locale);
 }
 
 export function messageItemText(item: MessageItem): string | null {

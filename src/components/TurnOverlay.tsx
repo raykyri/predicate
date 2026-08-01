@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -34,8 +35,11 @@ import { requestSaveDraftAsPrompt } from "../lib/promptLibrary";
 import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { listenToScrollToMessage } from "../lib/transcriptNavigation";
 import {
+  assistantGroupTimestamp,
   assistantRunCopyTextByItemKey,
   buildTimelineItems,
+  formatAbsoluteMessageTimestamp,
+  formatMessageTimestamp,
   hasToolCall,
   messageItemCopyText,
   messageItemIsTaggedInstruction,
@@ -114,6 +118,9 @@ interface TurnOverlayProps {
   // When false, the latest user message never pins to the top of the pane —
   // it scrolls with the rest of the transcript (Settings → sticky messages).
   stickyUserMessages?: boolean;
+  // When true, show a wall-clock timestamp after each consecutive run of
+  // assistant messages (before the next non-assistant message, or at the tail).
+  showAssistantTimestamps?: boolean;
   // When supplied, user-message headers get a small action that asks App to
   // regenerate the tab title from that message.
   onRegenerateTitleFromUserMessage?: (message: string) => void;
@@ -199,6 +206,7 @@ export default function TurnOverlay({
   thinkingLabel = "Working…",
   showActivityDetail = true,
   stickyUserMessages = true,
+  showAssistantTimestamps = false,
   onRegenerateTitleFromUserMessage,
   titleGenerationBusy = false,
   onForkFromMessage,
@@ -794,12 +802,21 @@ export default function TurnOverlay({
             // name on the continuation. (Consecutive agent messages only stay
             // separate when activities sit between them; see buildTimelineItems.)
             const previous = timelineItems[index - 1];
+            const next = timelineItems[index + 1];
             const showName = !(
               item.role === "assistant" &&
               previous?.role === "assistant" &&
               previous.blocks.length > 0 &&
               hasToolCall(previous)
             );
+            // Only the last item of a consecutive assistant run gets a footer
+            // timestamp — before the next user/system message, or at the tail.
+            const groupTimestamp =
+              showAssistantTimestamps &&
+              item.role === "assistant" &&
+              (next === undefined || next.role !== "assistant")
+                ? assistantGroupTimestamp(timelineItems, index)
+                : null;
             // The candidate keeps its marker class even while sticky is
             // disarmed (the height measurement finds it by this class); the
             // sticky styling only activates under the timeline's
@@ -809,26 +826,36 @@ export default function TurnOverlay({
                 ? ` is-sticky-user-message${stickyUserStuck ? " is-stuck" : ""}`
                 : "";
             return (
-              <MessageTimelineItemView
-                key={item.key}
-                item={item}
-                agentId={agentId}
-                savePromptAgentId={savePromptAgentId}
-                assistantLabel={assistantLabel}
-                showName={showName}
-                assistantCopyText={assistantRunCopyText.get(item.key) ?? null}
-                stickyClassName={stickyClassName}
-                titleGenerationEnabled={titleGenerationEnabled}
-                onRegenerateTitleFromUserMessage={handleRegenerateTitleFromUserMessage}
-                titleGenerationBusy={titleGenerationBusy}
-                // Hidden on the very first rendered message: a fork from there
-                // keeps nothing, which is a new agent rather than a branch.
-                // When the per-agent cap has truncated older turns this is
-                // conservative by one item, which beats offering an action the
-                // backend would refuse.
-                onForkFromMessage={index === 0 ? undefined : onForkFromMessage}
-                onCopyHandoff={copyHandoff}
-              />
+              <Fragment key={item.key}>
+                <MessageTimelineItemView
+                  item={item}
+                  agentId={agentId}
+                  savePromptAgentId={savePromptAgentId}
+                  assistantLabel={assistantLabel}
+                  showName={showName}
+                  assistantCopyText={assistantRunCopyText.get(item.key) ?? null}
+                  stickyClassName={stickyClassName}
+                  titleGenerationEnabled={titleGenerationEnabled}
+                  onRegenerateTitleFromUserMessage={handleRegenerateTitleFromUserMessage}
+                  titleGenerationBusy={titleGenerationBusy}
+                  // Hidden on the very first rendered message: a fork from there
+                  // keeps nothing, which is a new agent rather than a branch.
+                  // When the per-agent cap has truncated older turns this is
+                  // conservative by one item, which beats offering an action the
+                  // backend would refuse.
+                  onForkFromMessage={index === 0 ? undefined : onForkFromMessage}
+                  onCopyHandoff={copyHandoff}
+                />
+                {groupTimestamp !== null ? (
+                  <time
+                    className="turn-assistant-timestamp"
+                    dateTime={new Date(groupTimestamp).toISOString()}
+                    title={formatAbsoluteMessageTimestamp(groupTimestamp)}
+                  >
+                    {formatMessageTimestamp(groupTimestamp)}
+                  </time>
+                ) : null}
+              </Fragment>
             );
           })
         )}

@@ -272,6 +272,11 @@ export interface AppSettings {
   showToolCalls: boolean;
   /** pin the latest user message to the top of the transcript while its reply scrolls */
   stickyUserMessages: boolean;
+  /**
+   * Show a wall-clock timestamp after each consecutive run of assistant
+   * messages (before the next user/system message, or at the transcript tail).
+   */
+  showAssistantTimestamps: boolean;
   /** require Command+Enter instead of bare Enter for composer submit shortcuts */
   requireCmdEnterToSend: boolean;
 }
@@ -304,6 +309,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showTabDirectories: true,
   showToolCalls: true,
   stickyUserMessages: true,
+  showAssistantTimestamps: false,
   requireCmdEnterToSend: true,
 };
 
@@ -497,6 +503,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.stickyUserMessages === "boolean"
         ? parsed.stickyUserMessages
         : codeMode;
+    const showAssistantTimestamps =
+      typeof parsed.showAssistantTimestamps === "boolean"
+        ? parsed.showAssistantTimestamps
+        : DEFAULT_SETTINGS.showAssistantTimestamps;
     const requireCmdEnterToSend =
       typeof parsed.requireCmdEnterToSend === "boolean"
         ? parsed.requireCmdEnterToSend
@@ -537,6 +547,7 @@ export function loadSettings(): AppSettings {
       showTabDirectories,
       showToolCalls,
       stickyUserMessages,
+      showAssistantTimestamps,
       requireCmdEnterToSend,
     };
   } catch {

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assistantGroupTimestamp,
   assistantRunCopyTextByItemKey,
   assistantTextFromTimelineItems,
   buildTimelineItems,
+  formatAbsoluteMessageTimestamp,
+  formatMessageTimestamp,
   formatPlainTextTranscript,
   messageItemCopyText,
   messageItemText,
@@ -691,5 +694,103 @@ test("jump targets skip prompts with no plain text", () => {
   assert.deepEqual(
     transcriptJumpTargets(turns, 20).map((target) => target.text),
     ["real prompt"],
+  );
+});
+
+test("message items carry the latest folded turn timestamp", () => {
+  nextIndex = 0;
+  const items = buildTimelineItems([
+    turn("user", [text("hi")], { timestamp: 1_000 }),
+    turn("assistant", [text("part one")], { timestamp: 2_000 }),
+    // Merges into the previous assistant card (no intervening activities).
+    turn("assistant", [text("part two")], { timestamp: 3_000 }),
+    turn("user", [text("again")], { timestamp: 4_000 }),
+    turn("assistant", [
+      { type: "raw", value: { thinking: "plan" } },
+      toolUse("t1"),
+    ], { timestamp: 5_000 }),
+    turn("assistant", [text("done")], { timestamp: 6_000 }),
+  ]);
+
+  assert.equal(items[0].role, "user");
+  assert.equal(items[0].timestamp, 1_000);
+  assert.equal(items[1].role, "assistant");
+  assert.equal(items[1].timestamp, 3_000);
+  assert.equal(items[2].role, "user");
+  assert.equal(items[2].timestamp, 4_000);
+  // Tool/thinking attach to an assistant owner that then gets more text.
+  const lastAssistant = items[items.length - 1];
+  assert.equal(lastAssistant.role, "assistant");
+  assert.equal(lastAssistant.timestamp, 6_000);
+});
+
+test("assistantGroupTimestamp picks the latest time in a trailing run", () => {
+  nextIndex = 0;
+  const items = buildTimelineItems([
+    turn("assistant", [text("a")], { timestamp: 10 }),
+    turn("user", [text("q")], { timestamp: 20 }),
+    turn("assistant", [text("b1")], { timestamp: 30 }),
+    // Tool boundary forces a new assistant item; the group ends at the last one.
+    turn("assistant", [toolUse("t1")], { timestamp: 40 }),
+    turn("assistant", [text("b2")], { timestamp: 50 }),
+  ]);
+
+  // First assistant group ends at index 0.
+  assert.equal(assistantGroupTimestamp(items, 0), 10);
+  // User message is not an assistant group end.
+  assert.equal(assistantGroupTimestamp(items, 1), null);
+  // Walk the second group: timestamps 30, 40, 50 → 50 at the last item.
+  const lastIndex = items.length - 1;
+  assert.equal(items[lastIndex].role, "assistant");
+  assert.equal(assistantGroupTimestamp(items, lastIndex), 50);
+  // Mid-group index still reports the latest time up through that index.
+  assert.equal(assistantGroupTimestamp(items, lastIndex - 1), 40);
+});
+
+test("formatMessageTimestamp uses relative labels under 24 hours", () => {
+  const now = new Date(2026, 6, 31, 15, 0, 0).getTime(); // Jul 31 2026 3:00 PM local
+
+  assert.equal(formatMessageTimestamp(now - 30_000, now), "just now");
+  assert.equal(formatMessageTimestamp(now - 60_000, now), "1 min ago");
+  assert.equal(formatMessageTimestamp(now - 5 * 60_000, now), "5 min ago");
+  assert.equal(formatMessageTimestamp(now - 60 * 60_000, now), "1 hour ago");
+  assert.equal(formatMessageTimestamp(now - 6 * 60 * 60_000, now), "6 hours ago");
+  // Just under 24 hours still relative; at/over 24 hours falls back to absolute.
+  assert.equal(
+    formatMessageTimestamp(now - 24 * 60 * 60_000 + 1, now),
+    "23 hours ago",
+  );
+});
+
+test("formatAbsoluteMessageTimestamp uses time-only for today and date otherwise", () => {
+  const now = new Date(2026, 6, 31, 15, 0, 0).getTime(); // Jul 31 2026 3:00 PM local
+  const today = new Date(2026, 6, 31, 9, 5, 0).getTime();
+  const earlierThisYear = new Date(2026, 0, 15, 14, 30, 0).getTime();
+  const lastYear = new Date(2025, 11, 25, 8, 0, 0).getTime();
+  const locale = "en-US";
+
+  const todayLabel = formatAbsoluteMessageTimestamp(today, now, locale);
+  assert.match(todayLabel, /9:05/);
+  assert.doesNotMatch(todayLabel, /Jan|Jul|202/);
+
+  const earlierLabel = formatAbsoluteMessageTimestamp(earlierThisYear, now, locale);
+  assert.match(earlierLabel, /Jan/);
+  assert.match(earlierLabel, /15/);
+  assert.doesNotMatch(earlierLabel, /2026/);
+
+  const lastYearLabel = formatAbsoluteMessageTimestamp(lastYear, now, locale);
+  assert.match(lastYearLabel, /2025/);
+});
+
+test("formatMessageTimestamp falls back to absolute after 24 hours", () => {
+  const now = new Date(2026, 6, 31, 15, 0, 0).getTime();
+  const earlierThisYear = new Date(2026, 0, 15, 14, 30, 0).getTime();
+  const locale = "en-US";
+  const label = formatMessageTimestamp(earlierThisYear, now, locale);
+  assert.match(label, /Jan/);
+  assert.match(label, /15/);
+  assert.equal(
+    label,
+    formatAbsoluteMessageTimestamp(earlierThisYear, now, locale),
   );
 });
