@@ -195,7 +195,7 @@ enum AppShortcutCommand {
     OpenCommandPalette,
     FocusFollowups,
     OpenFolderMenu,
-    ToggleTranscript,
+    ToggleTranscriptOrBrowser,
     SplitPaneBelow,
     RestoreClosedPane,
     ClosePane,
@@ -224,7 +224,7 @@ impl AppShortcutCommand {
             Self::OpenCommandPalette => ("openCommandPalette", None),
             Self::FocusFollowups => ("focusFollowups", None),
             Self::OpenFolderMenu => ("openFolderMenu", None),
-            Self::ToggleTranscript => ("toggleTranscript", None),
+            Self::ToggleTranscriptOrBrowser => ("toggleTranscriptOrBrowser", None),
             Self::SplitPaneBelow => ("splitPaneBelow", None),
             Self::RestoreClosedPane => ("restoreClosedPane", None),
             Self::ClosePane => ("closePane", None),
@@ -304,7 +304,7 @@ fn classify_app_shortcut(
     // native (clear screen). The command palette binds it only for web targets,
     // in appShortcuts.ts.
     if one_primary_modifier && !option && shift && key == "e" {
-        return Some(AppShortcutCommand::ToggleTranscript);
+        return Some(AppShortcutCommand::ToggleTranscriptOrBrowser);
     }
     // Research-surface commands, claimed even for a focused terminal so they
     // keep working on research-scoped live terminals. Ghostty binds neither
@@ -369,6 +369,7 @@ mod imp {
         fn qmux_native_terminal_should_claim_web_app_shortcut(
             has_terminal_keyboard_owner: i32,
             responder_state: i32,
+            iframe_fallback_eligible: i32,
         ) -> i32;
         fn qmux_native_terminal_should_forward_left_mouse_down_to_web(click_count: i32) -> i32;
         fn qmux_native_terminal_initialize(native_view: *mut c_void) -> i32;
@@ -405,6 +406,7 @@ mod imp {
             height: f64,
             visible: i32,
         ) -> i32;
+        fn qmux_native_terminal_set_iframe_shortcut_fallback(active: i32) -> i32;
         fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
@@ -465,6 +467,7 @@ mod imp {
     pub fn should_claim_web_app_shortcut(
         has_terminal_keyboard_owner: bool,
         responder_state: i32,
+        iframe_fallback_eligible: bool,
     ) -> bool {
         // SAFETY: all arguments are scalar values. Swift validates the
         // responder-state discriminant before exercising the pure routing
@@ -473,6 +476,7 @@ mod imp {
             qmux_native_terminal_should_claim_web_app_shortcut(
                 i32::from(has_terminal_keyboard_owner),
                 responder_state,
+                i32::from(iframe_fallback_eligible),
             ) == 1
         }
     }
@@ -640,6 +644,20 @@ mod imp {
     pub fn set_web_pointer_claimed(claimed: bool) -> Result<(), String> {
         // SAFETY: the scalar is copied synchronously on the main actor.
         if unsafe { qmux_native_terminal_set_web_pointer_claimed(i32::from(claimed)) } == 1 {
+            Ok(())
+        } else {
+            Err("native terminal host is not attached".to_string())
+        }
+    }
+
+    /// Marks whether DOM focus sits inside a cross-document iframe (the
+    /// browser overlay's page). While set, the native key monitor claims
+    /// recognized ⌘ app shortcuts even though the responder is a healthy
+    /// WKWebView descendant — the host document's window-level handlers never
+    /// see keys typed into a framed document.
+    pub fn set_iframe_shortcut_fallback(active: bool) -> Result<(), String> {
+        // SAFETY: the scalar is copied synchronously on the main actor.
+        if unsafe { qmux_native_terminal_set_iframe_shortcut_fallback(i32::from(active)) } == 1 {
             Ok(())
         } else {
             Err("native terminal host is not attached".to_string())
@@ -937,6 +955,10 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn set_iframe_shortcut_fallback(_active: bool) -> Result<(), String> {
+        Err("native terminals are only available on macOS".to_string())
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         Ok(())
     }
@@ -986,8 +1008,8 @@ mod imp {
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
     paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, remove,
-    seed_settings, send_text, set_layout, set_stage_backstop, set_web_overlay_region,
-    set_web_pointer_claimed, shutdown, submit, update_settings,
+    seed_settings, send_text, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
+    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1371,6 +1393,11 @@ pub fn native_terminal_set_web_overlay_region(
 }
 
 #[tauri::command]
+pub fn native_terminal_set_iframe_shortcut_fallback(active: bool) -> Result<(), String> {
+    set_iframe_shortcut_fallback(active)
+}
+
+#[tauri::command]
 pub fn native_terminal_set_stage_backstop(
     x: f64,
     y: f64,
@@ -1435,22 +1462,36 @@ mod tests {
         const WEB_VIEW_DESCENDANT: i32 = 2;
 
         for responder_state in [OUTSIDE_WEB_VIEW, OUTER_WEB_VIEW, WEB_VIEW_DESCENDANT] {
-            assert!(!super::imp::should_claim_web_app_shortcut(
-                true,
-                responder_state,
-            ));
+            for iframe_fallback_eligible in [false, true] {
+                assert!(!super::imp::should_claim_web_app_shortcut(
+                    true,
+                    responder_state,
+                    iframe_fallback_eligible
+                ));
+            }
         }
         assert!(super::imp::should_claim_web_app_shortcut(
             false,
             OUTSIDE_WEB_VIEW,
+            false
         ));
         assert!(super::imp::should_claim_web_app_shortcut(
             false,
             OUTER_WEB_VIEW,
+            false
         ));
         assert!(!super::imp::should_claim_web_app_shortcut(
             false,
             WEB_VIEW_DESCENDANT,
+            false
+        ));
+        // A ⌘ chord typed while a cross-document iframe holds DOM focus must
+        // be claimed natively: the host document's window-level handlers never
+        // see keys delivered to the framed document.
+        assert!(super::imp::should_claim_web_app_shortcut(
+            false,
+            WEB_VIEW_DESCENDANT,
+            true
         ));
     }
 

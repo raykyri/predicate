@@ -26,6 +26,7 @@ import {
   FileText,
   FileUp,
   Folder,
+  Globe,
   GitBranch,
   House,
   Layers,
@@ -62,6 +63,7 @@ import {
 } from "./components/ComposerSubmitShortcut";
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
+import BrowserOverlay from "./components/BrowserOverlay";
 import ImageLightbox from "./components/ImageLightbox";
 import {
   closeImageLightbox,
@@ -229,6 +231,8 @@ import type { PublicationBinding } from "./lib/publication";
 import { useNativeWebOverlayRegion } from "./hooks/useNativeWebOverlayRegion";
 import { useQmuxEvents } from "./hooks/useQmuxEvents";
 import type {
+  BrowserOverlayState,
+  BrowserOverlaySize,
   CloseGroupContinuation,
   CloseDialogState,
   ExitDialogState,
@@ -276,6 +280,7 @@ import {
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
 } from "./lib/terminalFont";
+import { canRenderInInternalBrowser, isFileServerUrl } from "./lib/links";
 import {
   isResearchTreeSelectionChange,
   pruneResearchNavigation,
@@ -554,10 +559,12 @@ const RESEARCH_FOLDER_SCOPE_KEY = "qmux.research-folder-scope.v1";
 const HOME_HIDDEN_TERMINALS_KEY = "qmux.home-hidden-terminals.v1";
 const HOME_DRAFTS_VISIBLE_KEY = "qmux.home-drafts-visible.v1";
 const WARM_QMUX_TERMINAL_THEME_ID = "qmux-warm";
-// Link-action owner for a research tree's document.
-const RESEARCH_LINK_OWNER_PREFIX = "__research_document__:";
-function researchLinkOwnerId(treeId: string) {
-  return `${RESEARCH_LINK_OWNER_PREFIX}${treeId}`;
+// Browser-overlay / link-action owner for a research tree's document. Keyed
+// per tree so an overlay opened from one tree's links doesn't follow the user
+// into another tree (each tree keeps its own overlay, like panes do).
+const RESEARCH_BROWSER_OWNER_PREFIX = "__research_document__:";
+function researchBrowserOwnerId(treeId: string) {
+  return `${RESEARCH_BROWSER_OWNER_PREFIX}${treeId}`;
 }
 // How long after the user's last keystroke we keep holding the queue before letting a
 // finished turn auto-send the next queued message.
@@ -701,6 +708,7 @@ function claimResizePointer(event: ReactPointerEvent<HTMLDivElement>): () => voi
 const ATTACH_MAX_RETRIES = 4;
 const ATTACH_INITIAL_RETRY_MS = 150;
 const ATTACH_MAX_RETRY_MS = 2000;
+const BROWSER_OVERLAY_LEFT_MARGIN = 64;
 const EXPAND_TOGGLE_SHORTCUT_LABEL = "⌘⇧E / Ctrl+Shift+E";
 const TERMINAL_MIN_WIDTH = 380;
 const TURN_PANE_MIN_WIDTH = 300;
@@ -785,6 +793,7 @@ interface TurnPaneSurface {
   orphanedQueues: OrphanedQueueGroup[];
   queueSplit: boolean;
   queueSplitHeight: number | undefined;
+  browserOverlay: BrowserOverlayState | undefined;
   topFraction: number;
   heightFraction: number;
   hasTurnSidebar: boolean;
@@ -1426,6 +1435,10 @@ function MainApp() {
   const paneTabPointerDragRef = useRef<PaneTabPointerDrag | null>(null);
   const groupPointerDragRef = useRef<GroupPointerDrag | null>(null);
   const suppressGroupMenuButtonClickRef = useRef(false);
+  const browserOverlayByPaneRef = useRef<Record<string, BrowserOverlayState>>({});
+  const activeBrowserOwnerIdRef = useRef<string | null>(null);
+  const toggleActiveBrowserOverlayRef = useRef<() => void>(() => {});
+  const closeActiveBrowserOverlayRef = useRef<() => void>(() => {});
   const terminalSplitResizeRef = useRef<{
     splitId: string;
     dividerIndex: number;
@@ -2466,6 +2479,10 @@ function MainApp() {
   } | null>(null);
   const [draggingGroupId, setDraggingGroupId] = useState<string | null>(null);
   const [groupDropTarget, setGroupDropTarget] = useState<GroupDropTarget | null>(null);
+  // Per-pane browser overlay state, so each tab keeps its own page and open/closed.
+  const [browserOverlayByPane, setBrowserOverlayByPane] = useState<
+    Record<string, BrowserOverlayState>
+  >({});
   const [transcriptExpandedByPane, setTranscriptExpandedByPane] = useState<
     Record<string, boolean>
   >({});
@@ -3320,6 +3337,14 @@ function MainApp() {
     },
     [numberedTabIndexByPaneId],
   );
+  const activeBrowserOwnerId = researchSurfaceActive
+    ? activeResearchTreeId
+      ? researchBrowserOwnerId(activeResearchTreeId)
+      : null
+    : (activePane?.id ?? null);
+  const activeBrowserOverlay = activeBrowserOwnerId
+    ? browserOverlayByPane[activeBrowserOwnerId]
+    : undefined;
   useEffect(() => {
     if (
       activePane?.groupId &&
@@ -3839,6 +3864,12 @@ function MainApp() {
       regeneratingTitlePaneIdsRef.current = next;
       return next;
     });
+    setBrowserOverlayByPane((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([paneId]) => ids.has(paneId)),
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
     setTranscriptExpandedByPane((current) => {
       const next = Object.fromEntries(
         Object.entries(current).filter(([paneId]) => ids.has(paneId)),
@@ -4044,11 +4075,38 @@ function MainApp() {
     agentTypingRef.current = { agentId, timer };
   }
 
+  // Opens (or replaces) a pane's browser overlay with a URL, bumping the reload nonce
+  // so even re-opening the same URL reloads. Driven by the browser.open event.
+  // `sandbox` is set for token-bearing file-server URLs so the iframe loads them in an
+  // opaque origin (see BrowserOverlay); plain http(s) URLs are not sandboxed.
+  const openBrowserOverlay = useCallback((paneId: string, url: string, sandbox = false) => {
+    // Force the sandbox on for any token-bearing file-server URL regardless of the
+    // caller's flag: only the backend browser.open event passes sandbox=true, so typed
+    // navigation and link opens would otherwise load a file-server URL as a trusted
+    // same-origin document and defeat the token protection. Dev-server URLs are excluded
+    // by isFileServerUrl and keep their real same-origin context.
+    const effectiveSandbox = sandbox || isFileServerUrl(url, configRef.current?.fileServerPort ?? null);
+    setBrowserOverlayByPane((current) => ({
+      ...current,
+      [paneId]: {
+        url,
+        open: true,
+        reloadNonce: (current[paneId]?.reloadNonce ?? 0) + 1,
+        sandbox: effectiveSandbox,
+        size: current[paneId]?.size ?? null,
+      },
+    }));
+  }, []);
+
   const openLinkForPane = useCallback(
-    (_paneId: string | null | undefined, url: string) => {
-      void openExternalUrl(url);
+    (paneId: string | null | undefined, url: string) => {
+      if (paneId && canRenderInInternalBrowser(url)) {
+        openBrowserOverlay(paneId, url);
+      } else {
+        void openExternalUrl(url);
+      }
     },
-    [],
+    [openBrowserOverlay],
   );
 
   const openPaneLink = useCallback(
@@ -4057,6 +4115,51 @@ function MainApp() {
     },
     [],
   );
+
+  function toggleBrowserOverlay(paneId: string) {
+    setBrowserOverlayByPane((current) => {
+      const prev = current[paneId];
+      return {
+        ...current,
+        [paneId]: {
+          url: prev?.url ?? null,
+          open: !(prev?.open ?? false),
+          reloadNonce: prev?.reloadNonce ?? 0,
+          sandbox: prev?.sandbox ?? false,
+          size: prev?.size ?? null,
+        },
+      };
+    });
+  }
+
+  function toggleActiveBrowserOverlay() {
+    if (activeBrowserOwnerId) {
+      toggleBrowserOverlay(activeBrowserOwnerId);
+    }
+  }
+
+  function closeActiveBrowserOverlay() {
+    if (!activeBrowserOwnerId) {
+      return;
+    }
+    setBrowserOverlayByPane((current) => {
+      const prev = current[activeBrowserOwnerId];
+      if (!prev?.open) {
+        return current;
+      }
+      return { ...current, [activeBrowserOwnerId]: { ...prev, open: false } };
+    });
+  }
+
+  function setBrowserOverlaySize(paneId: string, size: BrowserOverlaySize) {
+    setBrowserOverlayByPane((current) => {
+      const prev = current[paneId];
+      if (!prev) {
+        return current;
+      }
+      return { ...current, [paneId]: { ...prev, size } };
+    });
+  }
 
   function toggleActiveQueueSplit() {
     const agentId = activeAgent?.id;
@@ -4179,6 +4282,22 @@ function MainApp() {
     setQueueSplitHeightByAgent((current) => ({ ...current, [agentId]: height }));
   }
 
+  function refreshActiveBrowserOverlay() {
+    if (!activeBrowserOwnerId) {
+      return;
+    }
+    setBrowserOverlayByPane((current) => {
+      const prev = current[activeBrowserOwnerId];
+      if (!prev) {
+        return current;
+      }
+      return {
+        ...current,
+        [activeBrowserOwnerId]: { ...prev, reloadNonce: prev.reloadNonce + 1 },
+      };
+    });
+  }
+
   const getQueueScroll = useCallback(
     (agentId: string) => queueScrollByAgentRef.current[agentId],
     [],
@@ -4198,6 +4317,24 @@ function MainApp() {
     [],
   );
 
+  // Navigate the overlay to a typed address. A bare host (no scheme) gets http://
+  // so `localhost:5173` works; file paths still go through `qmux open`.
+  function navigateActiveBrowserOverlay(rawInput: string) {
+    const trimmed = rawInput.trim();
+    if (!activeBrowserOwnerId || !trimmed) {
+      return;
+    }
+    const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    // The overlay can only render loopback http (CSP frame-src). Hand a typed external
+    // URL to the OS browser rather than loading a blank, CSP-blocked iframe; the
+    // external opener itself rejects anything but http(s)/mailto.
+    if (canRenderInInternalBrowser(url)) {
+      openBrowserOverlay(activeBrowserOwnerId, url);
+    } else {
+      void openExternalUrl(url);
+    }
+  }
+
   // One stable LinkActions object per transcript owner. TurnOverlay and the
   // research document feed this into the shared provider. Context changes bypass
   // memoization — a fresh object per App render re-rendered every markdown link in the
@@ -4213,7 +4350,7 @@ function MainApp() {
       // Research owners are exempt from pane-based eviction (they aren't
       // panes); the cached closures are tiny and a session's tree count is
       // small, so they're simply retained.
-      if (!paneId.startsWith(RESEARCH_LINK_OWNER_PREFIX) && !livePaneIds.has(paneId)) {
+      if (!paneId.startsWith(RESEARCH_BROWSER_OWNER_PREFIX) && !livePaneIds.has(paneId)) {
         linkActionsByPaneRef.current.delete(paneId);
       }
     }
@@ -4330,6 +4467,7 @@ function MainApp() {
       orphanedQueues,
       queueSplit: agent ? (queueSplitByAgent[agent.id] ?? false) : false,
       queueSplitHeight: agent ? queueSplitHeightByAgent[agent.id] : undefined,
+      browserOverlay: browserOverlayByPane[pane.id],
       topFraction,
       heightFraction,
       hasTurnSidebar: Boolean(agent) || orphanedQueues.length > 0,
@@ -4444,7 +4582,7 @@ function MainApp() {
   // searchOpen never re-fires the publish effect — so gating on the raw set
   // would let an off-screen pane keyboard-deaden the terminal actually on
   // screen. Intersecting with the visible set matches how the expanded
-  // transcript overlays are already visibility-derived.
+  // transcript and browser overlays are already visibility-derived.
   const visiblePaneOverlayBlocking = [...terminalOverlayBlockedPaneIds].some(
     (paneId) => visibleTerminalPaneIdSet.has(paneId),
   );
@@ -4456,10 +4594,11 @@ function MainApp() {
       // research surface rather than stacking over the terminal stage, so an
       // open (hidden) composer must not eat terminal input.
       publicationTarget ||
-      // The palette and expanded transcript must own both the DOM
+      // The palette and expanded/browser overlays must own both the DOM
       // gesture and keyboard while they cover the terminal stage.
       commandPaletteOpen ||
       activeTranscriptVisibleExpanded ||
+      activeBrowserOverlay?.open ||
       closeDialog ||
       exitDialog ||
       // The export-to-Research dialog floats over the terminal stage like the
@@ -5619,6 +5758,7 @@ function MainApp() {
   const appStyle = {
     "--font-ui": bodyFontFamily,
     "--sidebar-width": `${effectiveSidebarWidth}px`,
+    "--browser-overlay-left": `${BROWSER_OVERLAY_LEFT_MARGIN}px`,
     "--turn-font-delta": `${turnFontDelta}px`,
     "--transcript-expanded-font-delta": `${transcriptExpandedFontDelta}px`,
     "--transcript-expanded-line-height-delta": `${transcriptExpandedLineHeightDelta}`,
@@ -8128,6 +8268,7 @@ function MainApp() {
     isResearchAgent: (agentId: string) => researchAgentIdsRef.current.has(agentId),
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
+    openBrowserOverlay,
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady: handleEventsReady,
     onAgentSpawned: handleAgentSpawned,
@@ -8357,6 +8498,14 @@ function MainApp() {
         section: "Actions",
         title: "Fork session in worktree",
         action: () => void forkActivePane({ nest: true, useWorktree: true }),
+      });
+    }
+    if (activeBrowserOwnerId) {
+      commands.push({
+        id: "action:toggle-browser",
+        section: "Actions",
+        title: "Toggle browser overlay",
+        action: () => toggleActiveBrowserOverlay(),
       });
     }
     if (visiblePane) {
@@ -10094,6 +10243,10 @@ function MainApp() {
   // stale state.
   useEffect(() => {
     activePaneRef.current = activePane;
+    browserOverlayByPaneRef.current = browserOverlayByPane;
+    activeBrowserOwnerIdRef.current = activeBrowserOwnerId;
+    toggleActiveBrowserOverlayRef.current = toggleActiveBrowserOverlay;
+    closeActiveBrowserOverlayRef.current = closeActiveBrowserOverlay;
     requestClosePaneRef.current = requestClosePane;
     splitPaneBelowRef.current = splitPaneBelow;
     canToggleActiveTranscriptExpandedRef.current = Boolean(
@@ -10491,8 +10644,8 @@ function MainApp() {
       }
       const overlays = escapeOverlayStateRef.current;
 
-      // The image lightbox is the frontmost modal, so it takes Escape first
-      // and exclusively.
+      // The image lightbox is the frontmost modal (it floats above every pane
+      // and the browser overlay), so it takes Escape first and exclusively.
       // Its state lives in a module store rather than App state, so read it
       // directly here instead of mirroring it into the overlay ref above.
       if (getImageLightbox() !== null) {
@@ -10510,6 +10663,20 @@ function MainApp() {
         event.stopPropagation();
         closeThemePicker();
         requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
+        return;
+      }
+
+      // The browser overlay claims Escape exclusively, including from
+      // component-level listeners registered after this one.
+      const browserOwnerId = activeBrowserOwnerIdRef.current;
+      const browserOpen = browserOwnerId
+        ? browserOverlayByPaneRef.current[browserOwnerId]?.open === true
+        : false;
+      if (browserOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        closeActiveBrowserOverlayRef.current();
         return;
       }
 
@@ -10993,12 +11160,22 @@ function MainApp() {
             requestResearchFolderMenuToggle();
           }
           return;
-        case "toggleTranscript":
+        case "toggleTranscriptOrBrowser":
           if (
             activeSurfaceRef.current === "pane" &&
             canToggleActiveTranscriptExpandedRef.current
           ) {
             toggleActiveTranscriptExpandedRef.current();
+          } else {
+            const browserOwnerId =
+              activeSurfaceRef.current === "research"
+                ? activeResearchTreeIdRef.current
+                  ? researchBrowserOwnerId(activeResearchTreeIdRef.current)
+                  : null
+                : (activePaneRef.current?.id ?? null);
+            if (browserOwnerId) {
+              toggleBrowserOverlay(browserOwnerId);
+            }
           }
           return;
         case "splitPaneBelow": {
@@ -12105,6 +12282,8 @@ function MainApp() {
               showQueueSplit={Boolean(agent) && !researchBound}
               queueSplit={surface.queueSplit}
               onToggleQueueSplit={toggleActiveQueueSplit}
+              browserOpen={surface.browserOverlay?.open ?? false}
+              onToggleBrowser={toggleActiveBrowserOverlay}
               transcriptExpanded={activeTranscriptExpanded}
               transcriptShortcutLabel={EXPAND_TOGGLE_SHORTCUT_LABEL}
               onToggleTranscriptExpanded={toggleActiveTranscriptExpanded}
@@ -13004,6 +13183,23 @@ function MainApp() {
                 <span>Detach from split</span>
               </button>
             ) : null}
+            <button className="control-button"
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setPaneContextMenu(null);
+                setActivePaneId(contextMenuPane.id);
+                toggleBrowserOverlay(contextMenuPane.id);
+              }}
+            >
+              <Globe size={13} aria-hidden="true" />
+              <span>
+                {browserOverlayByPane[contextMenuPane.id]?.open
+                  ? "Hide browser"
+                  : "Show browser"}
+              </span>
+            </button>
+            <div className="context-menu-divider" role="separator" />
             <button className="control-button"
               type="button"
               role="menuitem"
@@ -14376,7 +14572,7 @@ function MainApp() {
               onUpdateDocument={editResearchDocument}
               onCancel={cancelResearchRun}
               onOpenPane={handleResearchDocumentOpenPane}
-              linkActions={linkActionsForPane(researchLinkOwnerId(activeResearchTreeId))}
+              linkActions={linkActionsForPane(researchBrowserOwnerId(activeResearchTreeId))}
               onError={setError}
               onToast={handleResearchDocumentToast}
               onPublish={setPublicationTarget}
@@ -14667,11 +14863,40 @@ function MainApp() {
       ) : null}
       {renderFloatingPaneRestoreControls()}
 
+      {activeBrowserOwnerId && activeBrowserOverlay?.open ? (
+        <BrowserOverlay
+          url={activeBrowserOverlay.url}
+          reloadNonce={activeBrowserOverlay.reloadNonce}
+          sandbox={activeBrowserOverlay.sandbox}
+          bodyFontId={settings.bodyFontId}
+          size={activeBrowserOverlay.size}
+          toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
+          onNavigate={navigateActiveBrowserOverlay}
+          onRefresh={refreshActiveBrowserOverlay}
+          onOpenExternal={() => {
+            // Never leak a token-bearing file-server URL to the OS browser (the button is
+            // also disabled for these, and the backend refuses them as the real boundary).
+            if (
+              activeBrowserOverlay.url &&
+              !isFileServerUrl(activeBrowserOverlay.url, configRef.current?.fileServerPort ?? null)
+            ) {
+              void openExternalUrl(activeBrowserOverlay.url);
+            }
+          }}
+          onClose={toggleActiveBrowserOverlay}
+          onResize={(size) => setBrowserOverlaySize(activeBrowserOwnerId, size)}
+        />
+      ) : null}
       {linkMenu ? (
         <LinkContextMenu
           x={linkMenu.x}
           y={linkMenu.y}
-          onOpen={() => {
+          canOpenInternal={linkMenu.paneId !== null && canRenderInInternalBrowser(linkMenu.url)}
+          onOpenInternal={() => {
+            openLinkForPane(linkMenu.paneId, linkMenu.url);
+            setLinkMenu(null);
+          }}
+          onOpenExternal={() => {
             void openExternalUrl(linkMenu.url);
             setLinkMenu(null);
           }}

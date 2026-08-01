@@ -2653,7 +2653,7 @@ mod tests {
             assert!(!script.contains("agent-detach"));
             assert!(!script.contains("local __qmux_status=$?"));
             assert!(!script.contains("return $__qmux_status"));
-            // `qmux` itself is a passthrough so its subcommands work at the prompt
+            // `qmux` itself is a passthrough so `qmux open <file>` works at the prompt
             // without qmux being on PATH.
             assert!(script.contains("unalias qmux"));
             assert!(script.contains("qmux() {"));

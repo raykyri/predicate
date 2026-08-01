@@ -1,14 +1,14 @@
 //! Counting semaphore bounding the loopback servers' per-connection threads.
 //!
-//! The control socket spawns one handler thread per accepted connection.
-//! Without a bound, a local process spamming connections could pile
+//! The control socket and file server spawn one handler thread per accepted
+//! connection. Without a bound, a local process spamming connections could pile
 //! up threads/FDs without limit. Each accept loop claims a slot *before*
 //! spawning; at the cap the accept loop blocks, so excess connections wait in
 //! the kernel listen backlog instead of growing our thread count. Handler read
 //! timeouts guarantee stuck slots free themselves.
 //!
 //! Hand-rolled on Mutex + Condvar to keep the backend's no-new-dependencies
-//! posture.
+//! posture (cf. the hand-rolled HTTP in file_server.rs).
 
 use std::sync::{Arc, Condvar, Mutex};
 

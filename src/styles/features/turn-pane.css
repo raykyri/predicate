@@ -190,7 +190,8 @@
   outline: none;
 }
 
-/* Top bar across the right pane. */
+/* Top bar across the right pane. Height matches the browser overlay's address bar
+   so the two line up when the browser is open. */
 .turn-pane-header {
   position: absolute;
   top: 0;
@@ -343,7 +344,9 @@
   color: var(--text-faint);
 }
 
-/* Active toggle state. */
+/* Browser toggle when the overlay is open: reads as locked on / pushed in rather
+   than swapping to a close icon. An accent-tinted fill plus an inset shadow gives
+   the depressed look; it returns to the neutral skin once toggled off. */
 .turn-pane-header-button.is-active {
   border-color: var(--accent-color);
   background: var(--accent-shadow);

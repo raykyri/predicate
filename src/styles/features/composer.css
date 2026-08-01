@@ -662,3 +662,6 @@
   display: inline-block;
   transform: translateY(1px);
 }
+
+/* Browser overlay: floats over the sidebar (leaving a left strip for tab switching)
+   and the center terminal, stopping at the turn pane's left edge. */

@@ -44,6 +44,13 @@ matching UI adapter on the frontend.
 - (Experimental) git worktree creation for launched agents, with configurable
   global, local `.qmux/`, or local `.claude/` storage, dirty-worktree checks,
   and a delete-or-keep prompt when closing worktree-backed panes.
+- (Experimental) A tab-bound, resizable browser that renders a local file or a
+  `http://localhost` dev server in a panel over the terminal. Markdown files
+  render as styled HTML.
+- (Experimental spike) qmux advertises that preview through Codex's current
+  private in-app-browser discovery socket, so it appears in
+  `agent.browsers.list()`. It is discovery-only for now: no DOM/CDP automation
+  capabilities are advertised.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install
@@ -203,7 +210,9 @@ hosted view can show proposal status without a separate collaboration database.
 - `Cmd-Shift-T`: switch back to Terminal from Research; otherwise restore the
   most recently closed pane.
 - `Cmd-Shift-H`: focus Home.
-- `Cmd-Shift-E` / `Ctrl-Shift-E`: expand or restore the active transcript pane.
+- `Cmd-Shift-E` / `Ctrl-Shift-E`: expand or restore the active transcript pane,
+  or toggle the browser overlay on shell-only panes.
+- `Escape`: close the browser overlay when it is open and the key reaches qmux.
 - `Cmd-D` / `Cmd-Shift-D`: split the active terminal downward (in Research,
   plain `Cmd-D` creates a new document instead).
 - `Cmd-W`: close the active pane.
@@ -249,7 +258,16 @@ hosted view can show proposal status without a separate collaboration database.
 - Agent panes also receive `QMUX_AGENT_ID`.
 - Hooks call `qmux notify <event>` over the token-gated Unix socket; qmux routes
   the notification to the owning agent's adapter. The same socket, scoped to the
-  caller's pane, serves other in-pane commands such as `qmux fork`.
+  caller's pane, serves other in-pane commands such as `qmux fork` and
+  `qmux open <file|localhost-url>`.
+- A loopback-only (`127.0.0.1`) HTTP server with per-pane random tokens backs
+  browser-overlay file targets. It serves only the requesting pane's group,
+  current directory, and agent worktree roots.
+- Codex Browser-plugin discovery listens on a qmux-owned socket under
+  `/tmp/codex-browser-use`. This is an undocumented compatibility adapter and
+  may need to track changes in the bundled OpenAI Browser plugin. It defaults to
+  the production Codex build flavor; developers can override that metadata with
+  `QMUX_CODEX_APP_BUILD_FLAVOR`.
 - Transcript tailing starts once an adapter binds a transcript path: Claude via
   `SessionStart`, Codex via an explicit `SessionStart` path or session-id lookup,
   and OpenCode via qmux-managed JSONL.

@@ -183,6 +183,13 @@ public func qmuxNativeTerminalSetWebOverlayRegion(
     }
 }
 
+@_cdecl("qmux_native_terminal_set_iframe_shortcut_fallback")
+public func qmuxNativeTerminalSetIframeShortcutFallback(_ active: Int32) -> Int32 {
+    onTerminalMain {
+        NativeTerminalHost.shared.setIframeShortcutFallback(active == 1) ? 1 : 0
+    }
+}
+
 @_cdecl("qmux_native_terminal_prepare_for_webview_reload")
 public func qmuxNativeTerminalPrepareForWebViewReload() -> Int32 {
     onTerminalMain {

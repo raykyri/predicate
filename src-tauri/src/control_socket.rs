@@ -361,6 +361,30 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
             )?;
             serde_json::to_value(pane).map_err(|err| format!("failed to encode forked pane: {err}"))
         }
+        "browser.open" => {
+            #[derive(Debug, Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct BrowserOpen {
+                target: String,
+                #[serde(default)]
+                cwd: Option<String>,
+            }
+            let payload = serde_json::from_value::<BrowserOpen>(request.payload)
+                .map_err(|err| format!("invalid browser.open payload: {err}"))?;
+            let (url, sandbox) = resolve_browser_target(
+                state,
+                &authed_pane,
+                payload.target.trim(),
+                payload.cwd.as_deref(),
+            )?;
+            state.emit(QmuxEvent::new(
+                "browser.open",
+                Some(authed_pane.clone()),
+                None,
+                json!({ "url": url, "sandbox": sandbox }),
+            ));
+            Ok(json!({ "url": url, "sandbox": sandbox }))
+        }
         // Other agent spawning and turn queueing are management operations that belong
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
         other => Err(format!("unknown control command '{other}'")),
@@ -373,6 +397,79 @@ fn validate_control_launch_workspace(state: &AppState, pane_id: &str) -> Result<
         .ok_or_else(|| format!("pane {pane_id} has no workspace"))?;
     validate_launch_workspace(state, Some(&group_id), LaunchOrigin::Terminal)?;
     Ok(())
+}
+
+/// The preview intentionally accepts only loopback HTTP origins. Files are
+/// served by qmux's token-scoped loopback server instead.
+fn is_loopback_http_url(url: &str) -> bool {
+    let Some((_scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or(rest);
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+    let host = if let Some(after_bracket) = host_port.strip_prefix('[') {
+        match after_bracket.split_once(']') {
+            Some((inner, _)) => inner,
+            None => return false,
+        }
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
+        return v4.is_loopback();
+    }
+    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
+        return v6.is_loopback();
+    }
+    false
+}
+
+fn resolve_browser_target(
+    state: &AppState,
+    authed_pane: &str,
+    target: &str,
+    cwd: Option<&str>,
+) -> Result<(String, bool), String> {
+    if target.is_empty() {
+        return Err("nothing to open".to_string());
+    }
+    if target.starts_with("http://") || target.starts_with("https://") {
+        if !is_loopback_http_url(target) {
+            return Err(format!(
+                "refusing to open '{target}': the browser overlay only loads http(s) URLs on localhost/127.0.0.1"
+            ));
+        }
+        return Ok((target.to_string(), false));
+    }
+
+    let requested = {
+        let path = std::path::Path::new(target);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            let base = cwd.ok_or_else(|| {
+                "cannot resolve a relative path without a working directory".to_string()
+            })?;
+            std::path::Path::new(base).join(path)
+        }
+    };
+
+    let roots = state.pane_file_roots(authed_pane);
+    let canonical =
+        crate::file_server::resolve_under_roots(&requested, &roots).ok_or_else(|| {
+            format!(
+                "'{target}' was not found under this pane's working directory and cannot be opened"
+            )
+        })?;
+    let port = state
+        .file_server_port()
+        .ok_or_else(|| "the file server is not running".to_string())?;
+    let token = state.pane_file_token(authed_pane)?;
+    Ok((crate::file_server::file_url(port, &token, &canonical), true))
 }
 
 fn ensure_pane_scope(authed_pane: &str, requested_pane: &str) -> Result<(), String> {
@@ -489,6 +586,17 @@ mod tests {
 
     fn request_line(token: &str, command: &str, payload: Value) -> String {
         json!({ "token": token, "command": command, "payload": payload }).to_string()
+    }
+
+    #[test]
+    fn browser_target_accepts_loopback_and_rejects_authority_spoofs() {
+        assert!(is_loopback_http_url("http://localhost:3000/app"));
+        assert!(is_loopback_http_url("http://127.0.0.1:8080"));
+        assert!(is_loopback_http_url("http://[::1]:3000/"));
+        assert!(!is_loopback_http_url("http://example.com/"));
+        assert!(!is_loopback_http_url("http://127.0.0.1.evil.com/"));
+        assert!(!is_loopback_http_url("http://127.0.0.1@evil.com/"));
+        assert!(!is_loopback_http_url("http://evil.com\\@127.0.0.1/"));
     }
 
     #[test]

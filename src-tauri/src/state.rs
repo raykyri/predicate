@@ -142,6 +142,8 @@ pub struct AppState {
 struct AppStateInner {
     config: QmuxConfig,
     pane_tokens: Mutex<HashMap<String, String>>,
+    // Separate read-only credentials used in file-preview URLs.
+    file_tokens: Mutex<HashMap<String, String>>,
     model: Mutex<Model>,
     transcript_tails: Mutex<HashSet<String>>,
     next_id: AtomicU64,
@@ -189,6 +191,8 @@ struct AppStateInner {
     // EOF while kill_all_panes tears processes down; those removals must preserve
     // the journals referenced by the frozen snapshot for the next launch.
     exit_teardown_started: AtomicBool,
+    // Ephemeral loopback file-preview server port, set after it binds.
+    file_server: Mutex<Option<u16>>,
     // (device, inode) of the control socket this process bound, recorded at bind time
     // so exit cleanup can tell its own socket apart from one a later instance bound
     // at the same path (see `owns_control_socket`).
@@ -736,6 +740,12 @@ fn wait_target_label_locked(model: &Model, target: &AgentInfo) -> Option<String>
         .or_else(|| target.model.clone())
 }
 
+fn path_is_ancestor_or_equal(ancestor: &std::path::Path, descendant: &std::path::Path) -> bool {
+    let ancestor = std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf());
+    let descendant = std::fs::canonicalize(descendant).unwrap_or_else(|_| descendant.to_path_buf());
+    descendant.starts_with(&ancestor)
+}
+
 fn queued_turn_wait_is_resolved_locked(model: &Model, wait_for: &QueuedTurnWait) -> bool {
     let Some(target) = model.agents.get(&wait_for.agent_id) else {
         // The target agent is gone entirely (e.g. its pane closed and the agent was
@@ -1121,6 +1131,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
+                file_tokens: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
                 transcript_tails: Mutex::new(HashSet::new()),
                 next_id: AtomicU64::new(1),
@@ -1136,6 +1147,7 @@ impl AppState {
                 preflighted_state: Mutex::new(None),
                 exit_confirmed: AtomicBool::new(false),
                 exit_teardown_started: AtomicBool::new(false),
+                file_server: Mutex::new(None),
                 control_socket_identity: Mutex::new(None),
                 pane_send_locks: Mutex::new(HashMap::new()),
                 shell_agent_jobs: Mutex::new(HashMap::new()),
@@ -1260,6 +1272,16 @@ impl AppState {
             .collect()
     }
 
+    pub fn set_file_server(&self, port: u16) {
+        if let Ok(mut slot) = self.inner.file_server.lock() {
+            *slot = Some(port);
+        }
+    }
+
+    pub fn file_server_port(&self) -> Option<u16> {
+        self.inner.file_server.lock().ok().and_then(|slot| *slot)
+    }
+
     /// Records the (device, inode) of the control socket this process bound (set once
     /// at startup, right after the bind).
     pub fn set_control_socket_identity(&self, device: u64, inode: u64) {
@@ -1372,6 +1394,68 @@ impl AppState {
             .ok()
             .and_then(|prefs| prefs.use_login_shell)
             .unwrap_or(true)
+    }
+
+    /// Returns the read-only file-preview token scoped to one pane.
+    pub fn pane_file_token(&self, pane_id: &str) -> Result<String, String> {
+        let mut tokens = self
+            .inner
+            .file_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(existing) = tokens.get(pane_id) {
+            return Ok(existing.clone());
+        }
+        let token = random_token()?;
+        Ok(tokens.entry(pane_id.to_string()).or_insert(token).clone())
+    }
+
+    pub fn pane_for_file_token(&self, token: &str) -> Option<String> {
+        let tokens = self
+            .inner
+            .file_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        tokens
+            .iter()
+            .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
+    }
+
+    /// Roots a preview from a pane may read. This deliberately excludes other
+    /// qmux groups and any cwd at or above the private workspace root.
+    pub fn pane_file_roots(&self, pane_id: &str) -> Vec<std::path::PathBuf> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(pane) = model.panes.get(pane_id) {
+            let mut roots = Vec::new();
+            let group_dir = model
+                .groups
+                .get(&pane.info.group_id)
+                .map(|group| std::path::PathBuf::from(&group.dir));
+            if let Some(group_dir) = &group_dir {
+                roots.push(group_dir.clone());
+            }
+            let cwd = std::path::PathBuf::from(&pane.info.cwd);
+            let workspace_root = &self.inner.config.workspace_root;
+            let cwd_at_or_above_workspace = path_is_ancestor_or_equal(&cwd, workspace_root);
+            let cwd_inside_workspace = path_is_ancestor_or_equal(workspace_root, &cwd);
+            let cwd_under_own_group = group_dir
+                .as_deref()
+                .is_some_and(|group_dir| path_is_ancestor_or_equal(group_dir, &cwd));
+            if !cwd_at_or_above_workspace && (!cwd_inside_workspace || cwd_under_own_group) {
+                roots.push(cwd);
+            }
+            for agent in model.agents.values() {
+                if agent.pane_id.as_deref() == Some(pane_id) {
+                    roots.push(std::path::PathBuf::from(&agent.worktree_dir));
+                }
+            }
+            return roots;
+        }
+        Vec::new()
     }
 
     pub fn config(&self) -> &QmuxConfig {
@@ -5658,6 +5742,9 @@ impl AppState {
         // again, so drop it rather than leave a live credential resolving (via
         // `pane_for_token`) to a pane that no longer exists. Separate lock from `model`.
         if let Ok(mut tokens) = self.inner.pane_tokens.lock() {
+            tokens.remove(pane_id);
+        }
+        if let Ok(mut tokens) = self.inner.file_tokens.lock() {
             tokens.remove(pane_id);
         }
         // Drop the pane's send lock so the map doesn't grow for the process lifetime.
@@ -15137,6 +15224,27 @@ mod tests {
         // The captured QMUX_TOKEN must not outlive its pane.
         state.remove_pane("pane-1").unwrap();
         assert!(state.pane_for_token(&token).is_none());
+    }
+
+    #[test]
+    fn remove_pane_reclaims_its_file_preview_token() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
+
+        let token = state.pane_file_token("pane-1").unwrap();
+        assert_eq!(state.pane_file_token("pane-1").unwrap(), token);
+        assert_eq!(state.pane_for_file_token(&token).as_deref(), Some("pane-1"));
+        assert_ne!(state.pane_token("pane-1").unwrap(), token);
+
+        state.remove_pane("pane-1").unwrap();
+        assert!(state.pane_for_file_token(&token).is_none());
+    }
+
+    #[test]
+    fn file_preview_roots_fail_closed_for_an_unknown_pane() {
+        let state = AppState::new(test_config(temp_workspace()));
+        assert!(state.pane_file_roots("missing-pane").is_empty());
     }
 
     #[test]
