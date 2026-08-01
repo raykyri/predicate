@@ -1762,8 +1762,8 @@ fn parse_grok_chat_history_value(
             let mut blocks = parse_grok_synthetic_message_blocks(value.get("content"))?;
             for block in &mut blocks {
                 if let TurnBlock::Text { text } = block {
-                    if let Some(query) = unwrap_grok_user_query(text) {
-                        *text = query.to_string();
+                    if let Some(normalized) = normalize_grok_user_message_text(text) {
+                        *text = normalized;
                     }
                 }
             }
@@ -1840,17 +1840,114 @@ fn parse_grok_chat_history_value(
     })
 }
 
+/// Normalize Grok user-message text so qMux renders a real user bubble.
+///
 /// Current Grok chat histories wrap user-authored text in a `<user_query>`
-/// envelope. Leaving that envelope in the transcript makes qMux's generic
-/// injected-instruction detector classify the whole user turn as private
-/// harness context, hiding its role label and normal message affordances.
-fn unwrap_grok_user_query(text: &str) -> Option<&str> {
+/// envelope and may also prefix an `<image_files>` harness block when the
+/// prompt included attachments. Leaving either tag in the transcript makes
+/// qMux's generic injected-instruction detector classify the whole turn as
+/// private harness context — collapsing the user's words into a
+/// `<image_files> <user_query>` chip (or nothing) and never showing them as a
+/// message. Extract the query body and turn listed image paths into
+/// `[Image: <path>]` markers the transcript can thumbnail.
+fn normalize_grok_user_message_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let image_paths = extract_grok_image_file_paths(trimmed);
+    let query = extract_grok_user_query(trimmed);
+
+    match (query, image_paths.is_empty()) {
+        (None, true) => None,
+        (Some(query), true) => Some(query.to_string()),
+        (Some(query), false) => {
+            // Numbered `[Image #N]` refs are Grok's inline placeholders for the
+            // paths listed above; with real path markers they would double-draw.
+            let body = strip_numbered_image_refs(query);
+            let markers = image_path_markers(&image_paths);
+            if body.trim().is_empty() {
+                Some(markers.join("\n"))
+            } else {
+                Some(format!("{}\n{}", markers.join("\n"), body.trim_end()))
+            }
+        }
+        (None, false) => Some(image_path_markers(&image_paths).join("\n")),
+    }
+}
+
+fn extract_grok_user_query(text: &str) -> Option<&str> {
     const OPEN: &str = "<user_query>";
     const CLOSE: &str = "</user_query>";
 
-    let wrapped = text.trim();
-    let query = wrapped.strip_prefix(OPEN)?.strip_suffix(CLOSE)?;
-    Some(query.trim_matches(['\r', '\n']))
+    let start = text.find(OPEN)?;
+    let content_start = start + OPEN.len();
+    let close_rel = text[content_start..].find(CLOSE)?;
+    let content = &text[content_start..content_start + close_rel];
+    Some(content.trim_matches(['\r', '\n']))
+}
+
+/// Paths listed inside a Grok `<image_files>…</image_files>` harness block.
+/// Lines look like `1. /absolute/path.png`.
+fn extract_grok_image_file_paths(text: &str) -> Vec<String> {
+    const OPEN: &str = "<image_files>";
+    const CLOSE: &str = "</image_files>";
+
+    let Some(start) = text.find(OPEN) else {
+        return Vec::new();
+    };
+    let content_start = start + OPEN.len();
+    let Some(close_rel) = text[content_start..].find(CLOSE) else {
+        return Vec::new();
+    };
+    let body = &text[content_start..content_start + close_rel];
+    let mut paths = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let candidate = line
+            .split_once(". ")
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or(line);
+        if candidate.starts_with('/') {
+            paths.push(candidate.to_string());
+        }
+    }
+    paths
+}
+
+fn image_path_markers(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| format!("[Image: {path}]"))
+        .collect()
+}
+
+/// Drop Grok's pathless `[Image #N]` placeholders once real path markers exist.
+fn strip_numbered_image_refs(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("[Image #") {
+        result.push_str(&rest[..start]);
+        let after_prefix = start + "[Image #".len();
+        match rest[after_prefix..].find(']') {
+            Some(close_rel) => {
+                let digits = &rest[after_prefix..after_prefix + close_rel];
+                if !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()) {
+                    rest = &rest[after_prefix + close_rel + 1..];
+                    continue;
+                }
+                // Not a pure numbered ref — keep the opening and continue after it.
+                result.push_str(&rest[start..after_prefix]);
+                rest = &rest[after_prefix..];
+            }
+            None => {
+                result.push_str(&rest[start..]);
+                return result;
+            }
+        }
+    }
+    result.push_str(rest);
+    result
 }
 
 fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEvent> {
@@ -2647,6 +2744,47 @@ mod tests {
             &turn.blocks[0],
             TurnBlock::Text { text } if text == "inspect the repo"
         ));
+    }
+
+    #[test]
+    fn unwraps_grok_user_query_prefixed_by_image_files() {
+        // Reproduces session 019fbe5f…: a follow-up prompt that includes an
+        // attachment is stored as <image_files> + <user_query> in one text
+        // block. The whole blob must not remain tagged-instruction harness.
+        let user = json!({
+            "type": "user",
+            "content": [{
+                "type": "text",
+                "text": "<image_files>\nThe following images were provided by the user and saved to the workspace for future use:\n1. /Users/raymond/.grok/sessions/demo/assets/image-9fdc73f2.png\n\nThese images can be copied for use in other locations.\n</image_files>\n\n<user_query>\nokay, can you implement 2? let's see if that looks realistic enough to use.[Image #1] \n</user_query>"
+            }, {
+                "type": "image",
+                "url": "data:image/png;base64,AAAA"
+            }]
+        })
+        .to_string();
+
+        let turn = parse_transcript_line("agent-1", 14, &user).unwrap();
+
+        assert_eq!(turn.role, "user");
+        let TurnBlock::Text { text } = &turn.blocks[0] else {
+            panic!("expected a text block");
+        };
+        assert!(
+            text.contains("okay, can you implement 2?"),
+            "user query must survive: {text:?}"
+        );
+        assert!(
+            text.contains("[Image: /Users/raymond/.grok/sessions/demo/assets/image-9fdc73f2.png]"),
+            "image_files path must become a path marker: {text:?}"
+        );
+        assert!(
+            !text.contains("<user_query>") && !text.contains("<image_files>"),
+            "harness tags must be stripped: {text:?}"
+        );
+        assert!(
+            !text.contains("[Image #1]"),
+            "numbered placeholder should not double-draw next to the path marker: {text:?}"
+        );
     }
 
     #[test]
