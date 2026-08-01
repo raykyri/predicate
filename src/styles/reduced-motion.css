@@ -19,6 +19,11 @@
   transform: translateY(var(--status-dot-y, 0));
 }
 
+.app-shell.reduce-motion .turn-jump-to-latest,
+.app-shell.reduce-motion .turn-jump-to-latest.is-visible {
+  transform: translateX(-50%);
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root,
   *,
@@ -36,5 +41,10 @@
     animation: none;
     opacity: 1;
     transform: translateY(var(--status-dot-y, 0));
+  }
+
+  .turn-jump-to-latest,
+  .turn-jump-to-latest.is-visible {
+    transform: translateX(-50%);
   }
 }

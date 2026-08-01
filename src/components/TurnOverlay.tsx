@@ -15,7 +15,7 @@ import type {
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Ellipsis } from "lucide-react";
+import { ArrowDown, Ellipsis } from "lucide-react";
 import type {
   MessageAnchor,
   ThreadParticipant,
@@ -137,6 +137,8 @@ interface TurnOverlayProps {
   // When true (the overlay showing the active pane), Cmd-F/Ctrl-F opens this
   // pane's find bar — unless focus is in the terminal, which owns its own find.
   searchHotkeyActive?: boolean;
+  // App-level motion preference. The OS preference is checked at click time too.
+  reduceMotion?: boolean;
 }
 
 // Gap kept between the last transcript message and the top of the composer.
@@ -211,6 +213,7 @@ export default function TurnOverlay({
   onForkFromMessage,
   handoffContext,
   searchHotkeyActive = false,
+  reduceMotion = false,
 }: TurnOverlayProps) {
   const sidebarRef = useRef<HTMLElement | null>(null);
   const inputWrapRef = useRef<HTMLDivElement | null>(null);
@@ -243,6 +246,11 @@ export default function TurnOverlay({
   // Whether the view is parked near the bottom, so incoming content can keep it
   // pinned there. Starts true (we load at the bottom) and tracks user scrolling.
   const stickToBottomRef = useRef(true);
+  // Smooth scrolling emits intermediate scroll events far from the bottom. Keep
+  // an explicit jump intent so streamed growth during that animation cannot
+  // turn live following back off before the view reaches its moving target.
+  const jumpingToLatestRef = useRef(false);
+  const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
   const [composerHeight, setComposerHeight] = useState(0);
   const [composerBaseHeight, setComposerBaseHeight] = useState(0);
 
@@ -262,8 +270,13 @@ export default function TurnOverlay({
     // on the very next commit); the sticky-message geometry can wait for the
     // next frame — see scheduleStickyUserStuckUpdate.
     const distanceFromBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-    const stuck = distanceFromBottom <= STICK_TO_BOTTOM_THRESHOLD;
+    const reachedLatest = distanceFromBottom <= STICK_TO_BOTTOM_THRESHOLD;
+    if (reachedLatest) {
+      jumpingToLatestRef.current = false;
+    }
+    const stuck = jumpingToLatestRef.current || reachedLatest;
     stickToBottomRef.current = stuck;
+    setJumpToLatestVisible(!stuck);
     // Remember where this transcript is parked so switching tabs (or away to
     // Home/Research) and back restores it. This fires for programmatic scrolls
     // too (auto-pin to bottom, restore), so the stored value stays current
@@ -272,6 +285,34 @@ export default function TurnOverlay({
       saveTranscriptScroll?.(agentId, { scrollTop: timeline.scrollTop, stuck });
     }
     scheduleStickyUserStuckUpdate();
+  };
+
+  const jumpToLatest = () => {
+    const timeline = timelineRef.current;
+    if (!timeline) {
+      return;
+    }
+    // Treat the click as an explicit return to live output immediately. The
+    // intent stays armed through intermediate smooth-scroll events so a growing
+    // transcript still lands at its current physical end.
+    jumpingToLatestRef.current = true;
+    stickToBottomRef.current = true;
+    setJumpToLatestVisible(false);
+    timeline.scrollTo({
+      top: timeline.scrollHeight,
+      behavior:
+        reduceMotion || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
+          ? "auto"
+          : "smooth",
+    });
+  };
+
+  const cancelJumpToLatest = () => {
+    if (!jumpingToLatestRef.current) {
+      return;
+    }
+    jumpingToLatestRef.current = false;
+    handleTimelineScroll();
   };
 
   const splitBounds = () => {
@@ -358,12 +399,16 @@ export default function TurnOverlay({
   // measures from zero.
   useLayoutEffect(() => {
     const saved = agentId ? getTranscriptScroll?.(agentId) : undefined;
+    jumpingToLatestRef.current = false;
     if (saved && !saved.stuck) {
       stickToBottomRef.current = false;
       const restore = () => {
         const timeline = timelineRef.current;
         if (timeline) {
           timeline.scrollTop = saved.scrollTop;
+          const distanceFromBottom =
+            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+          setJumpToLatestVisible(distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD);
         }
       };
       restore();
@@ -371,6 +416,7 @@ export default function TurnOverlay({
       return () => cancelAnimationFrame(frame);
     }
     stickToBottomRef.current = true;
+    setJumpToLatestVisible(false);
     scrollToBottom();
     const frame = requestAnimationFrame(scrollToBottom);
     return () => cancelAnimationFrame(frame);
@@ -540,6 +586,14 @@ export default function TurnOverlay({
   const inputStyle: CSSProperties | undefined = queueSplit
     ? { height: effectiveQueueSplitHeight }
     : undefined;
+  // Keep the floating affordance in the visible transcript strip: the composer
+  // overlays the bottom in the normal layout, while split mode ends the
+  // transcript above its separately-sized queue area.
+  const jumpToLatestBottom = queueSplit
+    ? effectiveQueueSplitHeight + 12
+    : input
+      ? (composerHeight || DEFAULT_COMPOSER_RESERVE) + 10
+      : 12;
   const splitBoundsNow = queueSplit ? splitBounds() : null;
   const assistantRunCopyText = useMemo(
     () => assistantRunCopyTextByItemKey(timelineItems),
@@ -738,6 +792,9 @@ export default function TurnOverlay({
           }`}
           style={timelineStyle}
           onScroll={handleTimelineScroll}
+          onPointerDownCapture={cancelJumpToLatest}
+          onWheelCapture={cancelJumpToLatest}
+          onKeyDownCapture={cancelJumpToLatest}
         >
         {timelineItems.length === 0 && !thinking ? (
           <div className="empty-state turn-empty-state">
@@ -842,6 +899,22 @@ export default function TurnOverlay({
         </div>
         </div>
       </TranscriptLinkActionsProvider>
+      <button
+        type="button"
+        className={`turn-jump-to-latest${jumpToLatestVisible ? " is-visible" : ""}`}
+        style={{ bottom: jumpToLatestBottom }}
+        aria-hidden={!jumpToLatestVisible}
+        tabIndex={jumpToLatestVisible ? 0 : -1}
+        onClick={(event) => {
+          // Once the pill slips away at the bottom, leaving focus on it would
+          // strand keyboard users on an invisible control.
+          event.currentTarget.blur();
+          jumpToLatest();
+        }}
+      >
+        <ArrowDown size={12} aria-hidden="true" />
+        Jump to latest
+      </button>
       {input ? (
         <div
           className={`turn-sidebar-input${queueSplit ? " is-split" : ""}`}

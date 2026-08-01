@@ -914,26 +914,27 @@
 
 .pane-context-details {
   display: grid;
-  gap: 1px;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 1px;
   margin: 0;
   font-size: var(--fs-sm);
 }
 
 .pane-context-details div {
-  display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
-  gap: 10px;
-  padding: 3px 6px;
+  display: contents;
 }
 
 .pane-context-details dt {
   min-width: 0;
+  padding: 3px 0 3px 6px;
   white-space: nowrap;
 }
 
 .pane-context-details dd {
   min-width: 0;
   margin: 0;
+  padding: 3px 6px 3px 0;
   color: var(--text-strong);
   overflow-wrap: anywhere;
 }

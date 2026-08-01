@@ -12249,6 +12249,7 @@ function MainApp() {
         showActivityDetail={settings.showToolCalls}
         stickyUserMessages={settings.stickyUserMessages}
         showAssistantTimestamps={settings.showAssistantTimestamps}
+        reduceMotion={settings.reduceMotion}
         agentId={agent?.id ?? surface.pane.id}
         getTranscriptScroll={getTranscriptScroll}
         saveTranscriptScroll={saveTranscriptScroll}
