@@ -108,8 +108,8 @@ Build the app:
 ```
 npm run build
 
-# Try the Finder-based DMG window layout:
-QMUX_DMG_FINDER_LAYOUT=1 npm run build
+# Headless build without the Finder-styled DMG window:
+CI=true npm run build
 ```
 
 Run a release build directly:
