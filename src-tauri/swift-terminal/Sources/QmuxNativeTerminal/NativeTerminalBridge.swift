@@ -353,6 +353,28 @@ public func qmuxNativeTerminalThemeCatalog() -> UnsafePointer<CChar>? {
     themeCatalogCString
 }
 
+/// Visible viewport as plain UTF-8 (no scrollback). Caller must free with
+/// `qmux_native_terminal_free_string`. Returns null when the pane or surface
+/// is missing. Uses the off-main session registry so PiP polling does not
+/// serialize behind AppKit layout.
+@_cdecl("qmux_native_terminal_read_viewport_text")
+public func qmuxNativeTerminalReadViewportText(
+    _ paneID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    guard let paneID = terminalString(paneID),
+          let session = TerminalSessionRegistry.shared.session(for: paneID),
+          let text = session.readViewportText()
+    else {
+        return nil
+    }
+    return text.withCString { strdup($0) }
+}
+
+@_cdecl("qmux_native_terminal_free_string")
+public func qmuxNativeTerminalFreeString(_ pointer: UnsafeMutablePointer<CChar>?) {
+    free(pointer)
+}
+
 @_cdecl("qmux_native_terminal_shutdown")
 public func qmuxNativeTerminalShutdown() {
     onTerminalMain {

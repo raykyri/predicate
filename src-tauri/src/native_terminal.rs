@@ -447,6 +447,8 @@ mod imp {
             theme_name: *const c_char,
         ) -> i32;
         fn qmux_native_terminal_theme_catalog() -> *const c_char;
+        fn qmux_native_terminal_read_viewport_text(pane_id: *const c_char) -> *mut c_char;
+        fn qmux_native_terminal_free_string(pointer: *mut c_char);
         fn qmux_native_terminal_shutdown();
     }
 
@@ -843,6 +845,26 @@ mod imp {
             .map_err(|_| "native terminal theme catalog is not valid UTF-8".to_string())
     }
 
+    /// Visible Ghostty viewport as plain text (no scrollback, no SGR colors).
+    /// Used by the expanded-transcript terminal PiP preview.
+    pub fn read_viewport_text(pane_id: &str) -> Result<String, String> {
+        let pane_id = cstring(pane_id, "pane id")?;
+        // SAFETY: Swift returns a freshly strdup'd buffer (or null) that this
+        // call owns and must free via qmux_native_terminal_free_string.
+        let pointer = unsafe { qmux_native_terminal_read_viewport_text(pane_id.as_ptr()) };
+        if pointer.is_null() {
+            return Err(
+                "native terminal pane was not found or its surface is not ready".to_string(),
+            );
+        }
+        // SAFETY: non-null, NUL-terminated, allocated by Swift strdup for us.
+        let text = unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { qmux_native_terminal_free_string(pointer) };
+        Ok(text)
+    }
+
     pub fn shutdown() {
         // SAFETY: shutdown is idempotent and synchronously tears down Swift-owned
         // views on the main thread.
@@ -953,15 +975,19 @@ mod imp {
         Ok("[]".to_string())
     }
 
+    pub fn read_viewport_text(_pane_id: &str) -> Result<String, String> {
+        Err("native terminals are only available on macOS".to_string())
+    }
+
     pub fn shutdown() {}
 }
 
 #[allow(unused_imports)]
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
-    paste_approved_text, prepare_for_webview_reload, receive, remove, seed_settings, send_text,
-    set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
-    submit, update_settings,
+    paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, remove,
+    seed_settings, send_text, set_layout, set_stage_backstop, set_web_overlay_region,
+    set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1388,6 +1414,11 @@ pub fn native_terminal_seed_settings(settings: NativeTerminalSeedSettings) -> Re
 #[tauri::command]
 pub fn native_terminal_theme_catalog() -> Result<String, String> {
     imp::theme_catalog()
+}
+
+#[tauri::command]
+pub fn native_terminal_read_viewport_text(pane_id: String) -> Result<String, String> {
+    imp::read_viewport_text(&pane_id)
 }
 
 #[cfg(all(test, target_os = "macos"))]

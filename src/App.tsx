@@ -95,6 +95,7 @@ import PublishDialog, { type PublishDialogTarget } from "./components/PublishDia
 import SidebarModeToggle from "./components/SidebarModeToggle";
 import TerminalPane from "./components/TerminalPane";
 import type { TerminalPaneHandle } from "./components/TerminalPane";
+import TerminalPip from "./components/TerminalPip";
 import TurnOverlay, {
   formatTurnsTranscript,
   type TranscriptScrollPosition,
@@ -14639,6 +14640,27 @@ function MainApp() {
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
         </aside>
+      ) : null}
+      {/* Text-mode terminal peek while the transcript covers the stage: polls
+          Ghostty viewport text and themed-monospace paints it. Click restores. */}
+      {activeTranscriptVisibleExpanded && activePane && IS_MAC ? (
+        <TerminalPip
+          paneId={activePane.id}
+          title={displayPaneTitle(activePane, agentByPaneId.get(activePane.id))}
+          theme={
+            themeCatalog?.find((theme) => theme.name === terminalThemeName) ??
+            effectiveTheme
+          }
+          fontFamily={terminalFontFamily}
+          fontSize={terminalFontSize}
+          onRestore={() => {
+            activateTerminalPane(activePane.id);
+            // Default splitMode follows splitRightPaneMode: non-split expansion
+            // lives in transcriptExpandedByPane; hardcoding true would leave
+            // single-pane expanded state stuck open.
+            setTranscriptExpandedForPane(activePane.id, false);
+          }}
+        />
       ) : null}
       {renderFloatingPaneRestoreControls()}
 

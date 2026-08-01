@@ -1026,6 +1026,14 @@ export async function listNativeTerminalThemes(): Promise<NativeTerminalTheme[]>
   return JSON.parse(catalog) as NativeTerminalTheme[];
 }
 
+/**
+ * Plain-text snapshot of a native terminal's visible viewport (no scrollback,
+ * no SGR colors). Used by the expanded-transcript PiP preview.
+ */
+export function readNativeTerminalViewportText(paneId: string) {
+  return invoke<string>("native_terminal_read_viewport_text", { paneId });
+}
+
 export function paneActivity(paneId: string) {
   return invoke<PaneActivity>("pane_activity", { paneId });
 }

@@ -785,6 +785,104 @@
   gap: 6px;
 }
 
+/* Scrollback-text picture-in-picture over the expanded transcript. Sits above
+   the expanded pane (z-index 7) and below stage-level restore chrome (9). */
+.terminal-pip {
+  position: absolute;
+  right: 14px;
+  bottom: 14px;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  width: min(360px, calc(100% - 28px));
+  max-height: min(240px, 42vh);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 18%, transparent);
+  border-radius: 10px;
+  background: var(--terminal-pip-bg, #111315);
+  color: var(--terminal-pip-fg, #e7e7e2);
+  box-shadow:
+    0 10px 28px rgba(0, 0, 0, 0.42),
+    0 0 0 1px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.terminal-pip:hover {
+  border-color: color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 32%, transparent);
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 1px rgba(0, 0, 0, 0.4);
+}
+
+.terminal-pip:focus-visible {
+  outline: none;
+  box-shadow:
+    0 12px 32px rgba(0, 0, 0, 0.5),
+    0 0 0 2px var(--accent-color, #6ee7a8);
+}
+
+.terminal-pip-chrome {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 0 8px 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 12%, transparent);
+  background: color-mix(in srgb, var(--terminal-pip-bg, #111315) 82%, #000);
+  color: color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 78%, transparent);
+}
+
+.terminal-pip-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.terminal-pip-restore {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  opacity: 0.72;
+}
+
+.terminal-pip:hover .terminal-pip-restore {
+  opacity: 1;
+}
+
+.terminal-pip-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 8px 10px 10px;
+  overflow: hidden;
+  color: var(--terminal-pip-fg, #e7e7e2);
+  font-family: var(--terminal-pip-font-family, var(--font-mono));
+  font-size: var(--terminal-pip-font-size, 10px);
+  font-variant-ligatures: none;
+  line-height: 1.35;
+  letter-spacing: 0;
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  pointer-events: none;
+  user-select: none;
+}
+
 .turn-pane-floating-expand-button,
 .turn-pane-floating-collapse-button,
 .turn-pane-floating-restore-button {
