@@ -220,8 +220,7 @@ import {
   pendingGraphOverlayTurns,
   threadIdForAgent,
 } from "./lib/threadGraph";
-import { formatPlainTextTranscript, transcriptJumpTargets } from "./lib/turnTimeline";
-import { requestScrollToMessage } from "./lib/transcriptNavigation";
+import { formatPlainTextTranscript } from "./lib/turnTimeline";
 import {
   requestResearchFollowupsFocus,
   requestResearchFolderMenuToggle,
@@ -398,7 +397,6 @@ import {
   listClaudeSkills,
   listNativeTerminalThemes,
   listSavedPrompts,
-  listAgentBranches,
   listAgentTranscripts,
   listAgentTurnQueue,
   listGlobalDrafts,
@@ -429,7 +427,6 @@ import {
   reorderGroups,
   readMarkdownDocumentFile,
   restoreLastClosedPane,
-  resumeRecentSession,
   seedNativeTerminalSettings,
   setLauncherAdapterPreference,
   setActiveTab,
@@ -459,7 +456,6 @@ import {
 } from "./lib/api";
 import type {
   AgentInfo,
-  BranchInfo,
   ClaudeSkill,
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
@@ -493,8 +489,6 @@ const LEFT_SIDEBAR_MAX_WIDTH = 420;
 // Below this width the New shell/New agent buttons drop their icons to keep the
 // labels readable. (The icon-only Settings cog always keeps its icon.)
 const LEFT_SIDEBAR_COMPACT_WIDTH = 270;
-// How many recent prompts the transcript menu's "Go to…" section lists.
-const TRANSCRIPT_JUMP_TARGET_LIMIT = 20;
 const PANE_TAB_DRAG_START_THRESHOLD = 4;
 const PANE_TAB_DRAG_CLICK_SUPPRESS_MS = 100;
 type ResearchViewedAckOptions = {
@@ -1618,9 +1612,6 @@ function MainApp() {
   const [transcriptOptionsByAgent, setTranscriptOptionsByAgent] = useState<
     Record<string, TranscriptOption[]>
   >({});
-  // Fork lineage per agent for the right pane's branch menu. Fetched alongside
-  // the transcript list when an agent's right pane becomes visible.
-  const [branchesByAgent, setBranchesByAgent] = useState<Record<string, BranchInfo[]>>({});
   const [waitTargetHoverAgentId, setWaitTargetHoverAgentId] = useState<string | null>(null);
   // The agent whose split cell a queued-card drag is currently hovering, so that
   // cell can render as the drop target while dragging a card between splits.
@@ -3905,7 +3896,6 @@ function MainApp() {
     };
     setTranscriptNoticeByAgent(pruneRecord);
     setTranscriptOptionsByAgent(pruneRecord);
-    setBranchesByAgent(pruneRecord);
     setProcessingNewMessageByAgent(pruneRecord);
     setThinkingAgentIds((current) => {
       const next = new Set([...current].filter((id) => ids.has(id)));
@@ -4597,11 +4587,6 @@ function MainApp() {
     .map((surface) => surface.agent?.id)
     .filter((agentId): agentId is string => Boolean(agentId));
   const visibleTurnPaneAgentIdsKey = visibleTurnPaneAgentIds.join("\0");
-  // Identity of the agent set as the branch menu sees it. Only membership and
-  // session ids matter, so ordinary status churn doesn't refetch every lineage.
-  const agentLineageKey = agents
-    .map((agent) => `${agent.id}:${agent.sessionId ?? ""}`)
-    .join("\0");
   const terminalPaneIsReadOnly = (pane: PaneInfo) =>
     groupById.get(pane.groupId)?.scope === "research" &&
     agentByPaneId.get(pane.id)?.status !== "awaitingPermission" &&
@@ -4795,17 +4780,6 @@ function MainApp() {
     // refreshTranscriptOptions only touches stable setters/imports.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visibleTurnPaneAgentIdsKey]);
-
-  // Lineage changes shape from outside this pane — a fork adds an agent, and a
-  // fork's SessionStart hook fills in the session id that lineage grouping keys
-  // on — so the branch menu refetches on those transitions, not just on focus.
-  useEffect(() => {
-    for (const agentId of visibleTurnPaneAgentIds) {
-      void refreshAgentBranches(agentId);
-    }
-    // refreshAgentBranches only touches stable setters/imports.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleTurnPaneAgentIdsKey, agentLineageKey]);
 
   // Content-unchanged rebuilds are already rare here: the agents array keeps
   // its identity across no-op hook events (upsertAgent bails out), terminal
@@ -5341,46 +5315,6 @@ function MainApp() {
       return;
     }
     setAgentQueuedTurns(agentId, queuedTurns);
-  }
-
-  async function refreshAgentBranches(agentId: string) {
-    try {
-      const branches = await listAgentBranches(agentId);
-      setBranchesByAgent((current) => ({ ...current, [agentId]: branches }));
-    } catch {
-      // Like the transcript picker, the branch menu is a best-effort aid; a
-      // failed lookup just leaves the lineage list out of the menu.
-    }
-  }
-
-  // Focuses another branch of the current lineage. A branch whose pane is still
-  // open is just a tab switch; one that was closed is reopened first — and
-  // recent_session_resume returns the live pane when it turns out to still be
-  // open, so the two paths converge safely if our liveness view is stale.
-  async function selectBranch(branch: BranchInfo) {
-    setError(null);
-    const livePane = branch.paneId
-      ? panes.find((pane) => pane.id === branch.paneId)
-      : undefined;
-    if (livePane) {
-      setActivePaneId(livePane.id);
-      return;
-    }
-    if (!branch.recentSessionId) {
-      // No pane and no recent-session record: nothing to focus or revive. This
-      // is a fork still waiting on its first SessionStart hook.
-      setError("that branch is still starting up");
-      return;
-    }
-    try {
-      const pane = await resumeRecentSession(branch.recentSessionId);
-      setPanes((current) =>
-        current.some((existing) => existing.id === pane.id) ? current : [...current, pane],
-      );
-      setActivePaneId(pane.id);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    }
   }
 
   async function refreshTranscriptOptions(agentId: string) {
@@ -12312,18 +12246,6 @@ function MainApp() {
                   void handleSelectTranscript(agent.id, path);
                 }
               }}
-              canFork={!researchBound && agentCanFork(agent)}
-              onFork={(options) => void forkActivePane(options)}
-              branches={agent && !researchBound ? (branchesByAgent[agent.id] ?? []) : []}
-              onSelectBranch={(branch) => void selectBranch(branch)}
-              jumpTargets={
-                agent ? transcriptJumpTargets(surface.turns, TRANSCRIPT_JUMP_TARGET_LIMIT) : []
-              }
-              // Addressed to the id TurnOverlay listens on, which falls back to
-              // the pane when the surface has no agent.
-              onJumpToMessage={(messageKey) =>
-                requestScrollToMessage(agent?.id ?? surface.pane.id, messageKey)
-              }
               showQueueSplit={Boolean(agent) && !researchBound}
               queueSplit={surface.queueSplit}
               onToggleQueueSplit={toggleActiveQueueSplit}

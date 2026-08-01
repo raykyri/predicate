@@ -1,10 +1,9 @@
 // Cross-component channels for research-surface shortcuts. The app-level
 // shortcut dispatcher lives in App.tsx while the follow-up composer belongs to
 // ResearchDocument and the folder menu's open state to ResearchFolderSwitcher,
-// so window events bridge them the same way `qmux:scroll-to-message` bridges
-// the transcript jump menu to its scroll container. Each target component is
-// mounted at most once (the active document, the research sidebar's switcher),
-// so the events carry no addressing detail.
+// so window events bridge those portaled surfaces back to their owners. Each
+// target component is mounted at most once (the active document, the research
+// sidebar's switcher), so the events carry no addressing detail.
 
 const FOCUS_FOLLOWUPS_EVENT = "qmux:research-focus-followups";
 const TOGGLE_FOLDER_MENU_EVENT = "qmux:research-toggle-folder-menu";

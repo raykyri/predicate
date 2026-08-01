@@ -1,6 +1,5 @@
 import {
   Expand,
-  GitBranch,
   Globe,
   Minimize2,
   PanelLeftOpen,
@@ -13,22 +12,18 @@ import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
 import PromptLibraryMenu from "./PromptLibraryMenu";
 import { formatRelativeTime, sessionMenuTitle } from "../lib/transcriptSessions";
-import type { TranscriptJumpTarget } from "../lib/turnTimeline";
-import type { BranchInfo, TranscriptOption } from "../types";
+import type { TranscriptOption } from "../types";
 
 // How long the "copied" toast stays up after copying the session id.
 const COPIED_TOAST_MS = 1600;
 
 // Preferred natural widths for the header menus; placement clamps them to the pane.
 const SESSION_MENU_PREFERRED_WIDTH = 320;
-// Wider than the fork actions alone need: the menu also lists sibling branches,
-// whose rows carry a prompt preview.
-const FORK_MENU_PREFERRED_WIDTH = 300;
 
 // The top bar across the right pane: the active session's id on the left, and
-// session/browser/transcript controls on the right. Forking is only enabled for
-// supported sessions with a live id. Its height matches the browser overlay's
-// address bar so the two read as a single chrome line when the browser is open.
+// session/browser/transcript controls on the right. Its height matches the
+// browser overlay's address bar so the two read as a single chrome line when
+// the browser is open.
 interface TurnPaneHeaderProps {
   agentId?: string | null;
   // The active agent's session id, or null before SessionStart lands.
@@ -38,21 +33,6 @@ interface TurnPaneHeaderProps {
   transcriptOptions: TranscriptOption[];
   transcriptPath: string | null;
   onSelectTranscript: (path: string | null) => void;
-  // Only supported sessions with a valid session id can be forked.
-  canFork: boolean;
-  // Fork the session into a child tab of the current one, optionally in a fresh
-  // git worktree.
-  onFork: (options: { nest: boolean; useWorktree: boolean }) => void;
-  // Sibling sessions in this agent's fork lineage, root first. Empty until the
-  // agent has a session id, or when it has never been forked.
-  branches: BranchInfo[];
-  // Focuses another branch, reopening its pane if it was closed.
-  onSelectBranch: (branch: BranchInfo) => void;
-  // The recent user prompts offered by the menu's "Go to…" section, oldest
-  // first. Empty when the pane has no transcript to jump around in.
-  jumpTargets: TranscriptJumpTarget[];
-  // Scrolls the transcript to a prompt by its message key.
-  onJumpToMessage: (messageKey: string) => void;
   showQueueSplit: boolean;
   queueSplit: boolean;
   onToggleQueueSplit: () => void;
@@ -72,30 +52,6 @@ interface TurnPaneHeaderProps {
   promptProjectPath?: string | null;
 }
 
-// A branch is named by its first prompt when one has been recorded. Before that
-// (a fork spawned but not yet talked to) fall back to a short session id, then to
-// a placeholder for a fork whose SessionStart hook hasn't landed.
-function branchTitle(branch: BranchInfo): string {
-  const preview = branch.preview?.trim();
-  if (preview) {
-    return preview;
-  }
-  const sessionId = branch.sessionId?.trim();
-  return sessionId ? `Session ${sessionId.slice(0, 8)}` : "Starting…";
-}
-
-function branchMeta(branch: BranchInfo): string {
-  const parts = [branch.isRoot ? "Root" : "Fork"];
-  if (branch.missing) {
-    // Explains why the row is disabled.
-    parts.push("Unavailable");
-  } else if (!branch.live) {
-    parts.push("Closed");
-  }
-  parts.push(formatRelativeTime(branch.lastActiveAt));
-  return parts.join(" · ");
-}
-
 type MenuPos = {
   left: number;
   top: number;
@@ -109,12 +65,6 @@ export default function TurnPaneHeader({
   transcriptOptions,
   transcriptPath,
   onSelectTranscript,
-  canFork,
-  onFork,
-  branches,
-  onSelectBranch,
-  jumpTargets,
-  onJumpToMessage,
   showQueueSplit,
   queueSplit,
   onToggleQueueSplit,
@@ -129,10 +79,6 @@ export default function TurnPaneHeader({
   promptProjectDir,
   promptProjectPath,
 }: TurnPaneHeaderProps) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const menuPopoverRef = useRef<HTMLDivElement | null>(null);
-  const [menuPos, setMenuPos] = useState<MenuPos | null>(null);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const sessionTriggerRef = useRef<HTMLButtonElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
@@ -147,14 +93,6 @@ export default function TurnPaneHeader({
     [transcriptOptions],
   );
   const canOpenSessionMenu = Boolean(sessionId || sessionOptions.length > 0);
-  // The branch menu carries both the lineage list and the fork actions, so it
-  // opens when either has something to offer. A lineage of one is just this
-  // session, which the header already names — not worth a list.
-  const siblingBranches = branches.length > 1 ? branches : [];
-  // Jumping counts as a reason to open the menu on its own: a session that
-  // cannot fork (no recorded session id yet) can still have a transcript worth
-  // navigating.
-  const canOpenBranchMenu = canFork || siblingBranches.length > 0 || jumpTargets.length > 0;
 
   // Clear any pending toast timer on unmount so it can't fire into a gone component.
   useEffect(() => {
@@ -164,39 +102,6 @@ export default function TurnPaneHeader({
       }
     };
   }, []);
-
-  // Close the fork menu on an outside click or Escape while it is open.
-  useEffect(() => {
-    if (!menuOpen) {
-      return;
-    }
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        !menuTriggerRef.current?.contains(target) &&
-        !menuPopoverRef.current?.contains(target)
-      ) {
-        setMenuOpen(false);
-      }
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMenuOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [menuOpen]);
-
-  useEffect(() => {
-    if (!canOpenBranchMenu) {
-      setMenuOpen(false);
-    }
-  }, [canOpenBranchMenu]);
 
   // Close the session menu on an outside click or Escape while it is open.
   useEffect(() => {
@@ -231,8 +136,8 @@ export default function TurnPaneHeader({
     }
   }, [canOpenSessionMenu]);
 
-  // Portaled menus escape the header/sidebar overflow:hidden. Session opens from
-  // the left control (grow right / toward center); fork from the right (grow left).
+  // The portaled menu escapes the header/sidebar overflow:hidden and opens from
+  // the left control toward the pane center.
   const positionSessionMenu = useCallback(() => {
     const trigger = sessionTriggerRef.current;
     const popover = sessionPopoverRef.current;
@@ -246,24 +151,6 @@ export default function TurnPaneHeader({
         popoverSize: { width: SESSION_MENU_PREFERRED_WIDTH, height },
         paneRect: turnPaneRectFrom(trigger),
         align: "start",
-        prefer: "below",
-      }),
-    );
-  }, []);
-
-  const positionForkMenu = useCallback(() => {
-    const trigger = menuTriggerRef.current;
-    const popover = menuPopoverRef.current;
-    if (!trigger || !popover) {
-      return;
-    }
-    const { height } = popover.getBoundingClientRect();
-    setMenuPos(
-      placePanePopover({
-        triggerRect: trigger.getBoundingClientRect(),
-        popoverSize: { width: FORK_MENU_PREFERRED_WIDTH, height },
-        paneRect: turnPaneRectFrom(trigger),
-        align: "end",
         prefer: "below",
       }),
     );
@@ -283,31 +170,6 @@ export default function TurnPaneHeader({
       window.removeEventListener("scroll", onReflow, true);
     };
   }, [sessionMenuOpen, positionSessionMenu, sessionOptions.length]);
-
-  useLayoutEffect(() => {
-    if (!menuOpen) {
-      setMenuPos(null);
-      return;
-    }
-    positionForkMenu();
-    const onReflow = () => positionForkMenu();
-    window.addEventListener("resize", onReflow);
-    window.addEventListener("scroll", onReflow, true);
-    return () => {
-      window.removeEventListener("resize", onReflow);
-      window.removeEventListener("scroll", onReflow, true);
-    };
-  }, [menuOpen, positionForkMenu]);
-
-  const fork = (options: { nest: boolean; useWorktree: boolean }) => {
-    setMenuOpen(false);
-    onFork(options);
-  };
-
-  const selectBranch = (branch: BranchInfo) => {
-    setMenuOpen(false);
-    onSelectBranch(branch);
-  };
 
   const selectTranscript = (path: string | null) => {
     setSessionMenuOpen(false);
@@ -344,10 +206,7 @@ export default function TurnPaneHeader({
             title="Session actions"
             aria-haspopup="menu"
             aria-expanded={sessionMenuOpen}
-            onClick={() => {
-              setMenuOpen(false);
-              setSessionMenuOpen((open) => !open);
-            }}
+            onClick={() => setSessionMenuOpen((open) => !open)}
           >
             {sessionId ? `Session: ${sessionId}` : "New session"}
           </button>
@@ -429,135 +288,6 @@ export default function TurnPaneHeader({
           projectDir={promptProjectDir}
           projectPath={promptProjectPath}
         />
-        <div className="turn-pane-fork">
-          <button
-            ref={menuTriggerRef}
-            type="button"
-            className="icon-button turn-pane-header-button"
-            disabled={!canOpenBranchMenu}
-            title={
-              canOpenBranchMenu
-                ? "Branches"
-                : "Forking is available after a supported session id is recorded"
-            }
-            aria-label="Branches"
-            aria-haspopup="menu"
-            aria-expanded={canOpenBranchMenu ? menuOpen : false}
-            onClick={() => {
-              if (canOpenBranchMenu) {
-                setSessionMenuOpen(false);
-                setMenuOpen((open) => !open);
-              }
-            }}
-          >
-            <GitBranch size={14} aria-hidden="true" />
-          </button>
-          {canOpenBranchMenu && menuOpen
-            ? createPortal(
-                <div
-                  ref={menuPopoverRef}
-                  className="popover-surface turn-pane-fork-menu"
-                  role="menu"
-                  style={
-                    menuPos
-                      ? {
-                          left: menuPos.left,
-                          top: menuPos.top,
-                          maxHeight: menuPos.maxHeight,
-                          width: Math.min(FORK_MENU_PREFERRED_WIDTH, menuPos.maxWidth),
-                          maxWidth: menuPos.maxWidth,
-                        }
-                      : { left: -9999, top: -9999 }
-                  }
-                >
-                  {siblingBranches.length > 0 ? (
-                    <>
-                      <div className="turn-pane-branch-label">Branches</div>
-                      <div
-                        className="turn-pane-branch-list"
-                        role="group"
-                        aria-label="Switch branch"
-                      >
-                        {siblingBranches.map((branch) => {
-                          const current = Boolean(agentId) && branch.agentId === agentId;
-                          return (
-                            <button
-                              key={branch.recentSessionId ?? branch.agentId ?? branch.sessionId}
-                              type="button"
-                              role="menuitemcheckbox"
-                              aria-checked={current}
-                              // A missing branch has no transcript left to reopen;
-                              // the current one is already on screen.
-                              disabled={current || branch.missing}
-                              className={`menu-item menu-item--compact turn-pane-branch-item${
-                                current ? " is-active" : ""
-                              }`}
-                              title={branch.sessionId ?? undefined}
-                              onClick={() => selectBranch(branch)}
-                            >
-                              <span className="turn-pane-branch-title">
-                                {branchTitle(branch)}
-                              </span>
-                              <span className="turn-pane-branch-meta">
-                                {branchMeta(branch)}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                      <div className="menu-divider" role="separator" />
-                    </>
-                  ) : null}
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="menu-item menu-item--compact turn-pane-fork-item"
-                    disabled={!canFork}
-                    onClick={() => fork({ nest: true, useWorktree: false })}
-                  >
-                    Fork session
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="menu-item menu-item--compact turn-pane-fork-item"
-                    disabled={!canFork}
-                    onClick={() => fork({ nest: true, useWorktree: true })}
-                  >
-                    Fork session in worktree
-                  </button>
-                  {jumpTargets.length > 0 ? (
-                    <>
-                      <div className="menu-divider" role="separator" />
-                      <div className="turn-pane-branch-label">Go to…</div>
-                      <div
-                        className="turn-pane-jump-list"
-                        role="group"
-                        aria-label="Go to message"
-                      >
-                        {jumpTargets.map((target) => (
-                          <button
-                            key={target.key}
-                            type="button"
-                            role="menuitem"
-                            className="menu-item menu-item--compact turn-pane-jump-item"
-                            title={target.text}
-                            onClick={() => {
-                              setMenuOpen(false);
-                              onJumpToMessage(target.key);
-                            }}
-                          >
-                            <span className="turn-pane-jump-text">{target.text}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </>
-                  ) : null}
-                </div>,
-                document.body,
-              )
-            : null}
-        </div>
         {showQueueSplit ? (
           <button
             type="button"

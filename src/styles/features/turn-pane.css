@@ -308,8 +308,8 @@
   border-bottom-left-radius: 0;
 }
 
-/* Shared by the prompt-library, fork, queue split, transcript, and
-   collapse buttons. Some also carry .control-button, whose min-height (30px) and
+/* Shared by the prompt-library, queue split, transcript, and collapse buttons.
+   Some also carry .control-button, whose min-height (30px) and
    horizontal padding would otherwise leak in and make those buttons taller than
    the plain .icon-button ones; neutralizing both here keeps all header buttons a
    uniform 28px square with the icon centered. */
@@ -369,8 +369,8 @@
   display: flex;
 }
 
-/* Portaled; right-aligned to its trigger like the fork menu, but taller: it hosts
-   a search field, a scrolling prompt list, and small inline fill/edit forms. */
+/* Portaled and right-aligned to its trigger; hosts a search field, a scrolling
+   prompt list, and small inline fill/edit forms. */
 .prompt-library-menu {
   gap: 6px;
   padding: 8px;
@@ -911,130 +911,6 @@
   margin-left: -1px;
   border-top-left-radius: 0;
   border-bottom-left-radius: 0;
-}
-
-.turn-pane-fork {
-  position: relative;
-  display: flex;
-}
-
-/* Portaled; right-aligned to the fork button so it grows toward the pane center. */
-.turn-pane-fork-menu {
-  gap: 2px;
-  padding: 4px;
-  overflow-y: auto;
-}
-
-.turn-pane-fork-item {
-  padding-inline: 10px;
-}
-
-.turn-pane-fork-item:disabled {
-  color: var(--text-faint);
-  cursor: default;
-}
-
-/* Lineage list above the fork actions in the branch menu. Capped so a long-lived
-   lineage scrolls inside the menu instead of growing it past the pane. */
-.turn-pane-branch-label {
-  padding: 2px 10px 3px;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  line-height: 1.2;
-}
-
-.turn-pane-branch-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 220px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.turn-pane-jump-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 260px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.turn-pane-jump-item {
-  /* menu-item is display:flex; keep items top-aligned and let the button grow
-     with the clamped label (up to two lines) instead of a single-line min-height. */
-  align-items: flex-start;
-  height: auto;
-  min-height: 0;
-  padding-block: 6px;
-  padding-inline: 10px;
-  white-space: normal;
-  text-align: left;
-}
-
-/* Prompts run to arbitrary length, so each entry clamps to two lines with a
-   trailing ellipsis. The clamp lives on an inner span rather than the button:
-   WebKit lays a button's children out in an anonymous inner box, so a
-   line-clamp set on the button never reaches the text and the prompt renders
-   in full. Keeping the button's padding off the clamped box also avoids
-   WebKit letting a third line bleed into padding-bottom instead of
-   ellipsizing. `overflow-wrap` keeps an unbroken token — a URL or a long path
-   — from pushing the menu wider than its measured width. The flex child must
-   take the full button width (`flex: 1; min-width: 0`) or -webkit-box never
-   measures a finite line length and the clamp fails. */
-.turn-pane-jump-text {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  flex: 1 1 auto;
-  width: 100%;
-  min-width: 0;
-  max-height: calc(1.35em * 2);
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  white-space: normal;
-  line-height: 1.35;
-  text-overflow: ellipsis;
-}
-
-.turn-pane-branch-item {
-  display: block;
-  padding-inline: 10px;
-  text-align: left;
-}
-
-.turn-pane-branch-title {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  line-height: 1.35;
-  color: var(--text-primary);
-}
-
-/* The current branch and an unavailable one are both disabled; only the current
-   one reads as selected. */
-.turn-pane-branch-item.is-active .turn-pane-branch-title {
-  color: var(--accent-color);
-}
-
-.turn-pane-branch-item:disabled:not(.is-active) .turn-pane-branch-title {
-  color: var(--text-faint);
-}
-
-.turn-pane-branch-meta {
-  display: block;
-  margin-top: 3px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  line-height: 1.25;
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
 }
 
 /* Make room for the top bar (40px + its 1px border). */

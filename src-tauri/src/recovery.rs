@@ -1,15 +1,10 @@
 use crate::adapters::adapter_registry;
 use crate::events::QmuxEvent;
-use crate::pty::{InitialPaneSize, respawn_shell_pane};
+use crate::pty::respawn_shell_pane;
 use crate::scrollback::append_pane_scrollback;
 use crate::state::{AppState, PaneInfo, PaneKind, PaneStatus};
-use crate::workspace::{
-    AgentInfo, AgentStatus, LaunchOrigin, mark_agent_failed, validate_launch_workspace,
-};
+use crate::workspace::{LaunchOrigin, mark_agent_failed, validate_launch_workspace};
 use serde_json::json;
-
-const DEFAULT_RECENT_SESSION_COLS: u16 = 100;
-const DEFAULT_RECENT_SESSION_ROWS: u16 = 24;
 
 /// Recreates recoverable panes from persisted metadata after a restart.
 ///
@@ -101,112 +96,6 @@ pub fn restore_last_closed_pane(state: &AppState) -> Result<Option<PaneInfo>, St
             Err(err)
         }
     }
-}
-
-pub fn resume_recent_session(
-    state: &AppState,
-    recent_session_id: &str,
-    initial_size: Option<InitialPaneSize>,
-) -> Result<PaneInfo, String> {
-    let session = state
-        .recent_session(recent_session_id)?
-        .ok_or_else(|| "recent session was not found".to_string())?;
-
-    if let Some(pane_id) = session.pane_id.as_deref()
-        && let Some(pane) = state
-            .list_panes()?
-            .into_iter()
-            .find(|pane| pane.id == pane_id)
-    {
-        return Ok(pane);
-    }
-
-    if session.missing {
-        return Err("recent session files are no longer available".to_string());
-    }
-
-    let group_id = session
-        .group_id
-        .clone()
-        .ok_or_else(|| "recent session is missing its group metadata".to_string())?;
-    if state.group(&group_id)?.is_none() {
-        return Err("recent session group is no longer available".to_string());
-    }
-
-    let adapter_registry = adapter_registry(state.config());
-    let adapter = adapter_registry.get(&session.adapter)?;
-    let agent = reusable_recent_agent(state, &session.id)?.unwrap_or_else(|| AgentInfo {
-        id: state.next_id("agent"),
-        group_id,
-        adapter: session.adapter.clone(),
-        worktree_dir: session.worktree_dir.clone(),
-        branch: session.branch.clone(),
-        pane_id: None,
-        orphaned_queue_pane_id: None,
-        session_id: session.session_id.clone(),
-        transcript_path: session.transcript_path.clone(),
-        status: AgentStatus::Starting,
-        model: session.model.clone(),
-        parent_id: session.parent_id.clone(),
-        fork_point: session.fork_point.clone(),
-        root_session_id: session.root_session_id.clone(),
-        thread_id: None,
-        branch_id: None,
-        paused: false,
-        created_at: session.created_at,
-    });
-    let agent = AgentInfo {
-        pane_id: None,
-        orphaned_queue_pane_id: None,
-        status: AgentStatus::Starting,
-        ..agent
-    };
-    state.insert_agent(agent.clone())?;
-
-    let size = initial_size.unwrap_or(InitialPaneSize {
-        cols: DEFAULT_RECENT_SESSION_COLS,
-        rows: DEFAULT_RECENT_SESSION_ROWS,
-    });
-    let pane = PaneInfo {
-        id: state.next_id("pane"),
-        title: adapter.display_name().to_string(),
-        last_osc_title: None,
-        kind: PaneKind::Agent,
-        agent_id: Some(agent.id.clone()),
-        group_id: agent.group_id.clone(),
-        cwd: agent.worktree_dir.clone(),
-        cols: size.cols,
-        rows: size.rows,
-        status: PaneStatus::Starting,
-        last_active_at: crate::state::now_millis(),
-        recovered: false,
-        depth: 0,
-    };
-
-    match adapter.resume(state, &pane, &agent) {
-        Ok(pane) => Ok(pane),
-        Err(err) => {
-            let _ = mark_agent_failed(state, &agent.id);
-            Err(err)
-        }
-    }
-}
-
-fn reusable_recent_agent(
-    state: &AppState,
-    recent_session_id: &str,
-) -> Result<Option<AgentInfo>, String> {
-    Ok(state.list_agents()?.into_iter().find(|agent| {
-        agent.pane_id.is_none()
-            && recent_session_id
-                == crate::state::recent_session_key(
-                    &agent.adapter,
-                    agent.session_id.as_deref(),
-                    agent.transcript_path.as_deref(),
-                )
-                .as_deref()
-                .unwrap_or("")
-    }))
 }
 
 fn restore_closed_pane_snapshot(

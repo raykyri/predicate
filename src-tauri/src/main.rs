@@ -60,7 +60,7 @@ use show_hide_shortcut::{
 };
 use sleep::SleepGuard;
 use state::{
-    AppState, BranchInfo, PaneInfo, PaneLayoutEntry, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
+    AppState, PaneInfo, PaneLayoutEntry, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
     ShellAgentJobInfo,
 };
 use tauri::Manager;
@@ -685,28 +685,6 @@ fn list_recent_sessions(
     limit: Option<usize>,
 ) -> Result<Vec<RecentSessionInfo>, String> {
     state.list_recent_sessions(limit.unwrap_or(12))
-}
-
-#[tauri::command(async)]
-fn agent_branches(
-    state: tauri::State<'_, AppState>,
-    agent_id: String,
-) -> Result<Vec<BranchInfo>, String> {
-    state.list_agent_branches(&agent_id)
-}
-
-#[tauri::command]
-async fn recent_session_resume(
-    state: tauri::State<'_, AppState>,
-    session_id: String,
-    initial_size: Option<InitialPaneSize>,
-) -> Result<PaneInfo, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        recovery::resume_recent_session(&state, &session_id, initial_size)
-    })
-    .await
-    .map_err(|err| format!("recent_session_resume task failed: {err}"))?
 }
 
 #[tauri::command(async)]
@@ -2592,8 +2570,6 @@ fn main() {
             list_agents,
             list_shell_agent_jobs,
             list_recent_sessions,
-            agent_branches,
-            recent_session_resume,
             list_turns,
             list_home_turn_history,
             list_thread_graphs,

@@ -134,28 +134,6 @@ export interface AgentInfo {
   createdAt: number;
 }
 
-// One session in a fork lineage, as listed in the turn pane's branch menu.
-// Mirrors `BranchInfo` in src-tauri/src/state.rs.
-export interface BranchInfo {
-  // Handle `resumeRecentSession` takes to revive a branch whose pane is gone.
-  // Null for a live agent with no recent-session record yet.
-  recentSessionId?: string | null;
-  agentId?: string | null;
-  paneId?: string | null;
-  sessionId?: string | null;
-  adapter: string;
-  preview?: string | null;
-  status?: AgentInfo["status"] | null;
-  // Session id this branch forked from; null for the lineage root.
-  forkPoint?: string | null;
-  isRoot: boolean;
-  live: boolean;
-  // Transcript or worktree is gone, so this branch can't be resumed.
-  missing: boolean;
-  lastActiveAt: number;
-  createdAt: number;
-}
-
 export type ShellAgentJobState = "foreground" | "backgrounded" | "stopped";
 
 export interface ShellAgentJobInfo {

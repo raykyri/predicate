@@ -6,7 +6,6 @@ import {
   assistantTextFromTimelineItems,
   buildTimelineItems,
   formatAbsoluteMessageTimestamp,
-  formatJumpTargetLabel,
   formatMessageTimestamp,
   formatPlainTextTranscript,
   messageItemCopyText,
@@ -14,7 +13,6 @@ import {
   thinkingProseText,
   timelineItemsAfterLastToolCall,
   timelineItemsContainTranscriptActivity,
-  transcriptJumpTargets,
 } from "../src/lib/turnTimeline";
 import type { Turn, TurnBlock } from "../src/types";
 
@@ -627,91 +625,6 @@ test("adding a result preserves the originating tool key", () => {
   const beforeActivity = before[0].activities[0];
   const afterActivity = after[0].activities[0];
   assert.equal(beforeActivity.key, afterActivity.key);
-});
-
-test("jump targets list recent user prompts oldest first", () => {
-  nextIndex = 0;
-  const turns = [
-    turn("user", [text("first")]),
-    turn("assistant", [text("reply one")]),
-    turn("user", [text("second")]),
-    turn("assistant", [text("reply two")]),
-    turn("user", [text("third")]),
-  ];
-
-  const targets = transcriptJumpTargets(turns, 20);
-
-  // Assistant replies are excluded, and order matches the transcript.
-  assert.deepEqual(
-    targets.map((target) => target.text),
-    ["first", "second", "third"],
-  );
-  // Keys address the rendered message, so they must match the timeline's.
-  const userKeys = buildTimelineItems(turns)
-    .filter((item) => item.role === "user")
-    .map((item) => item.key);
-  assert.deepEqual(
-    targets.map((target) => target.key),
-    userKeys,
-  );
-});
-
-test("jump targets keep the newest prompts when over the limit", () => {
-  nextIndex = 0;
-  const turns = Array.from({ length: 25 }, (_, index) => [
-    turn("user", [text(`prompt ${index}`)]),
-    turn("assistant", [text(`reply ${index}`)]),
-  ]).flat();
-
-  const targets = transcriptJumpTargets(turns, 20);
-
-  assert.equal(targets.length, 20);
-  // The window trims from the front: oldest dropped, newest retained.
-  assert.equal(targets[0].text, "prompt 5");
-  assert.equal(targets[19].text, "prompt 24");
-});
-
-// Back-to-back prompts (a queued follow-up) render as one card, so they offer
-// one jump target — the list addresses messages as drawn, not raw turns.
-test("jump targets follow the rendered fold of consecutive prompts", () => {
-  nextIndex = 0;
-  const targets = transcriptJumpTargets(
-    [turn("user", [text("first")]), turn("user", [text("second")])],
-    20,
-  );
-
-  assert.equal(targets.length, 1);
-  assert.match(targets[0].text, /first/);
-});
-
-test("jump targets skip prompts with no plain text", () => {
-  nextIndex = 0;
-  const turns = [
-    turn("user", [text("real prompt")]),
-    turn("user", [text("   ")]),
-    turn("user", [toolResult("stable", "done")]),
-  ];
-
-  assert.deepEqual(
-    transcriptJumpTargets(turns, 20).map((target) => target.text),
-    ["real prompt"],
-  );
-});
-
-test("jump target labels collapse multiline whitespace for the menu clamp", () => {
-  assert.equal(
-    formatJumpTargetLabel("ok show me\n\na sample\nof 20 or so\n"),
-    "ok show me a sample of 20 or so",
-  );
-
-  nextIndex = 0;
-  const targets = transcriptJumpTargets(
-    [turn("user", [text("first line\nsecond line\n\nthird")])],
-    20,
-  );
-  assert.equal(targets.length, 1);
-  assert.equal(targets[0].text, "first line second line third");
-  assert.doesNotMatch(targets[0].text, /\n/);
 });
 
 test("message items carry the latest folded turn timestamp", () => {

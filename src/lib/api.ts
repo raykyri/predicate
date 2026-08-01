@@ -14,7 +14,6 @@ import type {
 } from "./publication";
 import type {
   AgentInfo,
-  BranchInfo,
   ClaudeSkill,
   GlobalDraft,
   GlobalTaskLauncherHotkey,
@@ -639,20 +638,6 @@ export function setWorktreeLocation(location: WorktreeLocation) {
 
 export function spawnAgent(request: SpawnAgentRequest) {
   return invoke<PaneInfo>("agent_spawn", { request });
-}
-
-// Every session in this agent's fork lineage — the root plus every fork of it —
-// root first, then most recently active first. Empty when the agent has no
-// session id yet, which the caller treats as "no branches to show".
-export function listAgentBranches(agentId: string) {
-  return invoke<BranchInfo[]>("agent_branches", { agentId });
-}
-
-// Reopens a branch whose pane was closed. Returns the existing pane untouched if
-// the session is in fact still open, so callers can use it as a plain "focus this
-// branch" call without checking liveness first.
-export function resumeRecentSession(recentSessionId: string) {
-  return invoke<PaneInfo>("recent_session_resume", { sessionId: recentSessionId });
 }
 
 // Forks the session in `paneId` into a new tab and resumes it. With `nest`, the

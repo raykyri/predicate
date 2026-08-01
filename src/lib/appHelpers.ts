@@ -372,7 +372,7 @@ export function isQueuedTurn(value: unknown): value is QueuedTurn {
 }
 
 // Forking needs an adapter with a native fork command and a recorded session id to
-// resume. Single owner of the gate used by the pane header's fork menu, the
+// resume. Single owner of the gate used by context/launcher actions, the
 // selection "Ask in new thread" button, and the composer's queue-and-fork options.
 export function agentCanFork(agent: AgentInfo | null | undefined): boolean {
   return Boolean(
