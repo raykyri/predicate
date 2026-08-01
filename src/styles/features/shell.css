@@ -1207,6 +1207,30 @@
   font-family: var(--font-ui);
 }
 
+/* DM Sans and Anthropic Sans Text sit slightly high in fixed-height control
+   boxes. Nudge label glyphs down on the shared New shell/agent/query/doc and
+   Send/Send Now/Queue control set (and the main composer field that shares
+   the same metric complaint). Other fields already look balanced. */
+html[data-body-font="dm-sans"] .sidebar-actions button > span,
+html[data-body-font="dm-sans"] .native-input-submit-actions button > span {
+  transform: translateY(1px);
+}
+
+html[data-body-font="anthropic-sans-text"] .sidebar-actions button > span,
+html[data-body-font="anthropic-sans-text"] .native-input-submit-actions button > span {
+  transform: translateY(0.5px);
+}
+
+html[data-body-font="dm-sans"] .native-input textarea {
+  padding-top: 9px;
+  padding-bottom: 7px;
+}
+
+html[data-body-font="anthropic-sans-text"] .native-input textarea {
+  padding-top: 8.5px;
+  padding-bottom: 7.5px;
+}
+
 .sidebar-actions button:hover,
 .native-input-submit-actions button:hover:not(:disabled) {
   border-color: var(--control-border-hover-accent);
@@ -2643,6 +2667,7 @@
 .home-group-selector {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
 }
 

@@ -2124,14 +2124,17 @@ function MainApp() {
   // .app-shell: menus and dialogs are portaled to document.body to escape pane
   // clipping, and CSS inheritance follows their DOM parent rather than their
   // React owner. Keeping the root variable current makes those surfaces follow
-  // the same font selection as the rest of the application.
+  // the same font selection as the rest of the application. data-body-font
+  // drives optical text offsets for fonts that sit high in control boxes.
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.style.setProperty("--font-ui", bodyFontFamily);
+    root.dataset.bodyFont = settings.bodyFontId;
     return () => {
       root.style.removeProperty("--font-ui");
+      delete root.dataset.bodyFont;
     };
-  }, [bodyFontFamily]);
+  }, [bodyFontFamily, settings.bodyFontId]);
 
   useEffect(() => {
     let disposed = false;

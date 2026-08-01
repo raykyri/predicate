@@ -38,12 +38,6 @@ const SYSTEM_BODY_FONT_STACK =
 
 export const BODY_FONT_OPTIONS: BodyFontOption[] = [
   {
-    id: "inter",
-    label: "Inter",
-    stack: `"Inter", ${SYSTEM_BODY_FONT_STACK}`,
-    localNames: ["Inter Regular", "Inter-Regular"],
-  },
-  {
     id: "dm-sans",
     label: "DM Sans",
     // Latin and Latin Extended variable faces are bundled with qmux under the SIL OFL 1.1.
@@ -61,6 +55,12 @@ export const BODY_FONT_OPTIONS: BodyFontOption[] = [
     label: "Valley Sans",
     // Roman and italic variable faces are bundled with qmux under the SIL OFL 1.1.
     stack: `"Valley Sans", ${SYSTEM_BODY_FONT_STACK}`,
+  },
+  {
+    id: "inter",
+    label: "Inter",
+    stack: `"Inter", ${SYSTEM_BODY_FONT_STACK}`,
+    localNames: ["Inter Regular", "Inter-Regular"],
   },
   {
     id: "system",
