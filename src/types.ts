@@ -73,6 +73,8 @@ export interface PaneSplitInfo {
   paneIds: string[];
   sizes: Record<string, number>;
   intent?: Record<string, PaneSplitIntent>;
+  /** Split members presented as lightweight side branches instead of terminals. */
+  btwPaneIds?: string[];
 }
 
 export type PaneActivity =

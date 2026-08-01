@@ -202,6 +202,20 @@ test("normalizePaneSplitsForPanes still rejects non-contiguous remaining panes",
   assert.deepEqual(normalized, []);
 });
 
+test("btw split membership survives normalization and prunes stale panes", () => {
+  const normalized = normalizePaneSplitsForPanes(
+    [
+      {
+        ...split(["pane-1", "pane-2", "pane-3"]),
+        btwPaneIds: ["pane-2", "pane-missing"],
+      },
+    ],
+    panes(["pane-1", "pane-2", "pane-3"]),
+  );
+
+  assert.deepEqual(normalized[0].btwPaneIds, ["pane-2"]);
+});
+
 test("selectPaneAfterClose prefers the next split pane when closing the top split pane", () => {
   assert.equal(
     selectPaneAfterClose(panes(["pane-outside", "pane-1", "pane-2"]), "pane-1", [
@@ -396,6 +410,23 @@ test("joinPaneSplit records inserted pane intent", () => {
   assert.deepEqual(joined[0].intent, {
     "pane-2": insertedRelativeIntent("pane-1", "below", "command", 456),
   });
+});
+
+test("joinPaneSplit marks and preserves btw members", () => {
+  const first = joinPaneSplit([], panes(["pane-1", "pane-2"]), "pane-1", "pane-2", {
+    insertedPaneId: "pane-2",
+    btwPaneId: "pane-2",
+  });
+  const joined = joinPaneSplit(
+    first,
+    panes(["pane-1", "pane-2", "pane-3"]),
+    "pane-2",
+    "pane-3",
+    { insertedPaneId: "pane-3", btwPaneId: "pane-3" },
+  );
+
+  assert.deepEqual(joined[0].btwPaneIds, ["pane-2", "pane-3"]);
+  assert.equal(detachPaneFromSplitMemberships(joined, "pane-3")[0].btwPaneIds?.[0], "pane-2");
 });
 
 test("paneSnapshotForPersistedPaneSplits keeps a split when current panes lag a new pane", () => {

@@ -64,6 +64,7 @@ import {
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
+import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
   closeImageLightbox,
@@ -2652,18 +2653,38 @@ function MainApp() {
     return result;
   }, [agents, threadGraphs, turns]);
   const activeAgent = activePane ? agentByPaneId.get(activePane.id) : undefined;
-  const activePaneSplit = useMemo(
+  const activePaneSplitMembership = useMemo(
     () => paneSplitForPane(paneSplits, activePane?.id),
     [activePane?.id, paneSplits],
   );
+  const activeBtwPaneIdSet = useMemo(
+    () => new Set(activePaneSplitMembership?.btwPaneIds ?? []),
+    [activePaneSplitMembership],
+  );
+  // BTW members remain in the persisted split/tab group but consume no native
+  // terminal track. Normal terminal geometry is derived from the remaining panes.
+  const activePaneSplit = useMemo(() => {
+    if (!activePaneSplitMembership) {
+      return null;
+    }
+    const paneIds = activePaneSplitMembership.paneIds.filter(
+      (paneId) => !activeBtwPaneIdSet.has(paneId),
+    );
+    return paneIds.length > 1 ? { ...activePaneSplitMembership, paneIds } : null;
+  }, [activeBtwPaneIdSet, activePaneSplitMembership]);
   const splitRightPaneMode = Boolean(activePaneSplit && activePaneSplit.paneIds.length > 1);
   const activeSplitFractions = useMemo(
     () => (activePaneSplit ? splitFractions(activePaneSplit) : []),
     [activePaneSplit],
   );
   const visibleTerminalPaneIds = useMemo(
-    () => (activePaneSplit ? activePaneSplit.paneIds : activePane ? [activePane.id] : []),
-    [activePane?.id, activePaneSplit],
+    () =>
+      activePaneSplitMembership
+        ? activePaneSplitMembership.paneIds.filter((paneId) => !activeBtwPaneIdSet.has(paneId))
+        : activePane
+          ? [activePane.id]
+          : [],
+    [activeBtwPaneIdSet, activePane?.id, activePaneSplitMembership],
   );
   const visibleTerminalPanes = useMemo(
     () =>
@@ -2675,6 +2696,10 @@ function MainApp() {
   const visibleTerminalPaneIdSet = useMemo(
     () => new Set(visibleTerminalPaneIds),
     [visibleTerminalPaneIds],
+  );
+  const activeSplitMemberIdSet = useMemo(
+    () => new Set(activePaneSplitMembership?.paneIds ?? []),
+    [activePaneSplitMembership],
   );
   const groupById = useMemo(() => new Map(groups.map((group) => [group.id, group])), [groups]);
   const terminalGroups = useMemo(() => groupsForScope(groups, "terminal"), [groups]);
@@ -4523,6 +4548,27 @@ function MainApp() {
   const splitTurnPaneSurfaceByPaneId = new Map(
     splitTurnPaneSurfaces.map((surface) => [surface.pane.id, surface]),
   );
+  const btwTurnPaneSurfaces = activePaneSplitMembership
+    ? activePaneSplitMembership.paneIds
+        .filter((paneId) => activeBtwPaneIdSet.has(paneId))
+        .map((paneId) => paneById.get(paneId))
+        .filter((pane): pane is PaneInfo => Boolean(pane))
+        .map((pane) => turnPaneSurfaceForPane(pane))
+        .filter((surface) => surface.hasTurnSidebar)
+    : [];
+  const btwOwnerByPaneId = new Map<string, string>();
+  if (activePaneSplitMembership) {
+    let ownerPaneId: string | null = null;
+    for (const paneId of activePaneSplitMembership.paneIds) {
+      if (activeBtwPaneIdSet.has(paneId)) {
+        if (ownerPaneId) {
+          btwOwnerByPaneId.set(paneId, ownerPaneId);
+        }
+      } else {
+        ownerPaneId = paneId;
+      }
+    }
+  }
   const visibleTurnPaneSurfaces = splitRightPaneMode
     ? splitTurnPaneSurfaces
     : activeTurnPaneSurface?.hasTurnSidebar
@@ -8315,6 +8361,17 @@ function MainApp() {
   }
 
   function focusPaneTab(paneId: string) {
+    const requestedPaneId = paneId;
+    const split = paneSplitForPane(paneSplitsRef.current, paneId);
+    const focusingBtw = Boolean(split?.btwPaneIds?.includes(paneId));
+    if (focusingBtw && split) {
+      const index = split.paneIds.indexOf(paneId);
+      paneId =
+        split.paneIds
+          .slice(0, Math.max(0, index))
+          .reverse()
+          .find((candidate) => !split.btwPaneIds?.includes(candidate)) ?? paneId;
+    }
     const treeId = researchNodeByPaneIdRef.current.get(paneId)?.treeId;
     const researchExposureChanged = Boolean(
       treeId &&
@@ -8324,7 +8381,10 @@ function MainApp() {
           activeResearchTreeIdRef.current !== treeId),
     );
     setActivePaneId(paneId);
-    acknowledgePaneIfDone(paneId, true);
+    acknowledgePaneIfDone(requestedPaneId, true);
+    if (focusingBtw) {
+      setRightBarCollapsedForPane(false, paneId);
+    }
     if (treeId) {
       void markVisibleResearchTreeViewedRef.current(treeId, {
         force: researchExposureChanged,
@@ -10042,6 +10102,7 @@ function MainApp() {
       prompt?: string;
       anchor?: MessageAnchor;
       btw?: boolean;
+      titlePrompt?: string;
     },
   ): Promise<boolean> {
     setError(null);
@@ -10054,6 +10115,7 @@ function MainApp() {
           joinPaneSplit(paneSplitsRef.current, orderedPanes, pane.id, fork.id, {
             insertedPaneId: fork.id,
             source: "command",
+            btwPaneId: fork.id,
           }),
           orderedPanes,
         );
@@ -10072,7 +10134,7 @@ function MainApp() {
           fork.agentId,
           createPendingFirstMessageTitle(fork.id),
         );
-        applyPendingFirstMessageTitle(fork.agentId, options.prompt);
+        applyPendingFirstMessageTitle(fork.agentId, options.titlePrompt ?? options.prompt);
       }
       return true;
     } catch (err) {
@@ -11819,15 +11881,17 @@ function MainApp() {
     const paneDotClass = agentTabStatusDotClass(paneAgent?.status, paneTopQueueWaitsOnOtherPane);
     const paneStatus = paneTabStatusLabel(pane, paneAgent);
     const paneSplit = paneSplitForPane(paneSplits, pane.id);
+    const isBtwPane = Boolean(paneSplit?.btwPaneIds?.includes(pane.id));
     // The panes of the active split render as one connected card in the sidebar.
     // Flag the run (and its top/bottom edges) so only the split you're viewing is
     // grouped — an inactive split keeps plain tabs. Members are contiguous within
     // their group, so the neighbours bracket the run.
-    const paneInActiveSplit = Boolean(activePaneSplit) && visibleTerminalPaneIdSet.has(pane.id);
+    const paneInActiveSplit =
+      Boolean(activePaneSplitMembership) && activeSplitMemberIdSet.has(pane.id);
     const isActiveSplitFirst =
-      paneInActiveSplit && !visibleTerminalPaneIdSet.has(groupPanes[index - 1]?.id ?? "");
+      paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index - 1]?.id ?? "");
     const isActiveSplitLast =
-      paneInActiveSplit && !visibleTerminalPaneIdSet.has(groupPanes[index + 1]?.id ?? "");
+      paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index + 1]?.id ?? "");
     const paneDir = paneAgent?.worktreeDir ?? pane.cwd;
     const splitMembersShareDir = Boolean(
       paneSplit &&
@@ -11872,6 +11936,7 @@ function MainApp() {
       "pane-tab-row",
       pane.id === activePane?.id ? "is-selected" : "",
       paneSplit ? "is-split-member" : "",
+      isBtwPane ? "is-btw-pane" : "",
       paneInActiveSplit ? "is-split-active" : "",
       isActiveSplitFirst ? "is-split-active-first" : "",
       isActiveSplitLast ? "is-split-active-last" : "",
@@ -11933,15 +11998,24 @@ function MainApp() {
             aria-hidden="true"
           />
           <span className="pane-tab-content">
-            <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
-              {paneDisplayTitle}
-            </span>
-            {settings.codeMode && settings.showTabDirectories && paneDir && !hidePaneDir ? (
+            {isBtwPane ? (
+              <span className="pane-tab-title-line">
+                <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
+                  {paneDisplayTitle}
+                </span>
+                <span className="pane-tab-btw-label">BTW</span>
+              </span>
+            ) : (
+              <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
+                {paneDisplayTitle}
+              </span>
+            )}
+            {!isBtwPane && settings.codeMode && settings.showTabDirectories && paneDir && !hidePaneDir ? (
               <span className="pane-tab-path" title={paneDir}>
                 {formatPaneDir(paneDir)}
               </span>
             ) : null}
-            {settings.codeMode && paneGitMeta ? (
+            {!isBtwPane && settings.codeMode && paneGitMeta ? (
               <span className="pane-tab-gitmeta" title={paneGitMetaTitle}>
                 {paneGitMeta}
               </span>
@@ -12361,12 +12435,13 @@ function MainApp() {
                 onDraftChange={setAgentDraft}
                 registerDraftFlusher={registerComposerDraftFlusher}
                 onWaitTargetHover={setWaitTargetHoverAgentId}
-                onForkWithPrompt={({ useWorktree, prompt, btw }) =>
+                onForkWithPrompt={({ useWorktree, prompt, btw, titlePrompt }) =>
                   forkPane(surface.pane, {
                     nest: true,
                     useWorktree,
                     prompt,
                     btw,
+                    titlePrompt,
                   })
                 }
                 onLoopWithPrompt={({ prompt }) => startAgentLoop(agent.id, prompt)}
@@ -12412,6 +12487,21 @@ function MainApp() {
         }
       />
     );
+  }
+
+  function renderBtwFloatingPanes(ownerPaneId: string) {
+    return btwTurnPaneSurfaces
+      .filter((surface) => btwOwnerByPaneId.get(surface.pane.id) === ownerPaneId)
+      .map((surface, index) => (
+        <BtwFloatingPane
+          key={surface.pane.id}
+          title={displayPaneTitle(surface.pane, surface.agent)}
+          onActivate={() => acknowledgePaneIfDone(surface.pane.id, true)}
+          offset={index}
+        >
+          {renderTurnPaneSurface(surface, false)}
+        </BtwFloatingPane>
+      ));
   }
 
   const selectResearchTreeFromSidebar = useCallback(
@@ -14747,6 +14837,7 @@ function MainApp() {
                 >
                   {renderTurnPaneResizer()}
                   {renderTurnPaneSurface(surface, false)}
+                  {renderBtwFloatingPanes(surface.pane.id)}
                   {renderFloatingTurnPaneControls(surface, false)}
                 </section>
               ))
@@ -14806,6 +14897,7 @@ function MainApp() {
               }}
             >
               {renderTurnPaneSurface(surface, false)}
+              {renderBtwFloatingPanes(surface.pane.id)}
               {renderFloatingTurnPaneControls(surface, true)}
             </section>
           ))}
@@ -14822,6 +14914,7 @@ function MainApp() {
         >
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
+          {renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
         </aside>
       ) : null}
       {/* Text-mode terminal peek while the transcript covers the stage: polls

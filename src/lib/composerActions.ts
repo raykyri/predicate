@@ -55,7 +55,7 @@ export function deriveComposerGating(
 export type ComposerSubmissionPlan =
   | { kind: "reject"; message: string }
   | { kind: "fork"; useWorktree: boolean; prompt: string }
-  | { kind: "btw"; prompt: string }
+  | { kind: "btw"; prompt: string; titlePrompt: string }
   | { kind: "loop"; prompt: string; runOnce: boolean }
   | { kind: "turn" };
 
@@ -81,6 +81,7 @@ export function planComposerSubmission(
       return {
         kind: "btw",
         prompt: `${BTW_SAFETY_INSTRUCTION}\n\n${parsed.prompt}`,
+        titlePrompt: parsed.prompt,
       };
     }
     return { kind: "fork", useWorktree: parsed.command.useWorktree, prompt: parsed.prompt };

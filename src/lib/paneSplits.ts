@@ -20,6 +20,7 @@ interface JoinPaneSplitOptions {
   source?: PaneSplitIntentSource;
   insertedPaneId?: string;
   createdAt?: number;
+  btwPaneId?: string;
 }
 
 function panePositions(panes: PaneInfo[]) {
@@ -277,6 +278,10 @@ export function normalizePaneSplitsForPanes(
     if (intent) {
       normalizedSplit.intent = intent;
     }
+    const btwPaneIds = paneIds.filter((paneId) => split.btwPaneIds?.includes(paneId));
+    if (btwPaneIds.length > 0) {
+      normalizedSplit.btwPaneIds = btwPaneIds;
+    }
     normalized.push(normalizedSplit);
   }
 
@@ -381,6 +386,14 @@ export function joinPaneSplit(
     paneIds,
     sizes: joinedPaneSizes(existing, paneIds),
   };
+  const btwPaneIds = paneIds.filter(
+    (candidate) =>
+      candidate === options.btwPaneId ||
+      existing.some((split) => split.btwPaneIds?.includes(candidate)),
+  );
+  if (btwPaneIds.length > 0) {
+    joinedSplit.btwPaneIds = btwPaneIds;
+  }
   const intent = joinedPaneIntent(existing, paneIds, paneId, belowPaneId, options);
   if (intent) {
     joinedSplit.intent = intent;
@@ -413,6 +426,12 @@ export function detachPaneFromSplitMemberships(
           Object.entries(split.sizes ?? {}).filter(([id]) => id !== paneId),
         ),
       };
+      if (nextSplit.btwPaneIds) {
+        nextSplit.btwPaneIds = nextSplit.btwPaneIds.filter((id) => id !== paneId);
+        if (nextSplit.btwPaneIds.length === 0) {
+          delete nextSplit.btwPaneIds;
+        }
+      }
       delete nextSplit.intent;
       const intent = normalizedIntentForPaneIds(
         {

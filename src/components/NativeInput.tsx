@@ -10,7 +10,15 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, EllipsisVertical, FolderGit2, GitFork, Repeat, X } from "lucide-react";
+import {
+  ChevronDown,
+  EllipsisVertical,
+  FolderGit2,
+  GitFork,
+  MessageSquareText,
+  Repeat,
+  X,
+} from "lucide-react";
 import {
   listAgentTurnQueue,
   queueDeliveryAgentTurn,
@@ -87,6 +95,7 @@ const SLASH_COMMAND_PRESENTATION: Record<
   fork: { Icon: GitFork, summary: "Fork this session" },
   worktree: { Icon: FolderGit2, summary: "Fork into a new worktree" },
   loop: { Icon: Repeat, summary: `Loop until no changes (max ${LOOP_MAX_ITERATIONS})` },
+  btw: { Icon: MessageSquareText, summary: "Ask in a side branch now" },
 };
 
 type QueuePointerDrag = {
@@ -145,6 +154,7 @@ interface NativeInputProps {
     useWorktree: boolean;
     prompt: string;
     btw?: boolean;
+    titlePrompt?: string;
   }) => Promise<boolean>;
   // Starts a /loop for this agent: re-sends `prompt` after each completed turn
   // until the agent makes no changes (or the iteration cap is hit). Resolves true
@@ -804,6 +814,7 @@ export default function NativeInput({
           useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
           prompt: plan.prompt,
           btw: plan.kind === "btw",
+          titlePrompt: plan.kind === "btw" ? plan.titlePrompt : undefined,
         });
         if (forked) {
           recordRecentMessage(trimmed);

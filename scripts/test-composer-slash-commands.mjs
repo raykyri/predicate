@@ -14,6 +14,8 @@ execFileSync(
     "node",
     "--target",
     "ES2020",
+    "--jsx",
+    "react-jsx",
     "--lib",
     "ES2020,DOM",
     "--types",

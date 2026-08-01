@@ -94,6 +94,101 @@
   z-index: 8;
 }
 
+.btw-floating-pane {
+  position: absolute;
+  z-index: 12;
+  display: flex;
+  width: min(380px, calc(100% - 16px));
+  height: min(520px, calc(100% - 16px));
+  min-width: min(280px, calc(100% - 16px));
+  min-height: min(240px, calc(100% - 16px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--control-border-hover-accent);
+  border-radius: 10px;
+  background: var(--right-pane-bg);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+}
+
+.btw-floating-pane-titlebar {
+  display: flex;
+  height: 31px;
+  flex: 0 0 31px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--surface-divider);
+  background: var(--chrome-header-bg);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.btw-floating-pane-label {
+  color: var(--accent-color);
+  font-size: var(--fs-xs);
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.btw-floating-pane-title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--text-body-soft);
+  font-size: var(--fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btw-floating-pane-content {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+}
+
+.btw-floating-pane-content > .turn-sidebar {
+  height: 100%;
+}
+
+.btw-floating-pane-resizer {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.btw-floating-pane-resizer::after {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 7px;
+  height: 7px;
+  border-right: 1px solid var(--control-fg-muted);
+  border-bottom: 1px solid var(--control-fg-muted);
+  content: "";
+  opacity: 0.7;
+}
+
+.btw-floating-pane-resizer:hover::after,
+.btw-floating-pane-resizer:focus-visible::after {
+  border-color: var(--accent-color);
+  opacity: 1;
+}
+
+.btw-floating-pane-resizer:focus-visible {
+  outline: 1px solid var(--accent-color);
+  outline-offset: -3px;
+}
+
 .turn-pane-inline-split-divider {
   right: 0;
   left: auto;
@@ -792,13 +887,13 @@
    the expanded pane (z-index 7) and below stage-level restore chrome (9). */
 .terminal-pip {
   position: absolute;
-  right: 14px;
-  bottom: 14px;
+  top: 14px;
+  left: calc(var(--sidebar-width, 268px) + 14px);
   z-index: 8;
   display: flex;
   flex-direction: column;
-  width: min(360px, calc(100% - 28px));
-  max-height: min(240px, 42vh);
+  width: min(180px, calc(100% - var(--sidebar-width, 268px) - 28px));
+  max-height: min(120px, 21vh);
   margin: 0;
   padding: 0;
   overflow: hidden;
@@ -809,7 +904,6 @@
   box-shadow:
     0 10px 28px rgba(0, 0, 0, 0.42),
     0 0 0 1px rgba(0, 0, 0, 0.35);
-  cursor: pointer;
   text-align: left;
   font: inherit;
   appearance: none;
@@ -823,7 +917,7 @@
     0 0 0 1px rgba(0, 0, 0, 0.4);
 }
 
-.terminal-pip:focus-visible {
+.terminal-pip:focus-within {
   outline: none;
   box-shadow:
     0 12px 32px rgba(0, 0, 0, 0.5),
@@ -842,6 +936,10 @@
   color: color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 78%, transparent);
 }
 
+.terminal-pip.is-collapsed .terminal-pip-chrome {
+  border-bottom: 0;
+}
+
 .terminal-pip-title {
   flex: 1 1 auto;
   min-width: 0;
@@ -853,18 +951,51 @@
   text-overflow: ellipsis;
 }
 
-.terminal-pip-restore {
+.terminal-pip-collapse {
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
   width: 18px;
   height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
   opacity: 0.72;
+  appearance: none;
+  -webkit-appearance: none;
 }
 
-.terminal-pip:hover .terminal-pip-restore {
+.terminal-pip-collapse:hover,
+.terminal-pip-collapse:focus-visible {
+  background: color-mix(in srgb, var(--terminal-pip-fg, #e7e7e2) 10%, transparent);
+  outline: none;
   opacity: 1;
+}
+
+.terminal-pip-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.terminal-pip-preview:focus-visible {
+  outline: 1px solid var(--accent-color, #6ee7a8);
+  outline-offset: -1px;
 }
 
 .terminal-pip-body {

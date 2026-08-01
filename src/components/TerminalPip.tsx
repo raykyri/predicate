@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { CSSProperties } from "react";
-import { Minimize2 } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   readNativeTerminalViewportText,
   type NativeTerminalTheme,
@@ -28,9 +28,10 @@ export interface TerminalPipProps {
 
 /**
  * Floating monospaced preview of a native terminal's live viewport, used while
- * the right-pane transcript is expanded. Click restores the terminal stage.
- * Text only (no SGR colors) — good enough to see agent progress without a
- * Metal capture path.
+ * the right-pane transcript is expanded. Clicking the preview restores the
+ * terminal stage; its chrome can collapse the card to the title bar. Text only
+ * (no SGR colors) — good enough to see agent progress without a Metal capture
+ * path.
  */
 export default function TerminalPip({
   paneId,
@@ -41,6 +42,7 @@ export default function TerminalPip({
   onRestore,
 }: TerminalPipProps) {
   const [text, setText] = useState("");
+  const [collapsed, setCollapsed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -89,25 +91,46 @@ export default function TerminalPip({
   const body = text.trim().length > 0 ? text : "Waiting for terminal output…";
 
   return (
-    <button
-      type="button"
-      className="terminal-pip"
+    <section
+      className={`terminal-pip${collapsed ? " is-collapsed" : ""}`}
       style={style}
-      title={`Restore terminal (${displayTitle})`}
-      aria-label={`Restore terminal: ${displayTitle}`}
       onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => {
-        event.stopPropagation();
-        onRestore();
-      }}
+      aria-label={`Terminal preview: ${displayTitle}`}
     >
-      <span className="terminal-pip-chrome">
+      <div className="terminal-pip-chrome">
         <span className="terminal-pip-title">{displayTitle}</span>
-        <span className="terminal-pip-restore" aria-hidden="true">
-          <Minimize2 size={12} />
-        </span>
-      </span>
-      <pre className="terminal-pip-body">{body}</pre>
-    </button>
+        <button
+          type="button"
+          className="terminal-pip-collapse"
+          title={collapsed ? "Show terminal preview" : "Collapse terminal preview"}
+          aria-label={collapsed ? "Show terminal preview" : "Collapse terminal preview"}
+          aria-expanded={!collapsed}
+          onClick={(event) => {
+            event.stopPropagation();
+            setCollapsed((current) => !current);
+          }}
+        >
+          {collapsed ? (
+            <ChevronDown size={12} aria-hidden="true" />
+          ) : (
+            <ChevronUp size={12} aria-hidden="true" />
+          )}
+        </button>
+      </div>
+      {collapsed ? null : (
+        <button
+          type="button"
+          className="terminal-pip-preview"
+          title={`Restore terminal (${displayTitle})`}
+          aria-label={`Restore terminal: ${displayTitle}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onRestore();
+          }}
+        >
+          <pre className="terminal-pip-body">{body}</pre>
+        </button>
+      )}
+    </section>
   );
 }

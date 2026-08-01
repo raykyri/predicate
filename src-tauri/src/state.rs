@@ -1057,6 +1057,8 @@ pub struct PaneSplitInfo {
     pub sizes: HashMap<String, f64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub intent: HashMap<String, PaneSplitIntent>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub btw_pane_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -9473,12 +9475,18 @@ fn normalized_pane_splits(
                     && entry.created_at >= 0.0
             })
             .collect();
+        let btw_pane_ids = pane_ids
+            .iter()
+            .filter(|pane_id| split.btw_pane_ids.contains(pane_id))
+            .cloned()
+            .collect();
 
         result.push(PaneSplitInfo {
             id,
             pane_ids,
             sizes,
             intent,
+            btw_pane_ids,
         });
     }
 
@@ -11599,6 +11607,7 @@ mod tests {
                 pane_ids: vec![terminal_pane.id.clone(), research_pane.id.clone()],
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
+                btw_pane_ids: Vec::new(),
             }],
             research_trees: HashMap::from([(tree.id.clone(), tree)]),
             research_nodes: HashMap::from([(node.id.clone(), node)]),
@@ -13927,6 +13936,7 @@ mod tests {
                 pane_ids: vec!["pane-1".to_string(), "pane-3".to_string()],
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
+                btw_pane_ids: Vec::new(),
             }])
             .unwrap_err();
         assert!(invalid.contains("adjacent"));
@@ -13937,6 +13947,7 @@ mod tests {
                 pane_ids: vec!["pane-1".to_string(), "pane-2".to_string()],
                 sizes: HashMap::from([("pane-1".to_string(), 0.4), ("pane-2".to_string(), 0.6)]),
                 intent: HashMap::new(),
+                btw_pane_ids: Vec::new(),
             }])
             .unwrap();
         assert_eq!(splits.len(), 1);
@@ -13990,6 +14001,7 @@ mod tests {
                         },
                     ),
                 ]),
+                btw_pane_ids: vec!["pane-3".to_string(), "pane-2".to_string()],
             }])
             .unwrap();
 
@@ -14005,6 +14017,7 @@ mod tests {
             })
         );
         assert!(!splits[0].intent.contains_key("pane-3"));
+        assert_eq!(splits[0].btw_pane_ids, vec!["pane-2", "pane-3"]);
     }
 
     #[test]

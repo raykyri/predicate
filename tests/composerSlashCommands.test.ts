@@ -98,6 +98,7 @@ test("plans btw as an immediate fork prompt with the safety instruction", () => 
   assert.deepEqual(planComposerSubmission(parsed, true), {
     kind: "btw",
     prompt: `${BTW_SAFETY_INSTRUCTION}\n\ninspect the failing request`,
+    titlePrompt: "inspect the failing request",
   });
   assert.deepEqual(planComposerSubmission(parseComposerSlashCommand("/btw   "), true), {
     kind: "reject",
