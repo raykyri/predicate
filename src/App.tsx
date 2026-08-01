@@ -9841,42 +9841,13 @@ function MainApp() {
     if (!exitPreflightRequest) {
       return;
     }
-    let cancelled = false;
-
-    const preflightExit = async () => {
-      const paneSnapshot = panesRef.current;
-      const promptDialogs = (
-        await Promise.all(
-          paneSnapshot.map((pane) =>
-            closeDialogForPane(pane, { checkWorktreeStatus: false }),
-          ),
-        )
-      ).filter((dialog): dialog is CloseDialogState => dialog !== null);
-
-      if (cancelled) {
-        return;
-      }
-
-      setExitPreflightRequest(null);
-      const paneCount = Math.max(
-        exitPreflightRequest.paneCount,
-        paneSnapshot.length,
-        promptDialogs.length,
-      );
-      if (paneCount === 0) {
-        setExitDialog(null);
-        return;
-      }
-
-      setExitDialog({
-        paneCount,
-      });
-    };
-
-    void preflightExit();
-    return () => {
-      cancelled = true;
-    };
+    // Quitting already warns that every tab, agent, and process will stop. Reusing
+    // the per-pane close checks here used to fork one or two `ps` probes for every
+    // ordinary pane, then discard the resulting dialog descriptions. With many tabs
+    // that delayed this generic confirmation by hundreds of milliseconds.
+    const paneCount = Math.max(exitPreflightRequest.paneCount, panesRef.current.length);
+    setExitPreflightRequest(null);
+    setExitDialog(paneCount > 0 ? { paneCount } : null);
   }, [exitPreflightRequest]);
 
   useEffect(() => {
