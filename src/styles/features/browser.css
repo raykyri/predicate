@@ -95,6 +95,18 @@
   background: #ffffff;
 }
 
+.browser-overlay-frame.is-automated {
+  display: block;
+  object-fit: fill;
+  cursor: default;
+  user-select: none;
+}
+
+.browser-overlay-frame.is-automated:focus {
+  outline: 2px solid var(--accent-color);
+  outline-offset: -2px;
+}
+
 .browser-overlay-frame.is-file-content {
   /* Bare text/plain files have no authored CSS. In a dark Tauri/WebKit appearance,
      the UA plaintext renderer can choose light text; keep file previews matched to

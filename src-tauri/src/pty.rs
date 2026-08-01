@@ -2249,7 +2249,7 @@ fn running_processes(pids: &[u32]) -> Vec<RunningProcess> {
 /// macOS) per process — every pane close and watcher refresh paid tens to
 /// hundreds of milliseconds. One `ps` is a single subprocess regardless of tree
 /// size.
-fn descendant_process_ids(pid: u32) -> Vec<u32> {
+pub(crate) fn descendant_process_ids(pid: u32) -> Vec<u32> {
     descendants_from_parent_pairs(pid, &process_parent_snapshot())
 }
 

@@ -1,5 +1,6 @@
 mod adapters;
 mod browser_backend;
+mod browser_engine;
 mod cli;
 mod config;
 mod connection_limit;
@@ -2459,7 +2460,7 @@ fn main() {
                     }
                 }
                 start_control_socket(state.clone()).map_err(std::io::Error::other)?;
-                match browser_backend::start_browser_discovery() {
+                match browser_backend::start_browser_discovery(Some(state.clone())) {
                     Ok(socket) => {
                         eprintln!(
                             "qmux: experimental Codex browser discovery listening at {}",
@@ -2567,6 +2568,12 @@ fn main() {
             publishing::publishing_resolve_proposal,
             active_tab_get,
             active_tab_set,
+            browser_backend::browser_automation_snapshot,
+            browser_backend::browser_automation_navigate,
+            browser_backend::browser_automation_reload,
+            browser_backend::browser_automation_mouse,
+            browser_backend::browser_automation_insert_text,
+            browser_backend::browser_automation_key,
             open_external_url,
             prompt_library_list,
             prompt_library_save,

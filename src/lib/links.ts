@@ -22,12 +22,23 @@ export function safeHref(href: unknown): string | undefined {
     : undefined;
 }
 
-// The internal browser overlay can only load what the webview CSP's frame-src allows:
-// http over loopback (127.0.0.1 / localhost), which covers file-server URLs and local
-// dev servers. Anything else - external hosts, https, mailto, custom schemes - would
-// be blocked by CSP and render as a blank iframe, so it must hand off to the OS browser.
-// Keep this in lockstep with `frame-src` in tauri.conf.json.
+// Normal http(s) links render through qmux's isolated Chromium automation profile.
+// Token-bearing file previews are still detected separately and rendered in the
+// webview's sandboxed iframe. mailto and custom schemes remain OS-owned.
 export function canRenderInInternalBrowser(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  return parsed.protocol === "http:" || parsed.protocol === "https:";
+}
+
+// Fallback used only when the Chromium automation runtime is unavailable. The
+// Tauri webview CSP permits unsandboxed frames for loopback HTTP development
+// servers, but deliberately not arbitrary external pages.
+export function canRenderInLocalPreviewFrame(url: string): boolean {
   let parsed: URL;
   try {
     parsed = new URL(url);

@@ -4317,21 +4317,24 @@ function MainApp() {
     [],
   );
 
-  // Navigate the overlay to a typed address. A bare host (no scheme) gets http://
-  // so `localhost:5173` works; file paths still go through `qmux open`.
+  // Navigate the overlay's isolated automation browser. A bare host (no scheme)
+  // gets http:// so `localhost:5173` works; file paths still go through `qmux open`.
   function navigateActiveBrowserOverlay(rawInput: string) {
     const trimmed = rawInput.trim();
     if (!activeBrowserOwnerId || !trimmed) {
       return;
     }
-    const url = /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-    // The overlay can only render loopback http (CSP frame-src). Hand a typed external
-    // URL to the OS browser rather than loading a blank, CSP-blocked iframe; the
-    // external opener itself rejects anything but http(s)/mailto.
-    if (canRenderInInternalBrowser(url)) {
-      openBrowserOverlay(activeBrowserOwnerId, url);
-    } else {
-      void openExternalUrl(url);
+    const candidate = /^[a-z][a-z0-9+.-]*:/i.test(trimmed) ? trimmed : `http://${trimmed}`;
+    let parsed: URL;
+    try {
+      parsed = new URL(candidate);
+    } catch {
+      return;
+    }
+    if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+      openBrowserOverlay(activeBrowserOwnerId, parsed.href);
+    } else if (parsed.protocol === "mailto:") {
+      void openExternalUrl(parsed.href);
     }
   }
 
@@ -14865,6 +14868,7 @@ function MainApp() {
 
       {activeBrowserOwnerId && activeBrowserOverlay?.open ? (
         <BrowserOverlay
+          paneId={activeBrowserOwnerId}
           url={activeBrowserOverlay.url}
           reloadNonce={activeBrowserOverlay.reloadNonce}
           sandbox={activeBrowserOverlay.sandbox}
@@ -14873,14 +14877,14 @@ function MainApp() {
           toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
           onNavigate={navigateActiveBrowserOverlay}
           onRefresh={refreshActiveBrowserOverlay}
-          onOpenExternal={() => {
+          onOpenExternal={(currentUrl) => {
             // Never leak a token-bearing file-server URL to the OS browser (the button is
             // also disabled for these, and the backend refuses them as the real boundary).
             if (
-              activeBrowserOverlay.url &&
-              !isFileServerUrl(activeBrowserOverlay.url, configRef.current?.fileServerPort ?? null)
+              currentUrl &&
+              !isFileServerUrl(currentUrl, configRef.current?.fileServerPort ?? null)
             ) {
-              void openExternalUrl(activeBrowserOverlay.url);
+              void openExternalUrl(currentUrl);
             }
           }}
           onClose={toggleActiveBrowserOverlay}

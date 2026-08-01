@@ -44,13 +44,16 @@ matching UI adapter on the frontend.
 - (Experimental) git worktree creation for launched agents, with configurable
   global, local `.qmux/`, or local `.claude/` storage, dirty-worktree checks,
   and a delete-or-keep prompt when closing worktree-backed panes.
-- (Experimental) A tab-bound, resizable browser that renders a local file or a
-  `http://localhost` dev server in a panel over the terminal. Markdown files
-  render as styled HTML.
-- (Experimental spike) qmux advertises that preview through Codex's current
-  private in-app-browser discovery socket, so it appears in
-  `agent.browsers.list()`. It is discovery-only for now: no DOM/CDP automation
-  capabilities are advertised.
+- (Experimental) A tab-bound, resizable browser panel. Token-gated local files
+  remain in a sandboxed preview (Markdown renders as styled HTML); normal URLs
+  display the isolated browser tab controlled by the active agent.
+- (Experimental spike) qmux appears in Codex's `agent.browsers.list()` through
+  its current private in-app-browser socket and implements tab, Playwright,
+  Computer Use, screenshot, and raw CDP operations through a dedicated
+  `chrome-headless-shell` process. qmux finds a bundled or PATH installation,
+  then `PLAYWRIGHT_BROWSERS_PATH` and the newest default Playwright cache entry;
+  `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery. This does not use a
+  browser extension or the user's normal browser profile.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install

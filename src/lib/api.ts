@@ -760,6 +760,65 @@ export function openExternalUrl(url: string) {
   return invoke<void>("open_external_url", { url });
 }
 
+export type BrowserAutomationSnapshot = {
+  available: boolean;
+  tabId: number | null;
+  url: string | null;
+  title: string | null;
+  imageDataUrl: string | null;
+  width: number;
+  height: number;
+  error: string | null;
+};
+
+export function getBrowserAutomationSnapshot(paneId: string) {
+  return invoke<BrowserAutomationSnapshot>("browser_automation_snapshot", { paneId });
+}
+
+export function navigateBrowserAutomation(paneId: string, url: string) {
+  return invoke<void>("browser_automation_navigate", { paneId, url });
+}
+
+export function reloadBrowserAutomation(paneId: string) {
+  return invoke<void>("browser_automation_reload", { paneId });
+}
+
+export function sendBrowserAutomationMouse(
+  paneId: string,
+  kind: "move" | "click" | "scroll",
+  x: number,
+  y: number,
+  deltaX?: number,
+  deltaY?: number,
+) {
+  return invoke<void>("browser_automation_mouse", {
+    paneId,
+    kind,
+    x,
+    y,
+    deltaX: deltaX ?? null,
+    deltaY: deltaY ?? null,
+  });
+}
+
+export function insertBrowserAutomationText(paneId: string, text: string) {
+  return invoke<void>("browser_automation_insert_text", { paneId, text });
+}
+
+export function sendBrowserAutomationKey(
+  paneId: string,
+  key: string,
+  code: string,
+  windowsVirtualKeyCode: number,
+) {
+  return invoke<void>("browser_automation_key", {
+    paneId,
+    key,
+    code,
+    windowsVirtualKeyCode,
+  });
+}
+
 // Atomically moves a queued turn from one agent to another. The backend removes
 // from the source and hands it to the target in one call, rolling back on failure,
 // so the turn can never end up in both queues or be lost.

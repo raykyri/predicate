@@ -1,0 +1,1116 @@
+//! Dedicated chrome-headless-shell/CDP runtime used by the Codex Browser adapter.
+//!
+//! Codex's Browser client speaks Chrome DevTools Protocol after discovering a
+//! small JSON-RPC backend. The standalone shell cannot inherit the user's normal
+//! browser session, and qmux gives each launch a separate, ephemeral profile.
+
+use serde_json::{Map, Value, json};
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::ErrorKind;
+use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tungstenite::stream::MaybeTlsStream;
+use tungstenite::{Message, WebSocket, connect};
+
+const HEADLESS_SHELL_START_TIMEOUT: Duration = Duration::from_secs(8);
+const DEFAULT_CDP_TIMEOUT: Duration = Duration::from_secs(30);
+const CDP_READ_POLL: Duration = Duration::from_millis(20);
+
+static PROFILE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+type RpcReply = Result<Value, String>;
+
+pub struct BrowserEngine {
+    commands: mpsc::Sender<EngineCommand>,
+    subscribers: Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    next_subscription_id: AtomicU64,
+    executable: PathBuf,
+}
+
+impl BrowserEngine {
+    pub fn start() -> Result<Self, String> {
+        let runtime = ChromiumRuntime::launch()?;
+        let executable = runtime.executable.clone();
+        let subscribers = Arc::new(Mutex::new(HashMap::new()));
+        let event_subscribers = Arc::clone(&subscribers);
+        let (commands, command_rx) = mpsc::channel();
+
+        thread::Builder::new()
+            .name("qmux-browser-cdp".to_string())
+            .spawn(move || run_engine(runtime, command_rx, event_subscribers))
+            .map_err(|err| format!("failed to start chrome-headless-shell controller: {err}"))?;
+
+        Ok(Self {
+            commands,
+            subscribers,
+            next_subscription_id: AtomicU64::new(1),
+            executable,
+        })
+    }
+
+    pub fn executable(&self) -> &Path {
+        &self.executable
+    }
+
+    pub fn subscribe(&self, sender: mpsc::SyncSender<Value>) -> u64 {
+        let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
+        match self.subscribers.lock() {
+            Ok(mut subscribers) => {
+                subscribers.insert(id, sender);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(id, sender);
+            }
+        }
+        id
+    }
+
+    pub fn unsubscribe(&self, id: u64) {
+        match self.subscribers.lock() {
+            Ok(mut subscribers) => {
+                subscribers.remove(&id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(&id);
+            }
+        }
+    }
+
+    pub fn call(&self, method: &str, params: Value) -> RpcReply {
+        let timeout = params
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_CDP_TIMEOUT)
+            .saturating_add(Duration::from_secs(2));
+        let (reply_tx, reply_rx) = mpsc::channel();
+        self.commands
+            .send(EngineCommand::Call {
+                method: method.to_string(),
+                params,
+                reply: reply_tx,
+            })
+            .map_err(|_| "the qmux chrome-headless-shell controller stopped".to_string())?;
+        reply_rx
+            .recv_timeout(timeout)
+            .map_err(|_| format!("browser method '{method}' timed out"))?
+    }
+}
+
+enum EngineCommand {
+    Call {
+        method: String,
+        params: Value,
+        reply: mpsc::Sender<RpcReply>,
+    },
+}
+
+struct ChromiumRuntime {
+    child: Child,
+    profile_dir: PathBuf,
+    executable: PathBuf,
+    socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    next_cdp_id: u64,
+    next_tab_id: u64,
+    tabs: HashMap<u64, BrowserTab>,
+    target_to_tab: HashMap<String, u64>,
+    session_to_tab: HashMap<String, u64>,
+    target_sessions: HashMap<(u64, String), String>,
+    active_tab: Option<u64>,
+    expression_cache: HashMap<String, String>,
+}
+
+#[derive(Clone)]
+struct BrowserTab {
+    id: u64,
+    target_id: String,
+    url: String,
+    title: String,
+    attached_session: Option<String>,
+}
+
+impl ChromiumRuntime {
+    fn launch() -> Result<Self, String> {
+        let executable = find_headless_shell_executable().ok_or_else(|| {
+            "chrome-headless-shell was not found; install it with Playwright or set QMUX_CHROME_HEADLESS_SHELL_PATH"
+                .to_string()
+        })?;
+        let profile_dir = unique_profile_dir();
+        fs::create_dir_all(&profile_dir).map_err(|err| {
+            format!(
+                "failed to create chrome-headless-shell profile {}: {err}",
+                profile_dir.display()
+            )
+        })?;
+        fs::set_permissions(&profile_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            let _ = fs::remove_dir_all(&profile_dir);
+            format!(
+                "failed to secure chrome-headless-shell profile {}: {err}",
+                profile_dir.display()
+            )
+        })?;
+
+        let mut child = Command::new(&executable)
+            .args([
+                "--remote-debugging-port=0",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--disable-sync",
+                "--window-size=1280,900",
+            ])
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
+            .arg("about:blank")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                let _ = fs::remove_dir_all(&profile_dir);
+                format!("failed to launch {}: {err}", executable.display())
+            })?;
+
+        let active_port_file = profile_dir.join("DevToolsActivePort");
+        let deadline = Instant::now() + HEADLESS_SHELL_START_TIMEOUT;
+        let active_port = loop {
+            if let Ok(contents) = fs::read_to_string(&active_port_file) {
+                let mut lines = contents.lines();
+                let port = lines.next().and_then(|line| line.parse::<u16>().ok());
+                let websocket_path = lines.next().filter(|line| line.starts_with('/'));
+                if let (Some(port), Some(websocket_path)) = (port, websocket_path) {
+                    break (port, websocket_path.to_string());
+                }
+            }
+            if let Ok(Some(status)) = child.try_wait() {
+                let _ = fs::remove_dir_all(&profile_dir);
+                return Err(format!(
+                    "{} exited before CDP was ready ({status})",
+                    executable.display()
+                ));
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&profile_dir);
+                return Err(format!(
+                    "timed out waiting for CDP from {}",
+                    executable.display()
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+
+        let websocket_url = format!("ws://127.0.0.1:{}{}", active_port.0, active_port.1);
+        let (mut socket, _) = connect(websocket_url.as_str()).map_err(|err| {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&profile_dir);
+            format!("failed to connect to chrome-headless-shell CDP: {err}")
+        })?;
+        if let MaybeTlsStream::Plain(stream) = socket.get_mut() {
+            if let Err(err) = stream.set_read_timeout(Some(CDP_READ_POLL)) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = fs::remove_dir_all(&profile_dir);
+                return Err(format!(
+                    "failed to configure chrome-headless-shell CDP socket: {err}"
+                ));
+            }
+        }
+
+        Ok(Self {
+            child,
+            profile_dir,
+            executable,
+            socket,
+            next_cdp_id: 1,
+            next_tab_id: 1,
+            tabs: HashMap::new(),
+            target_to_tab: HashMap::new(),
+            session_to_tab: HashMap::new(),
+            target_sessions: HashMap::new(),
+            active_tab: None,
+            expression_cache: HashMap::new(),
+        })
+    }
+
+    fn handle_rpc(
+        &mut self,
+        method: &str,
+        mut params: Value,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        match method {
+            "getTabs" => self.get_tabs(subscribers),
+            "getUserTabs" | "getUserHistory" => Ok(json!([])),
+            "createTab" => self.create_tab(subscribers),
+            "focusTab" => {
+                let tab_id = tab_id(&params)?;
+                let target_id = self.tab(tab_id)?.target_id.clone();
+                self.call_cdp(
+                    "Target.activateTarget",
+                    json!({ "targetId": target_id }),
+                    None,
+                    DEFAULT_CDP_TIMEOUT,
+                    subscribers,
+                )?;
+                self.active_tab = Some(tab_id);
+                Ok(Value::Null)
+            }
+            "attach" => {
+                let tab_id = tab_id(&params)?;
+                self.ensure_attached(tab_id, subscribers)?;
+                Ok(Value::Null)
+            }
+            "detach" => self.detach_tab(tab_id(&params)?, subscribers),
+            "attachTarget" => {
+                let tab_id = tab_id(&params)?;
+                let target_id = required_string(&params, "targetId")?;
+                self.attach_target(tab_id, &target_id, subscribers)?;
+                Ok(Value::Null)
+            }
+            "detachTarget" => {
+                let tab_id = tab_id(&params)?;
+                let target_id = required_string(&params, "targetId")?;
+                self.detach_target(tab_id, &target_id, subscribers)
+            }
+            "executeCdp" => self.execute_cdp(&params, subscribers),
+            "executeCdpWithCachedExpression" => {
+                let cache_key = required_string(&params, "expressionCacheKey")?;
+                let command_params = params
+                    .get_mut("commandParams")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| "executeCdp requires commandParams".to_string())?;
+                if let Some(expression) = command_params
+                    .get("expression")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    self.expression_cache.insert(cache_key.clone(), expression);
+                } else {
+                    let expression =
+                        self.expression_cache
+                            .get(&cache_key)
+                            .cloned()
+                            .ok_or_else(|| {
+                                format!("cached CDP expression '{cache_key}' is not available")
+                            })?;
+                    command_params.insert("expression".to_string(), Value::String(expression));
+                }
+                let result = self.execute_cdp(&params, subscribers)?;
+                Ok(json!({ "kind": "executed", "result": result }))
+            }
+            "markTab" | "nameSession" | "moveMouse" | "turnEnded" => Ok(Value::Null),
+            "allowDownload" => {
+                Err("qmux automation does not support agent-initiated downloads yet".to_string())
+            }
+            "finalizeTabs" => self.finalize_tabs(&params, subscribers),
+            "claimUserTab" => Err("qmux does not expose tabs from the user's browser".to_string()),
+            "executeUnhandledCommand" => Ok(Value::Null),
+            _ => Err(format!("No handler registered for method: {method}")),
+        }
+    }
+
+    fn get_tabs(
+        &mut self,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        self.refresh_tabs(subscribers)?;
+        let mut tabs = self.tabs.values().cloned().collect::<Vec<_>>();
+        tabs.sort_by_key(|tab| tab.id);
+        Ok(Value::Array(
+            tabs.into_iter().map(|tab| self.tab_json(&tab)).collect(),
+        ))
+    }
+
+    fn create_tab(
+        &mut self,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let result = self.call_cdp(
+            "Target.createTarget",
+            json!({ "url": "about:blank" }),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        let target_id = required_string(&result, "targetId")?;
+        let tab = self.register_tab(target_id, "about:blank".to_string(), String::new());
+        self.active_tab = Some(tab.id);
+        Ok(self.tab_json(&tab))
+    }
+
+    fn refresh_tabs(
+        &mut self,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> Result<(), String> {
+        let result = self.call_cdp(
+            "Target.getTargets",
+            json!({}),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        let infos = result
+            .get("targetInfos")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "Target.getTargets returned no targetInfos".to_string())?;
+        let mut live_targets = HashSet::new();
+        for info in infos {
+            if info.get("type").and_then(Value::as_str) != Some("page") {
+                continue;
+            }
+            let target_id = required_string(info, "targetId")?;
+            let url = info
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let title = info
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            live_targets.insert(target_id.clone());
+            if let Some(tab_id) = self.target_to_tab.get(&target_id).copied() {
+                if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                    tab.url = url;
+                    tab.title = title;
+                }
+            } else {
+                self.register_tab(target_id, url, title);
+            }
+        }
+        let removed = self
+            .target_to_tab
+            .keys()
+            .filter(|target_id| !live_targets.contains(*target_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        for target_id in removed {
+            if let Some(tab_id) = self.target_to_tab.remove(&target_id) {
+                self.tabs.remove(&tab_id);
+                self.session_to_tab.retain(|_, owner| *owner != tab_id);
+                self.target_sessions
+                    .retain(|(owner, _), _| *owner != tab_id);
+                if self.active_tab == Some(tab_id) {
+                    self.active_tab = None;
+                }
+            }
+        }
+        if self.active_tab.is_none() {
+            self.active_tab = self.tabs.keys().copied().min();
+        }
+        Ok(())
+    }
+
+    fn register_tab(&mut self, target_id: String, url: String, title: String) -> BrowserTab {
+        let id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let tab = BrowserTab {
+            id,
+            target_id: target_id.clone(),
+            url,
+            title,
+            attached_session: None,
+        };
+        self.target_to_tab.insert(target_id, id);
+        self.tabs.insert(id, tab.clone());
+        tab
+    }
+
+    fn tab_json(&self, tab: &BrowserTab) -> Value {
+        json!({
+            "id": tab.id,
+            "url": tab.url,
+            "title": tab.title,
+            "active": self.active_tab == Some(tab.id)
+        })
+    }
+
+    fn tab(&self, tab_id: u64) -> Result<&BrowserTab, String> {
+        self.tabs
+            .get(&tab_id)
+            .ok_or_else(|| format!("tab {tab_id} does not exist"))
+    }
+
+    fn ensure_attached(
+        &mut self,
+        tab_id: u64,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> Result<String, String> {
+        if let Some(session) = self.tab(tab_id)?.attached_session.clone() {
+            return Ok(session);
+        }
+        let target_id = self.tab(tab_id)?.target_id.clone();
+        let result = self.call_cdp(
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        let session_id = required_string(&result, "sessionId")?;
+        self.session_to_tab.insert(session_id.clone(), tab_id);
+        self.tabs
+            .get_mut(&tab_id)
+            .expect("tab disappeared while attaching")
+            .attached_session = Some(session_id.clone());
+        Ok(session_id)
+    }
+
+    fn detach_tab(
+        &mut self,
+        tab_id: u64,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let Some(session_id) = self.tab(tab_id)?.attached_session.clone() else {
+            return Ok(Value::Null);
+        };
+        self.call_cdp(
+            "Target.detachFromTarget",
+            json!({ "sessionId": session_id }),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        if self.tab(tab_id)?.attached_session.as_deref() == Some(session_id.as_str()) {
+            self.forget_session(&session_id);
+            broadcast_cdp_detach(subscribers, tab_id);
+        }
+        Ok(Value::Null)
+    }
+
+    fn attach_target(
+        &mut self,
+        tab_id: u64,
+        target_id: &str,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> Result<String, String> {
+        if let Some(session) = self
+            .target_sessions
+            .get(&(tab_id, target_id.to_string()))
+            .cloned()
+        {
+            return Ok(session);
+        }
+        self.tab(tab_id)?;
+        let result = self.call_cdp(
+            "Target.attachToTarget",
+            json!({ "targetId": target_id, "flatten": true }),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        let session_id = required_string(&result, "sessionId")?;
+        self.session_to_tab.insert(session_id.clone(), tab_id);
+        self.target_sessions
+            .insert((tab_id, target_id.to_string()), session_id.clone());
+        Ok(session_id)
+    }
+
+    fn detach_target(
+        &mut self,
+        tab_id: u64,
+        target_id: &str,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let Some(session_id) = self
+            .target_sessions
+            .remove(&(tab_id, target_id.to_string()))
+        else {
+            return Ok(Value::Null);
+        };
+        self.call_cdp(
+            "Target.detachFromTarget",
+            json!({ "sessionId": session_id }),
+            None,
+            DEFAULT_CDP_TIMEOUT,
+            subscribers,
+        )?;
+        self.session_to_tab.remove(&session_id);
+        Ok(Value::Null)
+    }
+
+    fn execute_cdp(
+        &mut self,
+        params: &Value,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let target = params
+            .get("target")
+            .ok_or_else(|| "executeCdp requires target".to_string())?;
+        let tab_id = tab_id(target)?;
+        let method = required_string(params, "method")?;
+        let command_params = params
+            .get("commandParams")
+            .cloned()
+            .unwrap_or_else(|| json!({}));
+        validate_cdp_command(&method, &command_params)?;
+        let timeout = params
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .map(Duration::from_millis)
+            .unwrap_or(DEFAULT_CDP_TIMEOUT);
+        let session_id = if let Some(session_id) = target.get("sessionId").and_then(Value::as_str) {
+            if self.session_to_tab.get(session_id).copied() != Some(tab_id) {
+                return Err(format!(
+                    "CDP session {session_id} is not attached to tab {tab_id}"
+                ));
+            }
+            session_id.to_string()
+        } else if let Some(target_id) = target.get("targetId").and_then(Value::as_str) {
+            self.attach_target(tab_id, target_id, subscribers)?
+        } else {
+            self.ensure_attached(tab_id, subscribers)?
+        };
+        self.call_cdp(
+            &method,
+            command_params,
+            Some(&session_id),
+            timeout,
+            subscribers,
+        )
+    }
+
+    fn finalize_tabs(
+        &mut self,
+        params: &Value,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let keep = params
+            .get("keep")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+                    })
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let close = self
+            .tabs
+            .keys()
+            .copied()
+            .filter(|tab_id| !keep.contains(tab_id))
+            .collect::<Vec<_>>();
+        for tab_id in close {
+            let target_id = self.tab(tab_id)?.target_id.clone();
+            self.call_cdp(
+                "Target.closeTarget",
+                json!({ "targetId": target_id }),
+                None,
+                DEFAULT_CDP_TIMEOUT,
+                subscribers,
+            )?;
+        }
+        self.refresh_tabs(subscribers)?;
+        Ok(Value::Null)
+    }
+
+    fn call_cdp(
+        &mut self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let id = self.next_cdp_id;
+        self.next_cdp_id += 1;
+        let mut command = Map::new();
+        command.insert("id".to_string(), json!(id));
+        command.insert("method".to_string(), json!(method));
+        command.insert("params".to_string(), params);
+        if let Some(session_id) = session_id {
+            command.insert("sessionId".to_string(), json!(session_id));
+        }
+        self.socket
+            .send(Message::text(Value::Object(command).to_string()))
+            .map_err(|err| format!("failed to send CDP method {method}: {err}"))?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.read_cdp_message(subscribers) {
+                Ok(Some(message)) if message.get("id").and_then(Value::as_u64) == Some(id) => {
+                    if let Some(error) = message.get("error") {
+                        let detail = error
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("unknown CDP error");
+                        if detail.contains("Session with given id not found")
+                            || detail.contains("session not found")
+                        {
+                            if let Some(session_id) = session_id {
+                                if let Some(tab_id) = self.forget_session(session_id) {
+                                    broadcast_cdp_detach(subscribers, tab_id);
+                                }
+                            }
+                            return Err(format!("Debugger is not attached: {detail}"));
+                        }
+                        return Err(format!("{method}: {detail}"));
+                    }
+                    return Ok(message.get("result").cloned().unwrap_or(Value::Null));
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(err) => return Err(err),
+            }
+            if Instant::now() >= deadline {
+                return Err(format!("CDP method {method} timed out"));
+            }
+        }
+    }
+
+    fn read_cdp_message(
+        &mut self,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> Result<Option<Value>, String> {
+        let message = match self.socket.read() {
+            Ok(Message::Text(text)) => serde_json::from_str::<Value>(text.as_str())
+                .map_err(|err| format!("chrome-headless-shell sent invalid CDP JSON: {err}"))?,
+            Ok(Message::Ping(payload)) => {
+                self.socket.send(Message::Pong(payload)).map_err(|err| {
+                    format!("failed to answer chrome-headless-shell CDP ping: {err}")
+                })?;
+                return Ok(None);
+            }
+            Ok(Message::Close(_)) => {
+                return Err("chrome-headless-shell closed its CDP connection".to_string());
+            }
+            Ok(_) => return Ok(None),
+            Err(tungstenite::Error::Io(err))
+                if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+            {
+                return Ok(None);
+            }
+            Err(err) => return Err(format!("failed to read chrome-headless-shell CDP: {err}")),
+        };
+
+        if message.get("method").is_some() {
+            self.handle_cdp_event(&message, subscribers);
+        }
+        Ok(Some(message))
+    }
+
+    fn handle_cdp_event(
+        &mut self,
+        message: &Value,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) {
+        let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+        let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
+        let outer_session = message.get("sessionId").and_then(Value::as_str);
+
+        if method == "Target.targetInfoChanged" {
+            if let Some(info) = params.get("targetInfo") {
+                if let Some(target_id) = info.get("targetId").and_then(Value::as_str) {
+                    if let Some(tab_id) = self.target_to_tab.get(target_id).copied() {
+                        if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                            tab.url = info
+                                .get("url")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&tab.url)
+                                .to_string();
+                            tab.title = info
+                                .get("title")
+                                .and_then(Value::as_str)
+                                .unwrap_or(&tab.title)
+                                .to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        if method == "Target.detachedFromTarget" && outer_session.is_none() {
+            if let Some(detached_session) = params.get("sessionId").and_then(Value::as_str)
+                && let Some(tab_id) = self.forget_session(detached_session)
+            {
+                broadcast_cdp_detach(subscribers, tab_id);
+            }
+            return;
+        }
+
+        let Some(tab_id) =
+            outer_session.and_then(|session| self.session_to_tab.get(session).copied())
+        else {
+            return;
+        };
+        if method == "Target.attachedToTarget" {
+            if let Some(nested_session) = params.get("sessionId").and_then(Value::as_str) {
+                self.session_to_tab
+                    .insert(nested_session.to_string(), tab_id);
+                if let Some(target_id) = params
+                    .pointer("/targetInfo/targetId")
+                    .and_then(Value::as_str)
+                {
+                    self.target_sessions
+                        .insert((tab_id, target_id.to_string()), nested_session.to_string());
+                }
+            }
+        } else if method == "Target.detachedFromTarget" {
+            if let Some(nested_session) = params.get("sessionId").and_then(Value::as_str) {
+                self.session_to_tab.remove(nested_session);
+                self.target_sessions
+                    .retain(|_, session| session != nested_session);
+            }
+        }
+        let is_top_level = self
+            .tabs
+            .get(&tab_id)
+            .and_then(|tab| tab.attached_session.as_deref())
+            == outer_session;
+        let source = if is_top_level {
+            json!({ "tabId": tab_id })
+        } else {
+            json!({ "tabId": tab_id, "sessionId": outer_session })
+        };
+        broadcast(
+            subscribers,
+            json!({
+                "jsonrpc": "2.0",
+                "method": "onCDPEvent",
+                "params": {
+                    "source": source,
+                    "method": method,
+                    "params": params
+                }
+            }),
+        );
+    }
+
+    fn forget_session(&mut self, session_id: &str) -> Option<u64> {
+        let tab_id = self.session_to_tab.remove(session_id)?;
+        if self
+            .tabs
+            .get(&tab_id)
+            .and_then(|tab| tab.attached_session.as_deref())
+            == Some(session_id)
+        {
+            if let Some(tab) = self.tabs.get_mut(&tab_id) {
+                tab.attached_session = None;
+            }
+        }
+        self.target_sessions
+            .retain(|_, attached_session| attached_session != session_id);
+        Some(tab_id)
+    }
+}
+
+impl Drop for ChromiumRuntime {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = fs::remove_dir_all(&self.profile_dir);
+    }
+}
+
+fn run_engine(
+    mut runtime: ChromiumRuntime,
+    commands: mpsc::Receiver<EngineCommand>,
+    subscribers: Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+) {
+    loop {
+        loop {
+            match commands.try_recv() {
+                Ok(command) => match command {
+                    EngineCommand::Call {
+                        method,
+                        params,
+                        reply,
+                    } => {
+                        let result = runtime.handle_rpc(&method, params, &subscribers);
+                        let _ = reply.send(result);
+                    }
+                },
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return,
+            }
+        }
+        if let Err(err) = runtime.read_cdp_message(&subscribers) {
+            eprintln!("qmux: chrome-headless-shell CDP controller stopped: {err}");
+            return;
+        }
+    }
+}
+
+fn broadcast(subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>, event: Value) {
+    let mut subscribers = match subscribers.lock() {
+        Ok(subscribers) => subscribers,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    subscribers.retain(|_, subscriber| match subscriber.try_send(event.clone()) {
+        Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
+    });
+}
+
+fn broadcast_cdp_detach(
+    subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    tab_id: u64,
+) {
+    broadcast(
+        subscribers,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "onCDPDetach",
+            "params": { "tabId": tab_id }
+        }),
+    );
+}
+
+fn validate_cdp_command(method: &str, params: &Value) -> Result<(), String> {
+    match method {
+        "Browser.setDownloadBehavior" | "Page.setDownloadBehavior" => {
+            return Err(
+                "qmux automation does not support agent-initiated downloads yet".to_string(),
+            );
+        }
+        "DOM.setFileInputFiles" => {
+            return Err(
+                "qmux automation does not support agent-selected local file uploads yet"
+                    .to_string(),
+            );
+        }
+        "Page.navigate" => {}
+        _ => return Ok(()),
+    }
+    let url = params
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Page.navigate requires a URL".to_string())?;
+    if url == "about:blank" || url.starts_with("http://") || url.starts_with("https://") {
+        return Ok(());
+    }
+    Err("qmux automation only navigates to http(s) URLs".to_string())
+}
+
+fn find_headless_shell_executable() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("QMUX_CHROME_HEADLESS_SHELL_PATH") {
+        let path = PathBuf::from(path);
+        if is_executable_file(&path) {
+            return Some(path);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(executable_dir) = current_exe.parent()
+    {
+        candidates.push(executable_dir.join("chrome-headless-shell"));
+        candidates.push(executable_dir.join("headless_shell"));
+        candidates.push(executable_dir.join("../Resources/chrome-headless-shell"));
+        candidates
+            .push(executable_dir.join("../Resources/chrome-headless-shell/chrome-headless-shell"));
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for directory in std::env::split_paths(&path) {
+            candidates.push(directory.join("chrome-headless-shell"));
+            candidates.push(directory.join("headless_shell"));
+        }
+    }
+    if let Some(candidate) = candidates.into_iter().find(|path| is_executable_file(path)) {
+        return Some(candidate);
+    }
+
+    let mut playwright_caches = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
+        .filter(|path| path != "0")
+        .map(PathBuf::from)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(cache) = dirs::cache_dir() {
+        playwright_caches.push(cache.join("ms-playwright"));
+    }
+    playwright_caches
+        .into_iter()
+        .find_map(|cache| find_playwright_headless_shell(&cache))
+}
+
+fn find_playwright_headless_shell(cache: &Path) -> Option<PathBuf> {
+    let mut installs = fs::read_dir(cache)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| {
+            let revision = entry
+                .file_name()
+                .to_str()?
+                .strip_prefix("chromium_headless_shell-")?
+                .parse::<u64>()
+                .ok()?;
+            entry
+                .file_type()
+                .ok()?
+                .is_dir()
+                .then_some((revision, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    installs.sort_unstable_by_key(|(revision, _)| std::cmp::Reverse(*revision));
+    installs.into_iter().find_map(|(_, install)| {
+        find_file_below(&install, "chrome-headless-shell", 2)
+            .or_else(|| find_file_below(&install, "headless_shell", 2))
+    })
+}
+
+fn find_file_below(directory: &Path, filename: &str, remaining_depth: usize) -> Option<PathBuf> {
+    for entry in fs::read_dir(directory).ok()?.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if entry.file_name() == filename && is_executable_file(&path) {
+            return Some(path);
+        }
+        if remaining_depth > 0
+            && file_type.is_dir()
+            && let Some(found) = find_file_below(&path, filename, remaining_depth - 1)
+        {
+            return Some(found);
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+}
+
+fn unique_profile_dir() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let nonce = PROFILE_NONCE.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "qmux-codex-browser-{}-{timestamp}-{nonce}",
+        std::process::id()
+    ))
+}
+
+fn tab_id(value: &Value) -> Result<u64, String> {
+    value
+        .get("tabId")
+        .and_then(Value::as_u64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| "browser method requires a positive numeric tabId".to_string())
+}
+
+fn required_string(value: &Value, field: &str) -> Result<String, String> {
+    value
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("browser method requires '{field}'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tab_ids_must_be_positive_numbers() {
+        assert_eq!(tab_id(&json!({ "tabId": 3 })).unwrap(), 3);
+        assert!(tab_id(&json!({ "tabId": 0 })).is_err());
+        assert!(tab_id(&json!({ "tabId": "3" })).is_err());
+    }
+
+    #[test]
+    fn profile_paths_are_unique_and_scoped_to_temp() {
+        let first = unique_profile_dir();
+        let second = unique_profile_dir();
+        assert_ne!(first, second);
+        assert!(first.starts_with(std::env::temp_dir()));
+    }
+
+    #[test]
+    fn playwright_cache_prefers_newest_executable_headless_shell() {
+        let cache = unique_profile_dir();
+        for revision in [1200, 1223, 1300] {
+            let install = cache
+                .join(format!("chromium_headless_shell-{revision}"))
+                .join("chrome-headless-shell-test-arch");
+            fs::create_dir_all(&install).unwrap();
+            let executable = install.join("chrome-headless-shell");
+            fs::write(&executable, []).unwrap();
+            let mode = if revision == 1300 { 0o600 } else { 0o700 };
+            fs::set_permissions(&executable, fs::Permissions::from_mode(mode)).unwrap();
+        }
+
+        let selected = find_playwright_headless_shell(&cache).unwrap();
+        assert!(selected.starts_with(cache.join("chromium_headless_shell-1223")));
+        fs::remove_dir_all(cache).unwrap();
+    }
+
+    #[test]
+    fn navigation_rejects_local_and_active_content_schemes() {
+        assert!(
+            validate_cdp_command("Page.navigate", &json!({ "url": "https://example.com" })).is_ok()
+        );
+        assert!(
+            validate_cdp_command("Page.navigate", &json!({ "url": "http://localhost:3000" }))
+                .is_ok()
+        );
+        assert!(validate_cdp_command("Page.navigate", &json!({ "url": "about:blank" })).is_ok());
+        assert!(
+            validate_cdp_command("Page.navigate", &json!({ "url": "file:///etc/passwd" })).is_err()
+        );
+        assert!(
+            validate_cdp_command("Page.navigate", &json!({ "url": "javascript:alert(1)" }))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cdp_cannot_read_or_write_arbitrary_local_paths() {
+        assert!(
+            validate_cdp_command(
+                "Browser.setDownloadBehavior",
+                &json!({ "behavior": "allow", "downloadPath": "/tmp" })
+            )
+            .is_err()
+        );
+        assert!(
+            validate_cdp_command(
+                "DOM.setFileInputFiles",
+                &json!({ "files": ["/etc/passwd"] })
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    #[ignore = "launches an installed chrome-headless-shell"]
+    fn headless_shell_supports_core_tab_and_runtime_commands() {
+        let engine = BrowserEngine::start().unwrap();
+        let tab = engine.call("createTab", json!({})).unwrap();
+        let tab_id = tab["id"].as_u64().unwrap();
+        engine.call("attach", json!({ "tabId": tab_id })).unwrap();
+        let result = engine
+            .call(
+                "executeCdp",
+                json!({
+                    "target": { "tabId": tab_id },
+                    "method": "Runtime.evaluate",
+                    "commandParams": {
+                        "expression": "6 * 7",
+                        "returnByValue": true
+                    }
+                }),
+            )
+            .unwrap();
+        assert_eq!(result["result"]["value"], 42);
+    }
+}

@@ -1,16 +1,45 @@
 import { ExternalLink, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import type {
+  CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from "react";
 import type { BrowserOverlaySize } from "../appTypes";
 import {
   claimNativeTerminalPointerForWebDrag,
+  getBrowserAutomationSnapshot,
+  insertBrowserAutomationText,
+  navigateBrowserAutomation,
+  reloadBrowserAutomation,
+  sendBrowserAutomationKey,
+  sendBrowserAutomationMouse,
   setNativeTerminalIframeShortcutFallback,
 } from "../lib/api";
+import { canRenderInLocalPreviewFrame } from "../lib/links";
 
 const MIN_BROWSER_OVERLAY_WIDTH = 360;
 const MIN_BROWSER_OVERLAY_HEIGHT = 240;
 const BROWSER_OVERLAY_LEFT_INSET_FALLBACK = 64;
 const BROWSER_OVERLAY_BOTTOM_INSET = 50;
+const lastAutomationNavigationByPane = new Map<string, number>();
+const MAX_REMEMBERED_AUTOMATION_PANES = 256;
+
+function rememberAutomationNavigation(paneId: string, reloadNonce: number) {
+  lastAutomationNavigationByPane.delete(paneId);
+  lastAutomationNavigationByPane.set(paneId, reloadNonce);
+  while (lastAutomationNavigationByPane.size > MAX_REMEMBERED_AUTOMATION_PANES) {
+    const oldest = lastAutomationNavigationByPane.keys().next().value;
+    if (oldest === undefined) {
+      break;
+    }
+    lastAutomationNavigationByPane.delete(oldest);
+  }
+}
+
+function ignoreBrowserCommand(command: Promise<unknown>) {
+  void command.catch(() => undefined);
+}
 
 function clampSize(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -26,13 +55,13 @@ function cssPixelValue(value: string, fallback: number) {
 // navigation bar at the top shows the current URL and lets the user navigate, with
 // refresh + close controls pinned to its right.
 interface BrowserOverlayProps {
+  paneId: string;
   url: string | null;
   // Bumped on open/refresh so the iframe key changes and the page reloads.
   reloadNonce: number;
   // True for token-bearing file-server URLs: sandbox the frame so served (possibly
   // untrusted) content gets an opaque origin and can't read the token back to fetch
-  // other workspace files. Left off for trusted localhost dev servers, which need a
-  // real same-origin context to function.
+  // other workspace files. Normal URLs render through isolated Chromium instead.
   sandbox: boolean;
   // Passed to the token-gated file server so Markdown documents rendered in
   // this isolated frame use the same body font as the application. Arbitrary
@@ -45,7 +74,7 @@ interface BrowserOverlayProps {
   // Reload the current page.
   onRefresh: () => void;
   // Open the current page in the system's default external browser.
-  onOpenExternal: () => void;
+  onOpenExternal: (currentUrl?: string) => void;
   // Close the overlay.
   onClose: () => void;
   // Persist a user-resized overlay size in the app's per-pane React state.
@@ -53,6 +82,7 @@ interface BrowserOverlayProps {
 }
 
 export default function BrowserOverlay({
+  paneId,
   url,
   reloadNonce,
   sandbox,
@@ -69,13 +99,83 @@ export default function BrowserOverlay({
   // bar tracks navigation without clobbering what the user is mid-typing.
   const [draft, setDraft] = useState(url ?? "");
   const [resizing, setResizing] = useState(false);
+  const [automationSnapshot, setAutomationSnapshot] = useState<
+    Awaited<ReturnType<typeof getBrowserAutomationSnapshot>> | null
+  >(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const lastAutomationMoveRef = useRef(0);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
 
+  const automated = !sandbox;
+  const displayedUrl = automated ? (automationSnapshot?.url ?? url) : url;
+
   useEffect(() => {
-    setDraft(url ?? "");
-  }, [url]);
+    setDraft(displayedUrl ?? "");
+  }, [displayedUrl]);
+
+  useEffect(() => {
+    if (!automated) {
+      setAutomationSnapshot(null);
+      return;
+    }
+    let cancelled = false;
+    let polling = false;
+    const poll = async () => {
+      if (polling) {
+        return;
+      }
+      polling = true;
+      try {
+        const snapshot = await getBrowserAutomationSnapshot(paneId);
+        if (!cancelled) {
+          setAutomationSnapshot(snapshot);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setAutomationSnapshot({
+            available: false,
+            tabId: null,
+            url: null,
+            title: null,
+            imageDataUrl: null,
+            width: 1280,
+            height: 900,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      } finally {
+        polling = false;
+      }
+    };
+    void (async () => {
+      if (url && lastAutomationNavigationByPane.get(paneId) !== reloadNonce) {
+        try {
+          await navigateBrowserAutomation(paneId, url);
+          rememberAutomationNavigation(paneId, reloadNonce);
+        } catch (error) {
+          if (!cancelled) {
+            setAutomationSnapshot({
+              available: false,
+              tabId: null,
+              url,
+              title: null,
+              imageDataUrl: null,
+              width: 1280,
+              height: 900,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+      await poll();
+    })();
+    const timer = window.setInterval(() => void poll(), 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [automated, paneId, reloadNonce, url]);
 
   // Keys typed into the framed page belong to its document: the host
   // document's window-level shortcut handlers never fire, and the native key
@@ -227,6 +327,58 @@ export default function BrowserOverlay({
       return url;
     }
   })();
+  const fallbackFrameUrl =
+    automated &&
+    automationSnapshot?.available === false &&
+    frameUrl &&
+    canRenderInLocalPreviewFrame(frameUrl)
+      ? frameUrl
+      : null;
+
+  function automationPoint(event: {
+    clientX: number;
+    clientY: number;
+    currentTarget: HTMLImageElement;
+  }) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = automationSnapshot?.width ?? 1280;
+    const height = automationSnapshot?.height ?? 900;
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * width,
+      y: ((event.clientY - rect.top) / rect.height) * height,
+    };
+  }
+
+  function handleAutomationKey(event: ReactKeyboardEvent<HTMLImageElement>) {
+    if (event.metaKey || event.ctrlKey || event.altKey) {
+      return;
+    }
+    if (event.key.length === 1) {
+      event.preventDefault();
+      ignoreBrowserCommand(insertBrowserAutomationText(paneId, event.key));
+      return;
+    }
+    const virtualKeys: Record<string, number> = {
+      Backspace: 8,
+      Tab: 9,
+      Enter: 13,
+      Escape: 27,
+      PageUp: 33,
+      PageDown: 34,
+      End: 35,
+      Home: 36,
+      ArrowLeft: 37,
+      ArrowUp: 38,
+      ArrowRight: 39,
+      ArrowDown: 40,
+      Delete: 46,
+    };
+    const virtualKey = virtualKeys[event.key];
+    if (virtualKey !== undefined) {
+      event.preventDefault();
+      ignoreBrowserCommand(sendBrowserAutomationKey(paneId, event.key, event.code, virtualKey));
+    }
+  }
 
   return (
     <div
@@ -252,7 +404,7 @@ export default function BrowserOverlay({
             onChange={(event) => setDraft(event.currentTarget.value)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
-                setDraft(url ?? "");
+                setDraft(displayedUrl ?? "");
                 event.currentTarget.blur();
               }
             }}
@@ -269,7 +421,13 @@ export default function BrowserOverlay({
             className="icon-button browser-overlay-button"
             title="Refresh browser"
             aria-label="Refresh browser"
-            onClick={onRefresh}
+            onClick={() => {
+              if (automated) {
+                ignoreBrowserCommand(reloadBrowserAutomation(paneId));
+              } else {
+                onRefresh();
+              }
+            }}
           >
             <RotateCw size={14} aria-hidden="true" />
           </button>
@@ -282,11 +440,11 @@ export default function BrowserOverlay({
                 : "Open in external browser"
             }
             aria-label="Open in external browser"
-            onClick={onOpenExternal}
+            onClick={() => onOpenExternal(displayedUrl ?? undefined)}
             // File-server content carries a capability token in its URL; opening it in the
             // OS browser would leak that token. The backend refuses it too, but disable the
             // affordance so the action isn't offered in the first place.
-            disabled={!url || sandbox}
+            disabled={!displayedUrl || sandbox}
           >
             <ExternalLink size={14} aria-hidden="true" />
           </button>
@@ -302,7 +460,72 @@ export default function BrowserOverlay({
         </div>
       </div>
       <div className="browser-overlay-body">
-        {frameUrl ? (
+        {automated && automationSnapshot?.imageDataUrl ? (
+          <img
+            className="browser-overlay-frame is-automated"
+            src={automationSnapshot.imageDataUrl}
+            alt={automationSnapshot.title || "Automated browser tab"}
+            draggable={false}
+            tabIndex={0}
+            onClick={(event) => {
+              const point = automationPoint(event);
+              ignoreBrowserCommand(
+                sendBrowserAutomationMouse(paneId, "click", point.x, point.y),
+              );
+              event.currentTarget.focus();
+            }}
+            onPointerMove={(event) => {
+              const now = performance.now();
+              if (now - lastAutomationMoveRef.current < 50) {
+                return;
+              }
+              lastAutomationMoveRef.current = now;
+              const point = automationPoint(event);
+              ignoreBrowserCommand(
+                sendBrowserAutomationMouse(paneId, "move", point.x, point.y),
+              );
+            }}
+            onWheel={(event) => {
+              event.preventDefault();
+              const point = automationPoint(event);
+              ignoreBrowserCommand(
+                sendBrowserAutomationMouse(
+                  paneId,
+                  "scroll",
+                  point.x,
+                  point.y,
+                  event.deltaX,
+                  event.deltaY,
+                ),
+              );
+            }}
+            onKeyDown={handleAutomationKey}
+            onPaste={(event) => {
+              const text = event.clipboardData.getData("text/plain");
+              if (!text) {
+                return;
+              }
+              event.preventDefault();
+              ignoreBrowserCommand(insertBrowserAutomationText(paneId, text));
+            }}
+          />
+        ) : fallbackFrameUrl ? (
+          <iframe
+            key={`${fallbackFrameUrl}::${reloadNonce}`}
+            ref={frameRef}
+            className="browser-overlay-frame"
+            src={fallbackFrameUrl}
+            title="Browser overlay"
+            referrerPolicy="no-referrer"
+          />
+        ) : automated ? (
+          <div className="browser-overlay-empty">
+            <p>
+              {automationSnapshot?.error ??
+                "Connecting to the qmux automation browser…"}
+            </p>
+          </div>
+        ) : frameUrl ? (
           <iframe
             key={`${frameUrl}::${reloadNonce}`}
             ref={frameRef}
