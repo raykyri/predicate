@@ -13,6 +13,8 @@ const CACHE_MARKER =
 const PASTE_MARKER = "[Image: /Users/raymond/.claude/image-cache/qmux-paste-42-0.png]";
 const CODEX_IMAGE_BLOCK =
   '<image name=[Image] path="/var/folders/example/T/codex-clipboard-BvUGfw.png">\n</image>';
+const NUMBERED_CODEX_IMAGE_BLOCK =
+  '<image name=[Image #1] path="/var/folders/example/T/codex-clipboard-numbered.png">\n</image>';
 
 test("splitImageMarkers returns plain text untouched", () => {
   assert.deepEqual(splitImageMarkers("fix the login bug"), [
@@ -71,6 +73,12 @@ test("splitImageMarkers accepts quoted Codex image names and reordered attribute
   assert.deepEqual(splitImageMarkers(marker), [{ kind: "image", text: marker }]);
 });
 
+test("splitImageMarkers accepts Codex's numbered clipboard image blocks", () => {
+  assert.deepEqual(splitImageMarkers(NUMBERED_CODEX_IMAGE_BLOCK), [
+    { kind: "image", text: NUMBERED_CODEX_IMAGE_BLOCK },
+  ]);
+});
+
 test("splitImageMarkers leaves non-empty or incomplete image tags visible", () => {
   const text =
     '<image name=[Image] path="/tmp/a.png">caption</image> <image name=[Image] path="/tmp/b.png">';
@@ -104,9 +112,19 @@ test("imageMarkerSourcePath keeps interior spaces but trims edge whitespace", ()
   );
 });
 
-test("imageMarkerSourcePath returns null for numbered references and non-markers", () => {
+test("imageMarkerSourcePath extracts paths from Codex image blocks", () => {
+  assert.equal(
+    imageMarkerSourcePath(CODEX_IMAGE_BLOCK),
+    "/var/folders/example/T/codex-clipboard-BvUGfw.png",
+  );
+  assert.equal(
+    imageMarkerSourcePath(NUMBERED_CODEX_IMAGE_BLOCK),
+    "/var/folders/example/T/codex-clipboard-numbered.png",
+  );
+});
+
+test("imageMarkerSourcePath returns null for pathless references and non-markers", () => {
   assert.equal(imageMarkerSourcePath("[Image #1]"), null);
-  assert.equal(imageMarkerSourcePath(CODEX_IMAGE_BLOCK), null);
   assert.equal(imageMarkerSourcePath("[Image: source: ]"), null);
   assert.equal(imageMarkerSourcePath("plain text"), null);
   assert.equal(imageMarkerSourcePath(`prefixed ${CACHE_MARKER}`), null);

@@ -32,10 +32,10 @@ function loadTranscriptImage(path: string): Promise<string> {
   return loading;
 }
 
-/** Renders one "[Image: source: <path>]" transcript marker as the actual
- *  pasted image. Numbered "[Image #N]" references (no path), reads still in
- *  flight, and failed reads all fall back to the muted "[Image]" chip the
- *  compact views use, so the transcript never shows a raw cache path.
+/** Renders one path-bearing transcript image marker as the actual pasted image.
+ *  Numbered "[Image #N]" references (no path), reads still in flight, and failed
+ *  reads all fall back to the muted "[Image]" chip the compact views use, so the
+ *  transcript never shows a raw cache path.
  *
  *  "inline" is the full-width transcript image; "thumbnail" is the small
  *  rail-card preview. Either opens the shared lightbox on click. */

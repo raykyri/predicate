@@ -2256,25 +2256,62 @@ fn parse_codex_message_blocks(content: Option<&Value>) -> Option<Vec<TurnBlock>>
     match content? {
         Value::String(text) => Some(vec![TurnBlock::Text { text: text.clone() }]),
         Value::Array(items) => {
-            let blocks = items
-                .iter()
-                .filter_map(|item| {
-                    let block_type = item.get("type").and_then(Value::as_str);
-                    match block_type {
-                        Some("input_text" | "output_text" | "text") => item
-                            .get("text")
-                            .and_then(Value::as_str)
-                            .map(|text| TurnBlock::Text {
-                                text: text.to_string(),
-                            }),
-                        _ => None,
-                    }
-                })
-                .collect::<Vec<_>>();
+            let mut blocks = Vec::new();
+            let mut index = 0;
+            while index < items.len() {
+                // Current Codex transcripts split a pasted image across three
+                // content items: an opening <image ...> text item, the base64
+                // input_image payload, and a closing </image> text item. Keep
+                // the safe on-disk marker while dropping the huge data URL so
+                // the frontend can load the source path as a thumbnail.
+                if let Some(marker) = codex_image_marker_at(items, index) {
+                    blocks.push(TurnBlock::Text { text: marker });
+                    index += 3;
+                    continue;
+                }
+
+                let item = &items[index];
+                let block_type = item.get("type").and_then(Value::as_str);
+                if matches!(block_type, Some("input_text" | "output_text" | "text"))
+                    && let Some(text) = item.get("text").and_then(Value::as_str)
+                {
+                    blocks.push(TurnBlock::Text {
+                        text: text.to_string(),
+                    });
+                }
+                index += 1;
+            }
             Some(blocks)
         }
         _ => None,
     }
+}
+
+fn codex_image_marker_at(items: &[Value], index: usize) -> Option<String> {
+    let opening = items.get(index)?;
+    let image = items.get(index + 1)?;
+    let closing = items.get(index + 2)?;
+    let opening_text = opening
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "input_text" | "text"))
+        .and_then(|_| opening.get("text"))
+        .and_then(Value::as_str)?
+        .trim();
+    let is_image_payload = image.get("type").and_then(Value::as_str) == Some("input_image");
+    let closing_text = closing
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|kind| matches!(*kind, "input_text" | "text"))
+        .and_then(|_| closing.get("text"))
+        .and_then(Value::as_str)?
+        .trim();
+
+    (is_image_payload
+        && opening_text.starts_with("<image ")
+        && opening_text.ends_with('>')
+        && closing_text == "</image>")
+        .then(|| format!("{opening_text}\n</image>"))
 }
 
 fn codex_tool_input(payload: &Value) -> Value {
@@ -3310,6 +3347,36 @@ trusted_hash = "sha256:trusted"
         assert_eq!(assistant.role, "assistant");
         assert_text_block(&user.blocks[0], "fix the bug");
         assert_text_block(&assistant.blocks[0], "Done.");
+    }
+
+    #[test]
+    fn parse_codex_message_reassembles_clipboard_image_markers() {
+        let line = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "<image name=[Image #1] path=\"/var/folders/example/T/codex-clipboard.png\">"
+                    },
+                    { "type": "input_image", "image_url": "data:image/png;base64,AAAA" },
+                    { "type": "input_text", "text": "</image>" },
+                    { "type": "input_text", "text": "Please inspect this image [Image #1]" }
+                ]
+            }
+        })
+        .to_string();
+
+        let turn = parse_transcript_line("agent-1", 3, &line).expect("user turn");
+
+        assert_eq!(turn.blocks.len(), 2);
+        assert_text_block(
+            &turn.blocks[0],
+            "<image name=[Image #1] path=\"/var/folders/example/T/codex-clipboard.png\">\n</image>",
+        );
+        assert_text_block(&turn.blocks[1], "Please inspect this image [Image #1]");
     }
 
     #[test]

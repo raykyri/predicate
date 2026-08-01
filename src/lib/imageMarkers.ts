@@ -2,7 +2,8 @@
 // bytes in ~/.claude/image-cache and writes "[Image: source: <path>]" as its own
 // text block, images referenced inline in a typed prompt appear as "[Image #N]",
 // and Codex serializes clipboard attachments as an empty <image ...></image>
-// block. Images pasted into a qmux composer/queue are stored as "[Image: <path>]"
+// block whose name may be "[Image]" or "[Image #N]". Images pasted into a qmux
+// composer/queue are stored as "[Image: <path>]"
 // with an absolute path (the form delivered to the agent as text). All shapes
 // collapse to a muted "[Image]" chip in compact views, or a thumbnail where the
 // marker carries a resolvable path.
@@ -17,7 +18,7 @@ export const COLLAPSED_IMAGE_LABEL = "[Image]";
 // never prose like "[Image: figure 2]" — and, since "source:" has no leading
 // slash, never overlaps the Claude Code "[Image: source: …]" marker.
 const IMAGE_MARKER_SOURCE =
-  /\[Image: source: [^\]\n]*\]|\[Image: \/[^\]\n]*\]|\[Image #\d+\]|<image\b(?=[^>\r\n]*\bname=(?:"\[Image\]"|'\[Image\]'|\[Image\]))(?=[^>\r\n]*\bpath=(?:"[^"\r\n]+"|'[^'\r\n]+'))[^>\r\n]*>[\t\r\n ]*<\/image>/;
+  /\[Image: source: [^\]\n]*\]|\[Image: \/[^\]\n]*\]|\[Image #\d+\]|<image\b(?=[^>\r\n]*\bname=(?:"\[Image(?: #\d+)?\]"|'\[Image(?: #\d+)?\]'|\[Image(?: #\d+)?\]))(?=[^>\r\n]*\bpath=(?:"[^"\r\n]+"|'[^'\r\n]+'))[^>\r\n]*>[\t\r\n ]*<\/image>/;
 
 function imageMarkerPattern() {
   return new RegExp(IMAGE_MARKER_SOURCE.source, "g");
@@ -52,11 +53,15 @@ export function collapseImageMarkers(text: string): string {
 // "[Image: <path>]" paste marker carry an on-disk path; the "source: " prefix is
 // optional so one extractor handles both.
 const IMAGE_MARKER_PATH = /^\[Image: (?:source: )?([^\]\n]*)\]$/;
+const CODEX_IMAGE_MARKER_PATH = /\bpath=(?:"([^"\r\n]+)"|'([^'\r\n]+)')/;
 
-/** Extracts the on-disk path from a "[Image: source: <path>]" or "[Image: <path>]"
- *  marker segment. Numbered "[Image #N]" references carry no path and return
- *  null — they can only render as the collapsed chip. */
+/** Extracts the on-disk path from a path-bearing bracket or Codex XML marker.
+ *  Standalone numbered "[Image #N]" references carry no path and return null —
+ *  they can only render as the collapsed chip. */
 export function imageMarkerSourcePath(marker: string): string | null {
-  const path = IMAGE_MARKER_PATH.exec(marker)?.[1].trim();
+  const bracketPath = IMAGE_MARKER_PATH.exec(marker)?.[1];
+  const codexMatch = marker.match(new RegExp(`^(?:${IMAGE_MARKER_SOURCE.source})$`));
+  const codexPath = codexMatch ? CODEX_IMAGE_MARKER_PATH.exec(marker) : null;
+  const path = (bracketPath ?? codexPath?.[1] ?? codexPath?.[2])?.trim();
   return path ? path : null;
 }

@@ -438,8 +438,9 @@ export function readMarkdownDocumentFile(path: string) {
 
 /** Reads a pasted image referenced by a transcript "[Image: source: <path>]"
  * marker and returns it as a data: URL for direct use in an <img> tag. The
- * backend enforces the home-directory confinement, raster extension
- * allowlist, regular-file requirement, and byte cap. */
+ * backend confines reads to the home or platform temporary directory and
+ * enforces the raster extension allowlist, regular-file requirement, and byte
+ * cap. */
 export function readTranscriptImage(path: string) {
   return invoke<string>("read_transcript_image", { path });
 }

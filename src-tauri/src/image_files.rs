@@ -5,12 +5,14 @@
 //! only allows `data:`/`blob:` image sources, so the frontend asks this module to
 //! read the file and return a `data:` URL it can hand straight to an `<img>` tag.
 //!
-//! The read is confined to the user's home directory (where the image cache
-//! lives). The command is reachable only from the trusted webview, but confining
-//! it keeps a compromised renderer from repurposing it as a general file-read
-//! oracle: the path is canonicalized first, so a symlink whose name merely ends
-//! in `.png` cannot smuggle out a secret — the location and (re-checked on the
-//! canonical target) extension tests both apply to the real target.
+//! The read is confined to the user's home directory (where the Claude image
+//! cache lives) and the platform temporary directory (where Codex stores its
+//! clipboard images). The command is reachable only from the trusted webview,
+//! but confining it keeps a compromised renderer from repurposing it as a
+//! general file-read oracle: the path is canonicalized first, so a symlink whose
+//! name merely ends in `.png` cannot smuggle out a secret — the location and
+//! (re-checked on the canonical target) extension tests both apply to the real
+//! target.
 
 use std::fs;
 use std::io::Read;
@@ -48,21 +50,27 @@ pub fn read_transcript_image(path: &Path) -> Result<String, String> {
         .map(std::path::PathBuf::from)
         .filter(|home| !home.as_os_str().is_empty())
         .ok_or_else(|| "cannot determine your home directory to validate the image".to_string())?;
-    read_transcript_image_within(path, &home)
+    let temp = std::env::temp_dir();
+    read_transcript_image_within(path, &[home.as_path(), temp.as_path()])
 }
 
 /// Confinement-root-injectable core of [`read_transcript_image`], kept separate
-/// so tests can point `allowed_root` at a scratch directory. Mirrors
+/// so tests can point `allowed_roots` at scratch directories. Mirrors
 /// `research::read_markdown_document_file_within`: canonicalize (resolving
 /// symlinks and `..`) before any check, verify location, extension, file type,
 /// and size against the real target, and never buffer more than the cap even if
 /// the file grows between inspection and reading.
-fn read_transcript_image_within(path: &Path, allowed_root: &Path) -> Result<String, String> {
+fn read_transcript_image_within(path: &Path, allowed_roots: &[&Path]) -> Result<String, String> {
     let canonical = fs::canonicalize(path)
         .map_err(|err| format!("failed to resolve {}: {err}", path.display()))?;
-    let root = fs::canonicalize(allowed_root).unwrap_or_else(|_| allowed_root.to_path_buf());
-    if !canonical.starts_with(&root) {
-        return Err("only images under your home directory can be displayed".to_string());
+    let is_within_allowed_root = allowed_roots.iter().any(|allowed_root| {
+        let root = fs::canonicalize(allowed_root).unwrap_or_else(|_| (*allowed_root).to_path_buf());
+        canonical.starts_with(root)
+    });
+    if !is_within_allowed_root {
+        return Err(
+            "only images under your home or temporary directory can be displayed".to_string(),
+        );
     }
 
     let mime = canonical
@@ -184,7 +192,7 @@ mod tests {
         let bytes: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
         let png = folder.join("paste.PNG");
         fs::write(&png, bytes).unwrap();
-        let url = read_transcript_image_within(&png, &folder).unwrap();
+        let url = read_transcript_image_within(&png, &[folder.as_path()]).unwrap();
         assert_eq!(
             url,
             format!("data:image/png;base64,{}", STANDARD.encode(bytes))
@@ -192,9 +200,21 @@ mod tests {
 
         let jpeg = folder.join("photo.jpeg");
         fs::write(&jpeg, [0xff, 0xd8]).unwrap();
-        let url = read_transcript_image_within(&jpeg, &folder).unwrap();
+        let url = read_transcript_image_within(&jpeg, &[folder.as_path()]).unwrap();
         assert!(url.starts_with("data:image/jpeg;base64,"), "{url}");
 
+        fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn image_read_accepts_codex_images_from_the_platform_temp_directory() {
+        let folder = temp_folder();
+        let image = folder.join("codex-clipboard-example.png");
+        fs::write(&image, [0x89, b'P', b'N', b'G']).unwrap();
+
+        let url = read_transcript_image(&image).unwrap();
+
+        assert!(url.starts_with("data:image/png;base64,"), "{url}");
         fs::remove_dir_all(folder).unwrap();
     }
 
@@ -208,7 +228,7 @@ mod tests {
         // back through the confined reader as the same bytes.
         let path = save_pasted_image_within(&STANDARD.encode(bytes), ".png", &cache).unwrap();
         assert!(path.ends_with(".png"), "{path}");
-        let url = read_transcript_image_within(Path::new(&path), &folder).unwrap();
+        let url = read_transcript_image_within(Path::new(&path), &[folder.as_path()]).unwrap();
         assert_eq!(
             url,
             format!("data:image/png;base64,{}", STANDARD.encode(bytes))
@@ -229,13 +249,13 @@ mod tests {
 
         let svg = folder.join("vector.svg");
         fs::write(&svg, "<svg/>").unwrap();
-        let error = read_transcript_image_within(&svg, &folder).unwrap_err();
+        let error = read_transcript_image_within(&svg, &[folder.as_path()]).unwrap_err();
         assert!(error.contains("PNG"), "{error}");
 
         let oversized = folder.join("huge.png");
         let file = fs::File::create(&oversized).unwrap();
         file.set_len(MAX_TRANSCRIPT_IMAGE_BYTES as u64 + 1).unwrap();
-        let error = read_transcript_image_within(&oversized, &folder).unwrap_err();
+        let error = read_transcript_image_within(&oversized, &[folder.as_path()]).unwrap_err();
         assert!(error.contains("20 MB"), "{error}");
 
         fs::remove_dir_all(folder).unwrap();
@@ -249,7 +269,10 @@ mod tests {
         // A .png outside the confinement root is refused even though it exists.
         let external = outside.join("external.png");
         fs::write(&external, [0x89]).unwrap();
-        assert!(read_transcript_image_within(&external, &root).is_err());
+        assert!(read_transcript_image_within(&external, &[root.as_path()]).is_err());
+        assert!(
+            read_transcript_image_within(&external, &[root.as_path(), outside.as_path()]).is_ok()
+        );
 
         // A .png symlink inside the root pointing at a non-image secret outside
         // it is rejected: canonicalization resolves the link, so the location
@@ -258,7 +281,7 @@ mod tests {
         fs::write(&secret, "token=hunter2").unwrap();
         let link = root.join("innocent.png");
         std::os::unix::fs::symlink(&secret, &link).unwrap();
-        assert!(read_transcript_image_within(&link, &root).is_err());
+        assert!(read_transcript_image_within(&link, &[root.as_path()]).is_err());
 
         fs::remove_dir_all(root).unwrap();
         fs::remove_dir_all(outside).unwrap();
