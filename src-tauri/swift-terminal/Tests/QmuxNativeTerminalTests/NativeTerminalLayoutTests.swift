@@ -92,6 +92,75 @@ final class NativeTerminalLayoutTests: XCTestCase {
         }
     }
 
+    func testKeyboardFocusReturnsAfterGeometryDragBlockerClears() async throws {
+        try await MainActor.run {
+            let paneID = "native-resize-focus-test-pane"
+            let frame = CGRect(x: 24, y: 18, width: 720, height: 360)
+            NativeTerminalHost.shared.shutdown()
+            NativeTerminalCallbackRecorder.shared.reset()
+            let root = NSView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
+            let window = NSWindow(
+                contentRect: root.bounds,
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = root
+            defer {
+                NativeTerminalHost.shared.shutdown()
+                NativeTerminalCallbackRecorder.shared.reset()
+                window.close()
+                withExtendedLifetime(root) {}
+            }
+
+            XCTAssertTrue(NativeTerminalHost.shared.attach(to: root))
+            NativeTerminalHost.shared.seedSettings(Self.settings)
+            XCTAssertTrue(
+                NativeTerminalHost.shared.createPane(
+                    id: paneID,
+                    workingDirectory: nil
+                )
+            )
+            XCTAssertTrue(Self.setLayout(paneID: paneID, frame: frame, visible: true))
+            let terminalView = try XCTUnwrap(Self.terminalView(in: root))
+
+            // A split drag enters the shared input-blocked state, releasing
+            // the native owner while WebKit handles the gesture. Clearing the
+            // blocker must make the same active pane first responder again.
+            XCTAssertTrue(
+                NativeTerminalHost.shared.setDesiredKeyboardOwner(
+                    id: paneID,
+                    revision: 1
+                )
+            )
+            XCTAssertTrue(window.firstResponder === terminalView)
+            XCTAssertTrue(
+                NativeTerminalHost.shared.setDesiredKeyboardOwner(
+                    id: nil,
+                    revision: 2
+                )
+            )
+            XCTAssertTrue(
+                NativeTerminalHost.shared.setLayout(
+                    id: paneID,
+                    frame: frame,
+                    visible: true,
+                    acceptsPointerInput: false,
+                    acceptsKeyboardClaim: false,
+                    deferGeometry: true
+                )
+            )
+            XCTAssertTrue(Self.setLayout(paneID: paneID, frame: frame, visible: true))
+            XCTAssertTrue(
+                NativeTerminalHost.shared.setDesiredKeyboardOwner(
+                    id: paneID,
+                    revision: 3
+                )
+            )
+            XCTAssertTrue(window.firstResponder === terminalView)
+        }
+    }
+
     @MainActor
     private static func withPane(
         _ body: (_ paneID: String, _ frame: CGRect) throws -> Void
@@ -133,6 +202,19 @@ final class NativeTerminalLayoutTests: XCTestCase {
             acceptsKeyboardClaim: true,
             deferGeometry: false
         )
+    }
+
+    @MainActor
+    private static func terminalView(in root: NSView) -> QmuxTerminalView? {
+        if let terminal = root as? QmuxTerminalView {
+            return terminal
+        }
+        for child in root.subviews {
+            if let terminal = terminalView(in: child) {
+                return terminal
+            }
+        }
+        return nil
     }
 
     private static let settings = TerminalPaneSettings(

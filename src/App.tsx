@@ -696,6 +696,41 @@ function claimResizePointer(event: ReactPointerEvent<HTMLDivElement>): () => voi
   };
 }
 
+function TerminalSplitResizer({
+  style,
+  layoutKey,
+  onPointerDown,
+  onKeyDown,
+}: {
+  style: CSSProperties;
+  layoutKey: string;
+  onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
+  onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
+}) {
+  // The AppKit event monitor sees the native terminal's mouse-down before
+  // React can issue its asynchronous whole-gesture pointer claim. If the
+  // divider lands on a terminal frame boundary (including a temporarily stale
+  // frame), Ghostty can otherwise capture and consume the first drag event.
+  // Registering the resting divider rect ahead of the gesture makes its very
+  // first press web-owned; the normal drag claim then covers pointer motion
+  // after the divider leaves that rect.
+  const nativeRegionRef = useNativeWebOverlayRegion<HTMLDivElement>(IS_MAC, layoutKey);
+
+  return (
+    <div
+      ref={nativeRegionRef}
+      className="terminal-split-resizer"
+      role="separator"
+      aria-label="Resize terminal split"
+      aria-orientation="horizontal"
+      tabIndex={0}
+      style={style}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    />
+  );
+}
+
 // Bounded retry for releasing a pane's output backlog (attachPane). A failure would
 // otherwise leave the terminal blank forever, so retry with backoff to ride out a
 // transient race (e.g. the pane not yet visible to the backend) before giving up.
@@ -14650,14 +14685,10 @@ function MainApp() {
           ) : null}
           {activePaneSplit
             ? terminalSplitDividerOffsets.map((offset, index) => (
-                <div
+                <TerminalSplitResizer
                   key={`${activePaneSplit.id}-${index}`}
-                  className="terminal-split-resizer"
-                  role="separator"
-                  aria-label="Resize terminal split"
-                  aria-orientation="horizontal"
-                  tabIndex={0}
                   style={terminalSplitDividerStyle(offset, index)}
+                  layoutKey={`${activePaneSplit.id}:${index}:${offset}`}
                   onPointerDown={(event) =>
                     startTerminalSplitResize(event, activePaneSplit, index)
                   }
