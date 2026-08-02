@@ -1,4 +1,4 @@
-import { ExternalLink, RotateCw, X } from "lucide-react";
+import { Bot, ExternalLink, Globe, RotateCw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
@@ -501,26 +501,28 @@ export default function BrowserOverlay({
           <div className="browser-overlay-mode-group" role="group" aria-label="Browser engine">
             <button
               type="button"
-              className={`browser-overlay-mode-button${mode === "webkit" ? " is-active" : ""}`}
+              className={`icon-button browser-overlay-button browser-overlay-mode-button${mode === "webkit" ? " is-active" : ""}`}
               title="Use the WebKit browser"
+              aria-label="Use the WebKit browser"
               aria-pressed={mode === "webkit"}
               onClick={() => onModeChange("webkit", automationSnapshot?.url ?? url)}
             >
-              WebKit
+              <Globe size={14} aria-hidden="true" />
             </button>
             <button
               type="button"
-              className={`browser-overlay-mode-button${mode === "agent" ? " is-active" : ""}`}
+              className={`icon-button browser-overlay-button browser-overlay-mode-button${mode === "agent" ? " is-active" : ""}`}
               title={
                 sandbox
                   ? "Agent browser is unavailable for protected file previews"
                   : "Use the mirrored Chromium agent browser"
               }
+              aria-label="Use the mirrored Chromium agent browser"
               aria-pressed={mode === "agent"}
               disabled={sandbox}
               onClick={() => onModeChange("agent", url)}
             >
-              Agent
+              <Bot size={14} aria-hidden="true" />
             </button>
           </div>
         </div>

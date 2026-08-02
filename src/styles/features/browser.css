@@ -58,51 +58,12 @@
 }
 
 .browser-overlay-mode-group {
-  display: inline-flex;
-  height: 28px;
-  overflow: hidden;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--chrome-control-bg);
+  display: flex;
+  gap: 6px;
 }
 
 .browser-overlay-mode-button {
-  min-width: 54px;
-  padding: 0 9px;
-  border: 0;
-  border-right: 1px solid var(--control-border);
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--font-ui);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.browser-overlay-mode-button:last-child {
-  border-right: 0;
-}
-
-.browser-overlay-mode-button:hover:not(:disabled):not(.is-active) {
-  background: var(--chrome-control-bg-hover);
-  color: var(--text-strong);
-}
-
-.browser-overlay-mode-button.is-active {
-  background: var(--accent-color);
-  color: var(--accent-foreground, #fff);
-}
-
-.browser-overlay-mode-button:disabled {
-  cursor: default;
-  opacity: 0.4;
-}
-
-.browser-overlay-mode-button:focus-visible {
-  position: relative;
-  z-index: 1;
-  outline: none;
-  box-shadow: inset 0 0 0 2px var(--accent-shadow);
+  flex: 0 0 auto;
 }
 
 .browser-overlay-url {
@@ -247,6 +208,13 @@
 
 .browser-overlay-button.is-active {
   border-color: var(--accent-color);
+  background: var(--accent-shadow);
+  color: var(--text-strong);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.browser-overlay-button.is-active:hover {
+  background: var(--accent-shadow);
   color: var(--text-strong);
 }
 
