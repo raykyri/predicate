@@ -8,7 +8,8 @@ use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -22,6 +23,9 @@ use tungstenite::{Message, WebSocket, connect};
 const HEADLESS_SHELL_START_TIMEOUT: Duration = Duration::from_secs(8);
 const DEFAULT_CDP_TIMEOUT: Duration = Duration::from_secs(30);
 const CDP_READ_POLL: Duration = Duration::from_millis(20);
+const PROFILE_PREFIX: &str = "qmux-codex-browser-";
+const BROWSER_PID_FILE: &str = "QmuxBrowserProcessId";
+const BROWSER_EXECUTABLE_FILE: &str = "QmuxBrowserExecutable";
 
 static PROFILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
@@ -138,6 +142,7 @@ struct BrowserTab {
 
 impl ChromiumRuntime {
     fn launch() -> Result<Self, String> {
+        cleanup_stale_profile_dirs();
         let executable = find_headless_shell_executable().ok_or_else(|| {
             "chrome-headless-shell was not found; install it with Playwright or set QMUX_CHROME_HEADLESS_SHELL_PATH"
                 .to_string()
@@ -177,6 +182,12 @@ impl ChromiumRuntime {
                 let _ = fs::remove_dir_all(&profile_dir);
                 format!("failed to launch {}: {err}", executable.display())
             })?;
+        if let Err(err) = write_browser_identity(&profile_dir, child.id(), &executable) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = fs::remove_dir_all(&profile_dir);
+            return Err(err);
+        }
 
         let active_port_file = profile_dir.join("DevToolsActivePort");
         let deadline = Instant::now() + HEADLESS_SHELL_START_TIMEOUT;
@@ -994,9 +1005,168 @@ fn unique_profile_dir() -> PathBuf {
         .as_nanos();
     let nonce = PROFILE_NONCE.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "qmux-codex-browser-{}-{timestamp}-{nonce}",
+        "{PROFILE_PREFIX}{}-{timestamp}-{nonce}",
         std::process::id()
     ))
+}
+
+fn write_browser_identity(profile_dir: &Path, pid: u32, executable: &Path) -> Result<(), String> {
+    fs::write(profile_dir.join(BROWSER_PID_FILE), pid.to_string()).map_err(|err| {
+        format!(
+            "failed to record chrome-headless-shell pid in {}: {err}",
+            profile_dir.display()
+        )
+    })?;
+    fs::write(
+        profile_dir.join(BROWSER_EXECUTABLE_FILE),
+        executable.as_os_str().as_encoded_bytes(),
+    )
+    .map_err(|err| {
+        format!(
+            "failed to record chrome-headless-shell executable in {}: {err}",
+            profile_dir.display()
+        )
+    })
+}
+
+fn cleanup_stale_profile_dirs() {
+    let Ok(entries) = fs::read_dir(std::env::temp_dir()) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let profile_dir = entry.path();
+        let Some(owner_pid) = profile_owner_pid(&profile_dir) else {
+            continue;
+        };
+        if process_is_alive(owner_pid) {
+            continue;
+        }
+
+        let browser_pid = read_pid(&profile_dir.join(BROWSER_PID_FILE));
+        let expected_executable = fs::read(profile_dir.join(BROWSER_EXECUTABLE_FILE))
+            .ok()
+            .map(|bytes| PathBuf::from(std::ffi::OsString::from_vec(bytes)));
+        let close_sent = close_browser_over_cdp(&profile_dir);
+
+        if let Some(browser_pid) = browser_pid {
+            wait_for_process_exit(browser_pid, Duration::from_millis(500));
+            if process_is_alive(browser_pid)
+                && expected_executable.as_deref().is_some_and(|expected| {
+                    process_executable(browser_pid).as_deref() == Some(expected)
+                })
+            {
+                // The profile records both the pid and exact executable path. Only
+                // signal after validating both so a recycled pid cannot kill an
+                // unrelated process.
+                unsafe {
+                    libc::kill(browser_pid as libc::pid_t, libc::SIGTERM);
+                }
+                wait_for_process_exit(browser_pid, Duration::from_millis(500));
+            }
+        }
+
+        if close_sent || browser_pid.is_none_or(|pid| !process_is_alive(pid)) {
+            if let Err(err) = fs::remove_dir_all(&profile_dir) {
+                eprintln!(
+                    "qmux: failed to remove stale browser profile {}: {err}",
+                    profile_dir.display()
+                );
+            } else {
+                eprintln!(
+                    "qmux: reclaimed stale chrome-headless-shell profile {}",
+                    profile_dir.display()
+                );
+            }
+        }
+    }
+}
+
+fn profile_owner_pid(profile_dir: &Path) -> Option<u32> {
+    profile_dir
+        .file_name()?
+        .to_str()?
+        .strip_prefix(PROFILE_PREFIX)?
+        .split('-')
+        .next()?
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0 && *pid <= libc::pid_t::MAX as u32)
+}
+
+fn read_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0 && *pid <= libc::pid_t::MAX as u32)
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn wait_for_process_exit(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while process_is_alive(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    let mut buffer = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let length = unsafe {
+        libc::proc_pidpath(
+            pid as libc::pid_t,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    (length > 0).then(|| {
+        PathBuf::from(std::ffi::OsString::from_vec(
+            buffer[..length as usize].to_vec(),
+        ))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn process_executable(pid: u32) -> Option<PathBuf> {
+    fs::read_link(format!("/proc/{pid}/exe")).ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn process_executable(_pid: u32) -> Option<PathBuf> {
+    None
+}
+
+fn close_browser_over_cdp(profile_dir: &Path) -> bool {
+    let Ok(contents) = fs::read_to_string(profile_dir.join("DevToolsActivePort")) else {
+        return false;
+    };
+    let mut lines = contents.lines();
+    let Some(port) = lines.next().and_then(|line| line.parse::<u16>().ok()) else {
+        return false;
+    };
+    let Some(websocket_path) = lines.next().filter(|line| line.starts_with('/')) else {
+        return false;
+    };
+    let url = format!("ws://127.0.0.1:{port}{websocket_path}");
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    let Ok(stream) = TcpStream::connect_timeout(&address, Duration::from_millis(250)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(250)));
+    let Ok((mut socket, _)) = tungstenite::client(url.as_str(), stream) else {
+        return false;
+    };
+    socket
+        .send(Message::text(
+            json!({ "id": 1, "method": "Browser.close" }).to_string(),
+        ))
+        .is_ok()
 }
 
 fn tab_id(value: &Value) -> Result<u64, String> {
@@ -1033,6 +1203,41 @@ mod tests {
         let second = unique_profile_dir();
         assert_ne!(first, second);
         assert!(first.starts_with(std::env::temp_dir()));
+        assert_eq!(profile_owner_pid(&first), Some(std::process::id()));
+    }
+
+    #[test]
+    fn profile_owner_pid_rejects_unowned_or_unsafe_names() {
+        let temp = std::env::temp_dir();
+        assert_eq!(
+            profile_owner_pid(&temp.join("qmux-codex-browser-42-123-0")),
+            Some(42)
+        );
+        assert_eq!(
+            profile_owner_pid(&temp.join("other-browser-42-123-0")),
+            None
+        );
+        assert_eq!(
+            profile_owner_pid(&temp.join("qmux-codex-browser-0-123-0")),
+            None
+        );
+        assert_eq!(
+            profile_owner_pid(&temp.join("qmux-codex-browser-4294967295-123-0")),
+            None
+        );
+    }
+
+    #[test]
+    fn browser_identity_round_trips_pid_and_executable() {
+        let profile = unique_profile_dir();
+        fs::create_dir_all(&profile).unwrap();
+        let executable = Path::new("/tmp/chrome headless shell");
+        write_browser_identity(&profile, 42, executable).unwrap();
+
+        assert_eq!(read_pid(&profile.join(BROWSER_PID_FILE)), Some(42));
+        let recorded = fs::read(profile.join(BROWSER_EXECUTABLE_FILE)).unwrap();
+        assert_eq!(recorded, executable.as_os_str().as_encoded_bytes());
+        fs::remove_dir_all(profile).unwrap();
     }
 
     #[test]
