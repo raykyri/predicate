@@ -173,6 +173,10 @@ struct BrowserTab {
     attached_session: Option<String>,
 }
 
+fn tab_should_finalize(tab_id: u64, keep: &HashSet<u64>, scope: Option<&HashSet<u64>>) -> bool {
+    !keep.contains(&tab_id) && scope.is_none_or(|scope| scope.contains(&tab_id))
+}
+
 impl ChromiumRuntime {
     fn launch(
         commands: mpsc::Receiver<EngineCommand>,
@@ -675,11 +679,26 @@ impl ChromiumRuntime {
                     .collect::<HashSet<_>>()
             })
             .unwrap_or_default();
+        // The discovery backend injects a pane-owned scope. Direct engine
+        // callers omit it and retain the protocol's original global behavior.
+        let scope = params
+            .get("qmuxScope")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(|value| {
+                        value
+                            .as_u64()
+                            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+                    })
+                    .collect::<HashSet<_>>()
+            });
         let close = self
             .tabs
             .keys()
             .copied()
-            .filter(|tab_id| !keep.contains(tab_id))
+            .filter(|tab_id| tab_should_finalize(*tab_id, &keep, scope.as_ref()))
             .collect::<Vec<_>>();
         for tab_id in close {
             let target_id = self.tab(tab_id)?.target_id.clone();
@@ -1457,6 +1476,16 @@ mod tests {
         assert_eq!(tab_id(&json!({ "tabId": 3 })).unwrap(), 3);
         assert!(tab_id(&json!({ "tabId": 0 })).is_err());
         assert!(tab_id(&json!({ "tabId": "3" })).is_err());
+    }
+
+    #[test]
+    fn finalize_scope_cannot_close_another_panes_tab() {
+        let keep = HashSet::from([2]);
+        let scope = HashSet::from([1, 2]);
+        assert!(tab_should_finalize(1, &keep, Some(&scope)));
+        assert!(!tab_should_finalize(2, &keep, Some(&scope)));
+        assert!(!tab_should_finalize(3, &keep, Some(&scope)));
+        assert!(tab_should_finalize(3, &keep, None));
     }
 
     #[test]

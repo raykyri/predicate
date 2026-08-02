@@ -52,8 +52,10 @@ matching UI adapter on the frontend.
   Computer Use, screenshot, and raw CDP operations through a dedicated
   `chrome-headless-shell` process. qmux finds a bundled or PATH installation,
   then `PLAYWRIGHT_BROWSERS_PATH` and the newest default Playwright cache entry;
-  `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery. This does not use a
-  browser extension or the user's normal browser profile.
+  `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery. Pane-owned browser
+  targets appear as small global picture-in-picture previews, including while a
+  different terminal is active. This does not use a browser extension or the
+  user's normal browser profile.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install

@@ -2536,6 +2536,8 @@ fn main() {
             publishing::publishing_resolve_proposal,
             active_tab_get,
             active_tab_set,
+            browser_backend::browser_automation_targets,
+            browser_backend::browser_automation_preview,
             browser_backend::browser_automation_snapshot,
             browser_backend::browser_automation_start_screencast,
             browser_backend::browser_automation_stop_screencast,

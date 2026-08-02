@@ -85,6 +85,9 @@ interface BrowserOverlayProps {
   // other workspace files. Protected previews are always kept in WebKit mode.
   sandbox: boolean;
   mode: BrowserOverlayMode;
+  // False when opening a target that already exists (for example from a PiP):
+  // observe its current page without replaying the React state's URL.
+  navigateAgentOnOpen?: boolean;
   // Passed to the token-gated file server so Markdown documents rendered in
   // this isolated frame use the same body font as the application. Arbitrary
   // localhost pages remain untouched.
@@ -111,6 +114,7 @@ export default function BrowserOverlay({
   reloadNonce,
   sandbox,
   mode,
+  navigateAgentOnOpen = true,
   bodyFontId,
   size,
   toggleShortcutLabel,
@@ -344,7 +348,11 @@ export default function BrowserOverlay({
     );
 
     void (async () => {
-      if (url && lastAutomationNavigationByPane.get(paneId) !== reloadNonce) {
+      if (
+        navigateAgentOnOpen &&
+        url &&
+        lastAutomationNavigationByPane.get(paneId) !== reloadNonce
+      ) {
         try {
           await navigateBrowserAutomation(paneId, url);
           rememberAutomationNavigation(paneId, reloadNonce);
@@ -373,7 +381,7 @@ export default function BrowserOverlay({
       unlisten?.();
       void stopBrowserScreencast(paneId).catch(() => undefined);
     };
-  }, [automated, paneId, reloadNonce, url]);
+  }, [automated, navigateAgentOnOpen, paneId, reloadNonce, url]);
 
   // Keys typed into the framed page belong to its document: the host
   // document's window-level shortcut handlers never fire, and the native key

@@ -11,7 +11,7 @@ use crate::browser_engine::{BrowserEngine, ScreencastFrame};
 use crate::state::AppState;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -33,6 +33,9 @@ const CLIENT_REQUEST_WORKERS: usize = 4;
 /// Shared by the streamed screencast and the polled fallback so the mirror
 /// looks the same however a frame reached it.
 const AGENT_MIRROR_JPEG_QUALITY: u32 = 80;
+/// PiP previews are intentionally small and observation-only. A lower quality
+/// keeps periodic frames cheap without affecting the full browser mirror.
+const AGENT_PREVIEW_JPEG_QUALITY: u32 = 60;
 /// Screencast frames waiting to reach the webview. Chromium keeps at most a
 /// couple in flight, and a stale frame is worth less than the one behind it,
 /// so this stays small on purpose.
@@ -378,29 +381,50 @@ fn handle_request(
             }
         }),
         _ => match backend.engine.as_ref() {
-            Some(engine) => match engine.call(
-                method,
-                request.get("params").cloned().unwrap_or_else(|| json!({})),
-            ) {
-                Ok(result) => {
-                    remember_tab_owner(backend, owned_pane.as_deref(), method, request, &result);
-                    let result =
-                        scope_result_to_pane(backend, owned_pane.as_deref(), method, result);
-                    json!({
+            Some(engine) => {
+                let mut params = request.get("params").cloned().unwrap_or_else(|| json!({}));
+                // Chromium's finalizeTabs command is global, while qmux exposes
+                // a pane-scoped browser. Tell the engine which owned tabs this
+                // client is allowed to finalize so one terminal cannot close a
+                // browser that is still being shown for another terminal.
+                if method == "finalizeTabs"
+                    && let (Some(pane_id), Some(params)) =
+                        (owned_pane.as_deref(), params.as_object_mut())
+                {
+                    let scope = lock_or_recover(&backend.pane_by_tab)
+                        .iter()
+                        .filter(|(_, owner)| owner.as_str() == pane_id)
+                        .map(|(tab_id, _)| json!(tab_id))
+                        .collect::<Vec<_>>();
+                    params.insert("qmuxScope".to_string(), Value::Array(scope));
+                }
+                match engine.call(method, params) {
+                    Ok(result) => {
+                        remember_tab_owner(
+                            backend,
+                            owned_pane.as_deref(),
+                            method,
+                            request,
+                            &result,
+                        );
+                        let result =
+                            scope_result_to_pane(backend, owned_pane.as_deref(), method, result);
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result
+                        })
+                    }
+                    Err(message) => json!({
                         "jsonrpc": "2.0",
                         "id": id,
-                        "result": result
-                    })
+                        "error": {
+                            "code": -32000,
+                            "message": message
+                        }
+                    }),
                 }
-                Err(message) => json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "error": {
-                        "code": -32000,
-                        "message": message
-                    }
-                }),
-            },
+            }
             None => json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -501,6 +525,37 @@ fn pane_is_live(backend: &BrowserBackend, pane_id: &str) -> bool {
         .is_none_or(|state| state.pane_exists(pane_id).unwrap_or(false))
 }
 
+fn retain_live_browser_ownership(backend: &BrowserBackend, live_tab_ids: &HashSet<u64>) {
+    lock_or_recover(&backend.pane_by_tab)
+        .retain(|tab_id, owner| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
+    lock_or_recover(&backend.tab_by_pane)
+        .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
+    let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
+    lock_or_recover(&backend.viewport_by_pane).retain(|owner, viewport| {
+        selected_tabs.get(owner) == Some(&viewport.tab_id)
+            && live_tab_ids.contains(&viewport.tab_id)
+    });
+    // A selected-tab change invalidates the viewport cache, but the active
+    // screencast record must survive until the heartbeat stops that old tab.
+    // Targets already gone need no stop; streams owned by panes that vanished
+    // unexpectedly are actively reaped instead of merely forgotten.
+    let orphaned_screencasts = {
+        let mut streams = lock_or_recover(&backend.screencast_by_pane);
+        streams.retain(|_, viewport| live_tab_ids.contains(&viewport.tab_id));
+        streams
+            .iter()
+            .filter(|(owner, _)| !pane_is_live(backend, owner))
+            .map(|(owner, viewport)| (owner.clone(), *viewport))
+            .collect::<Vec<_>>()
+    };
+    for (owner, viewport) in orphaned_screencasts {
+        if let Err(error) = stop_recorded_screencast(backend, &owner, viewport) {
+            eprintln!("qmux: failed to stop orphaned pane {owner} screencast: {error}");
+        }
+    }
+    lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
+}
+
 fn scope_result_to_pane(
     backend: &BrowserBackend,
     pane_id: Option<&str>,
@@ -513,7 +568,7 @@ fn scope_result_to_pane(
     let live_tab_ids = tabs
         .iter()
         .filter_map(|tab| tab.get("id").and_then(Value::as_u64))
-        .collect::<std::collections::HashSet<_>>();
+        .collect::<HashSet<_>>();
     {
         let mut owners = lock_or_recover(&backend.pane_by_tab);
         owners
@@ -543,32 +598,7 @@ fn scope_result_to_pane(
             }
         }
     }
-    lock_or_recover(&backend.tab_by_pane)
-        .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
-    let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
-    lock_or_recover(&backend.viewport_by_pane).retain(|owner, viewport| {
-        selected_tabs.get(owner) == Some(&viewport.tab_id)
-            && live_tab_ids.contains(&viewport.tab_id)
-    });
-    // A selected-tab change invalidates the viewport cache, but the active
-    // screencast record must survive until the heartbeat stops that old tab.
-    // Targets already gone need no stop; streams owned by panes that vanished
-    // unexpectedly are actively reaped instead of merely forgotten.
-    let orphaned_screencasts = {
-        let mut streams = lock_or_recover(&backend.screencast_by_pane);
-        streams.retain(|_, viewport| live_tab_ids.contains(&viewport.tab_id));
-        streams
-            .iter()
-            .filter(|(owner, _)| !pane_is_live(backend, owner))
-            .map(|(owner, viewport)| (owner.clone(), *viewport))
-            .collect::<Vec<_>>()
-    };
-    for (owner, viewport) in orphaned_screencasts {
-        if let Err(error) = stop_recorded_screencast(backend, &owner, viewport) {
-            eprintln!("qmux: failed to stop orphaned pane {owner} screencast: {error}");
-        }
-    }
-    lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
+    retain_live_browser_ownership(backend, &live_tab_ids);
     let owners = lock_or_recover(&backend.pane_by_tab);
     tabs.retain(|tab| {
         tab.get("id")
@@ -700,6 +730,172 @@ pub struct BrowserAutomationSnapshot {
     width: u64,
     height: u64,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationTarget {
+    pane_id: String,
+    tab_id: u64,
+    url: Option<String>,
+    title: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserAutomationPreview {
+    pane_id: String,
+    tab_id: u64,
+    image_data_url: String,
+    width: u32,
+    height: u32,
+}
+
+fn owned_browser_targets(backend: &BrowserBackend, tabs: &[Value]) -> Vec<BrowserAutomationTarget> {
+    let live_tab_ids = tabs
+        .iter()
+        .filter_map(|tab| tab.get("id").and_then(Value::as_u64))
+        .collect::<HashSet<_>>();
+    retain_live_browser_ownership(backend, &live_tab_ids);
+
+    let selected = lock_or_recover(&backend.tab_by_pane).clone();
+    let owners = lock_or_recover(&backend.pane_by_tab);
+    let mut targets = selected
+        .into_iter()
+        .filter_map(|(pane_id, tab_id)| {
+            if owners.get(&tab_id).map(String::as_str) != Some(pane_id.as_str()) {
+                return None;
+            }
+            let tab = tabs
+                .iter()
+                .find(|tab| tab.get("id").and_then(Value::as_u64) == Some(tab_id))?;
+            Some(BrowserAutomationTarget {
+                pane_id,
+                tab_id,
+                url: tab.get("url").and_then(Value::as_str).map(str::to_string),
+                title: tab.get("title").and_then(Value::as_str).map(str::to_string),
+            })
+        })
+        .collect::<Vec<_>>();
+    targets.sort_by(|left, right| left.pane_id.cmp(&right.pane_id));
+    targets
+}
+
+/// List only tabs that a live qmux pane already owns. Unlike the full mirror
+/// commands, this discovery path never creates or claims a Chromium target.
+#[tauri::command(async)]
+pub fn browser_automation_targets(
+    browser: tauri::State<'_, BrowserDiscoverySocket>,
+) -> Result<Vec<BrowserAutomationTarget>, String> {
+    let tabs = browser.engine()?.call("getTabs", json!({}))?;
+    let tabs = tabs
+        .as_array()
+        .ok_or_else(|| "qmux chrome-headless-shell returned an invalid tab list".to_string())?;
+    Ok(owned_browser_targets(&browser._backend, tabs))
+}
+
+fn metric_number(metrics: &Value, visual_field: &str, layout_field: &str) -> Option<f64> {
+    metrics
+        .pointer(visual_field)
+        .or_else(|| metrics.pointer(layout_field))
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+}
+
+fn preview_clip(
+    metrics: &Value,
+    max_width: u32,
+    max_height: u32,
+) -> Result<(Value, u32, u32), String> {
+    let source_width = metric_number(
+        metrics,
+        "/cssVisualViewport/clientWidth",
+        "/cssLayoutViewport/clientWidth",
+    )
+    .filter(|value| *value > 0.0)
+    .ok_or_else(|| "Page.getLayoutMetrics returned no viewport width".to_string())?;
+    let source_height = metric_number(
+        metrics,
+        "/cssVisualViewport/clientHeight",
+        "/cssLayoutViewport/clientHeight",
+    )
+    .filter(|value| *value > 0.0)
+    .ok_or_else(|| "Page.getLayoutMetrics returned no viewport height".to_string())?;
+    let page_x = metric_number(
+        metrics,
+        "/cssVisualViewport/pageX",
+        "/cssLayoutViewport/pageX",
+    )
+    .unwrap_or(0.0);
+    let page_y = metric_number(
+        metrics,
+        "/cssVisualViewport/pageY",
+        "/cssLayoutViewport/pageY",
+    )
+    .unwrap_or(0.0);
+    let scale = (f64::from(max_width) / source_width)
+        .min(f64::from(max_height) / source_height)
+        .min(1.0)
+        .max(0.01);
+    let width = (source_width * scale).round().max(1.0) as u32;
+    let height = (source_height * scale).round().max(1.0) as u32;
+    Ok((
+        json!({
+            "x": page_x,
+            "y": page_y,
+            "width": source_width,
+            "height": source_height,
+            "scale": scale
+        }),
+        width,
+        height,
+    ))
+}
+
+/// Capture a small image of an existing pane-owned tab without changing its
+/// emulated metrics. This keeps the PiP observational: responsive layout and
+/// pointer coordinates remain under the browser client's control.
+#[tauri::command(async)]
+pub fn browser_automation_preview(
+    pane_id: String,
+    tab_id: u64,
+    max_width: u32,
+    max_height: u32,
+    browser: tauri::State<'_, BrowserDiscoverySocket>,
+) -> Result<BrowserAutomationPreview, String> {
+    if !pane_is_live(&browser._backend, &pane_id)
+        || lock_or_recover(&browser._backend.tab_by_pane).get(&pane_id) != Some(&tab_id)
+        || lock_or_recover(&browser._backend.pane_by_tab).get(&tab_id) != Some(&pane_id)
+    {
+        return Err("browser tab is not owned by this qmux pane".to_string());
+    }
+    let max_width = max_width.clamp(120, 640);
+    let max_height = max_height.clamp(80, 480);
+    let metrics = browser.execute_for_tab(tab_id, "Page.getLayoutMetrics", json!({}))?;
+    let (clip, width, height) = preview_clip(&metrics, max_width, max_height)?;
+    let screenshot = browser.execute_for_tab(
+        tab_id,
+        "Page.captureScreenshot",
+        json!({
+            "format": "jpeg",
+            "quality": AGENT_PREVIEW_JPEG_QUALITY,
+            "clip": clip,
+            "fromSurface": true,
+            "captureBeyondViewport": false,
+            "optimizeForSpeed": true
+        }),
+    )?;
+    let data = screenshot
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Page.captureScreenshot returned no image".to_string())?;
+    Ok(BrowserAutomationPreview {
+        pane_id,
+        tab_id,
+        image_data_url: format!("data:image/jpeg;base64,{data}"),
+        width,
+        height,
+    })
 }
 
 impl BrowserDiscoverySocket {
@@ -1380,6 +1576,130 @@ mod tests {
             json!(1),
         );
         assert_eq!(response["error"]["code"], -32001);
+    }
+
+    #[test]
+    fn browser_targets_report_only_existing_pane_owned_tabs() {
+        let backend = unavailable_backend();
+        lock_or_recover(&backend.tab_by_pane).insert("pane-b".to_string(), 5);
+        lock_or_recover(&backend.tab_by_pane).insert("pane-a".to_string(), 4);
+        lock_or_recover(&backend.tab_by_pane).insert("stale-pane".to_string(), 8);
+        lock_or_recover(&backend.pane_by_tab).insert(4, "pane-a".to_string());
+        lock_or_recover(&backend.pane_by_tab).insert(5, "pane-b".to_string());
+        lock_or_recover(&backend.pane_by_tab).insert(8, "stale-pane".to_string());
+        let targets = owned_browser_targets(
+            &backend,
+            &[
+                json!({ "id": 4, "url": "https://a.test/", "title": "A" }),
+                json!({ "id": 5, "url": "https://b.test/", "title": "B" }),
+                // A live but unowned Chromium target must not be claimed just
+                // because the PiP discovery path observed it.
+                json!({ "id": 9, "url": "about:blank", "title": "" }),
+            ],
+        );
+
+        assert_eq!(
+            targets,
+            vec![
+                BrowserAutomationTarget {
+                    pane_id: "pane-a".to_string(),
+                    tab_id: 4,
+                    url: Some("https://a.test/".to_string()),
+                    title: Some("A".to_string()),
+                },
+                BrowserAutomationTarget {
+                    pane_id: "pane-b".to_string(),
+                    tab_id: 5,
+                    url: Some("https://b.test/".to_string()),
+                    title: Some("B".to_string()),
+                },
+            ]
+        );
+        assert!(!lock_or_recover(&backend.pane_by_tab).contains_key(&8));
+        assert!(!lock_or_recover(&backend.tab_by_pane).contains_key("stale-pane"));
+        assert!(!lock_or_recover(&backend.pane_by_tab).contains_key(&9));
+    }
+
+    #[test]
+    fn browser_preview_clip_fits_without_upscaling() {
+        let metrics = json!({
+            "cssVisualViewport": {
+                "pageX": 12.0,
+                "pageY": 34.0,
+                "clientWidth": 1280.0,
+                "clientHeight": 900.0
+            }
+        });
+        let (clip, width, height) = preview_clip(&metrics, 240, 150).unwrap();
+        assert_eq!((width, height), (213, 150));
+        assert_eq!(clip["x"], 12.0);
+        assert_eq!(clip["y"], 34.0);
+        assert_eq!(clip["width"], 1280.0);
+        assert_eq!(clip["height"], 900.0);
+        assert_eq!(clip["scale"].as_f64(), Some(1.0 / 6.0));
+
+        let (clip, width, height) = preview_clip(
+            &json!({
+                "cssLayoutViewport": { "clientWidth": 100.0, "clientHeight": 50.0 }
+            }),
+            240,
+            150,
+        )
+        .unwrap();
+        assert_eq!((width, height), (100, 50));
+        assert_eq!(clip["scale"], 1.0);
+    }
+
+    #[test]
+    #[ignore = "launches an installed chrome-headless-shell"]
+    fn browser_preview_capture_preserves_existing_metrics() {
+        let engine = BrowserEngine::start().unwrap();
+        let tab = engine.call("createTab", json!({})).unwrap();
+        let tab_id = tab["id"].as_u64().unwrap();
+        execute_for_engine_tab(
+            &engine,
+            tab_id,
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": 800,
+                "height": 600,
+                "deviceScaleFactor": 1,
+                "mobile": false,
+                "screenWidth": 800,
+                "screenHeight": 600
+            }),
+        )
+        .unwrap();
+        let before =
+            execute_for_engine_tab(&engine, tab_id, "Page.getLayoutMetrics", json!({})).unwrap();
+        let (clip, width, height) = preview_clip(&before, 200, 120).unwrap();
+        let screenshot = execute_for_engine_tab(
+            &engine,
+            tab_id,
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": AGENT_PREVIEW_JPEG_QUALITY,
+                "clip": clip,
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+                "optimizeForSpeed": true
+            }),
+        )
+        .unwrap();
+        assert!(!screenshot["data"].as_str().unwrap_or_default().is_empty());
+        assert_eq!((width, height), (160, 120));
+
+        let after =
+            execute_for_engine_tab(&engine, tab_id, "Page.getLayoutMetrics", json!({})).unwrap();
+        assert_eq!(
+            before.pointer("/cssVisualViewport/clientWidth"),
+            after.pointer("/cssVisualViewport/clientWidth")
+        );
+        assert_eq!(
+            before.pointer("/cssVisualViewport/clientHeight"),
+            after.pointer("/cssVisualViewport/clientHeight")
+        );
     }
 
     #[test]

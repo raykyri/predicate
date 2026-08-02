@@ -759,6 +759,41 @@ export type BrowserAutomationSnapshot = {
   error: string | null;
 };
 
+export type BrowserAutomationTarget = {
+  paneId: string;
+  tabId: number;
+  url: string | null;
+  title: string | null;
+};
+
+export type BrowserAutomationPreview = {
+  paneId: string;
+  tabId: number;
+  imageDataUrl: string;
+  width: number;
+  height: number;
+};
+
+/** Existing pane-owned Chromium targets. This query never creates a tab. */
+export function listBrowserAutomationTargets() {
+  return invoke<BrowserAutomationTarget[]>("browser_automation_targets");
+}
+
+/** A downscaled, observation-only capture that leaves the tab viewport intact. */
+export function getBrowserAutomationPreview(
+  paneId: string,
+  tabId: number,
+  maxWidth: number,
+  maxHeight: number,
+) {
+  return invoke<BrowserAutomationPreview>("browser_automation_preview", {
+    paneId,
+    tabId,
+    maxWidth,
+    maxHeight,
+  });
+}
+
 export function getBrowserAutomationSnapshot(
   paneId: string,
   width: number,

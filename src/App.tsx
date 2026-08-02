@@ -64,6 +64,7 @@ import {
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
+import BrowserPipRail from "./components/BrowserPip";
 import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
@@ -479,7 +480,11 @@ import type {
   Turn,
   WaitTarget,
 } from "./types";
-import type { NativeTerminalTheme, ShowHideShortcutSetting } from "./lib/api";
+import type {
+  BrowserAutomationTarget,
+  NativeTerminalTheme,
+  ShowHideShortcutSetting,
+} from "./lib/api";
 import type { MenuBarSnapshot, MenuBarStatusTone } from "./lib/api";
 
 const LEFT_SIDEBAR_DEFAULT_WIDTH = 268;
@@ -4096,6 +4101,7 @@ function MainApp() {
         reloadNonce: (current[paneId]?.reloadNonce ?? 0) + 1,
         sandbox: effectiveSandbox,
         mode: effectiveSandbox ? "webkit" : (current[paneId]?.mode ?? "webkit"),
+        navigateAgentOnOpen: true,
         size: current[paneId]?.size ?? null,
       },
     }));
@@ -4130,6 +4136,7 @@ function MainApp() {
           reloadNonce: prev?.reloadNonce ?? 0,
           sandbox: prev?.sandbox ?? false,
           mode: prev?.mode ?? "webkit",
+          navigateAgentOnOpen: prev?.navigateAgentOnOpen,
           size: prev?.size ?? null,
         },
       };
@@ -4195,10 +4202,35 @@ function MainApp() {
           ...prev,
           mode,
           url: nextUrl,
+          navigateAgentOnOpen: mode === "agent" ? true : prev.navigateAgentOnOpen,
           reloadNonce:
             mode === "webkit" && nextUrl !== prev.url
               ? prev.reloadNonce + 1
               : prev.reloadNonce,
+        },
+      };
+    });
+  }
+
+  function showExistingAgentBrowser(target: BrowserAutomationTarget) {
+    if (!paneById.has(target.paneId)) {
+      return;
+    }
+    activateTerminalPane(target.paneId);
+    setBrowserOverlayByPane((current) => {
+      const prev = current[target.paneId];
+      return {
+        ...current,
+        [target.paneId]: {
+          url: target.url,
+          open: true,
+          reloadNonce: prev?.reloadNonce ?? 0,
+          sandbox: false,
+          mode: "agent",
+          // The target is already showing the page in this thumbnail. Opening
+          // the larger mirror must observe it, not navigate it a second time.
+          navigateAgentOnOpen: false,
+          size: prev?.size ?? null,
         },
       };
     });
@@ -14815,6 +14847,7 @@ function MainApp() {
           reloadNonce={activeBrowserOverlay.reloadNonce}
           sandbox={activeBrowserOverlay.sandbox}
           mode={activeBrowserOverlay.mode}
+          navigateAgentOnOpen={activeBrowserOverlay.navigateAgentOnOpen}
           bodyFontId={settings.bodyFontId}
           size={activeBrowserOverlay.size}
           toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
@@ -14837,6 +14870,21 @@ function MainApp() {
           onResize={(size) => setBrowserOverlaySize(activeBrowserOwnerId, size)}
         />
       ) : null}
+      <BrowserPipRail
+        panes={panes.map((pane) => ({
+          id: pane.id,
+          title: displayPaneTitle(pane, agentByPaneId.get(pane.id)),
+        }))}
+        expandedAgentPaneId={
+          activeBrowserOwnerId &&
+          activeBrowserOverlay?.open &&
+          activeBrowserOverlay.mode === "agent"
+            ? activeBrowserOwnerId
+            : null
+        }
+        belowBrowserOverlay={Boolean(activeBrowserOverlay?.open)}
+        onOpen={showExistingAgentBrowser}
+      />
       {linkMenu ? (
         <LinkContextMenu
           x={linkMenu.x}
