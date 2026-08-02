@@ -90,6 +90,14 @@
     inset 1px 0 0 var(--surface-divider);
 }
 
+/* Queue/wait target previews mirror the dotted blue ring on the target's tab
+   and terminal without changing split geometry. */
+.turn-pane-split-cell.is-wait-target-preview,
+.turn-pane-expanded-split-cell.is-wait-target-preview {
+  outline: 1px dotted var(--wait-target-preview-border);
+  outline-offset: -1px;
+}
+
 .turn-pane-split-cell .turn-pane-resizer {
   z-index: 8;
 }

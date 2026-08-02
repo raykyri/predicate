@@ -45,7 +45,7 @@
   color: var(--text-body-soft);
   box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
   font-size: var(--fs-xs);
-  font-weight: 650;
+  font-weight: 400;
   line-height: 1;
   white-space: nowrap;
   opacity: 0;

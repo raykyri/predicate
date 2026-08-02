@@ -21,6 +21,17 @@
   z-index: 2;
 }
 
+/* Match the dotted blue sidebar preview while a queue/wait option targets this
+   visible terminal. The absolute border does not affect native PTY geometry. */
+.terminal-pane.is-visible.is-wait-target-preview::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  border: 1px dotted var(--wait-target-preview-border);
+  pointer-events: none;
+}
+
 .terminal-split-drop-placeholder {
   position: absolute;
   left: 0;

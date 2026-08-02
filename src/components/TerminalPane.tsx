@@ -32,6 +32,8 @@ interface TerminalPaneProps {
   pane: PaneInfo;
   visible?: boolean;
   active: boolean;
+  /** Previewed as the destination of a queue/wait option in another pane. */
+  waitTargetPreview?: boolean;
   style?: CSSProperties;
   fontSize: number;
   fontFamily: string;
@@ -79,6 +81,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
     pane,
     visible: visibleProp,
     active,
+    waitTargetPreview = false,
     style,
     fontSize,
     fontFamily,
@@ -458,7 +461,15 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
 
   return (
     <div
-      className={`${TERMINAL_PANE_CLASS} is-native ${visible ? "is-visible" : ""} ${active ? "is-focused" : ""}`}
+      className={[
+        TERMINAL_PANE_CLASS,
+        "is-native",
+        visible ? "is-visible" : "",
+        active ? "is-focused" : "",
+        waitTargetPreview ? "is-wait-target-preview" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       aria-hidden={!visible}
       style={style}
       onPointerDown={() => onActivateRef.current?.(pane.id)}

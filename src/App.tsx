@@ -14583,6 +14583,9 @@ function MainApp() {
               pane={pane}
               visible={visibleTerminalPaneIdSet.has(pane.id)}
               active={pane.id === activePane?.id}
+              waitTargetPreview={
+                agentByPaneId.get(pane.id)?.id === waitTargetHoverAgentId
+              }
               style={terminalPaneStyle(pane.id)}
               fontSize={terminalFontSize}
               fontFamily={terminalNativeFontFamily}
@@ -14674,6 +14677,10 @@ function MainApp() {
                     surface.agent && surface.agent.id === queueDropTargetAgentId
                       ? " is-queue-drop-target"
                       : ""
+                  }${
+                    surface.agent?.id === waitTargetHoverAgentId
+                      ? " is-wait-target-preview"
+                      : ""
                   }`}
                   data-queue-drop-agent-id={surface.agent?.id}
                   style={turnPaneSplitCellStyle(surface)}
@@ -14740,6 +14747,10 @@ function MainApp() {
               }${
                 surface.agent && surface.agent.id === queueDropTargetAgentId
                   ? " is-queue-drop-target"
+                  : ""
+              }${
+                surface.agent?.id === waitTargetHoverAgentId
+                  ? " is-wait-target-preview"
                   : ""
               }`}
               data-queue-drop-agent-id={surface.agent?.id}

@@ -286,7 +286,7 @@
 .pane-tab-row.is-wait-target-preview .pane-tab {
   --pane-tab-status-bg: rgba(44, 49, 52, 0.7);
   background: var(--control-bg-hover);
-  outline: 1px dotted rgba(109, 167, 236, 0.7);
+  outline: 1px dotted var(--wait-target-preview-border);
   outline-offset: -1px;
 }
 

@@ -164,6 +164,7 @@
   --status-info-bg-hover: rgba(109, 167, 236, 0.14);
   --status-info-border: rgba(109, 167, 236, 0.25);
   --status-info-border-strong: rgba(109, 167, 236, 0.5);
+  --wait-target-preview-border: rgba(109, 167, 236, 0.7);
   --status-success-fg: #81c784;
   --status-error-fg: #e08a5f;
   --status-pending-fg: #7f8884;
