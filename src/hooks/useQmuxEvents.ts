@@ -108,6 +108,11 @@ export interface UseQmuxEventsHandlers {
   // their pre-attach output backlog (attachPane) without dropping cold-start bytes.
   onEventsReady: () => void;
   onAgentSpawned?: (agent: AgentInfo, paneId: string | null, source: string | null) => void;
+  onQueuedBtwForked?: (
+    sourcePaneId: string,
+    forkPaneId: string,
+    panes: PaneInfo[],
+  ) => void;
   onAgentPromptSubmitted?: (agentId: string, prompt: string) => void;
   onTerminalSearchRequested?: (paneId: string) => void;
   onTerminalPasteRequested?: (paneId: string, text: string | null) => void;
@@ -163,6 +168,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady,
     onAgentSpawned,
+    onQueuedBtwForked,
     onAgentPromptSubmitted,
     onTerminalSearchRequested,
     onTerminalPasteRequested,
@@ -184,6 +190,10 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     let agentRefreshSeq = 0;
     // Same idea for pane-list refetches (a fork adds a pane backend-side).
     let panesRefreshSeq = 0;
+    // Several queued BTW commands can drain in one backend pass. Hold their split
+    // intents until the newest pane refresh resolves so an older response cannot
+    // normalize a newer fork back out of the layout.
+    const pendingQueuedBtwForks: Array<{ sourcePaneId: string; forkPaneId: string }> = [];
     let groupsRefreshSeq = 0;
     const refreshThreadGraphs = (agentId?: string | null) => {
       if (
@@ -411,6 +421,15 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         (event.type === "agent.spawned" &&
           (event.payload.source === "queue" || event.payload.source === "research"))
       ) {
+        const sourcePaneId = stringField(event.payload, "sourcePaneId");
+        if (
+          event.type === "agent.forked" &&
+          event.payload.btw === true &&
+          sourcePaneId &&
+          event.paneId
+        ) {
+          pendingQueuedBtwForks.push({ sourcePaneId, forkPaneId: event.paneId });
+        }
         // The fork — or a queue-dispatched new-session or research-root spawn —
         // created a new pane backend-side with no frontend caller holding it;
         // refetch the ordered list so the nested tab appears (with its depth)
@@ -420,6 +439,13 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
           .then((latest) => {
             if (!disposed && seq === panesRefreshSeq) {
               setPanes(latest);
+              for (const pending of pendingQueuedBtwForks.splice(0)) {
+                onQueuedBtwForked?.(
+                  pending.sourcePaneId,
+                  pending.forkPaneId,
+                  latest,
+                );
+              }
             }
           })
           .catch(() => undefined);

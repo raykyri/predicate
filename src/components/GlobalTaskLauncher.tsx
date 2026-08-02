@@ -38,6 +38,7 @@ import {
   QUEUE_DELIVERY_OPTIONS,
   agentTabStatusDotClass,
   agentTabStatusPill,
+  composerSlashCommandSubmitLabels,
   deriveComposerGating,
   planComposerSubmission,
   queueWaitsOnOtherAgent,
@@ -487,10 +488,13 @@ export default function GlobalTaskLauncher() {
   );
   const canFork = agentCanFork(selected?.agent);
   const hasValue = value.trim().length > 0;
-  const parsedSlashCommand = useMemo(
-    () => parseComposerSlashCommand(value, { surface: "globalLauncher" }),
-    [value],
-  );
+  const parsedSlashCommand = useMemo(() => parseComposerSlashCommand(value), [value]);
+  const slashCommand =
+    parsedSlashCommand.kind !== "none" ? parsedSlashCommand.command : null;
+  const slashSubmitLabels = slashCommand
+    ? composerSlashCommandSubmitLabels(slashCommand)
+    : null;
+  const slashCanQueue = parsedSlashCommand.kind === "ready" && canAppendQueue;
   const permissionActions =
     selected?.agent.status === "awaitingPermission" ? (policy?.permissionActions ?? []) : [];
 
@@ -640,12 +644,13 @@ export default function GlobalTaskLauncher() {
       setError(plan.message);
       return;
     }
-    if (plan.kind === "fork") {
+    if ((plan.kind === "fork" || plan.kind === "btw") && mode !== "queue") {
       void finishSubmission(() =>
         forkAgent(selected.pane.id, {
           nest: true,
-          useWorktree: plan.useWorktree,
+          useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
           prompt: plan.prompt,
+          btw: plan.kind === "btw",
         }),
       );
       return;
@@ -654,7 +659,9 @@ export default function GlobalTaskLauncher() {
   }
 
   function submitDefault() {
-    if (submitShortcutWouldTargetSend) submit("send");
+    if (parsedSlashCommand.kind !== "none") {
+      submit(slashCanQueue ? "queue" : "send");
+    } else if (submitShortcutWouldTargetSend) submit("send");
     else if (submitShortcutWouldTargetQueue) submit("queue");
   }
 
@@ -900,31 +907,34 @@ export default function GlobalTaskLauncher() {
             </button>
           ))}
           {parsedSlashCommand.kind !== "none" ? (
-            <button
-              type="button"
-              className="control-button"
-              disabled={
-                submitting ||
-                parsedSlashCommand.kind !== "ready" ||
-                (parsedSlashCommand.command.kind === "fork" && !canFork)
-              }
-              title={
-                parsedSlashCommand.command.kind === "fork" && !canFork
-                  ? FORK_REQUIREMENT_TITLE
-                  : undefined
-              }
-              onClick={() => submit("send")}
-            >
-              <span>
-                {parsedSlashCommand.command.useWorktree
-                  ? "Fork in worktree & send"
-                  : "Fork & send"}
-              </span>
-              <ComposerSubmitShortcutGlyph
-                requireCmdEnter={requireCmdEnterToSend}
-                className="shortcut-hint"
-              />
-            </button>
+            <>
+              {slashCanQueue ? (
+                <button
+                  type="button"
+                  className="control-button"
+                  disabled={submitting || !canFork}
+                  title={!canFork ? FORK_REQUIREMENT_TITLE : undefined}
+                  onClick={() => submit("send")}
+                >
+                  <span>{slashSubmitLabels?.now}</span>
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className="control-button"
+                disabled={submitting || parsedSlashCommand.kind !== "ready" || !canFork}
+                title={!canFork ? FORK_REQUIREMENT_TITLE : undefined}
+                onClick={() => submit(slashCanQueue ? "queue" : "send")}
+              >
+                <span>
+                  {slashCanQueue ? slashSubmitLabels?.queued : slashSubmitLabels?.immediate}
+                </span>
+                <ComposerSubmitShortcutGlyph
+                  requireCmdEnter={requireCmdEnterToSend}
+                  className="shortcut-hint"
+                />
+              </button>
+            </>
           ) : (
             <>
               {canSend ? (

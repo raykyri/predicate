@@ -5,7 +5,11 @@ import {
   matchingComposerSlashCommands,
   parseComposerSlashCommand,
 } from "../src/lib/composerSlashCommands";
-import { BTW_SAFETY_INSTRUCTION, planComposerSubmission } from "../src/lib/composerActions";
+import {
+  BTW_SAFETY_INSTRUCTION,
+  composerSlashCommandSubmitLabels,
+  planComposerSubmission,
+} from "../src/lib/composerActions";
 
 test("matches command prefixes only in the first unfinished token", () => {
   assert.deepEqual(
@@ -56,7 +60,7 @@ test("treats the removed loop command as ordinary agent input", () => {
   assert.deepEqual(parseComposerSlashCommand("/loop"), { kind: "none" });
 });
 
-test("parses btw only in the right-pane composer", () => {
+test("parses btw as a side-branch command", () => {
   const parsed = parseComposerSlashCommand("/btw answer this side question");
   assert.equal(parsed.kind, "ready");
   if (parsed.kind === "ready") {
@@ -65,12 +69,8 @@ test("parses btw only in the right-pane composer", () => {
   }
   assert.equal(parseComposerSlashCommand("/btw").kind, "incomplete");
   assert.deepEqual(
-    parseComposerSlashCommand("/btw answer this", { surface: "globalLauncher" }),
-    { kind: "none" },
-  );
-  assert.deepEqual(
-    matchingComposerSlashCommands("/b", { surface: "globalLauncher" }),
-    [],
+    matchingComposerSlashCommands("/b").map((command) => command.name),
+    ["btw"],
   );
 });
 
@@ -93,6 +93,32 @@ test("plans btw as an immediate fork prompt with the safety instruction", () => 
     kind: "reject",
     message: "Add a message after /btw",
   });
+});
+
+test("labels immediate, now, and queued slash-command actions", () => {
+  const fork = parseComposerSlashCommand("/fork investigate");
+  const worktree = parseComposerSlashCommand("/worktree investigate");
+  const btw = parseComposerSlashCommand("/btw investigate");
+  assert.equal(fork.kind, "ready");
+  assert.equal(worktree.kind, "ready");
+  assert.equal(btw.kind, "ready");
+  if (fork.kind === "ready" && worktree.kind === "ready" && btw.kind === "ready") {
+    assert.deepEqual(composerSlashCommandSubmitLabels(fork.command), {
+      immediate: "Fork & send",
+      now: "Fork now",
+      queued: "Queue fork",
+    });
+    assert.deepEqual(composerSlashCommandSubmitLabels(worktree.command), {
+      immediate: "Fork in worktree & send",
+      now: "Worktree now",
+      queued: "Queue worktree",
+    });
+    assert.deepEqual(composerSlashCommandSubmitLabels(btw.command), {
+      immediate: "Fork below & send now",
+      now: "BTW now",
+      queued: "Queue BTW",
+    });
+  }
 });
 
 test("recognizes known commands without a message as incomplete", () => {

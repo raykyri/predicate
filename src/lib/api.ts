@@ -656,6 +656,7 @@ export function forkAgent(
     nest?: boolean;
     prompt?: string;
     anchor?: MessageAnchor;
+    btw?: boolean;
   },
 ) {
   return invoke<PaneInfo>("agent_fork", {
@@ -664,6 +665,7 @@ export function forkAgent(
     nest: options?.nest ?? false,
     prompt: options?.prompt,
     anchor: options?.anchor,
+    btw: options?.btw ?? false,
   });
 }
 

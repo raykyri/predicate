@@ -1,7 +1,10 @@
 import type { AgentStatus, ComposerPolicy } from "../adapters";
 import type { QueuedTurn, QueuedTurnDelivery, WaitTarget } from "../types";
 import { agentStatusLabel, agentStatusTone } from "./appHelpers";
-import type { ParsedComposerSlashCommand } from "./composerSlashCommands";
+import type {
+  ComposerSlashCommand,
+  ParsedComposerSlashCommand,
+} from "./composerSlashCommands";
 
 export const FORK_REQUIREMENT_TITLE =
   "Forking requires a supported agent session that has run a turn";
@@ -77,6 +80,38 @@ export function planComposerSubmission(
     return { kind: "fork", useWorktree: parsed.command.useWorktree, prompt: parsed.prompt };
   }
   return { kind: "turn" };
+}
+
+export interface ComposerSlashCommandSubmitLabels {
+  immediate: string;
+  now: string;
+  queued: string;
+}
+
+/** Button copy shared by both composer surfaces. When a command can be queued,
+ * `now` is the explicit left-hand action and `queued` is the default action. */
+export function composerSlashCommandSubmitLabels(
+  command: ComposerSlashCommand,
+): ComposerSlashCommandSubmitLabels {
+  if (command.kind === "btw") {
+    return {
+      immediate: "Fork below & send now",
+      now: "BTW now",
+      queued: "Queue BTW",
+    };
+  }
+  if (command.useWorktree) {
+    return {
+      immediate: "Fork in worktree & send",
+      now: "Worktree now",
+      queued: "Queue worktree",
+    };
+  }
+  return {
+    immediate: "Fork & send",
+    now: "Fork now",
+    queued: "Queue fork",
+  };
 }
 
 /** Status text for a queue-after wait target, shared by the right-pane

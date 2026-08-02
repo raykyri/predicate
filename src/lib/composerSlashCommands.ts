@@ -10,7 +10,6 @@ export interface ComposerSlashCommand {
   description: string;
   kind: ComposerSlashCommandKind;
   useWorktree: boolean;
-  rightPaneOnly?: boolean;
 }
 
 export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
@@ -31,22 +30,11 @@ export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
   {
     name: "btw",
     token: "/btw",
-    description: "Fork this session below the current terminal and send immediately",
+    description: "Fork this session below the current terminal and send the following message",
     kind: "btw",
     useWorktree: false,
-    rightPaneOnly: true,
   },
 ];
-
-export interface ComposerSlashCommandParseOptions {
-  surface?: "rightPane" | "globalLauncher";
-}
-
-function commandsForSurface(options?: ComposerSlashCommandParseOptions) {
-  return options?.surface === "globalLauncher"
-    ? COMPOSER_SLASH_COMMANDS.filter((command) => !command.rightPaneOnly)
-    : COMPOSER_SLASH_COMMANDS;
-}
 
 export type ParsedComposerSlashCommand =
   | { kind: "none" }
@@ -57,13 +45,12 @@ export type ParsedComposerSlashCommand =
  * followed by a space or tab. Unknown slash commands remain ordinary agent input. */
 export function parseComposerSlashCommand(
   value: string,
-  options?: ComposerSlashCommandParseOptions,
 ): ParsedComposerSlashCommand {
   if (!value.startsWith("/")) {
     return { kind: "none" };
   }
 
-  for (const command of commandsForSurface(options)) {
+  for (const command of COMPOSER_SLASH_COMMANDS) {
     if (value === command.token) {
       return { kind: "incomplete", command };
     }
@@ -87,12 +74,11 @@ export function parseComposerSlashCommand(
  * token. Once the user starts the message, the typeahead gets out of the way. */
 export function matchingComposerSlashCommands(
   value: string,
-  options?: ComposerSlashCommandParseOptions,
 ): readonly ComposerSlashCommand[] {
   if (!/^\/[^\s]*$/.test(value)) {
     return [];
   }
-  return commandsForSurface(options).filter((command) => command.token.startsWith(value));
+  return COMPOSER_SLASH_COMMANDS.filter((command) => command.token.startsWith(value));
 }
 
 export function completeComposerSlashCommand(command: ComposerSlashCommand): string {

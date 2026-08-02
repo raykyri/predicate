@@ -46,6 +46,7 @@ import type { PasteProtectionSettings } from "../lib/paste";
 import {
   FORK_REQUIREMENT_TITLE,
   QUEUE_DELIVERY_OPTIONS,
+  composerSlashCommandSubmitLabels,
   deriveComposerGating,
   planComposerSubmission,
   waitTargetStatusDotClass,
@@ -91,7 +92,7 @@ const SLASH_COMMAND_PRESENTATION: Record<
 > = {
   fork: { Icon: GitFork, summary: "Fork this session" },
   worktree: { Icon: FolderGit2, summary: "Fork into a new worktree" },
-  btw: { Icon: MessageSquareText, summary: "Ask in a side branch now" },
+  btw: { Icon: MessageSquareText, summary: "Ask in a side branch" },
 };
 
 type QueuePointerDrag = {
@@ -465,12 +466,10 @@ export default function NativeInput({
   // composer holds a recognized command).
   const slashCommand = parsedSlashCommand.kind !== "none" ? parsedSlashCommand.command : null;
   const slashCommandBlocked = slashCommand ? slashCommandBlockedReason(slashCommand) : null;
-  const slashSubmitLabel =
-    slashCommand?.kind === "btw"
-      ? "Fork below & send now"
-      : slashCommand?.useWorktree
-        ? "Fork in worktree & send"
-        : "Fork & send";
+  const slashSubmitLabels = slashCommand
+    ? composerSlashCommandSubmitLabels(slashCommand)
+    : null;
+  const slashCanQueue = parsedSlashCommand.kind === "ready" && canAppendQueue;
   const slashSubmitTitle = slashCommandBlocked ?? undefined;
 
   useEffect(() => {
@@ -725,7 +724,7 @@ export default function NativeInput({
       onError(plan.message);
       return;
     }
-    if (plan.kind === "fork" || plan.kind === "btw") {
+    if ((plan.kind === "fork" || plan.kind === "btw") && mode !== "queue") {
       setMenuOpen(false);
       setWaitOpen(false);
       setSubmitting(true);
@@ -1206,7 +1205,9 @@ export default function NativeInput({
       className="native-input"
       onSubmit={(event) => {
         event.preventDefault();
-        if (hasQueuedTurns && canAppendQueue) {
+        if (parsedSlashCommand.kind !== "none") {
+          void submitTurn(value, slashCanQueue ? "queue" : "send");
+        } else if (hasQueuedTurns && canAppendQueue) {
           void submitTurn(value, "queue");
         } else if (canSend) {
           void submitTurn(value, "send");
@@ -1414,7 +1415,7 @@ export default function NativeInput({
                   completeSlashCommand(command);
                 }
               } else if (parsedSlashCommand.kind !== "none") {
-                void submitTurn(value, "send");
+                void submitTurn(value, slashCanQueue ? "queue" : "send");
               } else if (submitShortcutTargetsSend) {
                 void submitTurn(value, "send");
               } else if (submitShortcutTargetsQueue) {
@@ -1666,21 +1667,38 @@ export default function NativeInput({
             ))
           ) : null}
           {slashMenuOpen ? null : parsedSlashCommand.kind !== "none" ? (
-            <button
-              className="control-button"
-              type="button"
-              disabled={
-                submitting || parsedSlashCommand.kind !== "ready" || Boolean(slashCommandBlocked)
-              }
-              title={slashSubmitTitle}
-              onClick={() => void submitTurn(value, "send")}
-            >
-              <span>{slashSubmitLabel}</span>
-              <ComposerSubmitShortcutGlyph
-                requireCmdEnter={requireCmdEnterToSend}
-                className="shortcut-hint"
-              />
-            </button>
+            <>
+              {slashCanQueue ? (
+                <button
+                  className="control-button"
+                  type="button"
+                  disabled={submitting || Boolean(slashCommandBlocked)}
+                  title={slashSubmitTitle}
+                  onClick={() => void submitTurn(value, "send")}
+                >
+                  <span>{slashSubmitLabels?.now}</span>
+                </button>
+              ) : null}
+              <button
+                className="control-button"
+                type="button"
+                disabled={
+                  submitting ||
+                  parsedSlashCommand.kind !== "ready" ||
+                  Boolean(slashCommandBlocked)
+                }
+                title={slashSubmitTitle}
+                onClick={() => void submitTurn(value, slashCanQueue ? "queue" : "send")}
+              >
+                <span>
+                  {slashCanQueue ? slashSubmitLabels?.queued : slashSubmitLabels?.immediate}
+                </span>
+                <ComposerSubmitShortcutGlyph
+                  requireCmdEnter={requireCmdEnterToSend}
+                  className="shortcut-hint"
+                />
+              </button>
+            </>
           ) : (
             <>
               {!sendDisabled ? (

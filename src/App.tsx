@@ -1466,6 +1466,7 @@ function MainApp() {
   const useLoginShellHydratedRef = useRef(false);
   const worktreeLocationHydratedRef = useRef(false);
   const paneSplitsRef = useRef<PaneSplitInfo[]>([]);
+  const queuedBtwSplitPersistChainRef = useRef<Promise<void>>(Promise.resolve());
   const titleGenerationTestSeqRef = useRef(0);
   const activeTabPersistenceReadyRef = useRef(false);
   const appToastTimerRef = useRef<number | null>(null);
@@ -8254,6 +8255,50 @@ function MainApp() {
     [],
   );
 
+  const handleQueuedBtwForked = useCallback(
+    (sourcePaneId: string, forkPaneId: string, latestPanes: PaneInfo[]) => {
+      const normalized = normalizePaneSplitsForPanes(
+        joinPaneSplit(
+          paneSplitsRef.current,
+          latestPanes,
+          sourcePaneId,
+          forkPaneId,
+          {
+            insertedPaneId: forkPaneId,
+            source: "command",
+            btwPaneId: forkPaneId,
+          },
+        ),
+        latestPanes,
+      );
+      // Queue draining can emit several BTW forks in one event batch. Advance the
+      // ref immediately so the next callback composes with this split even before
+      // React commits the state update.
+      paneSplitsRef.current = normalized;
+      setPaneSplitsState(normalized);
+      queuedBtwSplitPersistChainRef.current = queuedBtwSplitPersistChainRef.current
+        .catch(() => undefined)
+        .then(async () => {
+          const persisted = await persistPaneSplits(normalized);
+          // A later BTW callback may already have composed another pane into the
+          // split. Its queued persistence owns the eventual reconciliation.
+          if (!paneSplitsEqual(paneSplitsRef.current, normalized)) {
+            return;
+          }
+          const paneBasis = paneSnapshotForPersistedPaneSplits(
+            persisted,
+            panesRef.current,
+            latestPanes,
+          );
+          setPaneSplitsState(normalizePaneSplitsForPanes(persisted, paneBasis));
+        })
+        .catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+    },
+    [],
+  );
+
   useQmuxEvents({
     appendHookEvent,
     setPanes: setPanesPreservingRecoveredDismissals,
@@ -8282,6 +8327,7 @@ function MainApp() {
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady: handleEventsReady,
     onAgentSpawned: handleAgentSpawned,
+    onQueuedBtwForked: handleQueuedBtwForked,
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
     onTerminalSearchRequested: openNativeTerminalSearch,
     onTerminalPasteRequested: requestNativeTerminalPaste,
@@ -10063,7 +10109,9 @@ function MainApp() {
   ): Promise<boolean> {
     setError(null);
     try {
-      const fork = await forkAgent(pane.id, options);
+      // This surface builds immediate /btw splits optimistically below. Keep the
+      // backend event untagged so the global event handler doesn't build it twice.
+      const fork = await forkAgent(pane.id, { ...options, btw: false });
       if (options.btw) {
         const orderedPanes = placePaneAfterOptimistically(fork, pane.id);
         setPanesPreservingRecoveredDismissals(orderedPanes);

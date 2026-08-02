@@ -1,6 +1,6 @@
 use crate::adapters::{
     FORK_UNSUPPORTED_ERROR, adapter_supports_fork, agent_composer_policy, fork_agent_source,
-    spawn_sibling_agent_session,
+    fork_agent_source_btw, spawn_sibling_agent_session,
 };
 use crate::events::QmuxEvent;
 use crate::pty::{PaneWriteOptions, write_pane, write_pane_detailed};
@@ -40,6 +40,47 @@ pub(crate) fn is_shell_escape_turn(text: &str) -> bool {
 pub(crate) fn is_tui_command_turn(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with('!') || trimmed.starts_with('/')
+}
+
+const BTW_SAFETY_INSTRUCTION: &str = concat!(
+    "<qmux_instruction source=\"agent_driver\">\n",
+    "Do not change the working tree or codebase unless explicitly instructed to.\n",
+    "</qmux_instruction>",
+);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueuedComposerCommand<'a> {
+    Fork { prompt: &'a str, use_worktree: bool },
+    Btw { prompt: &'a str },
+}
+
+/// Recognizes qMux composer commands only at byte zero, with the same exact-token
+/// and space/tab separator rules as the frontend parser. Delaying this until a
+/// queued turn is claimed means edits, reorders, moves, and restored queues all
+/// dispatch from the text the user can actually see.
+fn parse_queued_composer_command(text: &str) -> Option<QueuedComposerCommand<'_>> {
+    fn prompt_after<'a>(text: &'a str, token: &str) -> Option<&'a str> {
+        let rest = text.strip_prefix(token)?;
+        if !matches!(rest.chars().next(), Some(' ' | '\t')) {
+            return None;
+        }
+        let prompt = rest.trim();
+        (!prompt.is_empty()).then_some(prompt)
+    }
+
+    if let Some(prompt) = prompt_after(text, "/fork") {
+        return Some(QueuedComposerCommand::Fork {
+            prompt,
+            use_worktree: false,
+        });
+    }
+    if let Some(prompt) = prompt_after(text, "/worktree") {
+        return Some(QueuedComposerCommand::Fork {
+            prompt,
+            use_worktree: true,
+        });
+    }
+    prompt_after(text, "/btw").map(|prompt| QueuedComposerCommand::Btw { prompt })
 }
 
 #[derive(Debug, Deserialize)]
@@ -610,8 +651,14 @@ fn send_claimed_turn(
             return Err(format!("Agent {agent_id} was not found"));
         }
     };
-    let send_result = match turn.delivery.as_ref() {
-        Some(delivery) => {
+    let queued_command = turn
+        .delivery
+        .is_none()
+        .then(|| parse_queued_composer_command(&turn.text))
+        .flatten();
+    let delivers_to_new_pane = turn.delivery.is_some() || queued_command.is_some();
+    let send_result = match (turn.delivery.as_ref(), queued_command) {
+        (Some(delivery), _) => {
             // Delivery turns dispatch at-most-once across a crash: drop the durable
             // in-flight copy before spawning, so a crash mid-spawn loses the turn
             // instead of re-running it on restart and minting a duplicate
@@ -625,7 +672,19 @@ fn send_claimed_turn(
                     text_delivered: false,
                 })
         }
-        None => send_agent_turn(state, &agent, &turn, AgentSendSource::QueuedTurn)
+        (None, Some(command)) => {
+            // Slash-command delivery has the same at-most-once crash semantics as
+            // an explicit delivery directive: spawning a duplicate fork is worse
+            // than losing the command in the tiny post-spawn/pre-confirm window.
+            state.clear_agent_inflight(agent_id);
+            deliver_queued_composer_command(state, &agent, command)
+                .map(|_| DispatchOutcome::StayedIdle)
+                .map_err(|message| TurnSendError {
+                    message,
+                    text_delivered: false,
+                })
+        }
+        (None, None) => send_agent_turn(state, &agent, &turn, AgentSendSource::QueuedTurn)
             .map(|_| DispatchOutcome::Ran),
     };
     let outcome = match send_result {
@@ -646,7 +705,7 @@ fn send_claimed_turn(
     // (a no-op for delivery turns, which cleared it before dispatch).
     state.clear_agent_inflight(agent_id);
     if turn.pause_after {
-        if turn.delivery.is_some() {
+        if delivers_to_new_pane {
             // A delivery turn never runs on this agent, so its "pause after" takes
             // effect now rather than arming a pending pause for the next idle.
             state.set_agent_paused(agent_id, true)?;
@@ -1000,6 +1059,29 @@ fn deliver_queued_turn_to_new_pane(
         }
         QueuedTurnDelivery::NewSession => {
             spawn_sibling_agent_session(state, source, text)?;
+        }
+    }
+    Ok(())
+}
+
+/// Dispatches a qMux slash command parsed from the front of a plain queued turn.
+/// The stored text keeps the command visible in the queue; only the launch prompt
+/// has its command prefix removed.
+fn deliver_queued_composer_command(
+    state: &AppState,
+    source: &AgentInfo,
+    command: QueuedComposerCommand<'_>,
+) -> Result<(), String> {
+    match command {
+        QueuedComposerCommand::Fork {
+            prompt,
+            use_worktree,
+        } => {
+            fork_agent_source(state, source, use_worktree, true, Some(prompt))?;
+        }
+        QueuedComposerCommand::Btw { prompt } => {
+            let prompt = format!("{BTW_SAFETY_INSTRUCTION}\n\n{prompt}");
+            fork_agent_source_btw(state, source, Some(&prompt))?;
         }
     }
     Ok(())
@@ -1398,6 +1480,34 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn queued_composer_commands_match_only_exact_front_tokens() {
+        assert_eq!(
+            parse_queued_composer_command("/fork fix the tests"),
+            Some(QueuedComposerCommand::Fork {
+                prompt: "fix the tests",
+                use_worktree: false,
+            })
+        );
+        assert_eq!(
+            parse_queued_composer_command("/worktree\tfix the tests"),
+            Some(QueuedComposerCommand::Fork {
+                prompt: "fix the tests",
+                use_worktree: true,
+            })
+        );
+        assert_eq!(
+            parse_queued_composer_command("/btw   investigate this\n"),
+            Some(QueuedComposerCommand::Btw {
+                prompt: "investigate this",
+            })
+        );
+        assert_eq!(parse_queued_composer_command(" /fork not at front"), None);
+        assert_eq!(parse_queued_composer_command("/forked not exact"), None);
+        assert_eq!(parse_queued_composer_command("/fork"), None);
+        assert_eq!(parse_queued_composer_command("prefix /btw no"), None);
+    }
 
     fn temp_workspace() -> PathBuf {
         let nanos = SystemTime::now()
@@ -2520,6 +2630,36 @@ mod tests {
         let err = drain_agent_turn_queue(&state, "agent-1").unwrap_err();
         assert!(!err.is_empty());
         assert_eq!(state.agent_queued_turns("agent-1").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_queued_slash_command_dispatch_requeues_the_visible_command() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id(
+                "agent-1",
+                AgentStatus::Done,
+                Some("pane-1"),
+            ))
+            .unwrap();
+        state
+            .insert_pane(sample_pane_runtime("pane-1", Some("agent-1")))
+            .unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "/worktree fix it".to_string())
+            .unwrap();
+
+        let err = drain_agent_turn_queue(&state, "agent-1").unwrap_err();
+        assert!(!err.is_empty());
+
+        let queued = state.agent_queued_turns("agent-1").unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].text, "/worktree fix it");
+        assert!(queued[0].delivery.is_none());
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Done
+        ));
     }
 
     #[test]
