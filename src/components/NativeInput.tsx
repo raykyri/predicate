@@ -16,7 +16,6 @@ import {
   FolderGit2,
   GitFork,
   MessageSquareText,
-  Repeat,
   X,
 } from "lucide-react";
 import {
@@ -37,8 +36,6 @@ import { writeClipboardText } from "../lib/clipboard";
 import { growComposerTextarea } from "../lib/composerTextarea";
 import {
   completeComposerSlashCommand,
-  isTuiCommandMessage,
-  LOOP_MAX_ITERATIONS,
   matchingComposerSlashCommands,
   parseComposerSlashCommand,
   type ComposerSlashCommand,
@@ -94,7 +91,6 @@ const SLASH_COMMAND_PRESENTATION: Record<
 > = {
   fork: { Icon: GitFork, summary: "Fork this session" },
   worktree: { Icon: FolderGit2, summary: "Fork into a new worktree" },
-  loop: { Icon: Repeat, summary: `Loop until no changes (max ${LOOP_MAX_ITERATIONS})` },
   btw: { Icon: MessageSquareText, summary: "Ask in a side branch now" },
 };
 
@@ -156,15 +152,6 @@ interface NativeInputProps {
     btw?: boolean;
     titlePrompt?: string;
   }) => Promise<boolean>;
-  // Starts a /loop for this agent: re-sends `prompt` after each completed turn
-  // until the agent makes no changes (or the iteration cap is hit). Resolves true
-  // when the loop started (first turn sent), false when it couldn't (e.g. no git
-  // worktree). The loop itself is driven by the App; the composer only kicks it off.
-  onLoopWithPrompt: (options: { prompt: string }) => Promise<boolean>;
-  // The agent's active /loop, if any, so the composer can show progress and a Stop
-  // control. Null when no loop is running for this agent.
-  activeLoop: { iterations: number } | null;
-  onStopLoop: () => void;
   onTurnSubmitted: (agentId: string, text: string, mode: SubmitAgentTurnMode) => void;
   onUserInput: (agentId: string) => void;
   // Read/write a tab's last queue scroll position (kept in App so it survives the
@@ -217,9 +204,6 @@ export default function NativeInput({
   registerDraftFlusher,
   onWaitTargetHover,
   onForkWithPrompt,
-  onLoopWithPrompt,
-  activeLoop,
-  onStopLoop,
   onTurnSubmitted,
   onUserInput,
   getQueueScroll,
@@ -473,43 +457,21 @@ export default function NativeInput({
   const permissionActions = awaitingPermission ? composerPolicy.permissionActions : [];
   const recentMessages = recentByAgent[agent.id] ?? [];
 
-  // Why a slash command can't run right now, or null when it can. Fork commands
-  // need a forkable session; /loop only needs a live (non-failed) agent — the git
-  // requirement is enforced at runtime by the loop controller, which aborts
-  // cleanly if the worktree has no readable git state.
-  function slashCommandBlockedReason(command: ComposerSlashCommand): string | null {
-    if (command.kind === "loop") {
-      return agent.status === "failed" ? "Can't loop a failed session" : null;
-    }
+  function slashCommandBlockedReason(_command: ComposerSlashCommand): string | null {
     return canQueueFork ? null : FORK_REQUIREMENT_TITLE;
   }
 
   // Derived presentation for the inline slash-command submit button (shown when the
-  // composer holds a recognized command). A /loop whose message the agent TUI would
-  // intercept can't loop, so the button says so and sends it a single time.
+  // composer holds a recognized command).
   const slashCommand = parsedSlashCommand.kind !== "none" ? parsedSlashCommand.command : null;
   const slashCommandBlocked = slashCommand ? slashCommandBlockedReason(slashCommand) : null;
-  const slashLoopRunsOnce =
-    parsedSlashCommand.kind === "ready" &&
-    parsedSlashCommand.command.kind === "loop" &&
-    isTuiCommandMessage(parsedSlashCommand.prompt);
   const slashSubmitLabel =
     slashCommand?.kind === "btw"
       ? "Fork below & send now"
-      : slashCommand?.kind === "loop"
-      ? slashLoopRunsOnce
-        ? "Send once"
-        : "Loop & send"
       : slashCommand?.useWorktree
         ? "Fork in worktree & send"
         : "Fork & send";
-  const slashSubmitTitle =
-    slashCommandBlocked ??
-    (slashCommand?.kind === "loop"
-      ? slashLoopRunsOnce
-        ? "Message starts with / or ! — sent once, not looped"
-        : `Re-sends your message until the agent makes no changes (max ${LOOP_MAX_ITERATIONS} runs)`
-      : undefined);
+  const slashSubmitTitle = slashCommandBlocked ?? undefined;
 
   useEffect(() => {
     setSlashSelectedIndex(0);
@@ -758,51 +720,9 @@ export default function NativeInput({
       return;
     }
 
-    // A manual submit takes over from any loop this composer is running: the user's
-    // action wins, so stop the loop before dispatching (a fresh /loop just restarts).
-    if (activeLoop) {
-      onStopLoop();
-    }
-
     const plan = planComposerSubmission(parseComposerSlashCommand(text), canQueueFork);
     if (plan.kind === "reject") {
       onError(plan.message);
-      return;
-    }
-    if (plan.kind === "loop") {
-      if (plan.runOnce) {
-        // A "/"- or "!"-prefixed message is a TUI command the agent reports no
-        // completion for, so it can't drive a loop: strip /loop and send it once.
-        setSubmitting(true);
-        try {
-          const result = await submitAgentTurn(agent.id, plan.prompt, mode);
-          onQueueChange(agent.id, result.queuedTurns);
-          onTurnSubmitted(agent.id, plan.prompt, mode);
-          recordRecentMessage(plan.prompt);
-          setValue("");
-          requestAnimationFrame(() => textareaRef.current?.focus());
-        } catch (err) {
-          onError(err instanceof Error ? err.message : String(err));
-        } finally {
-          setSubmitting(false);
-        }
-        return;
-      }
-      setMenuOpen(false);
-      setWaitOpen(false);
-      setSubmitting(true);
-      try {
-        const started = await onLoopWithPrompt({ prompt: plan.prompt });
-        if (started) {
-          recordRecentMessage(plan.prompt);
-          setValue("");
-          requestAnimationFrame(() => textareaRef.current?.focus());
-        }
-      } catch (err) {
-        onError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setSubmitting(false);
-      }
       return;
     }
     if (plan.kind === "fork" || plan.kind === "btw") {
@@ -1583,19 +1503,6 @@ export default function NativeInput({
             )
           : null}
         <div className="native-input-submit-actions">
-          {activeLoop ? (
-            <span className="composer-loop-label">
-              Looping {activeLoop.iterations}/{LOOP_MAX_ITERATIONS}
-              <button
-                type="button"
-                className="composer-loop-stop"
-                onClick={() => onStopLoop()}
-                title="Stop the loop"
-              >
-                Stop
-              </button>
-            </span>
-          ) : null}
           {paused ? <span className="composer-paused-label">Queue Paused</span> : null}
           <div className="composer-menu" ref={menuRef}>
             <button

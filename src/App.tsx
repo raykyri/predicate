@@ -196,7 +196,6 @@ import {
   agentTabStatusPill,
   queueWaitsOnOtherAgent,
 } from "./lib/composerActions";
-import { LOOP_MAX_ITERATIONS } from "./lib/composerSlashCommands";
 import {
   desiredNativeTerminalKeyboardOwner,
   windowFocusKeyboardOwner,
@@ -452,7 +451,6 @@ import {
   submitAgentTurn,
   unpauseAgent,
   updateMenuBar,
-  worktreeSignature,
   worktreeStatus,
 } from "./lib/api";
 import type {
@@ -1532,19 +1530,6 @@ function MainApp() {
   const regeneratingTitlePaneIdsRef = useRef(regeneratingTitlePaneIds);
   regeneratingTitlePaneIdsRef.current = regeneratingTitlePaneIds;
   const [agents, setAgents] = useState<AgentInfo[]>([]);
-  // Active /loop runs, keyed by agent id. Each re-sends its message after every
-  // completed turn until the agent's git worktree stops changing or the iteration
-  // cap is hit. `beforeSignature` is the worktree hash captured before the current
-  // in-flight turn; `evaluating` guards against a duplicate completion re-entering
-  // the compare-and-resend while the async signature read is still in flight.
-  const [agentLoops, setAgentLoops] = useState<
-    Record<string, { message: string; iterations: number; beforeSignature: string; evaluating: boolean }>
-  >({});
-  const agentLoopsRef = useRef(agentLoops);
-  agentLoopsRef.current = agentLoops;
-  // Previous per-agent status, so the loop driver fires only on genuine
-  // transitions (e.g. running -> done), not on every agents-array update.
-  const prevAgentStatusForLoopRef = useRef<Record<string, AgentInfo["status"]>>({});
   const [shellJobByAgent, setShellJobByAgent] = useState<
     Record<string, ShellAgentJobInfo>
   >({});
@@ -10121,118 +10106,6 @@ function MainApp() {
     await forkPane(activePane, options);
   }
 
-  // ---- /loop controller --------------------------------------------------
-  // A /loop re-sends one message after every completed turn until the agent's git
-  // worktree content stops changing (or LOOP_MAX_ITERATIONS turns run). Completion
-  // is driven by the status-transition effect below: only "done" advances a loop;
-  // "awaitingInput"/"failed" stop it (an interrupt is not a completion). The change
-  // signal is worktreeSignature — any git failure aborts the loop rather than being
-  // read as "no changes".
-
-  function clearAgentLoop(agentId: string) {
-    setAgentLoops((current) => {
-      if (!current[agentId]) {
-        return current;
-      }
-      const next = { ...current };
-      delete next[agentId];
-      return next;
-    });
-  }
-
-  // Kicks off a loop: snapshot the worktree, send the first turn, and record state.
-  // Returns false (without looping) when the worktree has no readable git state, so
-  // the composer can surface that instead of silently doing nothing.
-  async function startAgentLoop(agentId: string, message: string): Promise<boolean> {
-    setError(null);
-    let beforeSignature: string;
-    try {
-      beforeSignature = await worktreeSignature(agentId);
-    } catch {
-      setError(
-        "Can't start /loop — this session has no readable git worktree to detect changes.",
-      );
-      return false;
-    }
-    // Record the loop before sending so its state is already in place when the
-    // submit's status events (running -> done) arrive — otherwise a very fast turn
-    // could settle before we registered the loop and never get picked up.
-    setAgentLoops((current) => ({
-      ...current,
-      [agentId]: { message, iterations: 1, beforeSignature, evaluating: false },
-    }));
-    try {
-      const result = await submitAgentTurn(agentId, message, "auto");
-      setAgentQueuedTurns(agentId, result.queuedTurns);
-    } catch (err) {
-      clearAgentLoop(agentId);
-      setError(err instanceof Error ? err.message : String(err));
-      return false;
-    }
-    return true;
-  }
-
-  // Runs at each completed turn: compare the worktree against the pre-turn snapshot
-  // and either re-send (changes were made, under the cap) or stop.
-  async function advanceAgentLoop(agentId: string) {
-    const loop = agentLoopsRef.current[agentId];
-    if (!loop || loop.evaluating) {
-      return;
-    }
-    setAgentLoops((current) =>
-      current[agentId]
-        ? { ...current, [agentId]: { ...current[agentId], evaluating: true } }
-        : current,
-    );
-
-    let afterSignature: string;
-    try {
-      afterSignature = await worktreeSignature(agentId);
-    } catch {
-      clearAgentLoop(agentId);
-      setError("Stopped /loop — couldn't read the git worktree.");
-      return;
-    }
-
-    // The loop may have been stopped (or replaced) while the signature read was in
-    // flight; only proceed if this is still the same run we started evaluating.
-    const live = agentLoopsRef.current[agentId];
-    if (!live || live.message !== loop.message || live.iterations !== loop.iterations) {
-      return;
-    }
-
-    const changed = afterSignature !== loop.beforeSignature;
-    if (changed && loop.iterations < LOOP_MAX_ITERATIONS) {
-      try {
-        const result = await submitAgentTurn(agentId, loop.message, "auto");
-        setAgentQueuedTurns(agentId, result.queuedTurns);
-      } catch (err) {
-        clearAgentLoop(agentId);
-        setError(err instanceof Error ? err.message : String(err));
-        return;
-      }
-      if (!agentLoopsRef.current[agentId]) {
-        return;
-      }
-      setAgentLoops((current) =>
-        current[agentId]
-          ? {
-              ...current,
-              [agentId]: {
-                message: loop.message,
-                iterations: loop.iterations + 1,
-                beforeSignature: afterSignature,
-                evaluating: false,
-              },
-            }
-          : current,
-      );
-    } else {
-      // Either the turn changed nothing (goal reached) or the cap is hit: stop.
-      clearAgentLoop(agentId);
-    }
-  }
-
   // Stable identity for the terminal input handler. The impl above is a plain
   // function that closes over fresh state / unstable helpers, so passing it directly
   // gives a new identity every render — defeating TerminalPane's React.memo (making
@@ -11329,36 +11202,6 @@ function MainApp() {
       .catch(() => setPaletteSavedPrompts([]));
   }, [commandPaletteOpen, activePane, groupById]);
 
-  // Drives active /loop runs off agent status transitions. Only a genuine
-  // completion ("done") advances a loop; "awaitingInput" and "failed" stop it (an
-  // interrupt is not a completion, and neither is a loop-worthy state). Every other
-  // transition is ignored. Kept as a thin watcher — the compare/re-send logic lives
-  // in advanceAgentLoop — so it only reacts to real status changes, never re-runs.
-  useEffect(() => {
-    const prev = prevAgentStatusForLoopRef.current;
-    const next: Record<string, AgentInfo["status"]> = {};
-    for (const agent of agents) {
-      next[agent.id] = agent.status;
-      const before = prev[agent.id];
-      if (before === undefined || before === agent.status) {
-        continue;
-      }
-      if (!agentLoopsRef.current[agent.id]) {
-        continue;
-      }
-      if (agent.status === "done") {
-        void advanceAgentLoop(agent.id);
-      } else if (agent.status === "failed") {
-        clearAgentLoop(agent.id);
-        setError("Stopped /loop — the session failed.");
-      } else if (agent.status === "awaitingInput") {
-        clearAgentLoop(agent.id);
-      }
-    }
-    prevAgentStatusForLoopRef.current = next;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agents]);
-
   useEffect(() => {
     if (!homeActive) {
       return;
@@ -12416,13 +12259,6 @@ function MainApp() {
                     titlePrompt,
                   })
                 }
-                onLoopWithPrompt={({ prompt }) => startAgentLoop(agent.id, prompt)}
-                activeLoop={
-                  agentLoops[agent.id]
-                    ? { iterations: agentLoops[agent.id].iterations }
-                    : null
-                }
-                onStopLoop={() => clearAgentLoop(agent.id)}
                 onTurnSubmitted={(agentId, text, mode) => {
                   // Show "Working…" the instant a send starts a run, before the
                   // backend's status event round-trips. Gate on the agent being

@@ -242,31 +242,6 @@
   font-size: var(--fs-sm);
 }
 
-/* Live indicator while a /loop is running: iteration count plus an inline Stop. */
-.composer-loop-label {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  align-self: center;
-  color: var(--control-fg-muted);
-  font-size: var(--fs-sm);
-  white-space: nowrap;
-}
-
-.composer-loop-stop {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent-color);
-  font: inherit;
-  font-size: var(--fs-sm);
-  cursor: pointer;
-}
-
-.composer-loop-stop:hover {
-  text-decoration: underline;
-}
-
 /* Optically center the × against the text baseline. */
 .queued-turn-remove svg {
   transform: translateY(-0.5px);

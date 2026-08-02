@@ -79,11 +79,10 @@ use turn_queue::{
 };
 use workspace::{
     AgentInfo, AgentStatus, CreateGroupRequest, GroupInfo, LaunchOrigin, ResearchWorkspaceInfo,
-    WorktreeStatus, acknowledge_agent, agent_worktree_signature, agent_worktree_status,
-    clear_agent_working_status, create_group, create_research_workspace,
-    ensure_default_research_workspace, move_research_workspace, remove_agent_worktree,
-    remove_research_workspace, rename_group, rename_research_workspace, set_group_collapsed,
-    set_group_dir, validate_launch_workspace,
+    WorktreeStatus, acknowledge_agent, agent_worktree_status, clear_agent_working_status,
+    create_group, create_research_workspace, ensure_default_research_workspace,
+    move_research_workspace, remove_agent_worktree, remove_research_workspace, rename_group,
+    rename_research_workspace, set_group_collapsed, set_group_dir, validate_launch_workspace,
 };
 
 fn handle_global_shortcut(
@@ -2003,17 +2002,6 @@ async fn worktree_status(
 }
 
 #[tauri::command]
-async fn worktree_signature(
-    state: tauri::State<'_, AppState>,
-    agent_id: String,
-) -> Result<String, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || agent_worktree_signature(&state, &agent_id))
-        .await
-        .map_err(|err| format!("worktree_signature task failed: {err}"))?
-}
-
-#[tauri::command]
 async fn worktree_remove(
     state: tauri::State<'_, AppState>,
     agent_id: String,
@@ -2669,7 +2657,6 @@ fn main() {
             agent_acknowledge,
             agent_clear_working_status,
             worktree_status,
-            worktree_signature,
             worktree_remove,
             worktree_close_pane,
             app_confirm_exit,

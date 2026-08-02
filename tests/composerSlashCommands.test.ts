@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   completeComposerSlashCommand,
-  isTuiCommandMessage,
   matchingComposerSlashCommands,
   parseComposerSlashCommand,
 } from "../src/lib/composerSlashCommands";
@@ -11,7 +10,7 @@ import { BTW_SAFETY_INSTRUCTION, planComposerSubmission } from "../src/lib/compo
 test("matches command prefixes only in the first unfinished token", () => {
   assert.deepEqual(
     matchingComposerSlashCommands("/").map((command) => command.name),
-    ["fork", "worktree", "loop", "btw"],
+    ["fork", "worktree", "btw"],
   );
   assert.deepEqual(
     matchingComposerSlashCommands("/f").map((command) => command.name),
@@ -21,10 +20,7 @@ test("matches command prefixes only in the first unfinished token", () => {
     matchingComposerSlashCommands("/w").map((command) => command.name),
     ["worktree"],
   );
-  assert.deepEqual(
-    matchingComposerSlashCommands("/l").map((command) => command.name),
-    ["loop"],
-  );
+  assert.deepEqual(matchingComposerSlashCommands("/l"), []);
   assert.deepEqual(matchingComposerSlashCommands("/fork "), []);
   assert.deepEqual(matchingComposerSlashCommands("prefix /fork"), []);
   assert.deepEqual(matchingComposerSlashCommands("/unknown"), []);
@@ -55,16 +51,9 @@ test("parses fork commands and strips only the qmux command prefix", () => {
   }
 });
 
-test("parses the loop command and marks it as a loop kind", () => {
-  const parsed = parseComposerSlashCommand("/loop keep fixing the tests");
-  assert.equal(parsed.kind, "ready");
-  if (parsed.kind === "ready") {
-    assert.equal(parsed.command.name, "loop");
-    assert.equal(parsed.command.kind, "loop");
-    assert.equal(parsed.prompt, "keep fixing the tests");
-  }
-  assert.equal(parseComposerSlashCommand("/loop").kind, "incomplete");
-  assert.equal(parseComposerSlashCommand("/loop   ").kind, "incomplete");
+test("treats the removed loop command as ordinary agent input", () => {
+  assert.deepEqual(parseComposerSlashCommand("/loop keep fixing the tests"), { kind: "none" });
+  assert.deepEqual(parseComposerSlashCommand("/loop"), { kind: "none" });
 });
 
 test("parses btw only in the right-pane composer", () => {
@@ -104,15 +93,6 @@ test("plans btw as an immediate fork prompt with the safety instruction", () => 
     kind: "reject",
     message: "Add a message after /btw",
   });
-});
-
-test("flags messages the agent TUI intercepts as commands", () => {
-  assert.equal(isTuiCommandMessage("/compact"), true);
-  assert.equal(isTuiCommandMessage("  /model opus"), true);
-  assert.equal(isTuiCommandMessage("!git status"), true);
-  assert.equal(isTuiCommandMessage("\t!ls"), true);
-  assert.equal(isTuiCommandMessage("keep going"), false);
-  assert.equal(isTuiCommandMessage("fix the / in the path"), false);
 });
 
 test("recognizes known commands without a message as incomplete", () => {

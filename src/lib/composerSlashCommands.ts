@@ -1,12 +1,8 @@
-export type ComposerSlashCommandName = "fork" | "worktree" | "loop" | "btw";
+export type ComposerSlashCommandName = "fork" | "worktree" | "btw";
 
-/** How many times /loop re-sends its message before stopping regardless of
- * whether the agent is still making changes. Surfaced in the command tooltips. */
-export const LOOP_MAX_ITERATIONS = 6;
-
-/** What a command does when submitted: fork a new session, or loop a message to
- * the current agent. Fork-only fields (useWorktree) are ignored for other kinds. */
-export type ComposerSlashCommandKind = "fork" | "loop" | "btw";
+/** What a command does when submitted. Fork-only fields (useWorktree) are
+ * ignored for other kinds. */
+export type ComposerSlashCommandKind = "fork" | "btw";
 
 export interface ComposerSlashCommand {
   name: ComposerSlashCommandName;
@@ -33,13 +29,6 @@ export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     useWorktree: true,
   },
   {
-    name: "loop",
-    token: "/loop",
-    description: `Send the message on a loop until the agent stops making changes (up to ${LOOP_MAX_ITERATIONS} runs)`,
-    kind: "loop",
-    useWorktree: false,
-  },
-  {
     name: "btw",
     token: "/btw",
     description: "Fork this session below the current terminal and send immediately",
@@ -57,15 +46,6 @@ function commandsForSurface(options?: ComposerSlashCommandParseOptions) {
   return options?.surface === "globalLauncher"
     ? COMPOSER_SLASH_COMMANDS.filter((command) => !command.rightPaneOnly)
     : COMPOSER_SLASH_COMMANDS;
-}
-
-/** True when the agent TUI would intercept this message as a shell escape (`!`)
- * or slash command (`/`) rather than a plain turn. Such commands may emit no
- * completion hook, so /loop refuses to loop on them and runs them once instead.
- * Mirrors the backend `is_tui_command_turn` (src-tauri/src/turn_queue.rs). */
-export function isTuiCommandMessage(text: string): boolean {
-  const trimmed = text.trimStart();
-  return trimmed.startsWith("!") || trimmed.startsWith("/");
 }
 
 export type ParsedComposerSlashCommand =

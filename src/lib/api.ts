@@ -1159,14 +1159,6 @@ export function worktreeStatus(agentId: string) {
   return invoke<WorktreeStatus>("worktree_status", { agentId });
 }
 
-/** A content hash of the agent's git worktree (tracked + untracked, honoring
- * .gitignore), used by the composer /loop command to tell whether a turn changed
- * anything. Rejects when the directory isn't a git repo or git is unavailable, so
- * a caller can treat any failure as "can't loop" rather than "no changes". */
-export function worktreeSignature(agentId: string) {
-  return invoke<string>("worktree_signature", { agentId });
-}
-
 export function closeWorktreePane(agentId: string, deleteWorktree: boolean) {
   return invoke<void>("worktree_close_pane", { agentId, deleteWorktree });
 }
