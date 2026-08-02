@@ -652,15 +652,29 @@ impl ChromiumRuntime {
             .send(Message::text(Value::Object(command).to_string()))
             .map_err(|err| format!("failed to send CDP method {method}: {err}"))?;
 
+        let started_at = Instant::now();
+        let session_label = session_id.unwrap_or("browser");
+        eprintln!(
+            "qmux: CDP send id={id} method={method} session={session_label} timeout_ms={}",
+            timeout.as_millis()
+        );
         let deadline = Instant::now() + timeout;
         loop {
             match self.read_cdp_message(subscribers) {
                 Ok(Some(message)) if message.get("id").and_then(Value::as_u64) == Some(id) => {
+                    let response_session = message
+                        .get("sessionId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("browser");
                     if let Some(error) = message.get("error") {
                         let detail = error
                             .get("message")
                             .and_then(Value::as_str)
                             .unwrap_or("unknown CDP error");
+                        eprintln!(
+                            "qmux: CDP receive id={id} method={method} session={response_session} expected_session={session_label} status=error elapsed_ms={} detail={detail}",
+                            started_at.elapsed().as_millis()
+                        );
                         if detail.contains("Session with given id not found")
                             || detail.contains("session not found")
                         {
@@ -673,12 +687,38 @@ impl ChromiumRuntime {
                         }
                         return Err(format!("{method}: {detail}"));
                     }
+                    eprintln!(
+                        "qmux: CDP receive id={id} method={method} session={response_session} expected_session={session_label} status=ok elapsed_ms={}",
+                        started_at.elapsed().as_millis()
+                    );
                     return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
-                Ok(Some(_)) | Ok(None) => {}
-                Err(err) => return Err(err),
+                Ok(Some(message)) => {
+                    if let Some(unexpected_id) = message.get("id") {
+                        let response_session = message
+                            .get("sessionId")
+                            .and_then(Value::as_str)
+                            .unwrap_or("browser");
+                        eprintln!(
+                            "qmux: CDP discard id={unexpected_id} session={response_session} while_waiting_for_id={id} method={method} session={session_label} elapsed_ms={}",
+                            started_at.elapsed().as_millis()
+                        );
+                    }
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    eprintln!(
+                        "qmux: CDP read-error id={id} method={method} session={session_label} elapsed_ms={} detail={err}",
+                        started_at.elapsed().as_millis()
+                    );
+                    return Err(err);
+                }
             }
             if Instant::now() >= deadline {
+                eprintln!(
+                    "qmux: CDP timeout id={id} method={method} session={session_label} elapsed_ms={}",
+                    started_at.elapsed().as_millis()
+                );
                 return Err(format!("CDP method {method} timed out"));
             }
         }
