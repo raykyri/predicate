@@ -27,6 +27,8 @@ use std::time::Duration;
 const DISCOVERY_DIR: &str = "/tmp/codex-browser-use";
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const CLIENT_EVENT_QUEUE: usize = 1024;
+const CLIENT_REQUEST_QUEUE: usize = 128;
+const CLIENT_REQUEST_WORKERS: usize = 4;
 
 struct BrowserBackend {
     engine: Option<Arc<BrowserEngine>>,
@@ -206,6 +208,33 @@ fn serve_connection(mut stream: UnixStream, backend: Arc<BrowserBackend>) -> Res
         .engine
         .as_ref()
         .map(|engine| engine.subscribe(writer_tx.clone()));
+    let (request_tx, request_rx) = mpsc::sync_channel(CLIENT_REQUEST_QUEUE);
+    let request_rx = Arc::new(Mutex::new(request_rx));
+    for worker_index in 0..CLIENT_REQUEST_WORKERS {
+        let worker_backend = Arc::clone(&backend);
+        let worker_pane_id = pane_id.clone();
+        let worker_writer_tx = writer_tx.clone();
+        let worker_request_rx = Arc::clone(&request_rx);
+        thread::Builder::new()
+            .name(format!("qmux-browser-client-worker-{worker_index}"))
+            .spawn(move || {
+                loop {
+                    let work = {
+                        let receiver = lock_or_recover(&worker_request_rx);
+                        receiver.recv()
+                    };
+                    let Ok((request, id)) = work else {
+                        break;
+                    };
+                    let response =
+                        handle_request(&worker_backend, worker_pane_id.as_deref(), &request, id);
+                    if worker_writer_tx.send(response).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|err| format!("failed to start browser client worker: {err}"))?;
+    }
 
     loop {
         let request = match read_frame(&mut stream) {
@@ -223,8 +252,7 @@ fn serve_connection(mut stream: UnixStream, backend: Arc<BrowserBackend>) -> Res
         let Some(id) = request.get("id").cloned() else {
             continue;
         };
-        let response = handle_request(&backend, pane_id.as_deref(), &request, id);
-        if writer_tx.send(response).is_err() {
+        if request_tx.send((request, id)).is_err() {
             break;
         }
     }
@@ -949,6 +977,7 @@ fn write_frame(stream: &mut UnixStream, value: &Value) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
 
     fn unavailable_backend() -> BrowserBackend {
         BrowserBackend {
@@ -1051,7 +1080,7 @@ mod tests {
         assert!(!event_is_visible_to_pane(&backend, Some("pane-b"), &event));
     }
 
-    fn rpc_call(stream: &mut UnixStream, id: u64, method: &str, params: Value) -> Value {
+    fn write_rpc_request(stream: &mut UnixStream, id: u64, method: &str, params: Value) {
         write_frame(
             stream,
             &json!({
@@ -1062,6 +1091,10 @@ mod tests {
             }),
         )
         .unwrap();
+    }
+
+    fn rpc_call(stream: &mut UnixStream, id: u64, method: &str, params: Value) -> Value {
+        write_rpc_request(stream, id, method, params);
         loop {
             let response = read_frame(stream).unwrap().expect("browser socket closed");
             if response.get("id").and_then(Value::as_u64) == Some(id) {
@@ -1126,6 +1159,125 @@ mod tests {
             }),
         );
         assert_eq!(evaluated["result"]["result"]["value"], 42);
+    }
+
+    #[test]
+    #[ignore = "launches an installed chrome-headless-shell"]
+    fn codex_socket_services_paused_navigation_concurrently() {
+        let socket = start_browser_discovery(None).unwrap();
+        let mut stream = UnixStream::connect(socket.path()).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let session = json!({ "session_id": "paused-navigation-test", "turn_id": "turn-1" });
+
+        let created = rpc_call(&mut stream, 1, "createTab", session.clone());
+        let tab_id = created["result"]["id"].as_u64().unwrap();
+        let target = json!({ "tabId": tab_id });
+        assert!(
+            rpc_call(
+                &mut stream,
+                2,
+                "attach",
+                json!({
+                    "tabId": tab_id,
+                    "session_id": "paused-navigation-test",
+                    "turn_id": "turn-1"
+                }),
+            )
+            .get("error")
+            .is_none()
+        );
+        for (id, method) in [(3, "Page.enable"), (4, "Fetch.enable")] {
+            assert!(
+                rpc_call(
+                    &mut stream,
+                    id,
+                    "executeCdp",
+                    json!({
+                        "target": target,
+                        "method": method,
+                        "commandParams": {},
+                        "session_id": "paused-navigation-test",
+                        "turn_id": "turn-1"
+                    }),
+                )
+                .get("error")
+                .is_none()
+            );
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = connection.read(&mut request).unwrap();
+            connection
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+
+        write_rpc_request(
+            &mut stream,
+            5,
+            "executeCdp",
+            json!({
+                "target": target,
+                "method": "Page.navigate",
+                "commandParams": { "url": format!("http://{address}/") },
+                "timeoutMs": 5_000,
+                "session_id": "paused-navigation-test",
+                "turn_id": "turn-1"
+            }),
+        );
+        let request_id = loop {
+            let event = read_frame(&mut stream)
+                .unwrap()
+                .expect("browser socket closed before Fetch.requestPaused");
+            if event.pointer("/params/method").and_then(Value::as_str)
+                == Some("Fetch.requestPaused")
+            {
+                break event
+                    .pointer("/params/params/requestId")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string();
+            }
+        };
+        write_rpc_request(
+            &mut stream,
+            6,
+            "executeCdp",
+            json!({
+                "target": target,
+                "method": "Fetch.continueRequest",
+                "commandParams": { "requestId": request_id },
+                "timeoutMs": 5_000,
+                "session_id": "paused-navigation-test",
+                "turn_id": "turn-1"
+            }),
+        );
+
+        let mut navigation_completed = false;
+        let mut continue_completed = false;
+        while !navigation_completed || !continue_completed {
+            let response = read_frame(&mut stream)
+                .unwrap()
+                .expect("browser socket closed before navigation completed");
+            match response.get("id").and_then(Value::as_u64) {
+                Some(5) => {
+                    assert!(response.get("error").is_none(), "{response}");
+                    navigation_completed = true;
+                }
+                Some(6) => {
+                    assert!(response.get("error").is_none(), "{response}");
+                    continue_completed = true;
+                }
+                _ => {}
+            }
+        }
+        server.join().unwrap();
     }
 
     /// Manual compatibility probe for the private Browser-plugin discovery
