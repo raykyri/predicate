@@ -142,7 +142,13 @@ export default function BrowserOverlay({
         const height = Math.round(
           clampSize(bodyRect?.height ?? 900, MIN_BROWSER_OVERLAY_HEIGHT, 4096),
         );
-        const snapshot = await getBrowserAutomationSnapshot(paneId, width, height);
+        const scaleFactor = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+        const snapshot = await getBrowserAutomationSnapshot(
+          paneId,
+          width,
+          height,
+          scaleFactor,
+        );
         if (!cancelled) {
           setAutomationSnapshot(snapshot);
         }

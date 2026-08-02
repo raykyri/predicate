@@ -759,11 +759,17 @@ export type BrowserAutomationSnapshot = {
   error: string | null;
 };
 
-export function getBrowserAutomationSnapshot(paneId: string, width: number, height: number) {
+export function getBrowserAutomationSnapshot(
+  paneId: string,
+  width: number,
+  height: number,
+  scaleFactor: number,
+) {
   return invoke<BrowserAutomationSnapshot>("browser_automation_snapshot", {
     paneId,
     width,
     height,
+    scaleFactor,
   });
 }
 

@@ -37,7 +37,15 @@ struct BrowserBackend {
     pane_by_session: Mutex<HashMap<String, String>>,
     tab_by_pane: Mutex<HashMap<String, u64>>,
     pane_by_tab: Mutex<HashMap<u64, String>>,
-    viewport_by_pane: Mutex<HashMap<String, (u64, u32, u32)>>,
+    viewport_by_pane: Mutex<HashMap<String, BrowserViewport>>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct BrowserViewport {
+    tab_id: u64,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
 }
 
 /// Managed by Tauri so a clean app shutdown removes the discoverable socket.
@@ -498,8 +506,9 @@ fn scope_result_to_pane(
     lock_or_recover(&backend.tab_by_pane)
         .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
     let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
-    lock_or_recover(&backend.viewport_by_pane).retain(|owner, (tab_id, _, _)| {
-        selected_tabs.get(owner) == Some(tab_id) && live_tab_ids.contains(tab_id)
+    lock_or_recover(&backend.viewport_by_pane).retain(|owner, viewport| {
+        selected_tabs.get(owner) == Some(&viewport.tab_id)
+            && live_tab_ids.contains(&viewport.tab_id)
     });
     lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
     let owners = lock_or_recover(&backend.pane_by_tab);
@@ -680,16 +689,26 @@ impl BrowserDiscoverySocket {
     }
 }
 
+fn browser_scale_factor(scale_factor: f64) -> f64 {
+    if scale_factor.is_finite() {
+        scale_factor.clamp(1.0, 2.0)
+    } else {
+        1.0
+    }
+}
+
 #[tauri::command(async)]
 pub fn browser_automation_snapshot(
     pane_id: String,
     width: u32,
     height: u32,
+    scale_factor: f64,
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> BrowserAutomationSnapshot {
     let result = (|| -> Result<BrowserAutomationSnapshot, String> {
         let width = width.clamp(320, 4096);
         let height = height.clamp(240, 4096);
+        let scale_factor = browser_scale_factor(scale_factor);
         let mut tab_id = browser.tab_id_for_pane(&pane_id)?;
         let mut tabs = browser.engine()?.call("getTabs", json!({}))?;
         let mut tab = tabs
@@ -714,7 +733,12 @@ pub fn browser_automation_snapshot(
                 .cloned();
         }
         let tab = tab.ok_or_else(|| format!("browser tab {tab_id} no longer exists"))?;
-        let viewport = (tab_id, width, height);
+        let viewport = BrowserViewport {
+            tab_id,
+            width,
+            height,
+            scale_factor,
+        };
         let viewport_changed = lock_or_recover(&browser._backend.viewport_by_pane)
             .get(&pane_id)
             .copied()
@@ -726,7 +750,7 @@ pub fn browser_automation_snapshot(
                 json!({
                     "width": width,
                     "height": height,
-                    "deviceScaleFactor": 1,
+                    "deviceScaleFactor": scale_factor,
                     "mobile": false,
                     "screenWidth": width,
                     "screenHeight": height
@@ -810,10 +834,13 @@ pub fn browser_automation_mouse(
     let viewport = lock_or_recover(&browser._backend.viewport_by_pane)
         .get(&pane_id)
         .copied();
-    let x = x.clamp(0.0, f64::from(viewport.map_or(1280, |(_, width, _)| width)));
+    let x = x.clamp(
+        0.0,
+        f64::from(viewport.map_or(1280, |viewport| viewport.width)),
+    );
     let y = y.clamp(
         0.0,
-        f64::from(viewport.map_or(900, |(_, _, height)| height)),
+        f64::from(viewport.map_or(900, |viewport| viewport.height)),
     );
     let delta_x = delta_x.unwrap_or(0.0);
     let delta_y = delta_y.unwrap_or(0.0);
@@ -1034,7 +1061,15 @@ mod tests {
     #[test]
     fn agent_viewport_changes_invalidate_the_mirror_cache() {
         let backend = unavailable_backend();
-        lock_or_recover(&backend.viewport_by_pane).insert("pane-1".to_string(), (7, 1280, 900));
+        lock_or_recover(&backend.viewport_by_pane).insert(
+            "pane-1".to_string(),
+            BrowserViewport {
+                tab_id: 7,
+                width: 1280,
+                height: 900,
+                scale_factor: 2.0,
+            },
+        );
 
         remember_tab_owner(
             &backend,
@@ -1050,6 +1085,14 @@ mod tests {
         );
 
         assert!(lock_or_recover(&backend.viewport_by_pane).is_empty());
+    }
+
+    #[test]
+    fn agent_snapshot_scale_factor_is_capped_for_retina() {
+        assert_eq!(browser_scale_factor(0.5), 1.0);
+        assert_eq!(browser_scale_factor(1.5), 1.5);
+        assert_eq!(browser_scale_factor(3.0), 2.0);
+        assert_eq!(browser_scale_factor(f64::NAN), 1.0);
     }
 
     #[test]
