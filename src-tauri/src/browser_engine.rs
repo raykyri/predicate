@@ -26,14 +26,32 @@ const CDP_READ_POLL: Duration = Duration::from_millis(20);
 const PROFILE_PREFIX: &str = "qmux-codex-browser-";
 const BROWSER_PID_FILE: &str = "QmuxBrowserProcessId";
 const BROWSER_EXECUTABLE_FILE: &str = "QmuxBrowserExecutable";
+/// Ceiling on remembered fire-and-forget command ids. Chromium answers every
+/// command, so the set drains on its own; the cap only stops a wedged socket
+/// from growing it without bound.
+const MAX_UNWAITED_CDP_IDS: usize = 512;
 
 static PROFILE_NONCE: AtomicU64 = AtomicU64::new(0);
 
 type RpcReply = Result<Value, String>;
+type ScreencastSink = Arc<Mutex<Option<mpsc::SyncSender<ScreencastFrame>>>>;
+
+/// One `Page.screencastFrame` payload on its way to the qmux mirror.
+///
+/// Frames carry a full base64 JPEG, so they bypass the Browser client's event
+/// broadcast entirely: copying a Retina-sized image into every connected
+/// client's queue would cost far more than the mirror it feeds.
+pub struct ScreencastFrame {
+    pub tab_id: u64,
+    pub data: String,
+    pub url: String,
+    pub title: String,
+}
 
 pub struct BrowserEngine {
     commands: mpsc::Sender<EngineCommand>,
     subscribers: Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    screencast_sink: ScreencastSink,
     next_subscription_id: AtomicU64,
     executable: PathBuf,
 }
@@ -41,7 +59,8 @@ pub struct BrowserEngine {
 impl BrowserEngine {
     pub fn start() -> Result<Self, String> {
         let (commands, command_rx) = mpsc::channel();
-        let runtime = ChromiumRuntime::launch(command_rx)?;
+        let screencast_sink: ScreencastSink = Arc::new(Mutex::new(None));
+        let runtime = ChromiumRuntime::launch(command_rx, Arc::clone(&screencast_sink))?;
         let executable = runtime.executable.clone();
         let subscribers = Arc::new(Mutex::new(HashMap::new()));
         let event_subscribers = Arc::clone(&subscribers);
@@ -54,6 +73,7 @@ impl BrowserEngine {
         Ok(Self {
             commands,
             subscribers,
+            screencast_sink,
             next_subscription_id: AtomicU64::new(1),
             executable,
         })
@@ -85,6 +105,13 @@ impl BrowserEngine {
                 poisoned.into_inner().remove(&id);
             }
         }
+    }
+
+    /// Route `Page.screencastFrame` payloads to the qmux mirror instead of the
+    /// Browser client event stream. A single sink is enough: the app installs
+    /// one pump at startup and every mirrored pane reads from it.
+    pub fn set_screencast_sink(&self, sink: Option<mpsc::SyncSender<ScreencastFrame>>) {
+        *lock_or_recover(&self.screencast_sink) = sink;
     }
 
     pub fn call(&self, method: &str, params: Value) -> RpcReply {
@@ -122,8 +149,11 @@ struct ChromiumRuntime {
     executable: PathBuf,
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
     commands: mpsc::Receiver<EngineCommand>,
+    screencast_sink: ScreencastSink,
+    screencast_tabs: HashSet<u64>,
     deferred_responses: HashMap<u64, Value>,
     waiting_cdp_ids: HashSet<u64>,
+    unwaited_cdp_ids: HashSet<u64>,
     next_cdp_id: u64,
     next_tab_id: u64,
     tabs: HashMap<u64, BrowserTab>,
@@ -144,7 +174,10 @@ struct BrowserTab {
 }
 
 impl ChromiumRuntime {
-    fn launch(commands: mpsc::Receiver<EngineCommand>) -> Result<Self, String> {
+    fn launch(
+        commands: mpsc::Receiver<EngineCommand>,
+        screencast_sink: ScreencastSink,
+    ) -> Result<Self, String> {
         cleanup_stale_profile_dirs();
         let executable = find_headless_shell_executable().ok_or_else(|| {
             "chrome-headless-shell was not found; install it with Playwright or set QMUX_CHROME_HEADLESS_SHELL_PATH"
@@ -246,8 +279,11 @@ impl ChromiumRuntime {
             executable,
             socket,
             commands,
+            screencast_sink,
+            screencast_tabs: HashSet::new(),
             deferred_responses: HashMap::new(),
             waiting_cdp_ids: HashSet::new(),
+            unwaited_cdp_ids: HashSet::new(),
             next_cdp_id: 1,
             next_tab_id: 1,
             tabs: HashMap::new(),
@@ -415,6 +451,7 @@ impl ChromiumRuntime {
         for target_id in removed {
             if let Some(tab_id) = self.target_to_tab.remove(&target_id) {
                 self.tabs.remove(&tab_id);
+                self.screencast_tabs.remove(&tab_id);
                 self.session_to_tab.retain(|_, owner| *owner != tab_id);
                 self.target_sessions
                     .retain(|(owner, _), _| *owner != tab_id);
@@ -589,13 +626,27 @@ impl ChromiumRuntime {
         } else {
             self.ensure_attached(tab_id, subscribers)?
         };
-        self.call_cdp(
+        let result = self.call_cdp(
             &method,
             command_params,
             Some(&session_id),
             timeout,
             subscribers,
-        )
+        )?;
+        // Remember which tabs stream so their frames are routed to the mirror
+        // (and acknowledged here) instead of being broadcast as ordinary CDP
+        // events. qmux is the only screencast caller; a Browser client that
+        // started one would find its frames consumed by the mirror pump.
+        match method.as_str() {
+            "Page.startScreencast" => {
+                self.screencast_tabs.insert(tab_id);
+            }
+            "Page.stopScreencast" => {
+                self.screencast_tabs.remove(&tab_id);
+            }
+            _ => {}
+        }
+        Ok(result)
     }
 
     fn finalize_tabs(
@@ -696,6 +747,47 @@ impl ChromiumRuntime {
         result
     }
 
+    /// Send a CDP command whose reply carries nothing worth waiting for.
+    ///
+    /// Screencast acknowledgements arrive at frame rate and gate the next
+    /// frame, so blocking the controller on each one would cost more latency
+    /// than the frame is worth. The id is remembered only so the eventual
+    /// reply isn't reported as an orphaned response.
+    fn send_cdp_without_waiting(&mut self, method: &str, params: Value, session_id: Option<&str>) {
+        let id = self.next_cdp_id;
+        self.next_cdp_id += 1;
+        let mut command = Map::new();
+        command.insert("id".to_string(), json!(id));
+        command.insert("method".to_string(), json!(method));
+        command.insert("params".to_string(), params);
+        if let Some(session_id) = session_id {
+            command.insert("sessionId".to_string(), json!(session_id));
+        }
+        if let Err(err) = self
+            .socket
+            .send(Message::text(Value::Object(command).to_string()))
+        {
+            eprintln!("qmux: CDP send id={id} method={method} status=error detail={err}");
+            return;
+        }
+        if self.unwaited_cdp_ids.len() >= MAX_UNWAITED_CDP_IDS {
+            // Ids only grow, so keeping the newest half discards exactly the
+            // replies old enough that Chromium is never going to send them.
+            let mut ids = self.unwaited_cdp_ids.iter().copied().collect::<Vec<_>>();
+            ids.sort_unstable();
+            let dropped = ids.len() / 2;
+            for stale in ids.into_iter().take(dropped) {
+                self.unwaited_cdp_ids.remove(&stale);
+            }
+        }
+        self.unwaited_cdp_ids.insert(id);
+    }
+
+    /// True when `id` answers a command sent with `send_cdp_without_waiting`.
+    fn take_unwaited_cdp_id(&mut self, id: u64) -> bool {
+        self.unwaited_cdp_ids.remove(&id)
+    }
+
     fn wait_for_cdp_response(
         &mut self,
         id: u64,
@@ -756,7 +848,11 @@ impl ChromiumRuntime {
                     return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
                 Ok(Some(message)) => {
-                    if let Some(unexpected_id) = message.get("id").and_then(Value::as_u64) {
+                    // A reply to a screencast acknowledgement answers nobody and
+                    // is not late — take_unwaited_cdp_id filters those out.
+                    if let Some(unexpected_id) = message.get("id").and_then(Value::as_u64)
+                        && !self.take_unwaited_cdp_id(unexpected_id)
+                    {
                         let response_session = message
                             .get("sessionId")
                             .and_then(Value::as_str)
@@ -869,6 +965,10 @@ impl ChromiumRuntime {
         else {
             return;
         };
+        if method == "Page.screencastFrame" && self.screencast_tabs.contains(&tab_id) {
+            self.deliver_screencast_frame(tab_id, outer_session, &params);
+            return;
+        }
         if method == "Target.attachedToTarget" {
             if let Some(nested_session) = params.get("sessionId").and_then(Value::as_str) {
                 self.session_to_tab
@@ -912,6 +1012,38 @@ impl ChromiumRuntime {
         );
     }
 
+    /// Acknowledge a screencast frame and hand it to the mirror pump.
+    ///
+    /// Chromium keeps only a couple of frames in flight and withholds the next
+    /// one until the current frame is acknowledged, so the ack goes out before
+    /// anything else — including before the sink is consulted, so a mirror that
+    /// closed mid-frame can't wedge the stream for the tab it left behind.
+    fn deliver_screencast_frame(&mut self, tab_id: u64, session_id: Option<&str>, params: &Value) {
+        if let Some(frame_session) = params.get("sessionId").and_then(Value::as_u64) {
+            self.send_cdp_without_waiting(
+                "Page.screencastFrameAck",
+                json!({ "sessionId": frame_session }),
+                session_id,
+            );
+        }
+        let sink = lock_or_recover(&self.screencast_sink).clone();
+        let (Some(sink), Some(data)) = (sink, params.get("data").and_then(Value::as_str)) else {
+            return;
+        };
+        let tab = self.tabs.get(&tab_id);
+        let frame = ScreencastFrame {
+            tab_id,
+            data: data.to_string(),
+            url: tab.map(|tab| tab.url.clone()).unwrap_or_default(),
+            title: tab.map(|tab| tab.title.clone()).unwrap_or_default(),
+        };
+        // A mirror that can't keep up should skip frames rather than queue
+        // full-resolution JPEGs it will only render stale.
+        if let Err(mpsc::TrySendError::Disconnected(_)) = sink.try_send(frame) {
+            *lock_or_recover(&self.screencast_sink) = None;
+        }
+    }
+
     fn forget_session(&mut self, session_id: &str) -> Option<u64> {
         let tab_id = self.session_to_tab.remove(session_id)?;
         if self
@@ -950,7 +1082,9 @@ fn run_engine(
         }
         match runtime.read_cdp_message(&subscribers) {
             Ok(Some(message)) => {
-                if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                if let Some(id) = message.get("id").and_then(Value::as_u64)
+                    && !runtime.take_unwaited_cdp_id(id)
+                {
                     eprintln!("qmux: CDP discard late response id={id} with no command waiting");
                 }
             }
@@ -960,6 +1094,13 @@ fn run_engine(
                 return;
             }
         }
+    }
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -1530,6 +1671,156 @@ mod tests {
 
         navigation.join().unwrap().unwrap();
         server.join().unwrap();
+        engine.unsubscribe(subscription);
+    }
+
+    /// Width and height from a JPEG's start-of-frame marker, so a captured
+    /// frame can be measured without pulling in an image decoder.
+    fn jpeg_dimensions(bytes: &[u8]) -> Option<(u16, u16)> {
+        let mut index = 2;
+        while index + 8 < bytes.len() {
+            if bytes[index] != 0xFF {
+                index += 1;
+                continue;
+            }
+            let marker = bytes[index + 1];
+            let length = usize::from(u16::from_be_bytes([bytes[index + 2], bytes[index + 3]]));
+            // Every SOFn frame header carries the dimensions; the other 0xC*
+            // markers (Huffman tables, arithmetic conditioning, restart) do not.
+            if (0xC0..=0xCF).contains(&marker) && !matches!(marker, 0xC4 | 0xC8 | 0xCC) {
+                let height = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]);
+                let width = u16::from_be_bytes([bytes[index + 7], bytes[index + 8]]);
+                return Some((width, height));
+            }
+            index += 2 + length;
+        }
+        None
+    }
+
+    #[test]
+    fn jpeg_dimensions_are_read_from_the_start_of_frame_marker() {
+        let jpeg = [
+            0xFF, 0xD8, // SOI
+            0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00, // a Huffman table to skip over
+            0xFF, 0xC0, 0x00, 0x11, 0x08, 0x07, 0x08, 0x0A, 0x00, // SOF0: 2560x1800
+        ];
+        assert_eq!(jpeg_dimensions(&jpeg), Some((2560, 1800)));
+        assert_eq!(jpeg_dimensions(&[0xFF, 0xD8]), None);
+    }
+
+    /// Chromium's screencast only ever scales frames *down* (its scale factor
+    /// starts at 1 and `maxWidth`/`maxHeight` can only shrink it), so frames
+    /// arrive at CSS resolution no matter what device scale is emulated. This
+    /// pins both halves of that: the stream stays at 1x, and a screenshot taken
+    /// against the same override is the 2x image the mirror settles on.
+    #[test]
+    #[ignore = "launches an installed chrome-headless-shell"]
+    fn screencast_frames_stream_at_css_resolution_and_settle_at_display_scale() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+        let engine = BrowserEngine::start().unwrap();
+        let (frames_tx, frames_rx) = mpsc::sync_channel(4);
+        engine.set_screencast_sink(Some(frames_tx));
+        let (event_tx, event_rx) = mpsc::sync_channel(64);
+        let subscription = engine.subscribe(event_tx);
+
+        let tab = engine.call("createTab", json!({})).unwrap();
+        let tab_id = tab["id"].as_u64().unwrap();
+        engine.call("attach", json!({ "tabId": tab_id })).unwrap();
+        let execute = |method: &str, params: Value| {
+            engine
+                .call(
+                    "executeCdp",
+                    json!({
+                        "target": { "tabId": tab_id },
+                        "method": method,
+                        "commandParams": params,
+                        "timeoutMs": 10_000
+                    }),
+                )
+                .unwrap()
+        };
+        execute("Page.enable", json!({}));
+        execute(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": 640,
+                "height": 480,
+                "deviceScaleFactor": 2.0,
+                "mobile": false,
+                "screenWidth": 640,
+                "screenHeight": 480
+            }),
+        );
+        execute(
+            "Page.startScreencast",
+            json!({
+                "format": "jpeg",
+                "quality": 80,
+                "maxWidth": 1280,
+                "maxHeight": 960,
+                "everyNthFrame": 1
+            }),
+        );
+        let mut frames = Vec::new();
+
+        // Chromium withholds frames once a couple are outstanding, so getting
+        // past the second one proves the controller is acknowledging them.
+        for repaint in 0..8 {
+            if frames.len() >= 3 {
+                break;
+            }
+            execute(
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!(
+                        "document.body.style.background = 'rgb({repaint}, 40, 90)'"
+                    )
+                }),
+            );
+            if let Ok(frame) = frames_rx.recv_timeout(Duration::from_secs(5)) {
+                frames.push(frame);
+            }
+        }
+        assert!(
+            frames.len() >= 3,
+            "expected the screencast to keep streaming, got {} frame(s)",
+            frames.len()
+        );
+        assert!(frames.iter().all(|frame| frame.tab_id == tab_id));
+
+        let streamed = STANDARD.decode(&frames[0].data).unwrap();
+        assert_eq!(
+            jpeg_dimensions(&streamed),
+            Some((640, 480)),
+            "screencast frames stay at CSS resolution however the display scales"
+        );
+
+        // Frames belong to the mirror, not to the Browser client's event feed.
+        while let Ok(event) = event_rx.try_recv() {
+            assert_ne!(
+                event.pointer("/params/method").and_then(Value::as_str),
+                Some("Page.screencastFrame")
+            );
+        }
+
+        // ...which is why the mirror settles on a screenshot: the same override
+        // captures at the emulated 2x, so the resting mirror is Retina-sharp
+        // even though nothing streamed to it ever is.
+        let settled = execute(
+            "Page.captureScreenshot",
+            json!({
+                "format": "jpeg",
+                "quality": 80,
+                "fromSurface": true,
+                "captureBeyondViewport": false,
+                "optimizeForSpeed": true
+            }),
+        );
+        let settled = STANDARD.decode(settled["data"].as_str().unwrap()).unwrap();
+        assert_eq!(jpeg_dimensions(&settled), Some((1280, 960)));
+
+        execute("Page.stopScreencast", json!({}));
         engine.unsubscribe(subscription);
     }
 }

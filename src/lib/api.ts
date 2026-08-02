@@ -773,6 +773,48 @@ export function getBrowserAutomationSnapshot(
   });
 }
 
+/** One mirrored frame pushed by Chromium's screencast, ready for an <img>. */
+export type BrowserScreencastFrame = {
+  paneId: string;
+  tabId: number;
+  url: string;
+  title: string;
+  width: number;
+  height: number;
+  imageDataUrl: string;
+};
+
+/**
+ * Start (or reconfigure) the pane's screencast and report the mirrored tab.
+ * The backend only touches Chromium when the tab, size, or scale changed, so
+ * this doubles as the overlay's metadata heartbeat.
+ */
+export function startBrowserScreencast(
+  paneId: string,
+  width: number,
+  height: number,
+  scaleFactor: number,
+) {
+  return invoke<BrowserAutomationSnapshot>("browser_automation_start_screencast", {
+    paneId,
+    width,
+    height,
+    scaleFactor,
+  });
+}
+
+export function stopBrowserScreencast(paneId: string) {
+  return invoke<void>("browser_automation_stop_screencast", { paneId });
+}
+
+export function listenToBrowserScreencastFrames(
+  onFrame: (frame: BrowserScreencastFrame) => void,
+): Promise<UnlistenFn> {
+  return listen<BrowserScreencastFrame>("browser-screencast-frame", (event) =>
+    onFrame(event.payload),
+  );
+}
+
 export function navigateBrowserAutomation(paneId: string, url: string) {
   return invoke<void>("browser_automation_navigate", { paneId, url });
 }
