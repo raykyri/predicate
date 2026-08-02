@@ -5,22 +5,44 @@ import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
 } from "react";
+import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { BrowserOverlayMode, BrowserOverlaySize } from "../appTypes";
 import {
   claimNativeTerminalPointerForWebDrag,
   getBrowserAutomationSnapshot,
   insertBrowserAutomationText,
+  listenToBrowserScreencastFrames,
   navigateBrowserAutomation,
   reloadBrowserAutomation,
   sendBrowserAutomationKey,
   sendBrowserAutomationMouse,
   setNativeTerminalIframeShortcutFallback,
+  startBrowserScreencast,
+  stopBrowserScreencast,
 } from "../lib/api";
+import type { BrowserAutomationSnapshot } from "../lib/api";
 
 const MIN_BROWSER_OVERLAY_WIDTH = 360;
 const MIN_BROWSER_OVERLAY_HEIGHT = 240;
 const BROWSER_OVERLAY_LEFT_INSET_FALLBACK = 64;
 const BROWSER_OVERLAY_BOTTOM_INSET = 50;
+// Chromium pushes a frame whenever the mirrored page composites, so the only
+// polling left is a metadata refresh: it keeps the address bar current and
+// restarts the stream after the overlay is resized or its tab is replaced.
+const SCREENCAST_HEARTBEAT_MS = 1000;
+// A headless build that refuses to composite would leave the mirror blank
+// forever, so give the first frame a deadline and fall back to screenshots.
+const SCREENCAST_FIRST_FRAME_MS = 2500;
+// Screencast frames are always CSS-resolution — Chromium's screencast scale
+// only ever shrinks a frame, so no device scale makes it stream at 2x. Once
+// the page stops compositing, replace the last frame with a screenshot, which
+// does honour the emulated scale and comes back Retina-sharp.
+const SCREENCAST_SETTLE_MS = 250;
+// Chromium occasionally composites once more just after a capture. That frame
+// shows what the capture already shows, at half the resolution, so displaying
+// it would soften a settled mirror for no reason.
+const SCREENCAST_SETTLE_ECHO_MS = 200;
+const SNAPSHOT_POLL_MS = 500;
 const lastAutomationNavigationByPane = new Map<string, number>();
 const MAX_REMEMBERED_AUTOMATION_PANES = 256;
 
@@ -103,9 +125,13 @@ export default function BrowserOverlay({
   // bar tracks navigation without clobbering what the user is mid-typing.
   const [draft, setDraft] = useState(url ?? "");
   const [resizing, setResizing] = useState(false);
-  const [automationSnapshot, setAutomationSnapshot] = useState<
-    Awaited<ReturnType<typeof getBrowserAutomationSnapshot>> | null
-  >(null);
+  const [automationSnapshot, setAutomationSnapshot] = useState<BrowserAutomationSnapshot | null>(
+    null,
+  );
+  // The live mirror image — a streamed frame, or the sharper capture it
+  // settles on. Held apart from the metadata above so a heartbeat that carries
+  // no screenshot can't blank the view between frames.
+  const [mirrorFrame, setMirrorFrame] = useState<string | null>(null);
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
@@ -115,6 +141,7 @@ export default function BrowserOverlay({
 
   const automated = mode === "agent" && !sandbox;
   const displayedUrl = automated ? (automationSnapshot?.url ?? url) : url;
+  const mirrorImage = mirrorFrame ?? automationSnapshot?.imageDataUrl ?? null;
 
   useEffect(() => {
     if (document.activeElement !== addressInputRef.current) {
@@ -125,76 +152,215 @@ export default function BrowserOverlay({
   useEffect(() => {
     if (!automated) {
       setAutomationSnapshot(null);
+      setMirrorFrame(null);
       return;
     }
     let cancelled = false;
-    let polling = false;
-    const poll = async () => {
-      if (polling) {
+    let unlisten: UnlistenFn | null = null;
+    let heartbeatTimer: number | null = null;
+    let firstFrameTimer: number | null = null;
+    let settleTimer: number | null = null;
+    let snapshotTimer: number | null = null;
+    let requestInFlight = false;
+    let streaming = false;
+    // Bumped by every streamed frame so a slow refinement capture can tell it
+    // has been overtaken by newer motion and drop its result.
+    let frameSequence = 0;
+    let settledAt = 0;
+
+    const measure = () => {
+      const bodyRect = bodyRef.current?.getBoundingClientRect();
+      return {
+        width: Math.round(clampSize(bodyRect?.width ?? 1280, MIN_BROWSER_OVERLAY_WIDTH, 4096)),
+        height: Math.round(clampSize(bodyRect?.height ?? 900, MIN_BROWSER_OVERLAY_HEIGHT, 4096)),
+        scaleFactor: Math.min(Math.max(window.devicePixelRatio || 1, 1), 2),
+      };
+    };
+
+    const reportError = (error: unknown, currentUrl: string | null = null) => {
+      if (cancelled) {
         return;
       }
-      polling = true;
+      setAutomationSnapshot({
+        available: false,
+        tabId: null,
+        url: currentUrl,
+        title: null,
+        imageDataUrl: null,
+        width: 1280,
+        height: 900,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    };
+
+    const pollSnapshot = async () => {
+      if (cancelled || requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
       try {
-        const bodyRect = bodyRef.current?.getBoundingClientRect();
-        const width = Math.round(
-          clampSize(bodyRect?.width ?? 1280, MIN_BROWSER_OVERLAY_WIDTH, 4096),
-        );
-        const height = Math.round(
-          clampSize(bodyRect?.height ?? 900, MIN_BROWSER_OVERLAY_HEIGHT, 4096),
-        );
-        const scaleFactor = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
-        const snapshot = await getBrowserAutomationSnapshot(
-          paneId,
-          width,
-          height,
-          scaleFactor,
-        );
+        const { width, height, scaleFactor } = measure();
+        const snapshot = await getBrowserAutomationSnapshot(paneId, width, height, scaleFactor);
         if (!cancelled) {
           setAutomationSnapshot(snapshot);
         }
       } catch (error) {
-        if (!cancelled) {
-          setAutomationSnapshot({
-            available: false,
-            tabId: null,
-            url: null,
-            title: null,
-            imageDataUrl: null,
-            width: 1280,
-            height: 900,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+        reportError(error);
       } finally {
-        polling = false;
+        requestInFlight = false;
       }
     };
+
+    // One-way switch: once this pane is known not to stream, stop asking for a
+    // screencast and go back to the screenshot poll for the rest of the mount.
+    const fallBackToSnapshots = () => {
+      if (cancelled || snapshotTimer !== null) {
+        return;
+      }
+      if (heartbeatTimer !== null) {
+        window.clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+      }
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+        settleTimer = null;
+      }
+      setMirrorFrame(null);
+      void stopBrowserScreencast(paneId).catch(() => undefined);
+      void pollSnapshot();
+      snapshotTimer = window.setInterval(() => void pollSnapshot(), SNAPSHOT_POLL_MS);
+    };
+
+    // Trade the last streamed frame for a screenshot at the display's scale.
+    // A capture occasionally nudges Chromium into compositing once more; the
+    // echo window below keeps that from softening the mirror back down.
+    const settleAtDisplayScale = async () => {
+      if (cancelled || snapshotTimer !== null) {
+        return;
+      }
+      if (requestInFlight) {
+        armSettle();
+        return;
+      }
+      const sequence = frameSequence;
+      requestInFlight = true;
+      try {
+        const { width, height, scaleFactor } = measure();
+        const snapshot = await getBrowserAutomationSnapshot(paneId, width, height, scaleFactor);
+        if (cancelled || frameSequence !== sequence || !snapshot.imageDataUrl) {
+          return;
+        }
+        setAutomationSnapshot(snapshot);
+        setMirrorFrame(snapshot.imageDataUrl);
+        settledAt = performance.now();
+      } catch {
+        // The stream is still the source of truth; the next quiet moment retries.
+      } finally {
+        requestInFlight = false;
+      }
+    };
+
+    function armSettle() {
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      settleTimer = window.setTimeout(() => {
+        settleTimer = null;
+        void settleAtDisplayScale();
+      }, SCREENCAST_SETTLE_MS);
+    }
+
+    const refreshScreencast = async () => {
+      if (cancelled || requestInFlight || snapshotTimer !== null) {
+        return;
+      }
+      requestInFlight = true;
+      try {
+        const { width, height, scaleFactor } = measure();
+        const status = await startBrowserScreencast(paneId, width, height, scaleFactor);
+        if (cancelled) {
+          return;
+        }
+        setAutomationSnapshot(status);
+        if (status.available && !streaming && firstFrameTimer === null) {
+          firstFrameTimer = window.setTimeout(() => {
+            firstFrameTimer = null;
+            if (!streaming) {
+              fallBackToSnapshots();
+            }
+          }, SCREENCAST_FIRST_FRAME_MS);
+        }
+      } catch (error) {
+        reportError(error);
+      } finally {
+        requestInFlight = false;
+      }
+    };
+
+    void listenToBrowserScreencastFrames((frame) => {
+      if (cancelled || frame.paneId !== paneId || snapshotTimer !== null) {
+        return;
+      }
+      streaming = true;
+      frameSequence += 1;
+      if (firstFrameTimer !== null) {
+        window.clearTimeout(firstFrameTimer);
+        firstFrameTimer = null;
+      }
+      // An echo is still worth re-settling on — if the page genuinely changed,
+      // the capture that follows picks it up sharply — it just isn't worth
+      // showing in place of the capture it echoes.
+      if (performance.now() - settledAt >= SCREENCAST_SETTLE_ECHO_MS) {
+        setMirrorFrame(frame.imageDataUrl);
+      }
+      armSettle();
+      // Frames carry the tab's current identity, so navigation shows up in the
+      // address bar as soon as it paints rather than on the next heartbeat.
+      setAutomationSnapshot((previous) =>
+        previous && (previous.url !== frame.url || previous.title !== frame.title)
+          ? { ...previous, url: frame.url, title: frame.title }
+          : previous,
+      );
+    }).then(
+      (stop) => {
+        if (cancelled) {
+          stop();
+          return;
+        }
+        unlisten = stop;
+      },
+      () => fallBackToSnapshots(),
+    );
+
     void (async () => {
       if (url && lastAutomationNavigationByPane.get(paneId) !== reloadNonce) {
         try {
           await navigateBrowserAutomation(paneId, url);
           rememberAutomationNavigation(paneId, reloadNonce);
         } catch (error) {
-          if (!cancelled) {
-            setAutomationSnapshot({
-              available: false,
-              tabId: null,
-              url,
-              title: null,
-              imageDataUrl: null,
-              width: 1280,
-              height: 900,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+          reportError(error, url);
         }
       }
-      await poll();
+      await refreshScreencast();
     })();
-    const timer = window.setInterval(() => void poll(), 500);
+    heartbeatTimer = window.setInterval(() => void refreshScreencast(), SCREENCAST_HEARTBEAT_MS);
+
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (heartbeatTimer !== null) {
+        window.clearInterval(heartbeatTimer);
+      }
+      if (snapshotTimer !== null) {
+        window.clearInterval(snapshotTimer);
+      }
+      if (firstFrameTimer !== null) {
+        window.clearTimeout(firstFrameTimer);
+      }
+      if (settleTimer !== null) {
+        window.clearTimeout(settleTimer);
+      }
+      unlisten?.();
+      void stopBrowserScreencast(paneId).catch(() => undefined);
     };
   }, [automated, paneId, reloadNonce, url]);
 
@@ -534,11 +700,11 @@ export default function BrowserOverlay({
         </div>
       </div>
       <div ref={bodyRef} className="browser-overlay-body">
-        {automated && automationSnapshot?.imageDataUrl ? (
+        {automated && mirrorImage ? (
           <img
             className="browser-overlay-frame is-automated"
-            src={automationSnapshot.imageDataUrl}
-            alt={automationSnapshot.title || "Automated browser tab"}
+            src={mirrorImage}
+            alt={automationSnapshot?.title || "Automated browser tab"}
             draggable={false}
             tabIndex={0}
             onPointerDown={(event) => {

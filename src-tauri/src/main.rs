@@ -2537,6 +2537,8 @@ fn main() {
             active_tab_get,
             active_tab_set,
             browser_backend::browser_automation_snapshot,
+            browser_backend::browser_automation_start_screencast,
+            browser_backend::browser_automation_stop_screencast,
             browser_backend::browser_automation_navigate,
             browser_backend::browser_automation_reload,
             browser_backend::browser_automation_mouse,

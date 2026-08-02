@@ -7,7 +7,7 @@
 //! to an isolated chrome-headless-shell runtime. Sandboxed file previews remain
 //! separate.
 
-use crate::browser_engine::BrowserEngine;
+use crate::browser_engine::{BrowserEngine, ScreencastFrame};
 use crate::state::AppState;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -22,13 +22,29 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tauri::Emitter;
 
 const DISCOVERY_DIR: &str = "/tmp/codex-browser-use";
 const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const CLIENT_EVENT_QUEUE: usize = 1024;
 const CLIENT_REQUEST_QUEUE: usize = 128;
 const CLIENT_REQUEST_WORKERS: usize = 4;
+/// Shared by the streamed screencast and the polled fallback so the mirror
+/// looks the same however a frame reached it.
+const AGENT_MIRROR_JPEG_QUALITY: u32 = 80;
+/// Screencast frames waiting to reach the webview. Chromium keeps at most a
+/// couple in flight, and a stale frame is worth less than the one behind it,
+/// so this stays small on purpose.
+const SCREENCAST_FRAME_QUEUE: usize = 2;
+/// Tauri event carrying one mirrored frame to the browser overlay.
+const SCREENCAST_FRAME_EVENT: &str = "browser-screencast-frame";
+/// Ceiling on how often frames cross into the webview. Every frame is a full
+/// base64 JPEG over the IPC bridge, and a page animating at the display's
+/// refresh rate would spend more time shipping frames than rendering them.
+/// Dropping here is safe: the engine has already acknowledged the frame, and
+/// the overlay's settle capture redraws whatever a drop left behind.
+const SCREENCAST_MIN_FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 struct BrowserBackend {
     engine: Option<Arc<BrowserEngine>>,
@@ -38,6 +54,7 @@ struct BrowserBackend {
     tab_by_pane: Mutex<HashMap<String, u64>>,
     pane_by_tab: Mutex<HashMap<u64, String>>,
     viewport_by_pane: Mutex<HashMap<String, BrowserViewport>>,
+    screencast_by_pane: Mutex<HashMap<String, BrowserViewport>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -123,7 +140,9 @@ pub fn start_browser_discovery(
         tab_by_pane: Mutex::new(HashMap::new()),
         pane_by_tab: Mutex::new(HashMap::new()),
         viewport_by_pane: Mutex::new(HashMap::new()),
+        screencast_by_pane: Mutex::new(HashMap::new()),
     });
+    start_screencast_pump(&backend)?;
     let listener_backend = Arc::clone(&backend);
     let shutdown = Arc::new(AtomicBool::new(false));
     let listener_shutdown = Arc::clone(&shutdown);
@@ -426,6 +445,9 @@ fn remember_tab_owner(
             })
     {
         lock_or_recover(&backend.viewport_by_pane).remove(pane_id);
+        // The frame size follows the client's own override now; drop the
+        // screencast so the next heartbeat restarts it at the right bounds.
+        lock_or_recover(&backend.screencast_by_pane).remove(pane_id);
     }
 }
 
@@ -506,10 +528,12 @@ fn scope_result_to_pane(
     lock_or_recover(&backend.tab_by_pane)
         .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
     let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
-    lock_or_recover(&backend.viewport_by_pane).retain(|owner, viewport| {
-        selected_tabs.get(owner) == Some(&viewport.tab_id)
-            && live_tab_ids.contains(&viewport.tab_id)
-    });
+    for cache in [&backend.viewport_by_pane, &backend.screencast_by_pane] {
+        lock_or_recover(cache).retain(|owner, viewport| {
+            selected_tabs.get(owner) == Some(&viewport.tab_id)
+                && live_tab_ids.contains(&viewport.tab_id)
+        });
+    }
     lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
     let owners = lock_or_recover(&backend.pane_by_tab);
     tabs.retain(|tab| {
@@ -677,6 +701,10 @@ impl BrowserDiscoverySocket {
         params: Value,
     ) -> Result<Value, String> {
         let tab_id = self.tab_id_for_pane(pane_id)?;
+        self.execute_for_tab(tab_id, method, params)
+    }
+
+    fn execute_for_tab(&self, tab_id: u64, method: &str, params: Value) -> Result<Value, String> {
         self.engine()?.call(
             "executeCdp",
             json!({
@@ -697,6 +725,110 @@ fn browser_scale_factor(scale_factor: f64) -> f64 {
     }
 }
 
+/// The mirrored tab a pane is currently looking at, with Chromium already
+/// emulating the overlay's size and the display's scale.
+struct AgentMirrorTarget {
+    viewport: BrowserViewport,
+    url: Option<String>,
+    title: Option<String>,
+}
+
+impl AgentMirrorTarget {
+    fn into_snapshot(self, image_data_url: Option<String>) -> BrowserAutomationSnapshot {
+        BrowserAutomationSnapshot {
+            available: true,
+            tab_id: Some(self.viewport.tab_id),
+            url: self.url,
+            title: self.title,
+            image_data_url,
+            width: u64::from(self.viewport.width),
+            height: u64::from(self.viewport.height),
+            error: None,
+        }
+    }
+}
+
+/// Resolve the pane's tab and make Chromium render at `width`x`height` CSS
+/// pixels with `scale_factor` device pixels each. The metrics override is only
+/// re-sent when something actually changed, so this is cheap to call on a
+/// heartbeat.
+fn prepare_agent_mirror(
+    browser: &BrowserDiscoverySocket,
+    pane_id: &str,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+) -> Result<AgentMirrorTarget, String> {
+    let mut tab_id = browser.tab_id_for_pane(pane_id)?;
+    let mut tabs = browser.engine()?.call("getTabs", json!({}))?;
+    let mut tab = tabs
+        .as_array()
+        .and_then(|tabs| {
+            tabs.iter()
+                .find(|tab| tab.get("id").and_then(Value::as_u64) == Some(tab_id))
+        })
+        .cloned();
+    if tab.is_none() {
+        lock_or_recover(&browser._backend.pane_by_tab).remove(&tab_id);
+        lock_or_recover(&browser._backend.tab_by_pane).remove(pane_id);
+        lock_or_recover(&browser._backend.viewport_by_pane).remove(pane_id);
+        lock_or_recover(&browser._backend.screencast_by_pane).remove(pane_id);
+        tab_id = browser.tab_id_for_pane(pane_id)?;
+        tabs = browser.engine()?.call("getTabs", json!({}))?;
+        tab = tabs
+            .as_array()
+            .and_then(|tabs| {
+                tabs.iter()
+                    .find(|tab| tab.get("id").and_then(Value::as_u64) == Some(tab_id))
+            })
+            .cloned();
+    }
+    let tab = tab.ok_or_else(|| format!("browser tab {tab_id} no longer exists"))?;
+    let viewport = BrowserViewport {
+        tab_id,
+        width,
+        height,
+        scale_factor,
+    };
+    let viewport_changed = lock_or_recover(&browser._backend.viewport_by_pane)
+        .get(pane_id)
+        .copied()
+        != Some(viewport);
+    if viewport_changed {
+        browser.execute_for_pane(
+            pane_id,
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": width,
+                "height": height,
+                "deviceScaleFactor": scale_factor,
+                "mobile": false,
+                "screenWidth": width,
+                "screenHeight": height
+            }),
+        )?;
+        lock_or_recover(&browser._backend.viewport_by_pane).insert(pane_id.to_string(), viewport);
+    }
+    Ok(AgentMirrorTarget {
+        viewport,
+        url: tab.get("url").and_then(Value::as_str).map(str::to_string),
+        title: tab.get("title").and_then(Value::as_str).map(str::to_string),
+    })
+}
+
+fn unavailable_snapshot(width: u32, height: u32, error: String) -> BrowserAutomationSnapshot {
+    BrowserAutomationSnapshot {
+        available: false,
+        tab_id: None,
+        url: None,
+        title: None,
+        image_data_url: None,
+        width: u64::from(width.clamp(320, 4096)),
+        height: u64::from(height.clamp(240, 4096)),
+        error: Some(error),
+    }
+}
+
 #[tauri::command(async)]
 pub fn browser_automation_snapshot(
     pane_id: String,
@@ -706,64 +838,19 @@ pub fn browser_automation_snapshot(
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> BrowserAutomationSnapshot {
     let result = (|| -> Result<BrowserAutomationSnapshot, String> {
-        let width = width.clamp(320, 4096);
-        let height = height.clamp(240, 4096);
-        let scale_factor = browser_scale_factor(scale_factor);
-        let mut tab_id = browser.tab_id_for_pane(&pane_id)?;
-        let mut tabs = browser.engine()?.call("getTabs", json!({}))?;
-        let mut tab = tabs
-            .as_array()
-            .and_then(|tabs| {
-                tabs.iter()
-                    .find(|tab| tab.get("id").and_then(Value::as_u64) == Some(tab_id))
-            })
-            .cloned();
-        if tab.is_none() {
-            lock_or_recover(&browser._backend.pane_by_tab).remove(&tab_id);
-            lock_or_recover(&browser._backend.tab_by_pane).remove(&pane_id);
-            lock_or_recover(&browser._backend.viewport_by_pane).remove(&pane_id);
-            tab_id = browser.tab_id_for_pane(&pane_id)?;
-            tabs = browser.engine()?.call("getTabs", json!({}))?;
-            tab = tabs
-                .as_array()
-                .and_then(|tabs| {
-                    tabs.iter()
-                        .find(|tab| tab.get("id").and_then(Value::as_u64) == Some(tab_id))
-                })
-                .cloned();
-        }
-        let tab = tab.ok_or_else(|| format!("browser tab {tab_id} no longer exists"))?;
-        let viewport = BrowserViewport {
-            tab_id,
-            width,
-            height,
-            scale_factor,
-        };
-        let viewport_changed = lock_or_recover(&browser._backend.viewport_by_pane)
-            .get(&pane_id)
-            .copied()
-            != Some(viewport);
-        if viewport_changed {
-            browser.execute_for_pane(
-                &pane_id,
-                "Emulation.setDeviceMetricsOverride",
-                json!({
-                    "width": width,
-                    "height": height,
-                    "deviceScaleFactor": scale_factor,
-                    "mobile": false,
-                    "screenWidth": width,
-                    "screenHeight": height
-                }),
-            )?;
-            lock_or_recover(&browser._backend.viewport_by_pane).insert(pane_id.clone(), viewport);
-        }
+        let target = prepare_agent_mirror(
+            &browser,
+            &pane_id,
+            width.clamp(320, 4096),
+            height.clamp(240, 4096),
+            browser_scale_factor(scale_factor),
+        )?;
         let screenshot = browser.execute_for_pane(
             &pane_id,
             "Page.captureScreenshot",
             json!({
                 "format": "jpeg",
-                "quality": 78,
+                "quality": AGENT_MIRROR_JPEG_QUALITY,
                 "fromSurface": true,
                 "captureBeyondViewport": false,
                 "optimizeForSpeed": true
@@ -773,27 +860,152 @@ pub fn browser_automation_snapshot(
             .get("data")
             .and_then(Value::as_str)
             .ok_or_else(|| "Page.captureScreenshot returned no image".to_string())?;
-        Ok(BrowserAutomationSnapshot {
-            available: true,
-            tab_id: Some(tab_id),
-            url: tab.get("url").and_then(Value::as_str).map(str::to_string),
-            title: tab.get("title").and_then(Value::as_str).map(str::to_string),
-            image_data_url: Some(format!("data:image/jpeg;base64,{data}")),
-            width: u64::from(width),
-            height: u64::from(height),
-            error: None,
-        })
+        Ok(target.into_snapshot(Some(format!("data:image/jpeg;base64,{data}"))))
     })();
-    result.unwrap_or_else(|error| BrowserAutomationSnapshot {
-        available: false,
-        tab_id: None,
-        url: None,
-        title: None,
-        image_data_url: None,
-        width: u64::from(width.clamp(320, 4096)),
-        height: u64::from(height.clamp(240, 4096)),
-        error: Some(error),
-    })
+    result.unwrap_or_else(|error| unavailable_snapshot(width, height, error))
+}
+
+/// Never stream more pixels than the display can show. Chromium's screencast
+/// scale only ever shrinks a frame, so this is a ceiling rather than a target:
+/// it bounds an unexpectedly large surface without shrinking ordinary frames.
+fn screencast_max_dimensions(viewport: BrowserViewport) -> (u64, u64) {
+    let width = f64::from(viewport.width) * viewport.scale_factor;
+    let height = f64::from(viewport.height) * viewport.scale_factor;
+    (width.round() as u64, height.round() as u64)
+}
+
+/// Start — or reconfigure — the pane's screencast and report the mirrored tab.
+///
+/// Chromium is only touched when the tab, overlay size, or display scale
+/// changed, so the overlay can call this on a slow heartbeat to keep its
+/// address bar current and to recover after the mirrored tab is replaced.
+///
+/// Streamed frames are CSS-resolution however the display scales — Chromium's
+/// screencast can only scale a frame down — so the mirror is a two-speed
+/// image: frames carry motion, and `browser_automation_snapshot` supplies the
+/// Retina-scale capture the overlay settles on once the page stops painting.
+#[tauri::command(async)]
+pub fn browser_automation_start_screencast(
+    pane_id: String,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+    browser: tauri::State<'_, BrowserDiscoverySocket>,
+) -> BrowserAutomationSnapshot {
+    let result = (|| -> Result<BrowserAutomationSnapshot, String> {
+        let target = prepare_agent_mirror(
+            &browser,
+            &pane_id,
+            width.clamp(320, 4096),
+            height.clamp(240, 4096),
+            browser_scale_factor(scale_factor),
+        )?;
+        let viewport = target.viewport;
+        let streaming = lock_or_recover(&browser._backend.screencast_by_pane)
+            .get(&pane_id)
+            .copied();
+        if streaming != Some(viewport) {
+            let (max_width, max_height) = screencast_max_dimensions(viewport);
+            browser.execute_for_pane(
+                &pane_id,
+                "Page.startScreencast",
+                json!({
+                    "format": "jpeg",
+                    "quality": AGENT_MIRROR_JPEG_QUALITY,
+                    "maxWidth": max_width,
+                    "maxHeight": max_height,
+                    "everyNthFrame": 1
+                }),
+            )?;
+            lock_or_recover(&browser._backend.screencast_by_pane).insert(pane_id.clone(), viewport);
+        }
+        Ok(target.into_snapshot(None))
+    })();
+    result.unwrap_or_else(|error| unavailable_snapshot(width, height, error))
+}
+
+#[tauri::command(async)]
+pub fn browser_automation_stop_screencast(
+    pane_id: String,
+    browser: tauri::State<'_, BrowserDiscoverySocket>,
+) -> Result<(), String> {
+    let Some(streaming) = lock_or_recover(&browser._backend.screencast_by_pane).remove(&pane_id)
+    else {
+        return Ok(());
+    };
+    // Address the recorded tab rather than the pane: resolving a pane with no
+    // tab left would open one, and closing an overlay must never do that.
+    browser.execute_for_tab(streaming.tab_id, "Page.stopScreencast", json!({}))?;
+    Ok(())
+}
+
+/// Forward screencast frames from the CDP controller to the pane that owns the
+/// streaming tab. Frames are dropped rather than queued when no mirror wants
+/// them, so a closed overlay costs nothing until its screencast is stopped.
+fn start_screencast_pump(backend: &Arc<BrowserBackend>) -> Result<(), String> {
+    let Some(engine) = backend.engine.as_ref() else {
+        return Ok(());
+    };
+    let (frames_tx, frames_rx) = mpsc::sync_channel(SCREENCAST_FRAME_QUEUE);
+    engine.set_screencast_sink(Some(frames_tx));
+    let pump_backend = Arc::clone(backend);
+    thread::Builder::new()
+        .name("qmux-browser-screencast".to_string())
+        .spawn(move || {
+            // One budget across every mirrored pane, so the bridge's total
+            // cost is bounded however many panes are streaming at once.
+            let mut emitted_at: Option<Instant> = None;
+            while let Ok(frame) = frames_rx.recv() {
+                let now = Instant::now();
+                if emitted_at
+                    .is_some_and(|last| now.duration_since(last) < SCREENCAST_MIN_FRAME_INTERVAL)
+                {
+                    continue;
+                }
+                if emit_screencast_frame(&pump_backend, &frame) {
+                    emitted_at = Some(now);
+                }
+            }
+        })
+        .map_err(|err| format!("failed to start the browser screencast pump: {err}"))?;
+    Ok(())
+}
+
+/// Returns whether the frame reached a pane that wanted it.
+fn emit_screencast_frame(backend: &BrowserBackend, frame: &ScreencastFrame) -> bool {
+    let Some(pane_id) = lock_or_recover(&backend.pane_by_tab)
+        .get(&frame.tab_id)
+        .cloned()
+    else {
+        return false;
+    };
+    let Some(viewport) = lock_or_recover(&backend.screencast_by_pane)
+        .get(&pane_id)
+        .copied()
+        .filter(|viewport| viewport.tab_id == frame.tab_id)
+    else {
+        return false;
+    };
+    let Some(app_handle) = backend
+        .app_state
+        .as_ref()
+        .and_then(|state| state.app_handle())
+    else {
+        return false;
+    };
+    let _ = app_handle.emit(
+        SCREENCAST_FRAME_EVENT,
+        json!({
+            "paneId": pane_id,
+            "tabId": frame.tab_id,
+            "url": frame.url,
+            "title": frame.title,
+            "width": viewport.width,
+            "height": viewport.height,
+            "imageDataUrl": format!("data:image/jpeg;base64,{}", frame.data),
+        }),
+    );
+    true
 }
 
 #[tauri::command(async)]
@@ -1015,6 +1227,7 @@ mod tests {
             tab_by_pane: Mutex::new(HashMap::new()),
             pane_by_tab: Mutex::new(HashMap::new()),
             viewport_by_pane: Mutex::new(HashMap::new()),
+            screencast_by_pane: Mutex::new(HashMap::new()),
         }
     }
 
@@ -1061,15 +1274,14 @@ mod tests {
     #[test]
     fn agent_viewport_changes_invalidate_the_mirror_cache() {
         let backend = unavailable_backend();
-        lock_or_recover(&backend.viewport_by_pane).insert(
-            "pane-1".to_string(),
-            BrowserViewport {
-                tab_id: 7,
-                width: 1280,
-                height: 900,
-                scale_factor: 2.0,
-            },
-        );
+        let viewport = BrowserViewport {
+            tab_id: 7,
+            width: 1280,
+            height: 900,
+            scale_factor: 2.0,
+        };
+        lock_or_recover(&backend.viewport_by_pane).insert("pane-1".to_string(), viewport);
+        lock_or_recover(&backend.screencast_by_pane).insert("pane-1".to_string(), viewport);
 
         remember_tab_owner(
             &backend,
@@ -1085,6 +1297,52 @@ mod tests {
         );
 
         assert!(lock_or_recover(&backend.viewport_by_pane).is_empty());
+        // The client owns the frame size now; the next heartbeat has to restart
+        // the screencast rather than keep streaming at the stale bounds.
+        assert!(lock_or_recover(&backend.screencast_by_pane).is_empty());
+    }
+
+    #[test]
+    fn a_closed_tab_drops_its_pane_screencast() {
+        let backend = unavailable_backend();
+        lock_or_recover(&backend.pane_by_tab).insert(4, "pane-1".to_string());
+        lock_or_recover(&backend.tab_by_pane).insert("pane-1".to_string(), 4);
+        lock_or_recover(&backend.screencast_by_pane).insert(
+            "pane-1".to_string(),
+            BrowserViewport {
+                tab_id: 4,
+                width: 800,
+                height: 600,
+                scale_factor: 2.0,
+            },
+        );
+
+        scope_result_to_pane(
+            &backend,
+            Some("pane-1"),
+            "getTabs",
+            json!([{ "id": 9, "url": "about:blank", "title": "", "active": true }]),
+        );
+
+        assert!(lock_or_recover(&backend.screencast_by_pane).is_empty());
+    }
+
+    #[test]
+    fn screencast_frames_are_requested_at_the_display_resolution() {
+        let retina = BrowserViewport {
+            tab_id: 1,
+            width: 1280,
+            height: 900,
+            scale_factor: 2.0,
+        };
+        assert_eq!(screencast_max_dimensions(retina), (2560, 1800));
+        assert_eq!(
+            screencast_max_dimensions(BrowserViewport {
+                scale_factor: 1.0,
+                ..retina
+            }),
+            (1280, 900)
+        );
     }
 
     #[test]
