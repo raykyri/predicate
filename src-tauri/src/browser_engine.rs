@@ -626,21 +626,28 @@ impl ChromiumRuntime {
         } else {
             self.ensure_attached(tab_id, subscribers)?
         };
+        // Mark a starting stream before sending the command: Chromium may put
+        // its first Page.screencastFrame on the socket before the command
+        // response, and that frame must be acknowledged and routed rather than
+        // leaking into the Browser client's ordinary event feed.
+        let starting_screencast = method == "Page.startScreencast";
+        let was_screencasting = starting_screencast && !self.screencast_tabs.insert(tab_id);
         let result = self.call_cdp(
             &method,
             command_params,
             Some(&session_id),
             timeout,
             subscribers,
-        )?;
+        );
+        if result.is_err() && starting_screencast && !was_screencasting {
+            self.screencast_tabs.remove(&tab_id);
+        }
+        let result = result?;
         // Remember which tabs stream so their frames are routed to the mirror
         // (and acknowledged here) instead of being broadcast as ordinary CDP
         // events. qmux is the only screencast caller; a Browser client that
         // started one would find its frames consumed by the mirror pump.
         match method.as_str() {
-            "Page.startScreencast" => {
-                self.screencast_tabs.insert(tab_id);
-            }
             "Page.stopScreencast" => {
                 self.screencast_tabs.remove(&tab_id);
             }

@@ -181,6 +181,8 @@ export default function BrowserOverlay({
       if (cancelled) {
         return;
       }
+      streaming = false;
+      setMirrorFrame(null);
       setAutomationSnapshot({
         available: false,
         tabId: null,
@@ -282,6 +284,15 @@ export default function BrowserOverlay({
           return;
         }
         setAutomationSnapshot(status);
+        if (!status.available) {
+          streaming = false;
+          setMirrorFrame(null);
+          if (firstFrameTimer !== null) {
+            window.clearTimeout(firstFrameTimer);
+            firstFrameTimer = null;
+          }
+          return;
+        }
         if (status.available && !streaming && firstFrameTimer === null) {
           firstFrameTimer = window.setTimeout(() => {
             firstFrameTimer = null;

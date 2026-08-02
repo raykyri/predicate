@@ -54,10 +54,15 @@ struct BrowserBackend {
     tab_by_pane: Mutex<HashMap<String, u64>>,
     pane_by_tab: Mutex<HashMap<u64, String>>,
     viewport_by_pane: Mutex<HashMap<String, BrowserViewport>>,
+    /// Serializes transitions between actual Chromium screencasts. The map
+    /// below is both the routing table for pushed frames and the record needed
+    /// to stop a stream, so start/replace/stop must update it atomically with
+    /// respect to one another.
+    screencast_control: Mutex<()>,
     screencast_by_pane: Mutex<HashMap<String, BrowserViewport>>,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct BrowserViewport {
     tab_id: u64,
     width: u32,
@@ -140,6 +145,7 @@ pub fn start_browser_discovery(
         tab_by_pane: Mutex::new(HashMap::new()),
         pane_by_tab: Mutex::new(HashMap::new()),
         viewport_by_pane: Mutex::new(HashMap::new()),
+        screencast_control: Mutex::new(()),
         screencast_by_pane: Mutex::new(HashMap::new()),
     });
     start_screencast_pump(&backend)?;
@@ -445,9 +451,21 @@ fn remember_tab_owner(
             })
     {
         lock_or_recover(&backend.viewport_by_pane).remove(pane_id);
-        // The frame size follows the client's own override now; drop the
-        // screencast so the next heartbeat restarts it at the right bounds.
-        lock_or_recover(&backend.screencast_by_pane).remove(pane_id);
+        // The frame size follows the client's own override now. Stop the
+        // actual Chromium stream before forgetting it so closing the overlay
+        // during the next heartbeat cannot strand an untracked screencast.
+        let streaming = {
+            lock_or_recover(&backend.screencast_by_pane)
+                .get(pane_id)
+                .copied()
+        };
+        if let Some(streaming) = streaming {
+            if let Err(error) = stop_recorded_screencast(backend, pane_id, streaming) {
+                eprintln!(
+                    "qmux: failed to stop pane {pane_id} screencast after a device metrics override: {error}"
+                );
+            }
+        }
     }
 }
 
@@ -528,11 +546,27 @@ fn scope_result_to_pane(
     lock_or_recover(&backend.tab_by_pane)
         .retain(|owner, tab_id| live_tab_ids.contains(tab_id) && pane_is_live(backend, owner));
     let selected_tabs = lock_or_recover(&backend.tab_by_pane).clone();
-    for cache in [&backend.viewport_by_pane, &backend.screencast_by_pane] {
-        lock_or_recover(cache).retain(|owner, viewport| {
-            selected_tabs.get(owner) == Some(&viewport.tab_id)
-                && live_tab_ids.contains(&viewport.tab_id)
-        });
+    lock_or_recover(&backend.viewport_by_pane).retain(|owner, viewport| {
+        selected_tabs.get(owner) == Some(&viewport.tab_id)
+            && live_tab_ids.contains(&viewport.tab_id)
+    });
+    // A selected-tab change invalidates the viewport cache, but the active
+    // screencast record must survive until the heartbeat stops that old tab.
+    // Targets already gone need no stop; streams owned by panes that vanished
+    // unexpectedly are actively reaped instead of merely forgotten.
+    let orphaned_screencasts = {
+        let mut streams = lock_or_recover(&backend.screencast_by_pane);
+        streams.retain(|_, viewport| live_tab_ids.contains(&viewport.tab_id));
+        streams
+            .iter()
+            .filter(|(owner, _)| !pane_is_live(backend, owner))
+            .map(|(owner, viewport)| (owner.clone(), *viewport))
+            .collect::<Vec<_>>()
+    };
+    for (owner, viewport) in orphaned_screencasts {
+        if let Err(error) = stop_recorded_screencast(backend, &owner, viewport) {
+            eprintln!("qmux: failed to stop orphaned pane {owner} screencast: {error}");
+        }
     }
     lock_or_recover(&backend.pane_by_session).retain(|_, owner| pane_is_live(backend, owner));
     let owners = lock_or_recover(&backend.pane_by_tab);
@@ -705,15 +739,53 @@ impl BrowserDiscoverySocket {
     }
 
     fn execute_for_tab(&self, tab_id: u64, method: &str, params: Value) -> Result<Value, String> {
-        self.engine()?.call(
-            "executeCdp",
-            json!({
-                "target": { "tabId": tab_id },
-                "method": method,
-                "commandParams": params,
-                "timeoutMs": 10_000
-            }),
-        )
+        execute_for_engine_tab(self.engine()?, tab_id, method, params)
+    }
+}
+
+fn execute_for_engine_tab(
+    engine: &BrowserEngine,
+    tab_id: u64,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
+    engine.call(
+        "executeCdp",
+        json!({
+            "target": { "tabId": tab_id },
+            "method": method,
+            "commandParams": params,
+            "timeoutMs": 10_000
+        }),
+    )
+}
+
+fn stop_recorded_screencast(
+    backend: &BrowserBackend,
+    pane_id: &str,
+    expected: BrowserViewport,
+) -> Result<(), String> {
+    let _control = lock_or_recover(&backend.screencast_control);
+    if lock_or_recover(&backend.screencast_by_pane)
+        .get(pane_id)
+        .copied()
+        != Some(expected)
+    {
+        return Ok(());
+    }
+    let result = backend.engine.as_deref().map_or(Ok(Value::Null), |engine| {
+        execute_for_engine_tab(engine, expected.tab_id, "Page.stopScreencast", json!({}))
+    });
+    match result {
+        Ok(_) => {
+            remove_matching_screencast(backend, pane_id, expected);
+            Ok(())
+        }
+        Err(error) if browser_tab_no_longer_exists(&error) => {
+            remove_matching_screencast(backend, pane_id, expected);
+            Ok(())
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -893,6 +965,7 @@ pub fn browser_automation_start_screencast(
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> BrowserAutomationSnapshot {
     let result = (|| -> Result<BrowserAutomationSnapshot, String> {
+        let _control = lock_or_recover(&browser._backend.screencast_control);
         let target = prepare_agent_mirror(
             &browser,
             &pane_id,
@@ -905,8 +978,31 @@ pub fn browser_automation_start_screencast(
             .get(&pane_id)
             .copied();
         if streaming != Some(viewport) {
+            if let Some(previous) = streaming {
+                // Stop a pane's previous tab (or previous size configuration)
+                // before replacing the only record that can address it.
+                match browser.execute_for_tab(previous.tab_id, "Page.stopScreencast", json!({})) {
+                    Ok(_) => {
+                        remove_matching_screencast(&browser._backend, &pane_id, previous);
+                    }
+                    // A closed target already stopped its own screencast. Its
+                    // stale backend record must not prevent the replacement
+                    // tab from starting.
+                    Err(error)
+                        if previous.tab_id != viewport.tab_id
+                            && browser_tab_no_longer_exists(&error) =>
+                    {
+                        remove_matching_screencast(&browser._backend, &pane_id, previous);
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
             let (max_width, max_height) = screencast_max_dimensions(viewport);
-            browser.execute_for_pane(
+            // Register routing before issuing Page.startScreencast. Chromium
+            // can send the initial frame as soon as the command is accepted,
+            // on the controller thread that is waking this caller.
+            lock_or_recover(&browser._backend.screencast_by_pane).insert(pane_id.clone(), viewport);
+            if let Err(error) = browser.execute_for_pane(
                 &pane_id,
                 "Page.startScreencast",
                 json!({
@@ -916,8 +1012,10 @@ pub fn browser_automation_start_screencast(
                     "maxHeight": max_height,
                     "everyNthFrame": 1
                 }),
-            )?;
-            lock_or_recover(&browser._backend.screencast_by_pane).insert(pane_id.clone(), viewport);
+            ) {
+                remove_matching_screencast(&browser._backend, &pane_id, viewport);
+                return Err(error);
+            }
         }
         Ok(target.into_snapshot(None))
     })();
@@ -929,14 +1027,26 @@ pub fn browser_automation_stop_screencast(
     pane_id: String,
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> Result<(), String> {
-    let Some(streaming) = lock_or_recover(&browser._backend.screencast_by_pane).remove(&pane_id)
+    let Some(streaming) = lock_or_recover(&browser._backend.screencast_by_pane)
+        .get(&pane_id)
+        .copied()
     else {
         return Ok(());
     };
     // Address the recorded tab rather than the pane: resolving a pane with no
     // tab left would open one, and closing an overlay must never do that.
-    browser.execute_for_tab(streaming.tab_id, "Page.stopScreencast", json!({}))?;
-    Ok(())
+    stop_recorded_screencast(&browser._backend, &pane_id, streaming)
+}
+
+fn remove_matching_screencast(backend: &BrowserBackend, pane_id: &str, expected: BrowserViewport) {
+    let mut streams = lock_or_recover(&backend.screencast_by_pane);
+    if streams.get(pane_id).copied() == Some(expected) {
+        streams.remove(pane_id);
+    }
+}
+
+fn browser_tab_no_longer_exists(error: &str) -> bool {
+    error.contains(" does not exist")
 }
 
 /// Forward screencast frames from the CDP controller to the pane that owns the
@@ -1227,6 +1337,7 @@ mod tests {
             tab_by_pane: Mutex::new(HashMap::new()),
             pane_by_tab: Mutex::new(HashMap::new()),
             viewport_by_pane: Mutex::new(HashMap::new()),
+            screencast_control: Mutex::new(()),
             screencast_by_pane: Mutex::new(HashMap::new()),
         }
     }
@@ -1325,6 +1436,38 @@ mod tests {
         );
 
         assert!(lock_or_recover(&backend.screencast_by_pane).is_empty());
+    }
+
+    #[test]
+    fn a_live_previous_tab_keeps_its_screencast_record_until_replacement() {
+        let backend = unavailable_backend();
+        lock_or_recover(&backend.pane_by_tab).insert(4, "pane-1".to_string());
+        lock_or_recover(&backend.pane_by_tab).insert(9, "pane-1".to_string());
+        lock_or_recover(&backend.tab_by_pane).insert("pane-1".to_string(), 9);
+        let previous = BrowserViewport {
+            tab_id: 4,
+            width: 800,
+            height: 600,
+            scale_factor: 2.0,
+        };
+        lock_or_recover(&backend.screencast_by_pane).insert("pane-1".to_string(), previous);
+
+        scope_result_to_pane(
+            &backend,
+            Some("pane-1"),
+            "getTabs",
+            json!([
+                { "id": 4, "url": "https://old.example", "title": "old", "active": false },
+                { "id": 9, "url": "about:blank", "title": "", "active": true }
+            ]),
+        );
+
+        assert_eq!(
+            lock_or_recover(&backend.screencast_by_pane)
+                .get("pane-1")
+                .copied(),
+            Some(previous)
+        );
     }
 
     #[test]
