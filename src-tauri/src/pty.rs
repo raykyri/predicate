@@ -1871,7 +1871,13 @@ pub fn kill_all_panes(state: &AppState) {
             return;
         }
     };
-    for (pane_id, child) in children {
+    // Keep each pane's established signal, descendant walk, escalation, and reap
+    // sequence intact, but overlap those sequences across panes. portable-pty can
+    // spend up to 200ms waiting for one direct child to honor SIGHUP before it
+    // escalates; doing that serially made clean-exit latency scale with the number
+    // of stubborn panes. The scoped threads are all joined before returning, so the
+    // app still completes every best-effort teardown before its process exits.
+    for_each_concurrently(children, |(pane_id, child)| {
         if let Err(err) = kill_child(&pane_id, child) {
             eprintln!("qmux: failed to kill pane {pane_id} on exit: {err}");
         }
@@ -1879,7 +1885,20 @@ pub fn kill_all_panes(state: &AppState) {
         // the process is exiting, so clean them up here instead of leaking them into
         // /tmp until the OS clears it.
         remove_shell_integration_dir(&pane_id);
-    }
+    });
+}
+
+fn for_each_concurrently<T, F>(items: Vec<T>, action: F)
+where
+    T: Send,
+    F: Fn(T) + Sync,
+{
+    thread::scope(|scope| {
+        for item in items {
+            let action = &action;
+            scope.spawn(move || action(item));
+        }
+    });
 }
 
 pub fn close_worktree_pane(
@@ -3383,6 +3402,33 @@ mod tests {
                 .any(|(candidate, _)| *candidate == pid),
             "ps snapshot did not include the test process"
         );
+    }
+
+    #[test]
+    fn concurrent_teardown_starts_every_pane_before_waiting_for_completion() {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+
+        let teardown = thread::spawn(move || {
+            for_each_concurrently(vec!["pane-1", "pane-2"], move |pane_id| {
+                started_tx.send(pane_id).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            });
+        });
+
+        let first = started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("first pane teardown should start");
+        let second = started_rx.recv_timeout(Duration::from_secs(1));
+        // Always release both actions before asserting so a serial regression fails
+        // cleanly instead of leaving the test's coordinator thread parked forever.
+        release_tx.send(()).unwrap();
+        release_tx.send(()).unwrap();
+        teardown.join().unwrap();
+
+        let second = second.expect("pane teardowns should overlap");
+        assert_ne!(first, second);
     }
 
     #[test]
