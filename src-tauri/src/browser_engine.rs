@@ -40,15 +40,15 @@ pub struct BrowserEngine {
 
 impl BrowserEngine {
     pub fn start() -> Result<Self, String> {
-        let runtime = ChromiumRuntime::launch()?;
+        let (commands, command_rx) = mpsc::channel();
+        let runtime = ChromiumRuntime::launch(command_rx)?;
         let executable = runtime.executable.clone();
         let subscribers = Arc::new(Mutex::new(HashMap::new()));
         let event_subscribers = Arc::clone(&subscribers);
-        let (commands, command_rx) = mpsc::channel();
 
         thread::Builder::new()
             .name("qmux-browser-cdp".to_string())
-            .spawn(move || run_engine(runtime, command_rx, event_subscribers))
+            .spawn(move || run_engine(runtime, event_subscribers))
             .map_err(|err| format!("failed to start chrome-headless-shell controller: {err}"))?;
 
         Ok(Self {
@@ -121,6 +121,9 @@ struct ChromiumRuntime {
     profile_dir: PathBuf,
     executable: PathBuf,
     socket: WebSocket<MaybeTlsStream<TcpStream>>,
+    commands: mpsc::Receiver<EngineCommand>,
+    deferred_responses: HashMap<u64, Value>,
+    waiting_cdp_ids: HashSet<u64>,
     next_cdp_id: u64,
     next_tab_id: u64,
     tabs: HashMap<u64, BrowserTab>,
@@ -141,7 +144,7 @@ struct BrowserTab {
 }
 
 impl ChromiumRuntime {
-    fn launch() -> Result<Self, String> {
+    fn launch(commands: mpsc::Receiver<EngineCommand>) -> Result<Self, String> {
         cleanup_stale_profile_dirs();
         let executable = find_headless_shell_executable().ok_or_else(|| {
             "chrome-headless-shell was not found; install it with Playwright or set QMUX_CHROME_HEADLESS_SHELL_PATH"
@@ -242,6 +245,9 @@ impl ChromiumRuntime {
             profile_dir,
             executable,
             socket,
+            commands,
+            deferred_responses: HashMap::new(),
+            waiting_cdp_ids: HashSet::new(),
             next_cdp_id: 1,
             next_tab_id: 1,
             tabs: HashMap::new(),
@@ -631,6 +637,30 @@ impl ChromiumRuntime {
         Ok(Value::Null)
     }
 
+    fn handle_next_queued_command(
+        &mut self,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> Result<bool, String> {
+        let command = match self.commands.try_recv() {
+            Ok(command) => command,
+            Err(mpsc::TryRecvError::Empty) => return Ok(false),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err("the qmux chrome-headless-shell command queue closed".to_string());
+            }
+        };
+        match command {
+            EngineCommand::Call {
+                method,
+                params,
+                reply,
+            } => {
+                let result = self.handle_rpc(&method, params, subscribers);
+                let _ = reply.send(result);
+            }
+        }
+        Ok(true)
+    }
+
     fn call_cdp(
         &mut self,
         method: &str,
@@ -658,9 +688,41 @@ impl ChromiumRuntime {
             "qmux: CDP send id={id} method={method} session={session_label} timeout_ms={}",
             timeout.as_millis()
         );
+        self.waiting_cdp_ids.insert(id);
+        let result =
+            self.wait_for_cdp_response(id, method, session_id, timeout, started_at, subscribers);
+        self.waiting_cdp_ids.remove(&id);
+        self.deferred_responses.remove(&id);
+        result
+    }
+
+    fn wait_for_cdp_response(
+        &mut self,
+        id: u64,
+        method: &str,
+        session_id: Option<&str>,
+        timeout: Duration,
+        started_at: Instant,
+        subscribers: &Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
+    ) -> RpcReply {
+        let session_label = session_id.unwrap_or("browser");
         let deadline = Instant::now() + timeout;
         loop {
-            match self.read_cdp_message(subscribers) {
+            let message = if let Some(message) = self.deferred_responses.remove(&id) {
+                Ok(Some(message))
+            } else {
+                // Browser clients may need to answer a CDP event before this command
+                // can finish (for example Fetch.requestPaused during Page.navigate).
+                // Service one queued command between socket reads so that response
+                // can be sent without abandoning the command currently in flight.
+                self.handle_next_queued_command(subscribers)?;
+                if let Some(message) = self.deferred_responses.remove(&id) {
+                    Ok(Some(message))
+                } else {
+                    self.read_cdp_message(subscribers)
+                }
+            };
+            match message {
                 Ok(Some(message)) if message.get("id").and_then(Value::as_u64) == Some(id) => {
                     let response_session = message
                         .get("sessionId")
@@ -694,15 +756,23 @@ impl ChromiumRuntime {
                     return Ok(message.get("result").cloned().unwrap_or(Value::Null));
                 }
                 Ok(Some(message)) => {
-                    if let Some(unexpected_id) = message.get("id") {
+                    if let Some(unexpected_id) = message.get("id").and_then(Value::as_u64) {
                         let response_session = message
                             .get("sessionId")
                             .and_then(Value::as_str)
                             .unwrap_or("browser");
-                        eprintln!(
-                            "qmux: CDP discard id={unexpected_id} session={response_session} while_waiting_for_id={id} method={method} session={session_label} elapsed_ms={}",
-                            started_at.elapsed().as_millis()
-                        );
+                        if self.waiting_cdp_ids.contains(&unexpected_id) {
+                            eprintln!(
+                                "qmux: CDP defer id={unexpected_id} session={response_session} while_waiting_for_id={id} method={method} session={session_label} elapsed_ms={}",
+                                started_at.elapsed().as_millis()
+                            );
+                            defer_cdp_response(&mut self.deferred_responses, message);
+                        } else {
+                            eprintln!(
+                                "qmux: CDP discard late response id={unexpected_id} session={response_session} while_waiting_for_id={id} method={method} session={session_label} elapsed_ms={}",
+                                started_at.elapsed().as_millis()
+                            );
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -870,29 +940,25 @@ impl Drop for ChromiumRuntime {
 
 fn run_engine(
     mut runtime: ChromiumRuntime,
-    commands: mpsc::Receiver<EngineCommand>,
     subscribers: Arc<Mutex<HashMap<u64, mpsc::SyncSender<Value>>>>,
 ) {
     loop {
-        loop {
-            match commands.try_recv() {
-                Ok(command) => match command {
-                    EngineCommand::Call {
-                        method,
-                        params,
-                        reply,
-                    } => {
-                        let result = runtime.handle_rpc(&method, params, &subscribers);
-                        let _ = reply.send(result);
-                    }
-                },
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return,
-            }
+        match runtime.handle_next_queued_command(&subscribers) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(_) => return,
         }
-        if let Err(err) = runtime.read_cdp_message(&subscribers) {
-            eprintln!("qmux: chrome-headless-shell CDP controller stopped: {err}");
-            return;
+        match runtime.read_cdp_message(&subscribers) {
+            Ok(Some(message)) => {
+                if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                    eprintln!("qmux: CDP discard late response id={id} with no command waiting");
+                }
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("qmux: chrome-headless-shell CDP controller stopped: {err}");
+                return;
+            }
         }
     }
 }
@@ -1217,6 +1283,12 @@ fn tab_id(value: &Value) -> Result<u64, String> {
         .ok_or_else(|| "browser method requires a positive numeric tabId".to_string())
 }
 
+fn defer_cdp_response(responses: &mut HashMap<u64, Value>, message: Value) -> Option<u64> {
+    let id = message.get("id").and_then(Value::as_u64)?;
+    responses.insert(id, message);
+    Some(id)
+}
+
 fn required_string(value: &Value, field: &str) -> Result<String, String> {
     value
         .get(field)
@@ -1229,12 +1301,31 @@ fn required_string(value: &Value, field: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
 
     #[test]
     fn tab_ids_must_be_positive_numbers() {
         assert_eq!(tab_id(&json!({ "tabId": 3 })).unwrap(), 3);
         assert!(tab_id(&json!({ "tabId": 0 })).is_err());
         assert!(tab_id(&json!({ "tabId": "3" })).is_err());
+    }
+
+    #[test]
+    fn out_of_order_cdp_responses_are_buffered_by_id() {
+        let mut responses = HashMap::new();
+        let message = json!({ "id": 17, "result": { "ok": true } });
+
+        assert_eq!(
+            defer_cdp_response(&mut responses, message.clone()),
+            Some(17)
+        );
+        assert_eq!(responses.remove(&17), Some(message));
+        assert_eq!(
+            defer_cdp_response(&mut responses, json!({ "method": "Page.loadEventFired" })),
+            None
+        );
+        assert!(responses.is_empty());
     }
 
     #[test]
@@ -1357,5 +1448,88 @@ mod tests {
             )
             .unwrap();
         assert_eq!(result["result"]["value"], 42);
+    }
+
+    #[test]
+    #[ignore = "launches an installed chrome-headless-shell"]
+    fn paused_navigation_services_continue_request_while_navigate_waits() {
+        let engine = Arc::new(BrowserEngine::start().unwrap());
+        let tab = engine.call("createTab", json!({})).unwrap();
+        let tab_id = tab["id"].as_u64().unwrap();
+        engine.call("attach", json!({ "tabId": tab_id })).unwrap();
+        engine
+            .call(
+                "executeCdp",
+                json!({
+                    "target": { "tabId": tab_id },
+                    "method": "Page.enable",
+                    "commandParams": {}
+                }),
+            )
+            .unwrap();
+        engine
+            .call(
+                "executeCdp",
+                json!({
+                    "target": { "tabId": tab_id },
+                    "method": "Fetch.enable",
+                    "commandParams": {}
+                }),
+            )
+            .unwrap();
+
+        let (event_tx, event_rx) = mpsc::sync_channel(32);
+        let subscription = engine.subscribe(event_tx);
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .unwrap();
+        });
+
+        let navigation_engine = Arc::clone(&engine);
+        let navigation = thread::spawn(move || {
+            navigation_engine.call(
+                "executeCdp",
+                json!({
+                    "target": { "tabId": tab_id },
+                    "method": "Page.navigate",
+                    "commandParams": { "url": format!("http://{address}/") },
+                    "timeoutMs": 5_000
+                }),
+            )
+        });
+
+        let request_id = loop {
+            let event = event_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            if event.pointer("/params/method").and_then(Value::as_str)
+                == Some("Fetch.requestPaused")
+            {
+                break event
+                    .pointer("/params/params/requestId")
+                    .and_then(Value::as_str)
+                    .unwrap()
+                    .to_string();
+            }
+        };
+        engine
+            .call(
+                "executeCdp",
+                json!({
+                    "target": { "tabId": tab_id },
+                    "method": "Fetch.continueRequest",
+                    "commandParams": { "requestId": request_id },
+                    "timeoutMs": 5_000
+                }),
+            )
+            .unwrap();
+
+        navigation.join().unwrap().unwrap();
+        server.join().unwrap();
+        engine.unsubscribe(subscription);
     }
 }
