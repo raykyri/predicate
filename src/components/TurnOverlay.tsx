@@ -33,6 +33,7 @@ import { buildHandoffDocument, type HandoffContext } from "../lib/handoff";
 import { splitImageMarkers, type ImageMarkerSegment } from "../lib/imageMarkers";
 import { requestSaveDraftAsPrompt } from "../lib/promptLibrary";
 import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
+import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import {
   assistantGroupTimestamp,
   assistantRunCopyTextByItemKey,
@@ -1440,7 +1441,7 @@ function CollapsedTaggedUserInstruction({ label, text }: { label: string; text: 
 function CollapsedUserText({ text }: { text: string }) {
   const [expanded, setExpanded] = useState(false);
   const preview = useMemo(() => collapsedUserTextPreview(text), [text]);
-  const sizeLabel = formatCharacterSize(text.length);
+  const sizeLabel = useMemo(() => formatEstimatedTokenCount(text), [text]);
 
   return (
     <div className="long-user-message">
@@ -1466,16 +1467,6 @@ function CollapsedUserText({ text }: { text: string }) {
 function collapsedUserTextPreview(text: string) {
   const trimmedPreview = text.slice(0, LONG_USER_MESSAGE_PREVIEW_CHARS).trimEnd();
   return `${trimmedPreview}\n...`;
-}
-
-function formatCharacterSize(characters: number) {
-  if (characters < 1_000) {
-    return `${characters} chars`;
-  }
-  if (characters < 100_000) {
-    return `${(characters / 1_000).toFixed(1)}k chars`;
-  }
-  return `${Math.round(characters / 1_000)}k chars`;
 }
 
 function formatTurnTranscript(turn: Turn, assistantLabel: string) {

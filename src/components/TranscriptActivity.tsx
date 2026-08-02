@@ -9,6 +9,7 @@ import {
   type ToolEntry,
   type TurnTimelineStatus,
 } from "../lib/turnTimeline";
+import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import TranscriptMarkdown, { type OversizedMarkdownPolicy } from "./TranscriptMarkdown";
 
 // Reasoning can run long, and react-markdown re-parses on every render. Past
@@ -73,13 +74,13 @@ export function TranscriptActivityItem({
   isRootActivity = false,
   maxPayloadCharacters,
   deferPayloads = false,
-  showResultCharacterCount = true,
+  showResultTokenCount = true,
 }: {
   item: ActivityItem;
   isRootActivity?: boolean;
   maxPayloadCharacters?: number;
   deferPayloads?: boolean;
-  showResultCharacterCount?: boolean;
+  showResultTokenCount?: boolean;
 }) {
   switch (item.type) {
     case "tool":
@@ -88,7 +89,7 @@ export function TranscriptActivityItem({
           entry={item}
           showChevron={!isRootActivity}
           maxPayloadCharacters={maxPayloadCharacters}
-          showResultCharacterCount={showResultCharacterCount}
+          showResultTokenCount={showResultTokenCount}
         />
       );
     case "thinking":
@@ -107,7 +108,7 @@ export function TranscriptActivityItem({
           showChevron={!isRootActivity}
           maxPayloadCharacters={maxPayloadCharacters}
           deferPayloads={deferPayloads}
-          showResultCharacterCount={showResultCharacterCount}
+          showResultTokenCount={showResultTokenCount}
         />
       );
   }
@@ -118,13 +119,13 @@ function ActivityGroupView({
   showChevron,
   maxPayloadCharacters,
   deferPayloads,
-  showResultCharacterCount,
+  showResultTokenCount,
 }: {
   group: ActivityGroupItem;
   showChevron: boolean;
   maxPayloadCharacters?: number;
   deferPayloads: boolean;
-  showResultCharacterCount: boolean;
+  showResultTokenCount: boolean;
 }) {
   return (
     <details
@@ -149,7 +150,7 @@ function ActivityGroupView({
             item={child}
             maxPayloadCharacters={maxPayloadCharacters}
             deferPayloads={deferPayloads}
-            showResultCharacterCount={showResultCharacterCount}
+            showResultTokenCount={showResultTokenCount}
           />
         ))}
       </div>
@@ -261,12 +262,12 @@ function ToolEntryView({
   entry,
   showChevron,
   maxPayloadCharacters,
-  showResultCharacterCount,
+  showResultTokenCount,
 }: {
   entry: ToolEntry;
   showChevron: boolean;
   maxPayloadCharacters?: number;
-  showResultCharacterCount: boolean;
+  showResultTokenCount: boolean;
 }) {
   const summaryArgument = toolSummaryArgument(entry);
   const toolNameLabel = showChevron ? entry.name : `Called ${entry.name}`;
@@ -288,7 +289,7 @@ function ToolEntryView({
           </span>
           <ToolEntryStatus
             entry={entry}
-            showCharCount={showChevron && showResultCharacterCount}
+            showTokenCount={showChevron && showResultTokenCount}
           />
         </span>
       </summary>
@@ -438,46 +439,46 @@ export function DisclosureChevron() {
   return <ChevronRight className="disclosure-chevron" size={12} aria-hidden="true" />;
 }
 
-// Serialized lengths for the collapsed rows' "N chars" labels. The label is
-// visible without expanding, so it can't be deferred — but stringifying a large
-// result object costs O(result) and the timeline re-mounts on every tab
-// switch, repaying it for every entry each time. Result objects are immutable
-// and identity-stable across resets (turn reconciliation reuses turn objects),
-// so the length is cached per object for the app's lifetime; strings are their
-// own length.
-const serializedLengthByValue = new WeakMap<object, number>();
+// Serialized token estimates for the collapsed rows' "~N tok" labels. The
+// label is visible without expanding, so it can't be deferred — but
+// stringifying a large result object costs O(result) and the timeline
+// re-mounts on every tab switch, repaying it for every entry each time. Result
+// objects are immutable and identity-stable across resets (turn reconciliation
+// reuses turn objects), so the formatted estimate is cached per object for the
+// app's lifetime.
+const serializedTokenEstimateByValue = new WeakMap<object, string>();
 
-function serializedActivityLength(value: unknown): number {
+function serializedActivityTokenEstimate(value: unknown): string {
   if (typeof value === "string") {
-    return value.length;
+    return formatEstimatedTokenCount(value);
   }
   if (typeof value === "object" && value !== null) {
-    let length = serializedLengthByValue.get(value);
-    if (length === undefined) {
-      length = serializeActivityValue(value).length;
-      serializedLengthByValue.set(value, length);
+    let estimate = serializedTokenEstimateByValue.get(value);
+    if (estimate === undefined) {
+      estimate = formatEstimatedTokenCount(serializeActivityValue(value));
+      serializedTokenEstimateByValue.set(value, estimate);
     }
-    return length;
+    return estimate;
   }
-  return serializeActivityValue(value).length;
+  return formatEstimatedTokenCount(serializeActivityValue(value));
 }
 
 function ToolEntryStatus({
   entry,
-  showCharCount,
+  showTokenCount,
 }: {
   entry: ToolEntry;
-  showCharCount: boolean;
+  showTokenCount: boolean;
 }) {
   if (entry.result === undefined) {
     return <span className="tool-summary-meta">running</span>;
   }
-  if (!showCharCount) {
+  if (!showTokenCount) {
     return entry.isError ? <span className="tool-summary-meta">error</span> : null;
   }
-  const charCount = `${serializedActivityLength(entry.result)} chars`;
+  const tokenCount = serializedActivityTokenEstimate(entry.result);
   if (entry.isError) {
-    return <span className="tool-summary-meta">error, {charCount}</span>;
+    return <span className="tool-summary-meta">error, {tokenCount}</span>;
   }
-  return <span className="tool-summary-meta">{charCount}</span>;
+  return <span className="tool-summary-meta">{tokenCount}</span>;
 }

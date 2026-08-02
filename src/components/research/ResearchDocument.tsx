@@ -749,7 +749,7 @@ const ResearchTimelineItem = memo(function ResearchTimelineItem({
                 isRootActivity
                 maxPayloadCharacters={ACTIVITY_PAYLOAD_CHAR_LIMIT}
                 deferPayloads
-                showResultCharacterCount={false}
+                showResultTokenCount={false}
               />
             );
           }
@@ -791,7 +791,7 @@ const ResearchTimelineItem = memo(function ResearchTimelineItem({
           isRootActivity
           maxPayloadCharacters={ACTIVITY_PAYLOAD_CHAR_LIMIT}
           deferPayloads
-          showResultCharacterCount={false}
+          showResultTokenCount={false}
         />
       ))}
     </section>
