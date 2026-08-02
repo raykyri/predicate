@@ -2894,8 +2894,7 @@ mod tests {
         agent.status = AgentStatus::Idle;
         agent.session_id = Some("grok-session-1".to_string());
         agent.transcript_path = Some(
-            "/home/user/.grok/sessions/%2Fother%2Fproject/grok-session-1/updates.jsonl"
-                .to_string(),
+            "/home/user/.grok/sessions/%2Fother%2Fproject/grok-session-1/updates.jsonl".to_string(),
         );
         state.insert_agent(agent).unwrap();
 
@@ -2917,9 +2916,7 @@ mod tests {
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
         assert_eq!(
             agent.transcript_path.as_deref(),
-            Some(
-                "/home/user/.grok/sessions/%2Fother%2Fproject/grok-session-1/chat_history.jsonl"
-            )
+            Some("/home/user/.grok/sessions/%2Fother%2Fproject/grok-session-1/chat_history.jsonl")
         );
     }
 
@@ -2936,10 +2933,7 @@ mod tests {
         // Duplicate SessionStart that carries neither a transcript path nor a
         // session id refresh. The persisted updates binding must still be rewritten
         // in place so a resume that only re-attaches identity recovers the timeline.
-        let event = ingest(
-            &state,
-            hook_for_agent("SessionStart", "agent-1", json!({})),
-        );
+        let event = ingest(&state, hook_for_agent("SessionStart", "agent-1", json!({})));
 
         assert_eq!(event.event_type, "agent.session_start");
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
