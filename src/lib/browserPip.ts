@@ -1,11 +1,28 @@
 import type { BrowserAutomationTarget } from "./api";
 
 export const BROWSER_PIP_MAX_VISIBLE = 3;
+export const BROWSER_PIP_EDGE_INSET = 12;
 
 export type BrowserPipSelection = {
   visible: BrowserAutomationTarget[];
   overflow: number;
 };
+
+/**
+ * Keeps the global rail inside the terminal/workspace column when a docked
+ * right pane is visible. A fully expanded transcript is not docked: it owns
+ * the stage, so the rail retains its normal app-edge placement above it.
+ */
+export function browserPipRightInset(dockedRightPaneWidth: number | null): number {
+  if (
+    dockedRightPaneWidth === null ||
+    !Number.isFinite(dockedRightPaneWidth) ||
+    dockedRightPaneWidth <= 0
+  ) {
+    return BROWSER_PIP_EDGE_INSET;
+  }
+  return BROWSER_PIP_EDGE_INSET + dockedRightPaneWidth;
+}
 
 /**
  * Keeps one selected target per live pane, ordered like the qmux tab list.

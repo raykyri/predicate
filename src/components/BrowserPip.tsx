@@ -143,6 +143,7 @@ interface BrowserPipRailProps {
   panes: BrowserPipPane[];
   expandedAgentPaneId: string | null;
   belowBrowserOverlay: boolean;
+  rightInset: number;
   onOpen: (target: BrowserAutomationTarget) => void;
 }
 
@@ -150,6 +151,7 @@ export default function BrowserPipRail({
   panes,
   expandedAgentPaneId,
   belowBrowserOverlay,
+  rightInset,
   onOpen,
 }: BrowserPipRailProps) {
   const [targets, setTargets] = useState<BrowserAutomationTarget[]>([]);
@@ -225,7 +227,7 @@ export default function BrowserPipRail({
       ),
     [expandedAgentPaneId, paneOrder, showAll, targets],
   );
-  const layoutKey = `${belowBrowserOverlay ? "below" : "top"}:${selection.visible
+  const layoutKey = `${belowBrowserOverlay ? "below" : "top"}:${rightInset}:${selection.visible
     .map((target) => `${target.paneId}:${target.tabId}`)
     .join("|")}:${selection.overflow}`;
   const railRef = useNativeWebOverlayRegion<HTMLDivElement>(
@@ -240,6 +242,7 @@ export default function BrowserPipRail({
     <div
       ref={railRef}
       className={`browser-pip-rail${belowBrowserOverlay ? " is-below-browser-overlay" : ""}`}
+      style={{ right: rightInset }}
       onPointerDown={(event) => event.stopPropagation()}
       role="region"
       aria-label="Running agent browsers"

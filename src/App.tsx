@@ -65,6 +65,7 @@ import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
 import BrowserPipRail from "./components/BrowserPip";
+import { browserPipRightInset } from "./lib/browserPip";
 import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
@@ -5797,6 +5798,9 @@ function MainApp() {
   const turnFontDelta = Math.min(1, Math.max(0, (terminalFontSize - TERMINAL_FONT_SIZE) * 0.25));
   const transcriptExpandedFontDelta = activeTranscriptVisibleExpanded ? 1 : 0;
   const transcriptExpandedLineHeightDelta = activeTranscriptVisibleExpanded ? 0.1 : 0;
+  const browserPipInset = browserPipRightInset(
+    hasVisibleRightBar && !activeTranscriptVisibleExpanded ? turnPaneWidth : null,
+  );
 
   const appStyle = {
     "--font-ui": bodyFontFamily,
@@ -14883,6 +14887,7 @@ function MainApp() {
             : null
         }
         belowBrowserOverlay={Boolean(activeBrowserOverlay?.open)}
+        rightInset={browserPipInset}
         onOpen={showExistingAgentBrowser}
       />
       {linkMenu ? (

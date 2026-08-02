@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { BrowserAutomationTarget } from "../src/lib/api";
-import { browserPipPageLabel, selectBrowserPipTargets } from "../src/lib/browserPip";
+import {
+  BROWSER_PIP_EDGE_INSET,
+  browserPipPageLabel,
+  browserPipRightInset,
+  selectBrowserPipTargets,
+} from "../src/lib/browserPip";
 
 function target(
   paneId: string,
@@ -50,4 +55,11 @@ test("browser PiP labels prefer page title, then host", () => {
   assert.equal(browserPipPageLabel(target("pane", 1, "Dashboard", "https://example.com")), "Dashboard");
   assert.equal(browserPipPageLabel(target("pane", 1, null, "https://example.com/path")), "example.com");
   assert.equal(browserPipPageLabel(target("pane", 1, null, "about:blank")), "Agent browser");
+});
+
+test("browser PiP rail clears a docked right pane and otherwise stays at the app edge", () => {
+  assert.equal(browserPipRightInset(null), BROWSER_PIP_EDGE_INSET);
+  assert.equal(browserPipRightInset(420), 432);
+  assert.equal(browserPipRightInset(0), BROWSER_PIP_EDGE_INSET);
+  assert.equal(browserPipRightInset(Number.NaN), BROWSER_PIP_EDGE_INSET);
 });
