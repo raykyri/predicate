@@ -45,6 +45,7 @@ import {
   messageItemIsTaggedInstruction,
   messageItemText,
   sameMessageItem,
+  shouldShowAssistantGroupTimestamp,
 } from "../lib/turnTimeline";
 import type { MessageBlock, MessageItem } from "../lib/turnTimeline";
 import DomSearchBar from "./DomSearchBar";
@@ -843,6 +844,12 @@ export default function TurnOverlay({
               (next === undefined || next.role !== "assistant")
                 ? assistantGroupTimestamp(timelineItems, index)
                 : null;
+            const showGroupTimestamp =
+              groupTimestamp !== null &&
+              shouldShowAssistantGroupTimestamp(groupTimestamp, {
+                atTranscriptTail: next === undefined,
+                working: thinking,
+              });
             // The candidate keeps its marker class even while sticky is
             // disarmed (the height measurement finds it by this class); the
             // sticky styling only activates under the timeline's
@@ -872,7 +879,7 @@ export default function TurnOverlay({
                   onForkFromMessage={index === 0 ? undefined : onForkFromMessage}
                   onCopyHandoff={copyHandoff}
                 />
-                {groupTimestamp !== null ? (
+                {showGroupTimestamp ? (
                   <time
                     className="turn-assistant-timestamp"
                     dateTime={new Date(groupTimestamp).toISOString()}

@@ -10,6 +10,7 @@ import {
   formatPlainTextTranscript,
   messageItemCopyText,
   messageItemText,
+  shouldShowAssistantGroupTimestamp,
   thinkingProseText,
   timelineItemsAfterLastToolCall,
   timelineItemsContainTranscriptActivity,
@@ -690,6 +691,25 @@ test("formatMessageTimestamp uses relative labels under 24 hours", () => {
     formatMessageTimestamp(now - 24 * 60 * 60_000 + 1, now),
     "23 hours ago",
   );
+});
+
+test("working transcript tails suppress only a just-now assistant timestamp", () => {
+  const now = new Date(2026, 6, 31, 15, 0, 0).getTime();
+  const visible = (
+    ageMs: number,
+    overrides: Partial<{ atTranscriptTail: boolean; working: boolean }> = {},
+  ) =>
+    shouldShowAssistantGroupTimestamp(now - ageMs, {
+      atTranscriptTail: true,
+      working: true,
+      now,
+      ...overrides,
+    });
+
+  assert.equal(visible(30_000), false);
+  assert.equal(visible(60_000), true);
+  assert.equal(visible(30_000, { working: false }), true);
+  assert.equal(visible(30_000, { atTranscriptTail: false }), true);
 });
 
 test("formatAbsoluteMessageTimestamp uses time-only for today and date otherwise", () => {

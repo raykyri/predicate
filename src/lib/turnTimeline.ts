@@ -717,6 +717,26 @@ export function formatMessageTimestamp(
   return formatAbsoluteMessageTimestamp(ms, now, locale);
 }
 
+/**
+ * A live transcript tail already communicates recency with its working
+ * indicator, so omit only the redundant "just now" assistant footer there.
+ * Older tail timestamps and timestamps within the transcript remain useful.
+ */
+export function shouldShowAssistantGroupTimestamp(
+  timestamp: number,
+  options: {
+    atTranscriptTail: boolean;
+    working: boolean;
+    now?: number;
+  },
+): boolean {
+  return !(
+    options.atTranscriptTail &&
+    options.working &&
+    formatMessageTimestamp(timestamp, options.now) === "just now"
+  );
+}
+
 export function messageItemText(item: MessageItem): string | null {
   const text = item.blocks
     .flatMap((block) => (block.type === "text" ? [block.text] : []))
