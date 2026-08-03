@@ -232,14 +232,24 @@
   background: rgba(217, 135, 135, 0.13);
 }
 
-/* Live runs read as activity, not a count — the spinner takes the pill's grid
-   slot (aligned to the row top) and spins in the accent tone. */
+/* Live runs read as activity, not a count. Rotate a fixed, even-sized wrapper
+   so the glyph stays visually stable, and center it against one- or two-line
+   titles. */
 .research-sidebar-spinner {
-  display: inline-flex;
-  align-self: start;
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  align-self: center;
   flex: none;
-  padding-top: 3px;
+  place-items: center;
   color: var(--accent-color);
+  animation: spinner-spin 0.9s linear infinite;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.research-sidebar-spinner svg {
+  display: block;
 }
 
 /* Overlaid on the row's top-right corner rather than held in the grid, so the

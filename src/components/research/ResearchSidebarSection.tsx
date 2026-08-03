@@ -1021,7 +1021,7 @@ function ResearchSidebarSection({
               className="research-sidebar-spinner"
               title={`${tree.runningCount} running`}
             >
-              <LoaderCircle className="research-spinner" size={13} aria-hidden="true" />
+              <LoaderCircle size={14} aria-hidden="true" />
             </span>
           ) : !archived && tree.hasUnseenFailure ? (
             <span
