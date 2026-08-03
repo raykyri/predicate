@@ -748,6 +748,79 @@ export function openExternalUrl(url: string) {
   return invoke<void>("open_external_url", { url });
 }
 
+export type HumanBrowserSnapshot = {
+  ownerId: string;
+  url: string;
+};
+
+export type HumanBrowserEvent = {
+  ownerId: string;
+  kind: "navigation" | "title" | "newWindow";
+  url: string | null;
+  title: string | null;
+  loading: boolean | null;
+};
+
+export type HumanBrowserSync = {
+  ownerId: string;
+  url: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+  navigationRevision: number;
+};
+
+// Visibility belongs to one app-global native surface, so sync revisions order
+// all geometry/show requests. The backend additionally tracks lifecycle order
+// per owner so another pane's update cannot accidentally suppress a destroy.
+let humanBrowserSurfaceRevision = 0;
+let humanBrowserGeneration: Promise<number> | null = null;
+
+function getHumanBrowserGeneration() {
+  humanBrowserGeneration ??= invoke<number>("human_browser_generation");
+  return humanBrowserGeneration;
+}
+
+export async function syncHumanBrowser(request: HumanBrowserSync) {
+  humanBrowserSurfaceRevision += 1;
+  const revision = humanBrowserSurfaceRevision;
+  const generation = await getHumanBrowserGeneration();
+  return invoke<HumanBrowserSnapshot | null>("human_browser_sync", {
+    request: { ...request, generation, revision },
+  });
+}
+
+export async function destroyHumanBrowser(ownerId: string) {
+  humanBrowserSurfaceRevision += 1;
+  const revision = humanBrowserSurfaceRevision;
+  const generation = await getHumanBrowserGeneration();
+  return invoke<void>("human_browser_destroy", {
+    request: { ownerId, generation, revision },
+  });
+}
+
+export async function getHumanBrowserSnapshot(ownerId: string) {
+  const generation = await getHumanBrowserGeneration();
+  return invoke<HumanBrowserSnapshot | null>("human_browser_snapshot", {
+    request: { ownerId, generation },
+  });
+}
+
+export async function reloadHumanBrowser(ownerId: string) {
+  const generation = await getHumanBrowserGeneration();
+  return invoke<void>("human_browser_reload", {
+    request: { ownerId, generation },
+  });
+}
+
+export function listenToHumanBrowserEvents(
+  onEvent: (event: HumanBrowserEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<HumanBrowserEvent>("human-browser-event", (event) => onEvent(event.payload));
+}
+
 export type BrowserAutomationSnapshot = {
   available: boolean;
   tabId: number | null;

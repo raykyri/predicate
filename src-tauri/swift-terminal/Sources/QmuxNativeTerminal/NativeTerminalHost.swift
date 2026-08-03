@@ -29,6 +29,10 @@ final class NativeTerminalHost {
     static let shared = NativeTerminalHost()
 
     private(set) var container: NativeTerminalContainerView?
+    /// Tauri owns these views; the terminal bridge only needs their identity
+    /// to distinguish the privileged app from the external child browser.
+    private weak var appWebView: WKWebView?
+    private weak var humanBrowserWebView: WKWebView?
     private var panes: [String: NativeTerminalPane] = [:]
     private var backstop: NSView?
     private var eventMonitor: Any?
@@ -115,6 +119,7 @@ final class NativeTerminalHost {
         }
 
         let webView = findWebView(in: suppliedView)
+        appWebView = webView as? WKWebView
         let parent = webView?.superview ?? suppliedView
         let container = NativeTerminalContainerView(
             frame: webView?.frame ?? parent.bounds
@@ -357,7 +362,7 @@ final class NativeTerminalHost {
               let responder = window.firstResponder as? NSView,
               responder === view || responder.isDescendant(of: view)
         else { return }
-        if let webView = window.contentView.flatMap({ findWebView(in: $0) }) {
+        if let webView = appWebView {
             window.makeFirstResponder(webView)
         } else {
             window.makeFirstResponder(nil)
@@ -449,6 +454,32 @@ final class NativeTerminalHost {
         return true
     }
 
+    /// Registers Tauri's external child WKWebView for responder routing. Rust
+    /// owns its lifecycle and geometry; Swift retains only a weak reference.
+    func setHumanBrowserWebView(_ webView: WKWebView?, active: Bool) -> Bool {
+        guard container != nil else { return false }
+        if active {
+            guard let webView else { return false }
+            humanBrowserWebView = webView
+            iframeShortcutFallbackActive = false
+            return true
+        }
+
+        guard humanBrowserWebView == nil || humanBrowserWebView === webView else {
+            return true
+        }
+        if let humanBrowserWebView,
+           let window,
+           let responder = window.firstResponder as? NSView,
+           responder === humanBrowserWebView
+               || responder.isDescendant(of: humanBrowserWebView)
+        {
+            window.makeFirstResponder(appWebView)
+        }
+        humanBrowserWebView = nil
+        return true
+    }
+
     /// Drops routing state owned by the current DOM document before WKWebView
     /// reloads. Terminal panes and their Ghostty surfaces deliberately survive;
     /// the new document will republish layout, pointer policy, and keyboard
@@ -471,6 +502,7 @@ final class NativeTerminalHost {
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
+        humanBrowserWebView = nil
         // Drop document-owned deferral flags; the new document will re-request
         // geometry. Keep in-flight frames/fit IDs so a reload mid-resize does
         // not strand panes at pre-reload sizes until the next set_layout pass.
@@ -609,6 +641,8 @@ final class NativeTerminalHost {
         container?.onLiveResizeChange = nil
         container?.removeFromSuperview()
         container = nil
+        humanBrowserWebView = nil
+        appWebView = nil
     }
 
     /// The React layout is the authority for normal ownership changes, while a
@@ -677,7 +711,7 @@ final class NativeTerminalHost {
                     guard responder === previousView || responder === window else {
                         return
                     }
-                    if let webView = window.contentView.flatMap({ self.findWebView(in: $0) }) {
+                    if let webView = self.appWebView {
                         window.makeFirstResponder(webView)
                     } else {
                         window.makeFirstResponder(nil)
@@ -820,8 +854,7 @@ final class NativeTerminalHost {
         // WebKit's GPU process can die while WebContent remains responsive. A tiny
         // native snapshot exercises the compositor without allocating a full-window
         // image under the same memory pressure that caused the original failure.
-        guard let contentView = window.contentView,
-              let webView = findWebView(in: contentView) as? WKWebView,
+        guard let webView = appWebView,
               webView.bounds.width > 0,
               webView.bounds.height > 0
         else {
@@ -1174,17 +1207,33 @@ final class NativeTerminalHost {
         guard event.type == .keyDown,
               let window,
               event.window === window,
+              let shortcutKey = appShortcutKey(for: event)
+        else {
+            return false
+        }
+        let responderState = webAppShortcutResponderState(in: window)
+        if responderState == .humanBrowser,
+           humanBrowserDefersEditableSensitiveShortcut(
+               key: shortcutKey,
+               shift: event.modifierFlags.contains(.shift),
+               control: event.modifierFlags.contains(.control),
+               option: event.modifierFlags.contains(.option),
+               command: event.modifierFlags.contains(.command)
+           )
+        {
+            return false
+        }
+        guard
               shouldClaimWebAppShortcut(
                   hasTerminalKeyboardOwner: keyboardOwnerPane != nil,
-                  responderState: webAppShortcutResponderState(in: window),
+                  responderState: responderState,
                   // Only ⌘ chords are pulled out of a focused iframe; option
                   // and bare-control chords (word navigation, readline-style
                   // editing) stay with the framed page, mirroring how the DOM
                   // classifier defers those to editable targets.
                   iframeFallbackEligible: iframeShortcutFallbackActive
                       && event.modifierFlags.contains(.command)
-              ),
-              let shortcutKey = appShortcutKey(for: event)
+              )
         else {
             return false
         }
@@ -1210,6 +1259,12 @@ final class NativeTerminalHost {
         guard let responder = window.firstResponder as? NSView else {
             return .outsideWebView
         }
+        if let humanBrowserWebView,
+           responder === humanBrowserWebView
+               || responder.isDescendant(of: humanBrowserWebView)
+        {
+            return .humanBrowser
+        }
         if responder is WKWebView {
             return .outerWebView
         }
@@ -1233,7 +1288,8 @@ final class NativeTerminalHost {
     /// composer) belongs to the DOM's own handlers and exclusions.
     func shouldOfferKeyEquivalentFallback(for pane: NativeTerminalPane) -> Bool {
         guard keyboardOwnerPane === pane, let window else { return false }
-        return webAppShortcutResponderState(in: window) != .webViewDescendant
+        let state = webAppShortcutResponderState(in: window)
+        return state != .webViewDescendant && state != .humanBrowser
     }
 
     /// Asks Rust to classify the chord into an exact qmux command. Returns true

@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import GhosttyTerminal
+import WebKit
 
 private func terminalString(_ pointer: UnsafePointer<CChar>?) -> String? {
     guard let pointer else { return nil }
@@ -187,6 +188,25 @@ public func qmuxNativeTerminalSetWebOverlayRegion(
 public func qmuxNativeTerminalSetIframeShortcutFallback(_ active: Int32) -> Int32 {
     onTerminalMain {
         NativeTerminalHost.shared.setIframeShortcutFallback(active == 1) ? 1 : 0
+    }
+}
+
+@_cdecl("qmux_native_terminal_set_human_browser_webview")
+public func qmuxNativeTerminalSetHumanBrowserWebView(
+    _ nativeView: UnsafeMutableRawPointer?,
+    _ active: Int32
+) -> Int32 {
+    let nativeViewAddress = nativeView.map(UInt.init(bitPattern:))
+    return onTerminalMain {
+        let webView = nativeViewAddress.flatMap {
+            UnsafeMutableRawPointer(bitPattern: $0)
+        }.map {
+            Unmanaged<WKWebView>.fromOpaque($0).takeUnretainedValue()
+        }
+        return NativeTerminalHost.shared.setHumanBrowserWebView(
+            webView,
+            active: active == 1
+        ) ? 1 : 0
     }
 }
 

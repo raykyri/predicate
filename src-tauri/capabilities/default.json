@@ -1,8 +1,8 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default permissions for the qmux application window.",
-  "windows": ["main", "global-task-launcher"],
+  "description": "Default permissions for qmux-owned application webviews.",
+  "webviews": ["main", "global-task-launcher"],
   "permissions": [
     "core:default",
     "core:event:default",

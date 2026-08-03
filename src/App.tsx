@@ -214,6 +214,7 @@ import {
   type AppShortcutCommand,
 } from "./lib/appShortcuts";
 import { requestComposerInsert } from "./lib/promptLibrary";
+import { nativeHumanBrowserOwnerIds } from "./lib/humanBrowserState";
 import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
@@ -403,6 +404,8 @@ import {
   listHomeTurnHistory,
   createGlobalDraft,
   deleteGlobalDraft,
+  destroyHumanBrowser,
+  reloadHumanBrowser,
   assignGlobalDraft,
   listTurns,
   listPanes,
@@ -1465,6 +1468,7 @@ function MainApp() {
   const groupPointerDragRef = useRef<GroupPointerDrag | null>(null);
   const suppressGroupMenuButtonClickRef = useRef(false);
   const browserOverlayByPaneRef = useRef<Record<string, BrowserOverlayState>>({});
+  const nativeHumanBrowserOwnerIdsRef = useRef<Set<string>>(new Set());
   const activeBrowserOwnerIdRef = useRef<string | null>(null);
   const toggleActiveBrowserOverlayRef = useRef<() => void>(() => {});
   const closeActiveBrowserOverlayRef = useRef<() => void>(() => {});
@@ -2497,6 +2501,7 @@ function MainApp() {
   const [browserOverlayByPane, setBrowserOverlayByPane] = useState<
     Record<string, BrowserOverlayState>
   >({});
+  browserOverlayByPaneRef.current = browserOverlayByPane;
   const [transcriptExpandedByPane, setTranscriptExpandedByPane] = useState<
     Record<string, boolean>
   >({});
@@ -3880,10 +3885,16 @@ function MainApp() {
     applyPendingFirstMessageTitle(agentId, prompt);
   }
 
-  // Drop per-pane UI state for panes that have closed so it can't leak or resurface.
+  // Drop browser/UI state only when its real owner disappears. Browser owners
+  // include research trees as well as terminal panes; unrelated pane metadata
+  // updates must not retire a research document's preserved browser.
   useEffect(() => {
     panesRef.current = panes;
     const ids = new Set(panes.map((pane) => pane.id));
+    const browserOwnerIds = new Set(ids);
+    for (const tree of [...researchTrees, ...archivedResearchTrees]) {
+      browserOwnerIds.add(researchBrowserOwnerId(tree.id));
+    }
     setTerminalTitleByPane((current) => {
       const next = Object.fromEntries(
         Object.entries(current).filter(([paneId]) => ids.has(paneId)),
@@ -3904,7 +3915,7 @@ function MainApp() {
     });
     setBrowserOverlayByPane((current) => {
       const next = Object.fromEntries(
-        Object.entries(current).filter(([paneId]) => ids.has(paneId)),
+        Object.entries(current).filter(([ownerId]) => browserOwnerIds.has(ownerId)),
       );
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
@@ -3930,7 +3941,23 @@ function MainApp() {
         delete titleRegenerationSeqByPaneRef.current[paneId];
       }
     }
-  }, [panes]);
+  }, [archivedResearchTrees, panes, researchTrees]);
+
+  // A child stays alive while its overlay remains open, including inactive-tab
+  // round trips. Closing the overlay, switching to Agent mode, moving to a
+  // sandboxed preview, or deleting its owner retires it after the child effect
+  // has published its final hidden revision.
+  useEffect(() => {
+    const nextOwnerIds = nativeHumanBrowserOwnerIds(browserOverlayByPane);
+    for (const ownerId of nativeHumanBrowserOwnerIdsRef.current) {
+      if (!nextOwnerIds.has(ownerId)) {
+        void destroyHumanBrowser(ownerId).catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+      }
+    }
+    nativeHumanBrowserOwnerIdsRef.current = nextOwnerIds;
+  }, [browserOverlayByPane]);
 
   // Drop per-agent UI state for agents that no longer exist, so these maps and refs
   // don't grow unbounded across a long session of spawning and closing agents.
@@ -4239,6 +4266,31 @@ function MainApp() {
     });
   }
 
+  function setHumanBrowserLocation(paneId: string, nextUrl: string) {
+    let normalized: string;
+    try {
+      const parsed = new URL(nextUrl);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return;
+      }
+      normalized = parsed.href;
+    } catch {
+      return;
+    }
+    setBrowserOverlayByPane((current) => {
+      const previous = current[paneId];
+      if (
+        !previous?.open ||
+        previous.mode !== "webkit" ||
+        previous.sandbox ||
+        previous.url === normalized
+      ) {
+        return current;
+      }
+      return { ...current, [paneId]: { ...previous, url: normalized } };
+    });
+  }
+
   function toggleActiveQueueSplit() {
     const agentId = activeAgent?.id;
     if (!agentId) {
@@ -4362,6 +4414,13 @@ function MainApp() {
 
   function refreshActiveBrowserOverlay() {
     if (!activeBrowserOwnerId) {
+      return;
+    }
+    const overlay = browserOverlayByPaneRef.current[activeBrowserOwnerId];
+    if (overlay?.open && overlay.mode === "webkit" && !overlay.sandbox) {
+      void reloadHumanBrowser(activeBrowserOwnerId).catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
       return;
     }
     setBrowserOverlayByPane((current) => {
@@ -4683,24 +4742,15 @@ function MainApp() {
   const visiblePaneOverlayBlocking = [...terminalOverlayBlockedPaneIds].some(
     (paneId) => visibleTerminalPaneIdSet.has(paneId),
   );
-  const nativeTerminalInputBlocked = Boolean(
+  const nativeModalOccluded = Boolean(
     settingsOpen ||
       imageLightbox !== null ||
       newResearchOpen ||
-      // The new-document composer is absent here on purpose: it lives in the
-      // research surface rather than stacking over the terminal stage, so an
-      // open (hidden) composer must not eat terminal input.
+      newResearchFolderRequest !== null ||
       publicationTarget ||
-      // The palette and expanded/browser overlays must own both the DOM
-      // gesture and keyboard while they cover the terminal stage.
       commandPaletteOpen ||
-      activeTranscriptVisibleExpanded ||
-      activeBrowserOverlay?.open ||
       closeDialog ||
       exitDialog ||
-      // The export-to-Research dialog floats over the terminal stage like the
-      // quit/close dialogs; without this the terminal keeps pointer/keyboard
-      // ownership under the modal and its buttons and title field go dead.
       exportResearchPane ||
       exitPreflightRequest ||
       renamePaneId ||
@@ -4708,7 +4758,25 @@ function MainApp() {
       linkMenu ||
       paneContextMenu ||
       groupMenu ||
-      settingsMenu ||
+      settingsMenu,
+  );
+  const nativeBrowserOccluded = Boolean(
+    nativeModalOccluded || appToast || folderPickerStatus,
+  );
+  const nativeBrowserGeometryRevision = activeTranscriptVisibleExpanded
+    ? -1
+    : activePaneReservesTurnPaneWidth
+      ? turnPaneWidth
+      : 0;
+  const nativeTerminalInputBlocked = Boolean(
+    nativeModalOccluded ||
+      // The new-document composer is absent here on purpose: it lives in the
+      // research surface rather than stacking over the terminal stage, so an
+      // open (hidden) composer must not eat terminal input.
+      // The palette and expanded/browser overlays must own both the DOM
+      // gesture and keyboard while they cover the terminal stage.
+      activeTranscriptVisibleExpanded ||
+      activeBrowserOverlay?.open ||
       // Drag/layout gestures and terminal-local search/confirm overlays also
       // revoke the desired owner until their web interaction completes.
       draggingPaneId !== null ||
@@ -14849,7 +14917,10 @@ function MainApp() {
           bodyFontId={settings.bodyFontId}
           size={activeBrowserOverlay.size}
           toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
+          occluded={nativeBrowserOccluded}
+          geometryRevision={nativeBrowserGeometryRevision}
           onNavigate={navigateActiveBrowserOverlay}
+          onLocationChange={(url) => setHumanBrowserLocation(activeBrowserOwnerId, url)}
           onRefresh={refreshActiveBrowserOverlay}
           onOpenExternal={(currentUrl) => {
             // Never leak a token-bearing file-server URL to the OS browser (the button is

@@ -99,8 +99,9 @@ export type BrowserOverlaySize = {
 export type BrowserOverlayMode = "webkit" | "agent";
 
 // Per-pane browser overlay: the URL it's showing, whether it's visible, a nonce
-// bumped on open/refresh, the selected WebKit/Agent engine, whether file content
-// needs an opaque-origin sandbox, and an optional size that survives tab switches.
+// bumped when navigation must be replayed, the selected WebKit/Agent engine,
+// whether file content needs an opaque-origin sandbox, and an optional size that
+// survives tab switches.
 export type BrowserOverlayState = {
   url: string | null;
   open: boolean;

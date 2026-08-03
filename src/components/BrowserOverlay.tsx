@@ -1,5 +1,5 @@
 import { Bot, ExternalLink, Globe, RotateCw, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
   KeyboardEvent as ReactKeyboardEvent,
@@ -9,9 +9,11 @@ import type { UnlistenFn } from "@tauri-apps/api/event";
 import type { BrowserOverlayMode, BrowserOverlaySize } from "../appTypes";
 import {
   claimNativeTerminalPointerForWebDrag,
+  getHumanBrowserSnapshot,
   getBrowserAutomationSnapshot,
   insertBrowserAutomationText,
   listenToBrowserScreencastFrames,
+  listenToHumanBrowserEvents,
   navigateBrowserAutomation,
   reloadBrowserAutomation,
   sendBrowserAutomationKey,
@@ -19,6 +21,7 @@ import {
   setNativeTerminalIframeShortcutFallback,
   startBrowserScreencast,
   stopBrowserScreencast,
+  syncHumanBrowser,
 } from "../lib/api";
 import type { BrowserAutomationSnapshot } from "../lib/api";
 
@@ -43,6 +46,8 @@ const SCREENCAST_SETTLE_MS = 250;
 // it would soften a settled mirror for no reason.
 const SCREENCAST_SETTLE_ECHO_MS = 200;
 const SNAPSHOT_POLL_MS = 500;
+const HUMAN_BROWSER_LOCATION_POLL_MS = 500;
+const HUMAN_BROWSER_NAVIGATION_GRACE_MS = 1200;
 const lastAutomationNavigationByPane = new Map<string, number>();
 const MAX_REMEMBERED_AUTOMATION_PANES = 256;
 
@@ -78,7 +83,8 @@ function cssPixelValue(value: string, fallback: number) {
 interface BrowserOverlayProps {
   paneId: string;
   url: string | null;
-  // Bumped on open/refresh so WebKit reloads and Agent navigation is replayed.
+  // Bumped when a URL must be replayed. Human-browser Refresh uses the native
+  // reload command directly so a just-changed page URL cannot be overwritten.
   reloadNonce: number;
   // True for token-bearing file-server URLs: sandbox the frame so served (possibly
   // untrusted) content gets an opaque origin and can't read the token back to fetch
@@ -91,8 +97,16 @@ interface BrowserOverlayProps {
   bodyFontId: string;
   size?: BrowserOverlaySize | null;
   toggleShortcutLabel?: string | null;
+  // A native child cannot be covered by DOM stacking. Hide it while an app
+  // modal/menu is above this overlay, then restore it to the measured slot.
+  occluded: boolean;
+  // Changes whenever app layout can move a fixed-size overlay without resizing
+  // it, ensuring the native child's full bounding rect is republished.
+  geometryRevision: number;
   // Navigate to a typed address (a URL, or a bare host that gets http:// prefixed).
   onNavigate: (rawInput: string) => void;
+  // Redirects and in-page navigation update the per-pane address state.
+  onLocationChange: (url: string) => void;
   // Reload the current page.
   onRefresh: () => void;
   // Open the current page in the system's default external browser.
@@ -114,7 +128,10 @@ export default function BrowserOverlay({
   bodyFontId,
   size,
   toggleShortcutLabel,
+  occluded,
+  geometryRevision,
   onNavigate,
+  onLocationChange,
   onRefresh,
   onOpenExternal,
   onClose,
@@ -125,6 +142,7 @@ export default function BrowserOverlay({
   // bar tracks navigation without clobbering what the user is mid-typing.
   const [draft, setDraft] = useState(url ?? "");
   const [resizing, setResizing] = useState(false);
+  const [humanBrowserError, setHumanBrowserError] = useState<string | null>(null);
   const [automationSnapshot, setAutomationSnapshot] = useState<BrowserAutomationSnapshot | null>(
     null,
   );
@@ -138,16 +156,191 @@ export default function BrowserOverlay({
   const frameRef = useRef<HTMLIFrameElement | null>(null);
   const lastAutomationMoveRef = useRef(0);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
+  const humanBrowserUrlRef = useRef(url);
+  const humanBrowserOccludedRef = useRef(occluded);
+  const humanBrowserNavigationRevisionRef = useRef(reloadNonce);
+  const onLocationChangeRef = useRef(onLocationChange);
+  const onNavigateRef = useRef(onNavigate);
+  const syncHumanBrowserSlotRef = useRef<() => void>(() => undefined);
 
   const automated = mode === "agent" && !sandbox;
+  const humanBrowser = mode === "webkit" && !sandbox && url !== null;
   const displayedUrl = automated ? (automationSnapshot?.url ?? url) : url;
   const mirrorImage = mirrorFrame ?? automationSnapshot?.imageDataUrl ?? null;
+
+  humanBrowserUrlRef.current = url;
+  humanBrowserOccludedRef.current = occluded;
+  humanBrowserNavigationRevisionRef.current = reloadNonce;
+  onLocationChangeRef.current = onLocationChange;
+  onNavigateRef.current = onNavigate;
 
   useEffect(() => {
     if (document.activeElement !== addressInputRef.current) {
       setDraft(displayedUrl ?? "");
     }
   }, [displayedUrl]);
+
+  useLayoutEffect(() => {
+    if (!humanBrowser) {
+      setHumanBrowserError(null);
+      syncHumanBrowserSlotRef.current = () => undefined;
+      return;
+    }
+
+    let cancelled = false;
+    let frame: number | null = null;
+    let unlisten: UnlistenFn | null = null;
+    let locationPollTimer: number | null = null;
+    let locationPollInFlight = false;
+    let lastNavigationRevision = humanBrowserNavigationRevisionRef.current;
+    let locationPollSuppressedUntil = 0;
+    let syncSequence = 0;
+    let lastSyncedUrl = url;
+
+    const syncSlot = async () => {
+      frame = null;
+      const body = bodyRef.current;
+      const currentUrl = humanBrowserUrlRef.current;
+      if (cancelled || !body || !currentUrl) {
+        return;
+      }
+      const rect = body.getBoundingClientRect();
+      const sequence = ++syncSequence;
+      const navigationRevision = humanBrowserNavigationRevisionRef.current;
+      if (navigationRevision !== lastNavigationRevision) {
+        lastNavigationRevision = navigationRevision;
+        locationPollSuppressedUntil = performance.now() + HUMAN_BROWSER_NAVIGATION_GRACE_MS;
+      }
+      lastSyncedUrl = currentUrl;
+      try {
+        await syncHumanBrowser({
+          ownerId: paneId,
+          url: currentUrl,
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height,
+          visible:
+            !humanBrowserOccludedRef.current && rect.width >= 1 && rect.height >= 1,
+          navigationRevision: humanBrowserNavigationRevisionRef.current,
+        });
+        if (!cancelled && sequence === syncSequence) {
+          setHumanBrowserError(null);
+        }
+      } catch (error) {
+        if (!cancelled && sequence === syncSequence) {
+          setHumanBrowserError(error instanceof Error ? error.message : String(error));
+        }
+      }
+    };
+
+    const scheduleSync = () => {
+      if (frame === null) {
+        frame = requestAnimationFrame(() => void syncSlot());
+      }
+    };
+    syncHumanBrowserSlotRef.current = scheduleSync;
+
+    const resizeObserver = new ResizeObserver(scheduleSync);
+    if (bodyRef.current) {
+      resizeObserver.observe(bodyRef.current);
+    }
+    window.addEventListener("resize", scheduleSync);
+
+    void listenToHumanBrowserEvents((event) => {
+      if (cancelled || event.ownerId !== paneId) {
+        return;
+      }
+      if (event.kind === "newWindow" && event.url) {
+        onNavigateRef.current(event.url);
+        return;
+      }
+      if ((event.kind === "navigation" || event.kind === "title") && event.url) {
+        locationPollSuppressedUntil = 0;
+        onLocationChangeRef.current(event.url);
+      }
+    }).then(
+      (stop) => {
+        if (cancelled) {
+          stop();
+        } else {
+          unlisten = stop;
+        }
+      },
+      (error) => {
+        if (!cancelled) {
+          setHumanBrowserError(error instanceof Error ? error.message : String(error));
+        }
+      },
+    );
+
+    const pollLocation = async () => {
+      if (cancelled || locationPollInFlight || humanBrowserOccludedRef.current) {
+        return;
+      }
+      const navigationRevision = humanBrowserNavigationRevisionRef.current;
+      // A React navigation render can precede the rAF that sends it to the
+      // native child. Do not let a poll from that narrow window restore the
+      // page's old URL before syncSlot establishes the navigation grace period.
+      if (navigationRevision !== lastNavigationRevision) {
+        return;
+      }
+      locationPollInFlight = true;
+      try {
+        const snapshot = await getHumanBrowserSnapshot(paneId);
+        if (
+          !cancelled &&
+          navigationRevision === humanBrowserNavigationRevisionRef.current &&
+          navigationRevision === lastNavigationRevision &&
+          snapshot?.url &&
+          snapshot.url !== humanBrowserUrlRef.current &&
+          performance.now() >= locationPollSuppressedUntil
+        ) {
+          onLocationChangeRef.current(snapshot.url);
+        }
+      } catch {
+        // Page-load events remain the primary path. Polling is only the
+        // same-document navigation fallback, so a transient miss is harmless.
+      } finally {
+        locationPollInFlight = false;
+      }
+    };
+    locationPollTimer = window.setInterval(
+      () => void pollLocation(),
+      HUMAN_BROWSER_LOCATION_POLL_MS,
+    );
+
+    scheduleSync();
+    return () => {
+      cancelled = true;
+      syncHumanBrowserSlotRef.current = () => undefined;
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
+      resizeObserver.disconnect();
+      window.removeEventListener("resize", scheduleSync);
+      if (locationPollTimer !== null) {
+        window.clearInterval(locationPollTimer);
+      }
+      unlisten?.();
+      if (lastSyncedUrl) {
+        void syncHumanBrowser({
+          ownerId: paneId,
+          url: lastSyncedUrl,
+          x: 0,
+          y: 0,
+          width: 0,
+          height: 0,
+          visible: false,
+          navigationRevision: humanBrowserNavigationRevisionRef.current,
+        }).catch(() => undefined);
+      }
+    };
+  }, [humanBrowser, paneId]);
+
+  useLayoutEffect(() => {
+    syncHumanBrowserSlotRef.current();
+  }, [geometryRevision, humanBrowser, occluded, reloadNonce, url]);
 
   useEffect(() => {
     if (!automated) {
@@ -387,7 +580,7 @@ export default function BrowserOverlay({
   // focusin/focusout to this one. The rAF matches the app-level samplers:
   // activeElement settles after the event.
   useEffect(() => {
-    if (!url || automated) {
+    if (!url || automated || humanBrowser) {
       return;
     }
     let frame: number | null = null;
@@ -424,7 +617,7 @@ export default function BrowserOverlay({
       // the claim explicitly instead of leaving it wedged on.
       report(false);
     };
-  }, [automated, url, reloadNonce]);
+  }, [automated, humanBrowser, url, reloadNonce]);
 
   useEffect(() => {
     return () => {
@@ -620,6 +813,13 @@ export default function BrowserOverlay({
         >
           <X size={14} aria-hidden="true" />
         </button>
+        <div
+          className="browser-overlay-resize-handle"
+          role="separator"
+          aria-label="Resize browser overlay"
+          title="Resize browser overlay"
+          onPointerDown={startResize}
+        />
         <form
           className="browser-overlay-nav-form"
           onSubmit={(event) => {
@@ -829,6 +1029,10 @@ export default function BrowserOverlay({
                 "Connecting to the qmux automation browser…"}
             </p>
           </div>
+        ) : humanBrowser ? (
+          <div className="browser-overlay-native-slot" aria-label="WebKit browser content">
+            {humanBrowserError ? <p>{humanBrowserError}</p> : null}
+          </div>
         ) : frameUrl ? (
           <iframe
             key={`${frameUrl}::${reloadNonce}`}
@@ -850,13 +1054,6 @@ export default function BrowserOverlay({
           </div>
         )}
       </div>
-      <div
-        className="browser-overlay-resize-handle"
-        role="separator"
-        aria-label="Resize browser overlay"
-        title="Resize browser overlay"
-        onPointerDown={startResize}
-      />
     </div>
   );
 }

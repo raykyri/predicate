@@ -44,7 +44,11 @@ sha2 = "0.10"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
+# Child webviews currently live behind Tauri's unstable API. Keep the dependency
+# on the 2.11 minor while qmux also reaches the platform WKWebView handle for its
+# native shortcut bridge; that handle is explicitly allowed to change between
+# Tauri minor releases.
+tauri = { version = "~2.11.3", features = ["macos-private-api", "tray-icon", "unstable"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 tauri-plugin-clipboard-manager = "2.3.2"
 tauri-plugin-dialog = "2"

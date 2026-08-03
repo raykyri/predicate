@@ -8,6 +8,7 @@ mod control_socket;
 mod events;
 mod file_server;
 mod global_task_launcher;
+mod human_browser;
 mod image_files;
 mod launch_path;
 mod menu_bar;
@@ -2247,15 +2248,18 @@ fn show_main_window(app: &tauri::AppHandle) {
 /// This is safe before the native host is initialized (the first page-load
 /// callback can run before setup) and idempotent across an explicit reload plus
 /// its ensuing PageLoadEvent::Started callback.
-fn prepare_main_webview_reload() {
+fn prepare_main_webview_reload(app: Option<&tauri::AppHandle>) {
     cancel_interface_health_probe();
     native_terminal::set_events_listener_ready(false);
+    if let Some(app) = app {
+        human_browser::reset_all(app);
+    }
     let _ = native_terminal::prepare_for_webview_reload();
 }
 
 #[cfg(desktop)]
 fn reload_main_webview(app: &tauri::AppHandle) {
-    prepare_main_webview_reload();
+    prepare_main_webview_reload(Some(app));
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("qmux: cannot reload interface because the main webview is missing");
         return;
@@ -2356,7 +2360,7 @@ fn main() {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Started
             {
-                prepare_main_webview_reload();
+                prepare_main_webview_reload(Some(webview.app_handle()));
             }
         });
 
@@ -2369,7 +2373,7 @@ fn main() {
         let label = webview.label();
         eprintln!("qmux: WebContent process terminated for {label}; reloading");
         if label == "main" {
-            prepare_main_webview_reload();
+            prepare_main_webview_reload(Some(webview.app_handle()));
         }
         if let Err(err) = webview.reload() {
             eprintln!("qmux: failed to reload webview {label}: {err}");
@@ -2387,6 +2391,7 @@ fn main() {
                 state
                     .attach_app(app.handle().clone())
                     .map_err(std::io::Error::other)?;
+                app.manage(human_browser::HumanBrowserManager::default());
                 #[cfg(target_os = "macos")]
                 if !native_terminal::available() {
                     return Err(std::io::Error::other(
@@ -2544,6 +2549,11 @@ fn main() {
             browser_backend::browser_automation_mouse,
             browser_backend::browser_automation_insert_text,
             browser_backend::browser_automation_key,
+            human_browser::human_browser_sync,
+            human_browser::human_browser_destroy,
+            human_browser::human_browser_generation,
+            human_browser::human_browser_snapshot,
+            human_browser::human_browser_reload,
             open_external_url,
             prompt_library_list,
             prompt_library_save,

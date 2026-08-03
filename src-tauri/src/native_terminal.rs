@@ -371,6 +371,13 @@ mod imp {
             responder_state: i32,
             iframe_fallback_eligible: i32,
         ) -> i32;
+        fn qmux_native_terminal_human_browser_defers_editable_sensitive_shortcut(
+            key: *const c_char,
+            shift: i32,
+            control: i32,
+            option: i32,
+            command: i32,
+        ) -> i32;
         fn qmux_native_terminal_should_forward_left_mouse_down_to_web(click_count: i32) -> i32;
         fn qmux_native_terminal_initialize(native_view: *mut c_void) -> i32;
         fn qmux_native_terminal_create_host_managed(
@@ -407,6 +414,10 @@ mod imp {
             visible: i32,
         ) -> i32;
         fn qmux_native_terminal_set_iframe_shortcut_fallback(active: i32) -> i32;
+        fn qmux_native_terminal_set_human_browser_webview(
+            native_view: *mut c_void,
+            active: i32,
+        ) -> i32;
         fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
@@ -477,6 +488,29 @@ mod imp {
                 i32::from(has_terminal_keyboard_owner),
                 responder_state,
                 i32::from(iframe_fallback_eligible),
+            ) == 1
+        }
+    }
+
+    pub fn human_browser_defers_editable_sensitive_shortcut(
+        key: &str,
+        shift: bool,
+        control: bool,
+        option: bool,
+        command: bool,
+    ) -> bool {
+        let Ok(key) = CString::new(key) else {
+            return false;
+        };
+        // SAFETY: the key is a valid NUL-terminated string for the duration of
+        // the synchronous call and all remaining arguments are scalar values.
+        unsafe {
+            qmux_native_terminal_human_browser_defers_editable_sensitive_shortcut(
+                key.as_ptr(),
+                i32::from(shift),
+                i32::from(control),
+                i32::from(option),
+                i32::from(command),
             ) == 1
         }
     }
@@ -661,6 +695,24 @@ mod imp {
             Ok(())
         } else {
             Err("native terminal host is not attached".to_string())
+        }
+    }
+
+    /// Registers the separately hosted WKWebView used by human-browser mode.
+    /// Its descendants need native app-shortcut routing because they are not
+    /// part of the privileged application's DOM responder tree.
+    pub fn set_human_browser_webview(native_view: *mut c_void, active: bool) -> Result<(), String> {
+        if active && native_view.is_null() {
+            return Err("human browser native view is null".to_string());
+        }
+        // SAFETY: Tauri owns the WKWebView for the duration of this synchronous
+        // call. Swift stores it weakly and never assumes ownership of it.
+        if unsafe { qmux_native_terminal_set_human_browser_webview(native_view, i32::from(active)) }
+            == 1
+        {
+            Ok(())
+        } else {
+            Err("native terminal host rejected the human browser webview".to_string())
         }
     }
 
@@ -959,6 +1011,13 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn set_human_browser_webview(
+        _native_view: *mut c_void,
+        _active: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         Ok(())
     }
@@ -1008,8 +1067,9 @@ mod imp {
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
     paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, remove,
-    seed_settings, send_text, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
-    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
+    seed_settings, send_text, set_human_browser_webview, set_iframe_shortcut_fallback, set_layout,
+    set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown, submit,
+    update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1460,8 +1520,14 @@ mod tests {
         const OUTSIDE_WEB_VIEW: i32 = 0;
         const OUTER_WEB_VIEW: i32 = 1;
         const WEB_VIEW_DESCENDANT: i32 = 2;
+        const HUMAN_BROWSER: i32 = 3;
 
-        for responder_state in [OUTSIDE_WEB_VIEW, OUTER_WEB_VIEW, WEB_VIEW_DESCENDANT] {
+        for responder_state in [
+            OUTSIDE_WEB_VIEW,
+            OUTER_WEB_VIEW,
+            WEB_VIEW_DESCENDANT,
+            HUMAN_BROWSER,
+        ] {
             for iframe_fallback_eligible in [false, true] {
                 assert!(!super::imp::should_claim_web_app_shortcut(
                     true,
@@ -1493,6 +1559,52 @@ mod tests {
             WEB_VIEW_DESCENDANT,
             true
         ));
+        // A child WKWebView is outside the app document, so neither its outer
+        // responder nor its content descendants can deliver qmux shortcuts to
+        // the React window listener.
+        assert!(super::imp::should_claim_web_app_shortcut(
+            false,
+            HUMAN_BROWSER,
+            false
+        ));
+    }
+
+    #[test]
+    fn human_browser_leaves_editable_sensitive_shortcuts_with_the_page() {
+        assert!(
+            super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "ArrowUp", false, false, true, true
+            )
+        );
+        assert!(
+            super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "ArrowDown",
+                false,
+                false,
+                true,
+                true
+            )
+        );
+        assert!(
+            super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "w", false, true, false, false
+            )
+        );
+        assert!(
+            !super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "ArrowUp", true, false, true, true
+            )
+        );
+        assert!(
+            !super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "w", false, false, false, true
+            )
+        );
+        assert!(
+            !super::imp::human_browser_defers_editable_sensitive_shortcut(
+                "t", false, false, false, true
+            )
+        );
     }
 
     #[test]
