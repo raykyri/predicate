@@ -94,6 +94,16 @@ export interface InitialPaneSize {
   rows: number;
 }
 
+export type RemoteMultiplexer = "tmux" | "herdr";
+
+/** The remote host a group is bound to. Mirrors Rust's `RemoteRef`. */
+export interface RemoteRef {
+  id: string;
+  label: string;
+  host: string;
+  multiplexer: RemoteMultiplexer;
+}
+
 export interface GroupInfo {
   id: string;
   name: string;
@@ -107,6 +117,7 @@ export interface GroupInfo {
   collapsed: boolean;
   scope: "terminal" | "research";
   importedResearchArchiveId?: string | null;
+  remote?: RemoteRef | null;
   agents: string[];
 }
 

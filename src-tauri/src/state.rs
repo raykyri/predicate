@@ -1315,8 +1315,14 @@ impl AppState {
         if !matches!(pane.info.kind, PaneKind::Shell) {
             return None;
         }
+        // A remote pane's cwd is a path on its group's host; the local is_dir
+        // liveness probe below would silently discard it.
+        let remote = model
+            .groups
+            .get(&pane.info.group_id)
+            .is_some_and(GroupInfo::is_remote);
         let cwd = std::path::PathBuf::from(&pane.info.cwd);
-        cwd.is_dir().then_some(cwd)
+        (remote || cwd.is_dir()).then_some(cwd)
     }
 
     /// The advisory cwd for spawning into `group_id`: the live cwd of the group's
@@ -1330,6 +1336,9 @@ impl AppState {
     /// signal is advisory.
     pub fn group_spawn_cwd(&self, group_id: &str) -> Option<std::path::PathBuf> {
         let model = self.inner.model.lock().ok()?;
+        // A remote group's pane cwds live on its host; the local is_dir
+        // liveness probe below would silently discard every one of them.
+        let remote = model.groups.get(group_id).is_some_and(GroupInfo::is_remote);
         model
             .panes
             .values()
@@ -1337,7 +1346,7 @@ impl AppState {
             .filter(|pane| matches!(pane.info.kind, PaneKind::Shell))
             .filter_map(|pane| {
                 let cwd = std::path::PathBuf::from(&pane.info.cwd);
-                cwd.is_dir().then_some((pane.info.last_active_at, cwd))
+                (remote || cwd.is_dir()).then_some((pane.info.last_active_at, cwd))
             })
             .max_by_key(|(last_active_at, _)| *last_active_at)
             .map(|(_, cwd)| cwd)
@@ -1403,6 +1412,17 @@ impl AppState {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         if let Some(pane) = model.panes.get(pane_id) {
+            // A remote group's dir and cwd are paths on its host. Serving them
+            // through the local file server would resolve those strings against
+            // the local filesystem — at best a wrong file, at worst a same-named
+            // local path leaking into a preview. Remote panes get no roots.
+            if model
+                .groups
+                .get(&pane.info.group_id)
+                .is_some_and(GroupInfo::is_remote)
+            {
+                return Vec::new();
+            }
             let mut roots = Vec::new();
             let group_dir = model
                 .groups
@@ -8993,6 +9013,7 @@ fn migrate_legacy_research_workspaces(
                     collapsed: false,
                     scope: WorkspaceScope::Terminal,
                     imported_research_archive_id: None,
+                    remote: None,
                     agents: Vec::new(),
                 }
             });
@@ -9615,6 +9636,7 @@ mod tests {
             collapsed: false,
             scope: WorkspaceScope::Research,
             imported_research_archive_id: None,
+            remote: None,
             agents: vec!["agent-1".to_string()],
         }
     }

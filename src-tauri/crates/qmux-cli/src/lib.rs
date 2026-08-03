@@ -1,3 +1,11 @@
+//! The qmux in-pane CLI. On the local machine the qmux app binary doubles as
+//! the CLI (the app's `main` dispatches through [`run_cli_if_requested`]
+//! before starting Tauri); the standalone `qmux-cli` binary built from this
+//! crate carries the same commands without the app, so a host that never runs
+//! the app — a remote box reached over ssh — can still service hooks, cwd
+//! reporting, and forks once a transport exists.
+
+use qmux_proto::{ControlRequest, ControlResponse};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::env;
@@ -6,14 +14,6 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::Command;
 use std::time::Duration;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ControlResponse {
-    ok: bool,
-    data: Value,
-    error: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -311,11 +311,11 @@ fn request(command: &str, payload: Value) -> Result<String, String> {
     let timeout = Some(Duration::from_secs(2));
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
-    let request = json!({
-        "token": token,
-        "command": command,
-        "payload": payload,
-    });
+    let request = ControlRequest {
+        token,
+        command: command.to_string(),
+        payload,
+    };
 
     serde_json::to_writer(&mut stream, &request)
         .map_err(|err| format!("failed to encode request: {err}"))?;

@@ -987,6 +987,7 @@ mod tests {
                     collapsed: false,
                     scope: WorkspaceScope::Terminal,
                     imported_research_archive_id: None,
+                    remote: None,
                     agents: Vec::new(),
                 },
                 None,

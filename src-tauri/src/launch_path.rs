@@ -44,6 +44,16 @@ pub(crate) fn warm_login_shell_path() {
     });
 }
 
+/// The qmux CLI path advertised to child processes — `QMUX_CLI`, hook
+/// commands, and shell wrapper functions all call back into qmux through this
+/// binary. Centralized so exactly one place decides which CLI a launch target
+/// gets: the local target reuses this process's executable (the app binary
+/// doubles as the CLI), while a remote target must instead resolve a
+/// standalone `qmux-cli` shipped to its host.
+pub(crate) fn qmux_cli_path() -> Result<PathBuf, String> {
+    env::current_exe().map_err(|err| format!("failed to resolve the qmux executable: {err}"))
+}
+
 pub(crate) fn resolve_binary(binary: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH");
     let home = env::var_os("HOME").map(PathBuf::from);

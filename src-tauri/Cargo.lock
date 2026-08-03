@@ -3026,6 +3026,8 @@ dependencies = [
  "names",
  "portable-pty",
  "pulldown-cmark",
+ "qmux-cli",
+ "qmux-proto",
  "reqwest",
  "rustls",
  "serde",
@@ -3040,6 +3042,24 @@ dependencies = [
  "tauri-plugin-updater",
  "tungstenite",
  "window-vibrancy 0.7.1",
+]
+
+[[package]]
+name = "qmux-cli"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "qmux-proto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "qmux-proto"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
