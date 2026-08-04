@@ -5225,6 +5225,7 @@ function MainApp() {
   function placePaneAfterOptimistically(
     pane: PaneInfo,
     siblingPaneId: string | null,
+    persistPlacement = true,
   ): PaneInfo[] {
     const current = panesRef.current.filter((existing) => existing.id !== pane.id);
     if (!siblingPaneId || siblingPaneId === pane.id) {
@@ -5234,9 +5235,11 @@ function MainApp() {
     if (siblingIndex === -1) {
       return [...current, pane];
     }
-    void placePaneAfter(pane.id, siblingPaneId)
-      .then((orderedPanes) => setPanesPreservingRecoveredDismissals(orderedPanes))
-      .catch(() => undefined);
+    if (persistPlacement) {
+      void placePaneAfter(pane.id, siblingPaneId)
+        .then((orderedPanes) => setPanesPreservingRecoveredDismissals(orderedPanes))
+        .catch(() => undefined);
+    }
     // Mirror the backend's placement: directly after the sibling, at the
     // sibling's nesting depth.
     const placed = { ...pane, depth: current[siblingIndex].depth };
@@ -10205,9 +10208,10 @@ function MainApp() {
   }
 
   // Forks the active session into a new tab (resuming it) — as a sibling right
-  // after the current tab, or nested under it when `nest` is set — and focuses the
-  // fork. The backend also emits agent.forked, which refetches the ordered pane
-  // list, so the optimistic append below is just to avoid a flicker.
+  // after the current tab, nested under it when `nest` is set, or joined into a
+  // split directly below it when `splitBelow` is set — and focuses the fork. The
+  // backend also emits agent.forked, which refetches the ordered pane list, so the
+  // optimistic placement below is just to avoid a flicker.
   async function forkPane(
     pane: PaneInfo,
     options: {
@@ -10216,28 +10220,43 @@ function MainApp() {
       prompt?: string;
       anchor?: MessageAnchor;
       btw?: boolean;
+      splitBelow?: boolean;
       titlePrompt?: string;
     },
   ): Promise<boolean> {
     setError(null);
     try {
-      // This surface builds immediate /btw splits optimistically below. Keep the
-      // backend event untagged so the global event handler doesn't build it twice.
+      // This surface builds immediate fork splits optimistically below. Keep the
+      // backend event untagged so the global event handler doesn't build /btw twice.
       const fork = await forkAgent(pane.id, { ...options, btw: false });
-      if (options.btw) {
-        const orderedPanes = placePaneAfterOptimistically(fork, pane.id);
+      if (options.btw || options.splitBelow) {
+        // A split fork is already placed as a sibling by the backend. Immediate
+        // /btw forks start nested and still need the sibling-placement mutation.
+        const orderedPanes = placePaneAfterOptimistically(
+          fork,
+          pane.id,
+          !options.splitBelow,
+        );
         setPanesPreservingRecoveredDismissals(orderedPanes);
         savePaneSplits(
           joinPaneSplit(paneSplitsRef.current, orderedPanes, pane.id, fork.id, {
             insertedPaneId: fork.id,
             source: "command",
-            btwPaneId: fork.id,
+            btwPaneId: options.btw ? fork.id : undefined,
           }),
           orderedPanes,
         );
-        // The branch is already running its launch prompt; leave the calling
-        // terminal focused so /btw never interrupts the work it branched from.
-        setActivePaneId(pane.id);
+        if (options.btw) {
+          // The branch is already running its launch prompt; leave the calling
+          // terminal focused so /btw never interrupts the work it branched from.
+          setActivePaneId(pane.id);
+        } else {
+          setActivePaneId(fork.id);
+          setLastActiveGroupId(fork.groupId);
+          requestAnimationFrame(() => {
+            terminalPaneRefs.current.get(fork.id)?.focus();
+          });
+        }
       } else {
         setPanesPreservingRecoveredDismissals((current) =>
           current.some((existing) => existing.id === fork.id) ? current : [...current, fork],
@@ -13279,6 +13298,22 @@ function MainApp() {
                 >
                   <GitBranch size={13} aria-hidden="true" />
                   <span>Fork session</span>
+                </button>
+                <button className="control-button"
+                  type="button"
+                  role="menuitem"
+                  title="Fork this session into a split pane below this tab"
+                  onClick={() => {
+                    setPaneContextMenu(null);
+                    void forkPane(contextMenuPane, {
+                      nest: false,
+                      useWorktree: false,
+                      splitBelow: true,
+                    });
+                  }}
+                >
+                  <GitBranch size={13} aria-hidden="true" />
+                  <span>Fork session in split</span>
                 </button>
                 <button className="control-button"
                   type="button"
