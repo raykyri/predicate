@@ -1767,6 +1767,8 @@ const PAGE_SCRIPT = `(() => {
   var root = document.getElementById("qmux-answer-root");
   if (!root) return;
   var rail = document.querySelector(".research-followups");
+  var grid = document.querySelector(".research-response-grid");
+  var connectorSvg = null;
 
   // The rendered-text projection: what anchor offsets and quotes refer to.
   var nodes = [];
@@ -1927,9 +1929,15 @@ const PAGE_SCRIPT = `(() => {
     if (linkedEntry && linkedEntry.card) {
       linkedEntry.card.classList.remove("is-anchor-linked");
     }
+    if (linkedEntry && linkedEntry.connector) {
+      linkedEntry.connector.classList.remove("is-anchor-linked");
+    }
     linkedEntry = entry;
     if (entry && entry.card) {
       entry.card.classList.add("is-anchor-linked");
+    }
+    if (entry && entry.connector) {
+      entry.connector.classList.add("is-anchor-linked");
     }
     root.classList.toggle("is-highlight-hovered", Boolean(entry));
   }
@@ -2009,6 +2017,117 @@ const PAGE_SCRIPT = `(() => {
     }
   }
 
+  // Rounded-elbow connector path: out from the passage's line into the
+  // gutter, a vertical run at midX, then into the card at the card's own
+  // height. Degenerates to a straight segment when the pair is level or the
+  // gutter is too tight for the turns. Ported from the app's research
+  // document (connectorElbowPath).
+  function connectorElbowPath(sx, sy, ex, ey, midX) {
+    var dy = ey - sy;
+    if (Math.abs(dy) < 2 || ex - sx < 8) {
+      return "M " + sx + " " + sy + " L " + ex + " " + ey;
+    }
+    var radius = Math.min(10, Math.abs(dy) / 2, midX - sx, ex - midX);
+    var dir = dy > 0 ? 1 : -1;
+    return "M " + sx + " " + sy + " L " + (midX - radius) + " " + sy +
+      " Q " + midX + " " + sy + " " + midX + " " + (sy + dir * radius) +
+      " L " + midX + " " + (ey - dir * radius) +
+      " Q " + midX + " " + ey + " " + (midX + radius) + " " + ey +
+      " L " + ex + " " + ey;
+  }
+
+  function clearConnectors() {
+    for (var ccIndex = 0; ccIndex < resolved.length; ccIndex += 1) {
+      resolved[ccIndex].connector = null;
+    }
+    if (connectorSvg) {
+      connectorSvg.remove();
+      connectorSvg = null;
+    }
+  }
+
+  // Dotted elbow leaders from each passage's first line to its anchored card,
+  // as in the app. Overlapping vertical runs are assigned gutter lanes by
+  // greedy interval colouring (top-to-bottom) and fanned leftward one lane
+  // step per collision, capped per run so it never crowds the passage edge.
+  function drawConnectors() {
+    clearConnectors();
+    if (!grid || !rail || window.innerWidth < 900) return;
+    var gridRect = grid.getBoundingClientRect();
+    var startX = Math.round(root.getBoundingClientRect().right - gridRect.left) + 8;
+    var geometry = [];
+    for (var gcIndex = 0; gcIndex < resolved.length; gcIndex += 1) {
+      var connectorEntry = resolved[gcIndex];
+      if (!connectorEntry.card || !connectorEntry.card.classList.contains("is-anchored")) {
+        continue;
+      }
+      var lineRects = connectorEntry.range.getClientRects();
+      var firstLine = null;
+      for (var flIndex = 0; flIndex < lineRects.length; flIndex += 1) {
+        if (lineRects[flIndex].width > 0) {
+          firstLine = lineRects[flIndex];
+          break;
+        }
+      }
+      if (!firstLine) continue;
+      var cardRect = connectorEntry.card.getBoundingClientRect();
+      geometry.push({
+        entry: connectorEntry,
+        sy: Math.round(firstLine.top + firstLine.height / 2 - gridRect.top),
+        ex: Math.round(cardRect.left - gridRect.left) - 6,
+        ey: Math.round(cardRect.top - gridRect.top) + 17,
+      });
+    }
+    if (geometry.length === 0) return;
+    var laneEnds = [];
+    var laneByIndex = {};
+    geometry
+      .map(function (run, index) {
+        return {
+          index: index,
+          top: Math.min(run.sy, run.ey),
+          bottom: Math.max(run.sy, run.ey),
+        };
+      })
+      .sort(function (a, b) { return a.top - b.top || a.index - b.index; })
+      .forEach(function (run) {
+        var lane = -1;
+        for (var laneIndex = 0; laneIndex < laneEnds.length; laneIndex += 1) {
+          if (laneEnds[laneIndex] <= run.top) {
+            lane = laneIndex;
+            break;
+          }
+        }
+        if (lane === -1) lane = laneEnds.length;
+        laneEnds[lane] = run.bottom;
+        laneByIndex[run.index] = lane;
+      });
+    var svgNs = "http://www.w3.org/2000/svg";
+    connectorSvg = document.createElementNS(svgNs, "svg");
+    connectorSvg.setAttribute("class", "research-anchor-connector");
+    connectorSvg.setAttribute("aria-hidden", "true");
+    for (var pcIndex = 0; pcIndex < geometry.length; pcIndex += 1) {
+      var piece = geometry[pcIndex];
+      var lane = laneByIndex[pcIndex] || 0;
+      var maxOffset = 0.25 * (piece.ex - startX);
+      var offset = Math.min(lane * 14, maxOffset);
+      var midX = Math.round((startX + piece.ex) / 2 - offset);
+      var pair = document.createElementNS(svgNs, "g");
+      pair.setAttribute("class", "research-anchor-connector-pair");
+      var pathEl = document.createElementNS(svgNs, "path");
+      pathEl.setAttribute("d", connectorElbowPath(startX, piece.sy, piece.ex, piece.ey, midX));
+      var dotEl = document.createElementNS(svgNs, "circle");
+      dotEl.setAttribute("cx", String(startX));
+      dotEl.setAttribute("cy", String(piece.sy));
+      dotEl.setAttribute("r", "2");
+      pair.appendChild(pathEl);
+      pair.appendChild(dotEl);
+      connectorSvg.appendChild(pair);
+      piece.entry.connector = pair;
+    }
+    grid.appendChild(connectorSvg);
+  }
+
   function positionCards() {
     if (!rail) return;
     // The narrow layout stacks the rail under the answer; anchored absolute
@@ -2021,6 +2140,7 @@ const PAGE_SCRIPT = `(() => {
       }
       rail.style.minHeight = "";
       if (cardsContainer) cardsContainer.style.marginTop = "";
+      clearConnectors();
       return;
     }
     if (cardsContainer) cardsContainer.style.marginTop = "";
@@ -2070,6 +2190,7 @@ const PAGE_SCRIPT = `(() => {
         }
       }
     }
+    drawConnectors();
   }
 
   if (resolved.length > 0) {
@@ -2600,6 +2721,7 @@ const PAGE_CSS = `
 :root {
   color-scheme:dark;
   --workspace-bg:#151719;
+  --research-anchor-connector:#78827f;
   --chrome-header-bg:#14171a;
   --content-card-bg:#1d2224;
   --field-bg:#111315;
@@ -2656,7 +2778,7 @@ a { color:inherit; text-decoration:none; }
 /* Document scroller and content column widths, matching the app. */
 .research-document-scroll { flex:1; padding:44px clamp(24px,5vw,72px) 40px; }
 .research-document-content { width:min(100%,1160px); min-width:0; margin:0 auto; }
-.research-response-grid { display:grid; grid-template-columns:minmax(0,640px) minmax(220px,260px); align-items:start; gap:clamp(28px,4vw,52px); min-width:0; max-width:100%; }
+.research-response-grid { position:relative; display:grid; grid-template-columns:minmax(0,640px) minmax(220px,260px); align-items:start; gap:clamp(28px,4vw,52px); min-width:0; max-width:100%; }
 .research-response-grid.is-single { grid-template-columns:minmax(0,640px); }
 /* Without a rail (published research answers), the whole document narrows to
    the answer column and centers, like the transcript view. */
@@ -2729,6 +2851,13 @@ a { color:inherit; text-decoration:none; }
 .research-followup-card.is-anchored { position:absolute; z-index:1; right:2px; left:0; padding:9px 11px; border:1px solid var(--surface-border-subtle); border-radius:10px; background:var(--content-card-bg); }
 .research-followup-card.is-anchored:hover { z-index:4; border-color:rgba(255,255,255,0.1); }
 .research-followup-card.is-anchored.is-anchor-linked { z-index:4; border-color:rgba(255,255,255,0.1); }
+/* Dotted elbow leaders from each passage to its follow-up card, drawn into
+   this overlay by the page script; mirrors the app's research document. */
+.research-anchor-connector { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+.research-anchor-connector-pair { opacity:0.56; transition:opacity 120ms ease; }
+.research-anchor-connector-pair.is-anchor-linked { opacity:1; }
+.research-anchor-connector path { fill:none; stroke:var(--research-anchor-connector); stroke-width:1.4; stroke-dasharray:2 5; stroke-linecap:round; }
+.research-anchor-connector circle { fill:var(--research-anchor-connector); }
 .research-followup-card.is-anchor-linked > strong { color:#f2f4f1; }
 .research-followup-card.is-anchor-linked .research-followup-preview { color:#7d8580; }
 .research-followup-quote { display:-webkit-box; min-width:0; overflow:hidden; margin-bottom:5px; padding-left:8px; border-left:2px solid var(--accent-color); color:#9aa39e; font-size:13px; font-style:italic; line-height:1.4; -webkit-box-orient:vertical; -webkit-line-clamp:2; }
@@ -2828,6 +2957,8 @@ a:focus-visible, button:focus-visible, .textarea:focus-visible, summary:focus-vi
 .error-page p { margin:0; color:var(--text-muted); }
 
 @media (max-width:900px) {
+  /* The rail stacks under the answer; there is no gutter to draw into. */
+  .research-anchor-connector { display:none; }
   .research-document-scroll { padding-inline:24px; }
   .research-response-grid { grid-template-columns:minmax(0,1fr); }
   .research-followups { padding:28px 0 0; border-top:1px solid var(--surface-border-subtle); }
@@ -2844,7 +2975,8 @@ a:focus-visible, button:focus-visible, .textarea:focus-visible, summary:focus-vi
 @media print {
   :root { color-scheme:light; }
   body { background:#ffffff; color:#1a1a1a; }
-  .doc-header, .research-followups, .proposal-composer, .github-sign-in,
+  .doc-header, .research-followups, .research-anchor-connector,
+  .proposal-composer, .github-sign-in,
   .sign-out-form, .page-footer, .research-answer-copy,
   .research-highlight-action { display:none !important; }
   .research-response-grid { display:block; }
