@@ -1,4 +1,6 @@
 import AppKit
+import CoreGraphics
+import CoreText
 import Foundation
 import GhosttyTerminal
 import WebKit
@@ -21,6 +23,28 @@ private func onTerminalMain<T: Sendable>(
             operation()
         }
     }
+}
+
+@_cdecl("qmux_native_terminal_register_font")
+public func qmuxNativeTerminalRegisterFont(
+    _ bytes: UnsafePointer<UInt8>?,
+    _ length: Int
+) -> Int32 {
+    guard let bytes, length > 0 else { return 0 }
+    let data = Data(bytes: bytes, count: length) as CFData
+    guard let provider = CGDataProvider(data: data),
+          let font = CGFont(provider)
+    else { return 0 }
+
+    var registrationError: Unmanaged<CFError>?
+    if CTFontManagerRegisterGraphicsFont(font, &registrationError) {
+        return 1
+    }
+
+    // A locally installed copy or a second initialization makes registration
+    // idempotently successful: the requested family is already available.
+    guard let error = registrationError?.takeRetainedValue() else { return 0 }
+    return CFErrorGetCode(error) == CTFontManagerError.alreadyRegistered.rawValue ? 1 : 0
 }
 
 @_cdecl("qmux_native_terminal_initialize")

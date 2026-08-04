@@ -111,15 +111,23 @@ export async function detectAvailableBodyFonts(): Promise<BodyFontOption[]> {
 const MONO_FALLBACK =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 
-// The small, curated list shown in the settings dropdown. JetBrains Mono is the
-// only bundled face; the rest are common system monospace fonts. Adding an entry
-// here is all it takes to grow the menu.
+// The small, curated list shown in the settings dropdown. JetBrains Mono and
+// Ioskeley Mono are bundled; the rest are common system monospace fonts.
 export const FONT_OPTIONS: FontOption[] = [
   {
     id: "jetbrains-mono",
     label: "JetBrains Mono",
     stack: TERMINAL_FONT_FAMILY,
     nativeFamily: "JetBrains Mono",
+  },
+  {
+    id: "ioskeley-mono",
+    label: "Ioskeley Mono",
+    stack: `"Ioskeley Mono", ${MONO_FALLBACK}`,
+    // Ghostty recommends the Term build for correctly constrained arrows,
+    // box-drawing glyphs, and ligatures. Its family name intentionally differs
+    // from the matching webfont used by CSS surfaces.
+    nativeFamily: "Ioskeley Mono Term",
   },
   {
     id: "sf-mono",

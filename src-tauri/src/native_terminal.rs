@@ -364,8 +364,28 @@ mod imp {
     use std::ffi::{CString, c_char, c_void};
     use std::sync::Mutex;
 
+    const IOSKELEY_MONO_FONTS: &[(&str, &[u8])] = &[
+        (
+            "regular",
+            include_bytes!("../../src/assets/fonts/IoskeleyMonoTerm-Regular.ttf"),
+        ),
+        (
+            "bold",
+            include_bytes!("../../src/assets/fonts/IoskeleyMonoTerm-Bold.ttf"),
+        ),
+        (
+            "italic",
+            include_bytes!("../../src/assets/fonts/IoskeleyMonoTerm-Italic.ttf"),
+        ),
+        (
+            "bold italic",
+            include_bytes!("../../src/assets/fonts/IoskeleyMonoTerm-BoldItalic.ttf"),
+        ),
+    ];
+
     unsafe extern "C" {
         fn qmux_native_terminal_bridge_available() -> i32;
+        fn qmux_native_terminal_register_font(bytes: *const u8, bytes_len: usize) -> i32;
         fn qmux_native_terminal_should_claim_web_app_shortcut(
             has_terminal_keyboard_owner: i32,
             responder_state: i32,
@@ -524,6 +544,7 @@ mod imp {
         if native_view.is_null() {
             return Err("Tauri returned a null native content view".to_string());
         }
+        register_ioskeley_mono()?;
         // SAFETY: Tauri owns this NSView for the duration of the application and
         // Swift retains only a weak reference to its window plus a child view.
         if unsafe { qmux_native_terminal_initialize(native_view) } == 1 {
@@ -535,6 +556,20 @@ mod imp {
         } else {
             Err("failed to attach the native terminal host beneath WKWebView".to_string())
         }
+    }
+
+    pub(super) fn register_ioskeley_mono() -> Result<(), String> {
+        for (style, font) in IOSKELEY_MONO_FONTS {
+            // SAFETY: each buffer is compiled into the executable and therefore
+            // remains valid for the process lifetime. Swift copies, parses, and
+            // registers the Core Graphics font synchronously.
+            if unsafe { qmux_native_terminal_register_font(font.as_ptr(), font.len()) } != 1 {
+                return Err(format!(
+                    "failed to register bundled Ioskeley Mono Term {style} font"
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub fn create_host_managed(
@@ -1513,6 +1548,11 @@ mod tests {
     #[test]
     fn swift_ghostty_bridge_is_linked() {
         assert!(super::available());
+    }
+
+    #[test]
+    fn bundled_ioskeley_mono_faces_register_with_core_text() {
+        super::imp::register_ioskeley_mono().unwrap();
     }
 
     #[test]

@@ -48,6 +48,7 @@
       "../qmux-claude-plugin/": "qmux-claude-plugin",
       "../qmux-opencode-plugin/plugins/qmux-notify.js": "qmux-opencode-plugin/plugins/qmux-notify.js",
       "../src/assets/fonts/DMSans-OFL.txt": "licenses/DMSans-OFL.txt",
+      "../src/assets/fonts/IoskeleyMono-OFL.txt": "licenses/IoskeleyMono-OFL.txt",
       "../src/assets/fonts/ValleySans-OFL.txt": "licenses/ValleySans-OFL.txt"
     },
     "icon": [

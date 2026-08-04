@@ -30,6 +30,40 @@
   font-display: block;
 }
 
+/* Ioskeley Mono v2.0.0, bundled under the SIL OFL 1.1. The native Ghostty
+   surface uses the corresponding Term TTF faces registered by the host. */
+@font-face {
+  font-family: "Ioskeley Mono";
+  src: url("../assets/fonts/IoskeleyMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Ioskeley Mono";
+  src: url("../assets/fonts/IoskeleyMono-Bold.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 700;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Ioskeley Mono";
+  src: url("../assets/fonts/IoskeleyMono-Italic.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 400;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "Ioskeley Mono";
+  src: url("../assets/fonts/IoskeleyMono-BoldItalic.woff2") format("woff2");
+  font-style: italic;
+  font-weight: 700;
+  font-display: block;
+}
+
 /* DM Sans 100–1000 variable webfonts, bundled under the SIL OFL 1.1.
    Source: @fontsource-variable/dm-sans@5.2.8 */
 @font-face {
