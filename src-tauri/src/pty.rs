@@ -8,7 +8,7 @@ use crate::state::{
 use crate::turn_queue::release_waiters_for_agent;
 use crate::workspace::{
     CreateGroupRequest, WorkspaceScope, capture_agent_worktree_removal, create_group,
-    remove_captured_worktree,
+    group_recoverable_dir, remove_captured_worktree,
 };
 use portable_pty::PtySize;
 use portable_pty::{CommandBuilder, native_pty_system};
@@ -18,8 +18,8 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -158,6 +158,108 @@ impl PaneActivity {
     }
 }
 
+/// A file the spawn backend must write on the host that runs the command,
+/// before the command starts: generated shell rc scripts, per-spawn hook
+/// settings. Declarative so the backend owns where and how files land — the
+/// local backend writes them in `materialize_support_files`; a remote backend
+/// must ship them to its host instead.
+#[derive(Debug)]
+pub struct SupportFile {
+    /// Owner-only directory subtree the file lives under. Every component from
+    /// here down to the file's parent is created and restricted to 0o700, so
+    /// generated files are never reachable by other accounts even under a
+    /// shared world-writable location like /tmp.
+    pub root: PathBuf,
+    /// Absolute path of the file itself; must sit below `root`.
+    pub path: PathBuf,
+    pub contents: String,
+    /// Mode bits applied when the file is created.
+    pub mode: u32,
+    /// When true the write must create the file (O_CREAT|O_EXCL) and fail if
+    /// the path already exists — for nonce-named files where a collision means
+    /// a planted file that must never be followed or truncated.
+    pub create_new: bool,
+    /// Filename prefix to prune from the file's parent before writing, keeping
+    /// per-pane scratch bounded to one live file across spawn/resume cycles.
+    pub prune_prefix: Option<String>,
+}
+
+/// Command arguments and environment to use when support files are optional
+/// and the launch backend cannot materialize them. Shell integration uses this
+/// to preserve a usable plain shell when its generated rc file cannot be
+/// written; launches whose support files are required leave this as `None`.
+#[derive(Debug)]
+pub struct SupportFileFallback {
+    pub args: Vec<String>,
+    pub envs: Vec<(String, String)>,
+    /// Optional environment variable that receives the materialization error.
+    pub error_env_key: Option<String>,
+}
+
+/// What should run for a pane — program, arguments, directory, environment,
+/// and the support files the command depends on — independent of where it
+/// runs. Adapters and the shell path build plans; `plan_to_spec` turns a plan
+/// into an executable spec for the pane's group.
+#[derive(Debug)]
+pub struct CommandPlan {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub envs: Vec<(String, String)>,
+    pub support_files: Vec<SupportFile>,
+    pub support_file_fallback: Option<SupportFileFallback>,
+}
+
+/// Pane bookkeeping that accompanies a `CommandPlan` into `plan_to_spec`.
+#[derive(Debug)]
+pub struct PaneMeta {
+    pub pane_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub group_id: String,
+    pub kind: PaneKind,
+    pub title: String,
+    pub last_osc_title: Option<String>,
+    pub initial_size: Option<InitialPaneSize>,
+    pub recovered: bool,
+}
+
+/// The single decision point between "what should run for this pane" and "how
+/// it is executed". The only launch target today is the local machine, so a
+/// plan maps 1:1 onto a `PtySpawnSpec`; a remote group's target would instead
+/// wrap the plan in its transport (ssh + multiplexer) here. Until that lands,
+/// remote groups are rejected outright so a remote path can never fall through
+/// to a local spawn.
+pub fn plan_to_spec(
+    state: &AppState,
+    meta: PaneMeta,
+    plan: CommandPlan,
+) -> Result<PtySpawnSpec, String> {
+    let remote = state.group(&meta.group_id)?.and_then(|group| group.remote);
+    if let Some(remote) = remote {
+        return Err(format!(
+            "group {} is bound to remote '{}'; spawning panes on a remote host is not implemented yet",
+            meta.group_id, remote.label
+        ));
+    }
+    Ok(PtySpawnSpec {
+        pane_id: meta.pane_id,
+        agent_id: meta.agent_id,
+        group_id: meta.group_id,
+        kind: meta.kind,
+        title: meta.title,
+        last_osc_title: meta.last_osc_title,
+        program: plan.program,
+        args: plan.args,
+        cwd: plan.cwd,
+        envs: plan.envs,
+        support_files: plan.support_files,
+        support_file_fallback: plan.support_file_fallback,
+        initial_size: meta.initial_size,
+        recovered: meta.recovered,
+    })
+}
+
+#[derive(Debug)]
 pub struct PtySpawnSpec {
     pub pane_id: Option<String>,
     pub agent_id: Option<String>,
@@ -169,6 +271,8 @@ pub struct PtySpawnSpec {
     pub args: Vec<String>,
     pub cwd: PathBuf,
     pub envs: Vec<(String, String)>,
+    pub support_files: Vec<SupportFile>,
+    pub support_file_fallback: Option<SupportFileFallback>,
     pub initial_size: Option<InitialPaneSize>,
     pub recovered: bool,
 }
@@ -233,6 +337,7 @@ pub fn spawn_shell_pane(
                 after_group_id: None,
                 base_repo: None,
                 base_ref: None,
+                remote: None,
             },
         )?,
     };
@@ -256,7 +361,7 @@ pub fn spawn_shell_pane(
         })
         .and_then(|id| state.inheritable_shell_cwd(id))
         .or_else(|| state.group_spawn_cwd(&group.id))
-        .or_else(|| recoverable_dir(&group.dir))
+        .or_else(|| group_recoverable_dir(group.remote.as_ref(), &group.dir))
         .unwrap_or_else(|| state.default_open_dir());
     let pane_id = state.next_id("pane");
     spawn_pty(
@@ -293,7 +398,7 @@ pub fn spawn_shell_agent_command_pane(
     agent_args: &[String],
     prepared_agent_id: &str,
 ) -> Result<PaneInfo, String> {
-    let qmux_cli = env::current_exe()
+    let qmux_cli = crate::launch_path::qmux_cli_path()
         .map_err(|err| format!("failed to resolve qmux executable for fork launch: {err}"))?;
     let startup_command =
         shell_agent_exec_command(&qmux_cli, adapter_id, agent_args, prepared_agent_id);
@@ -342,23 +447,26 @@ pub fn respawn_shell_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInfo,
     // linger and fire on a later relaunch of the same pane id; the resume only proceeds
     // when that original dir still exists.
     let resume = state.take_shell_agent_resume(&pane.id);
-    let resume_dir = resume
-        .as_ref()
-        .and_then(|resume| recoverable_dir(&resume.cwd));
     // A recovered shell whose last dir was deleted between sessions reopens near the
     // group's other work (its most-recently-active shell pane), else the group's
     // creation-time seed dir, else the default dir / home rather than the bare `/` a
     // Finder/Dock launch inherits. During startup recovery siblings may not be
     // respawned yet, in which case group_spawn_cwd yields None and the seed/default
     // apply.
-    let group_seed_dir = state
-        .group(&pane.group_id)
-        .ok()
-        .flatten()
-        .and_then(|group| recoverable_dir(&group.dir));
+    let group = state.group(&pane.group_id).ok().flatten();
+    let group_remote = group.as_ref().and_then(|group| group.remote.as_ref());
+    // Every dir probe below is group-aware: a remote group's paths live on its
+    // host, so a local stat would discard the resume dir (dropping the resume
+    // command with it) and then discard the pane's own cwd.
+    let resume_dir = resume
+        .as_ref()
+        .and_then(|resume| group_recoverable_dir(group_remote, &resume.cwd));
+    let group_seed_dir = group
+        .as_ref()
+        .and_then(|group| group_recoverable_dir(group.remote.as_ref(), &group.dir));
     let cwd = resume_dir
         .clone()
-        .or_else(|| recoverable_dir(&pane.cwd))
+        .or_else(|| group_recoverable_dir(group_remote, &pane.cwd))
         .or_else(|| state.group_spawn_cwd(&pane.group_id))
         .or(group_seed_dir)
         .unwrap_or_else(|| state.default_open_dir());
@@ -457,13 +565,19 @@ fn shell_spawn_spec(
     startup_command: Option<String>,
 ) -> Result<PtySpawnSpec, String> {
     let shell = pane_shell();
+    let qmux_cli = crate::launch_path::qmux_cli_path()
+        .map_err(|err| format!("failed to resolve qmux executable for shell integration: {err}"))?;
     let mut envs = shell_pane_envs(state, &pane_id)?;
+    let plain_shell_envs = envs.clone();
     let mut args = Vec::new();
+    let mut support_files = Vec::new();
+    let mut support_file_fallback = None;
 
     let shell_commands = adapter_registry(state.config()).shell_commands();
     let login_shell = state.use_login_shell();
     match agent_shell_function_injection(
         &shell,
+        &qmux_cli,
         &pane_id,
         &shell_commands,
         startup_command.as_deref(),
@@ -472,7 +586,17 @@ fn shell_spawn_spec(
         Ok(Some(injection)) => {
             args = injection.args;
             envs.extend(injection.envs);
+            support_files = injection.support_files;
             envs.push(("QMUX_AGENT_FUNCTIONS".to_string(), "1".to_string()));
+            if startup_command.is_none() || recovered {
+                let mut fallback_envs = plain_shell_envs;
+                fallback_envs.push(("QMUX_AGENT_FUNCTIONS".to_string(), "failed".to_string()));
+                support_file_fallback = Some(SupportFileFallback {
+                    args: Vec::new(),
+                    envs: fallback_envs,
+                    error_env_key: Some("QMUX_AGENT_FUNCTIONS_ERROR".to_string()),
+                });
+            }
         }
         // A plain shell degrades gracefully when integration can't be set up —
         // the pane still works, only the wrapper functions are missing. A
@@ -503,20 +627,27 @@ fn shell_spawn_spec(
         }
     }
 
-    Ok(PtySpawnSpec {
-        pane_id: Some(pane_id),
-        agent_id: None,
-        group_id,
-        kind: PaneKind::Shell,
-        title: "Shell".to_string(),
-        last_osc_title: None,
-        program: shell,
-        args,
-        cwd,
-        envs,
-        initial_size,
-        recovered,
-    })
+    plan_to_spec(
+        state,
+        PaneMeta {
+            pane_id: Some(pane_id),
+            agent_id: None,
+            group_id,
+            kind: PaneKind::Shell,
+            title: "Shell".to_string(),
+            last_osc_title: None,
+            initial_size,
+            recovered,
+        },
+        CommandPlan {
+            program: shell,
+            args,
+            cwd,
+            envs,
+            support_files,
+            support_file_fallback,
+        },
+    )
 }
 
 /// Returns the path only when it still resolves to a directory, so recovery can
@@ -539,11 +670,29 @@ pub fn qmux_pane_envs(state: &AppState, pane_id: &str) -> Result<Vec<(String, St
             state.config().workspace_root.display().to_string(),
         ),
     ];
-    // Expose the qmux executable so in-pane tooling (e.g. the fork skill) can call it
-    // without depending on `qmux` being on PATH. Best-effort: omitted if unresolved.
-    if let Ok(exe) = std::env::current_exe() {
-        envs.push(("QMUX_CLI".to_string(), exe.display().to_string()));
-    }
+    // Expose the qmux executable so in-pane tooling (hooks, agent wrappers, the
+    // fork skill) can call back without depending on `qmux` being on PATH. The
+    // one place any pane's QMUX_CLI is set, and required rather than
+    // best-effort: every launch path already fails without a resolvable CLI, so
+    // a pane that started with the variable missing would only fail later and
+    // less legibly.
+    envs.push((
+        "QMUX_CLI".to_string(),
+        crate::launch_path::qmux_cli_path()?.display().to_string(),
+    ));
+    Ok(envs)
+}
+
+/// Envs for an agent pane: the standard pane wiring plus the agent binding.
+/// The one place the `QMUX_AGENT_ID` pairing is added, so no launch path can
+/// forget it or spell it differently.
+pub fn agent_pane_envs(
+    state: &AppState,
+    pane_id: &str,
+    agent_id: &str,
+) -> Result<Vec<(String, String)>, String> {
+    let mut envs = qmux_pane_envs(state, pane_id)?;
+    envs.push(("QMUX_AGENT_ID".to_string(), agent_id.to_string()));
     Ok(envs)
 }
 
@@ -556,6 +705,7 @@ fn shell_pane_envs(state: &AppState, pane_id: &str) -> Result<Vec<(String, Strin
 struct ShellFunctionInjection {
     args: Vec<String>,
     envs: Vec<(String, String)>,
+    support_files: Vec<SupportFile>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -565,47 +715,17 @@ enum ShellKind {
     Unsupported,
 }
 
+/// Shared parent for all per-pane shell integration scratch directories. The
+/// `SupportFile` root, so materialization keeps the whole subtree owner-only.
+fn shell_integration_root() -> PathBuf {
+    env::temp_dir().join("qmux-shell-init")
+}
+
 /// Per-pane scratch directory holding generated shell rc files. The location is
 /// derived purely from the pane id so teardown can find it without consulting
 /// pane state.
 fn shell_integration_dir(pane_id: &str) -> PathBuf {
-    env::temp_dir().join("qmux-shell-init").join(pane_id)
-}
-
-/// Creates the per-pane shell integration directory restricted to the owning
-/// user. The shared parent is locked to `0o700` first so other local accounts
-/// cannot pre-create (or symlink) a pane's subdirectory and redirect the rc
-/// files we are about to write; the per-pane dir is then created `0o700` too so
-/// its generated scripts are never world-readable in a shared /tmp.
-fn create_shell_integration_dir(pane_id: &str) -> Result<PathBuf, String> {
-    let parent = env::temp_dir().join("qmux-shell-init");
-    fs::create_dir_all(&parent).map_err(|err| {
-        format!(
-            "failed to create shell integration root {}: {err}",
-            parent.display()
-        )
-    })?;
-    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).map_err(|err| {
-        format!(
-            "failed to restrict shell integration root {}: {err}",
-            parent.display()
-        )
-    })?;
-
-    let root = parent.join(pane_id);
-    fs::create_dir_all(&root).map_err(|err| {
-        format!(
-            "failed to create shell integration dir {}: {err}",
-            root.display()
-        )
-    })?;
-    fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).map_err(|err| {
-        format!(
-            "failed to restrict shell integration dir {}: {err}",
-            root.display()
-        )
-    })?;
-    Ok(root)
+    shell_integration_root().join(pane_id)
 }
 
 /// Removes a pane's shell integration scratch directory on teardown. Best
@@ -626,8 +746,13 @@ fn remove_shell_integration_dir(pane_id: &str) {
     }
 }
 
+/// Plans the shell-integration wrapper for a pane: the extra shell arguments,
+/// environment, and generated rc files. Purely declarative — nothing is
+/// written here; the rc files come back as `SupportFile`s for the spawn
+/// backend to materialize on whichever host runs the shell.
 fn agent_shell_function_injection(
     shell: &str,
+    qmux_cli: &Path,
     pane_id: &str,
     shell_commands: &[ShellCommandIntegration],
     startup_command: Option<&str>,
@@ -638,30 +763,20 @@ fn agent_shell_function_injection(
         return Ok(None);
     }
 
-    let qmux_cli = env::current_exe()
-        .map_err(|err| format!("failed to resolve qmux executable for shell integration: {err}"))?;
-    let root = create_shell_integration_dir(pane_id)?;
+    let root = shell_integration_dir(pane_id);
 
     match shell_kind {
         ShellKind::Zsh => {
             let zdotdir = root.join("zsh");
-            fs::create_dir_all(&zdotdir).map_err(|err| {
-                format!(
-                    "failed to create zsh integration dir {}: {err}",
-                    zdotdir.display()
-                )
-            })?;
             let rcfile = zdotdir.join(".zshrc");
-            fs::write(
-                &rcfile,
-                zsh_init_script(&qmux_cli, shell_commands, startup_command, login_shell),
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to write zsh integration file {}: {err}",
-                    rcfile.display()
-                )
-            })?;
+            let support_files = vec![SupportFile {
+                root: shell_integration_root(),
+                path: rcfile,
+                contents: zsh_init_script(qmux_cli, shell_commands, startup_command, login_shell),
+                mode: 0o644,
+                create_new: false,
+                prune_prefix: None,
+            }];
             let mut envs = vec![("ZDOTDIR".to_string(), zdotdir.display().to_string())];
             if let Some(zdotdir) = original_zdotdir() {
                 envs.push(("QMUX_ORIGINAL_ZDOTDIR".to_string(), zdotdir));
@@ -669,20 +784,19 @@ fn agent_shell_function_injection(
             Ok(Some(ShellFunctionInjection {
                 args: vec!["-i".to_string()],
                 envs,
+                support_files,
             }))
         }
         ShellKind::Bash => {
             let rcfile = root.join("bashrc");
-            fs::write(
-                &rcfile,
-                bash_init_script(&qmux_cli, shell_commands, startup_command, login_shell),
-            )
-            .map_err(|err| {
-                format!(
-                    "failed to write bash integration file {}: {err}",
-                    rcfile.display()
-                )
-            })?;
+            let support_files = vec![SupportFile {
+                root: shell_integration_root(),
+                path: rcfile.clone(),
+                contents: bash_init_script(qmux_cli, shell_commands, startup_command, login_shell),
+                mode: 0o644,
+                create_new: false,
+                prune_prefix: None,
+            }];
             let mut envs = Vec::new();
             if let Some(bashrc) = original_bashrc() {
                 envs.push(("QMUX_ORIGINAL_BASHRC".to_string(), bashrc));
@@ -694,6 +808,7 @@ fn agent_shell_function_injection(
                     "-i".to_string(),
                 ],
                 envs,
+                support_files,
             }))
         }
         ShellKind::Unsupported => Ok(None),
@@ -945,11 +1060,131 @@ fn base_child_envs() -> Vec<(String, String)> {
     envs
 }
 
+/// Creates `dir` if it is missing and restricts it to the owning user. Callers
+/// walk a chain top-down with this so no level is ever reachable by another
+/// account, even for the instant between its creation and its `chmod`.
+fn create_owner_only_dir(dir: &Path) -> Result<(), String> {
+    match fs::create_dir(dir) {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::AlreadyExists => {}
+        Err(err) => return Err(format!("failed to create {}: {err}", dir.display())),
+    }
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to restrict {}: {err}", dir.display()))
+}
+
+/// Writes a spec's support files on the local filesystem: the local half of the
+/// `SupportFile` contract. Carries the pruning and O_EXCL semantics of the
+/// inline writers this replaced, and tightens their directory handling: every
+/// level from the shared root down to the file's parent is owner-only from the
+/// moment it exists, and a descriptor whose path does not genuinely resolve
+/// below its declared root is refused rather than written.
+pub(crate) fn materialize_support_files(files: &[SupportFile]) -> Result<(), String> {
+    for file in files {
+        let parent = file
+            .path
+            .parent()
+            .ok_or_else(|| format!("support file {} has no parent", file.path.display()))?;
+        let relative = file.path.strip_prefix(&file.root).map_err(|_| {
+            format!(
+                "support file {} escapes its root {}",
+                file.path.display(),
+                file.root.display()
+            )
+        })?;
+        if relative.as_os_str().is_empty() {
+            return Err(format!(
+                "support file {} is its own root",
+                file.path.display()
+            ));
+        }
+        // `strip_prefix` is purely lexical: it happily hands back a relative
+        // path that starts with `..`, which would satisfy the containment check
+        // above while resolving outside the root. Require plain names so the
+        // path really does sit below the root it claims.
+        if relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(format!(
+                "support file {} escapes its root {}",
+                file.path.display(),
+                file.root.display()
+            ));
+        }
+        // Create the chain one component at a time, restricting each level
+        // before the next is created inside it, so another local account can
+        // never pre-create (or traverse into) a directory we are about to write
+        // generated files under. Creating the whole chain up front and only then
+        // walking down would leave the intermediate levels briefly
+        // world-traversable under a shared location like /tmp.
+        if let Some(root_parent) = file.root.parent() {
+            fs::create_dir_all(root_parent)
+                .map_err(|err| format!("failed to create {}: {err}", root_parent.display()))?;
+        }
+        create_owner_only_dir(&file.root)?;
+        let mut dir = file.root.clone();
+        if let Some(relative_parent) = relative.parent() {
+            for component in relative_parent.components() {
+                dir.push(component);
+                create_owner_only_dir(&dir)?;
+            }
+        }
+        if let Some(prefix) = &file.prune_prefix
+            && let Ok(entries) = fs::read_dir(parent)
+        {
+            for entry in entries.flatten() {
+                if entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(prefix.as_str()))
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
+        let mut options = fs::OpenOptions::new();
+        options.write(true).mode(file.mode);
+        if file.create_new {
+            options.create_new(true);
+        } else {
+            options.create(true).truncate(true);
+        }
+        let mut handle = options
+            .open(&file.path)
+            .map_err(|err| format!("failed to create {}: {err}", file.path.display()))?;
+        handle
+            .write_all(file.contents.as_bytes())
+            .map_err(|err| format!("failed to write {}: {err}", file.path.display()))?;
+    }
+    Ok(())
+}
+
+/// Materializes a local spec's support files, applying its declared plain-command
+/// fallback when those files are optional. Required support files still fail the
+/// spawn, while the fallback receives the original error for diagnostics.
+fn materialize_support_files_or_fallback(spec: &mut PtySpawnSpec) -> Result<(), String> {
+    let Err(err) = materialize_support_files(&spec.support_files) else {
+        return Ok(());
+    };
+    let Some(fallback) = spec.support_file_fallback.take() else {
+        return Err(err);
+    };
+    spec.args = fallback.args;
+    spec.envs = fallback.envs;
+    if let Some(key) = fallback.error_env_key {
+        spec.envs.push((key, err));
+    }
+    spec.support_files.clear();
+    Ok(())
+}
+
 fn spawn_portable_pty(
     state: &AppState,
-    spec: PtySpawnSpec,
+    mut spec: PtySpawnSpec,
     native_surface: bool,
 ) -> Result<PaneInfo, String> {
+    materialize_support_files_or_fallback(&mut spec)?;
     let pane_id = spec.pane_id.unwrap_or_else(|| state.next_id("pane"));
     let initial_size = resolved_initial_size(spec.initial_size);
     let pty_system = native_pty_system();
@@ -2630,6 +2865,339 @@ mod tests {
             .find_map(|(env_key, value)| (env_key == key).then(|| value.clone()))
     }
 
+    fn test_remote() -> crate::workspace::RemoteRef {
+        crate::workspace::RemoteRef {
+            id: "remote-1".to_string(),
+            label: "workbox".to_string(),
+            host: "workbox".to_string(),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+        }
+    }
+
+    // Characterization: pins the spawn plan the shell path produces today, so
+    // the planner refactor (and any future launch-target work) can't silently
+    // change what actually executes. The recovery respawn shares this exact
+    // builder, so parity between fresh and recovered specs is asserted too.
+    #[test]
+    fn shell_spawn_spec_pins_program_envs_and_recovery_parity() {
+        let workspace = temp_workspace();
+        let state = test_state_with_workspace(workspace.clone());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: None,
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+        )
+        .unwrap();
+
+        let spec = shell_spawn_spec(
+            &state,
+            "pane-spec".to_string(),
+            group.id.clone(),
+            std::env::temp_dir(),
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(spec.program, pane_shell());
+        assert_eq!(spec.cwd, std::env::temp_dir());
+        assert_eq!(env_value(&spec.envs, "QMUX_PANE_ID").unwrap(), "pane-spec");
+        assert!(env_value(&spec.envs, "QMUX_SOCK").is_some());
+        assert!(env_value(&spec.envs, "QMUX_TOKEN").is_some());
+        assert_eq!(
+            env_value(&spec.envs, "QMUX_WORKSPACE_ROOT").unwrap(),
+            workspace.display().to_string()
+        );
+        assert_eq!(
+            env_value(&spec.envs, "QMUX_SHELL_INTEGRATION").unwrap(),
+            "1"
+        );
+        // Integration availability depends on the environment's shell, but the
+        // plan must always record the outcome one way or the other.
+        match shell_kind(&spec.program) {
+            ShellKind::Zsh | ShellKind::Bash => {
+                assert_eq!(env_value(&spec.envs, "QMUX_AGENT_FUNCTIONS").unwrap(), "1");
+                assert_eq!(spec.support_files.len(), 1);
+                assert!(spec.support_file_fallback.is_some());
+                assert!(
+                    spec.support_files[0]
+                        .path
+                        .starts_with(shell_integration_root())
+                );
+            }
+            ShellKind::Unsupported => {
+                assert_eq!(
+                    env_value(&spec.envs, "QMUX_AGENT_FUNCTIONS").unwrap(),
+                    "unsupported"
+                );
+                assert!(spec.support_files.is_empty());
+                assert!(spec.support_file_fallback.is_none());
+            }
+        }
+
+        // Same pane id, recovered: identical command plan.
+        let recovered = shell_spawn_spec(
+            &state,
+            "pane-spec".to_string(),
+            group.id.clone(),
+            std::env::temp_dir(),
+            None,
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(recovered.program, spec.program);
+        assert_eq!(recovered.args, spec.args);
+        assert_eq!(
+            recovered.support_file_fallback.is_some(),
+            spec.support_file_fallback.is_some()
+        );
+        assert!(recovered.recovered);
+    }
+
+    #[test]
+    fn fresh_shell_agent_startup_keeps_support_files_required() {
+        let state = test_state_with_workspace(temp_workspace());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: None,
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+        )
+        .unwrap();
+        let planned = shell_spawn_spec(
+            &state,
+            "pane-required".to_string(),
+            group.id,
+            std::env::temp_dir(),
+            None,
+            false,
+            Some("qmux-agent-startup".to_string()),
+        );
+
+        match shell_kind(&pane_shell()) {
+            ShellKind::Zsh | ShellKind::Bash => {
+                let spec = planned.unwrap();
+                assert!(!spec.support_files.is_empty());
+                assert!(spec.support_file_fallback.is_none());
+            }
+            ShellKind::Unsupported => {
+                assert!(planned.unwrap_err().contains("require zsh or bash"));
+            }
+        }
+    }
+
+    #[test]
+    fn zsh_injection_plans_rc_support_file_and_zdotdir() {
+        let injection = agent_shell_function_injection(
+            "/bin/zsh",
+            Path::new("/Applications/qmux.app/qmux"),
+            "pane-z",
+            &[],
+            None,
+            false,
+        )
+        .unwrap()
+        .expect("zsh is a supported shell");
+        assert_eq!(injection.args, vec!["-i".to_string()]);
+        let zdotdir = env_value(&injection.envs, "ZDOTDIR").unwrap();
+        assert!(
+            zdotdir.ends_with("pane-z/zsh"),
+            "unexpected ZDOTDIR: {zdotdir}"
+        );
+        assert_eq!(injection.support_files.len(), 1);
+        let file = &injection.support_files[0];
+        assert_eq!(file.path, PathBuf::from(&zdotdir).join(".zshrc"));
+        assert_eq!(file.root, shell_integration_root());
+        assert_eq!(file.mode, 0o644);
+        assert!(!file.create_new);
+        assert!(file.prune_prefix.is_none());
+        assert!(file.contents.contains("Generated by qmux"));
+    }
+
+    #[test]
+    fn bash_injection_plans_rcfile_argument_and_support_file() {
+        let injection = agent_shell_function_injection(
+            "/bin/bash",
+            Path::new("/Applications/qmux.app/qmux"),
+            "pane-b",
+            &[],
+            None,
+            false,
+        )
+        .unwrap()
+        .expect("bash is a supported shell");
+        assert_eq!(injection.args.len(), 3);
+        assert_eq!(injection.args[0], "--rcfile");
+        assert_eq!(injection.args[2], "-i");
+        assert_eq!(injection.support_files.len(), 1);
+        let file = &injection.support_files[0];
+        // The rcfile the shell is told to load is exactly the file the backend
+        // will materialize.
+        assert_eq!(file.path.display().to_string(), injection.args[1]);
+        assert_eq!(file.root, shell_integration_root());
+        assert!(file.contents.contains("Generated by qmux"));
+    }
+
+    #[test]
+    fn agent_pane_envs_extends_pane_envs_with_the_agent_binding() {
+        let state = test_state();
+        let envs = agent_pane_envs(&state, "pane-a", "agent-7").unwrap();
+        let base = qmux_pane_envs(&state, "pane-a").unwrap();
+        assert_eq!(envs[..base.len()], base[..]);
+        assert_eq!(env_value(&envs, "QMUX_AGENT_ID").unwrap(), "agent-7");
+    }
+
+    #[test]
+    fn plan_to_spec_refuses_remote_groups() {
+        let state = test_state_with_workspace(temp_workspace());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                // A remote path that does not exist locally: creation must not
+                // stat it, and the spawn layer must refuse rather than fall
+                // through to a local spawn.
+                dir: Some("/no/such/dir/on/this/machine".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(test_remote()),
+            },
+        )
+        .unwrap();
+        assert_eq!(group.dir, "/no/such/dir/on/this/machine");
+
+        let error = shell_spawn_spec(
+            &state,
+            "pane-remote".to_string(),
+            group.id.clone(),
+            std::env::temp_dir(),
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("not implemented yet"), "{error}");
+    }
+
+    #[test]
+    fn materialize_support_files_rejects_paths_outside_their_root() {
+        let error = materialize_support_files(&[SupportFile {
+            root: PathBuf::from("/tmp/qmux-sf-root"),
+            path: PathBuf::from("/etc/passwd"),
+            contents: String::new(),
+            mode: 0o600,
+            create_new: false,
+            prune_prefix: None,
+        }])
+        .unwrap_err();
+        assert!(error.contains("escapes"), "{error}");
+    }
+
+    // The containment check cannot be lexical alone: `strip_prefix` succeeds on
+    // a path that walks back out through `..`, so a descriptor built from an
+    // unsanitized id would pass the prefix test and write anywhere on disk.
+    #[test]
+    fn materialize_support_files_rejects_parent_traversal_within_their_root() {
+        let root = std::env::temp_dir().join("qmux-sf-traversal");
+        let escapee = root.join("..").join("qmux-sf-escaped.json");
+        let _ = fs::remove_file(&escapee);
+        let error = materialize_support_files(&[SupportFile {
+            root: root.clone(),
+            path: escapee.clone(),
+            contents: "planted".to_string(),
+            mode: 0o600,
+            create_new: false,
+            prune_prefix: None,
+        }])
+        .unwrap_err();
+        assert!(error.contains("escapes"), "{error}");
+        assert!(!escapee.exists());
+    }
+
+    // Every level from the shared root down to the file's parent must be
+    // owner-only by the time the file lands, so a generated script is never
+    // reachable by another account under a world-writable /tmp.
+    #[test]
+    fn materialize_support_files_locks_down_the_whole_directory_chain() {
+        let root = std::env::temp_dir().join("qmux-sf-chain");
+        let _ = fs::remove_dir_all(&root);
+        let nested = root.join("pane-chain").join("zsh");
+        let path = nested.join(".zshrc");
+        materialize_support_files(&[SupportFile {
+            root: root.clone(),
+            path: path.clone(),
+            contents: "# generated".to_string(),
+            mode: 0o644,
+            create_new: false,
+            prune_prefix: None,
+        }])
+        .unwrap();
+
+        for dir in [&root, &root.join("pane-chain"), &nested] {
+            let mode = fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} is {mode:o}", dir.display());
+        }
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# generated");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn optional_support_file_failure_applies_plain_command_fallback() {
+        let mut spec = PtySpawnSpec {
+            pane_id: Some("pane-fallback".to_string()),
+            agent_id: None,
+            group_id: "group-1".to_string(),
+            kind: PaneKind::Shell,
+            title: "Shell".to_string(),
+            last_osc_title: None,
+            program: "/bin/zsh".to_string(),
+            args: vec!["-i".to_string()],
+            cwd: std::env::temp_dir(),
+            envs: vec![("ZDOTDIR".to_string(), "/tmp/generated".to_string())],
+            support_files: vec![SupportFile {
+                root: PathBuf::from("/tmp/qmux-sf-root"),
+                path: PathBuf::from("/etc/passwd"),
+                contents: String::new(),
+                mode: 0o600,
+                create_new: false,
+                prune_prefix: None,
+            }],
+            support_file_fallback: Some(SupportFileFallback {
+                args: Vec::new(),
+                envs: vec![("QMUX_AGENT_FUNCTIONS".to_string(), "failed".to_string())],
+                error_env_key: Some("QMUX_AGENT_FUNCTIONS_ERROR".to_string()),
+            }),
+            initial_size: None,
+            recovered: true,
+        };
+
+        materialize_support_files_or_fallback(&mut spec).unwrap();
+
+        assert!(spec.args.is_empty());
+        assert!(spec.support_files.is_empty());
+        assert_eq!(
+            env_value(&spec.envs, "QMUX_AGENT_FUNCTIONS").as_deref(),
+            Some("failed")
+        );
+        assert!(
+            env_value(&spec.envs, "QMUX_AGENT_FUNCTIONS_ERROR")
+                .is_some_and(|error| error.contains("escapes"))
+        );
+    }
+
     #[test]
     fn shell_kind_detects_supported_shells_by_basename() {
         assert_eq!(shell_kind("/bin/zsh"), ShellKind::Zsh);
@@ -3136,6 +3704,8 @@ mod tests {
                 args,
                 cwd: std::env::temp_dir(),
                 envs: Vec::new(),
+                support_files: Vec::new(),
+                support_file_fallback: None,
                 initial_size: None,
                 recovered: false,
             },
@@ -3156,6 +3726,8 @@ mod tests {
             args: Vec::new(),
             cwd: std::env::temp_dir(),
             envs: Vec::new(),
+            support_files: Vec::new(),
+            support_file_fallback: None,
             initial_size: None,
             recovered: true,
         };
@@ -3230,6 +3802,7 @@ mod tests {
                     collapsed: false,
                     scope: WorkspaceScope::Terminal,
                     imported_research_archive_id: None,
+                    remote: None,
                     agents: vec!["agent-1".to_string()],
                 },
                 None,

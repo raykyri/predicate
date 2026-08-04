@@ -6,7 +6,10 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
-use crate::pty::{InitialPaneSize, PtySpawnSpec, qmux_pane_envs, recoverable_dir, spawn_pty};
+use crate::pty::{
+    CommandPlan, InitialPaneSize, PaneMeta, agent_pane_envs, plan_to_spec, recoverable_dir,
+    spawn_pty,
+};
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{Turn, TurnBlock, start_transcript_tail, string_field};
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
@@ -222,30 +225,34 @@ impl OpencodeAdapter {
         let args = build_opencode_args(&cwd, request.model.as_deref(), &request.prompt);
 
         let pane_id = state.next_id("pane");
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(config_dir_env);
 
         // The plugin can emit session.created immediately after exec. Reserve the
         // binding first so its authenticated hook passes pane/agent scope checks.
         attach_opencode_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: request.initial_size,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: request.initial_size,
-                recovered: false,
+                support_files: Vec::new(),
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
 
         match spawn_result {
             Ok(pane) => Ok(pane),
@@ -274,8 +281,7 @@ impl OpencodeAdapter {
         let (args, resumed) =
             build_opencode_resume_args(&cwd, agent.model.as_deref(), agent.session_id.as_deref());
 
-        let mut envs = qmux_pane_envs(state, &pane.id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
         if let Some(session_id) = agent
             .session_id
             .as_deref()
@@ -286,26 +292,31 @@ impl OpencodeAdapter {
         }
         envs.push(config_dir_env);
 
-        let info = spawn_pty(
+        let spec = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane.id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: pane.title.clone(),
                 last_osc_title: pane.last_osc_title.clone(),
-                program: binary,
-                args,
-                cwd,
-                envs,
                 initial_size: Some(InitialPaneSize {
                     cols: pane.cols,
                     rows: pane.rows,
                 }),
                 recovered: true,
             },
+            CommandPlan {
+                program: binary,
+                args,
+                cwd,
+                envs,
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
         )?;
+        let info = spawn_pty(state, spec)?;
 
         // A recovered opencode process is launched without an inline prompt,
         // even when resuming a session, so it is ready once the TUI appears. The
@@ -393,29 +404,33 @@ impl OpencodeAdapter {
         );
 
         let pane_id = state.next_id("pane");
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("QMUX_FORK_POINT".to_string(), session_id.clone()));
         envs.push(config_dir_env);
         attach_opencode_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
 
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: None,
-                recovered: false,
+                support_files: Vec::new(),
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
         match spawn_result {
             Ok(pane) => {
                 let forked = state
@@ -506,8 +521,7 @@ impl OpencodeAdapter {
         )?;
 
         let args = build_opencode_args_from_shell(None, &request.args);
-        let mut envs = qmux_pane_envs(state, &request.pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let mut envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
         if let Some(session_id) = resume_session_id {
             envs.push(("QMUX_ROOT_SESSION_ID".to_string(), session_id));
         }

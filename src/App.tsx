@@ -352,7 +352,8 @@ import {
   clearAgentWorkingStatus,
   closeWorktreePane,
   confirmAppExit,
-  createGroupWithFolder,
+  createGroupWithShell,
+  pickGroupFolder,
   createResearchWorkspaceWithFolder,
   renameResearchWorkspace,
   moveResearchWorkspaceWithFolder,
@@ -5258,12 +5259,17 @@ function MainApp() {
     }
   }
 
-  async function createInitialShellForGroup(groupId: string) {
-    const pane = await spawnShell(estimateInitialPaneSize(false), null, groupId);
-    const orderedPanes = panesWithNewTabInLaunchPosition(pane, groupId);
+  // Group creation and its first shell are one backend operation
+  // (group_create_with_shell), so a failed spawn can never leave a dead,
+  // empty group behind; the picker runs separately beforehand so other
+  // directory sources can feed the same create path later.
+  async function createGroupInDir(dir: string, afterGroupId: string | null) {
+    const created = await createGroupWithShell(dir, afterGroupId, estimateInitialPaneSize(false));
+    const orderedPanes = panesWithNewTabInLaunchPosition(created.pane, created.group.id);
     setPanesPreservingRecoveredDismissals(orderedPanes);
-    setActivePaneId(pane.id);
-    setLastActiveGroupId(pane.groupId);
+    setActivePaneId(created.pane.id);
+    setLastActiveGroupId(created.pane.groupId);
+    await refreshGroups();
   }
 
   async function createGroupAfterWithFolder(group: GroupInfo) {
@@ -5271,12 +5277,11 @@ function MainApp() {
     setFolderPickerStatus("Opening folder picker…");
     try {
       await waitForPaintedFrame();
-      const newGroup = await createGroupWithFolder(group.id);
-      if (!newGroup) {
+      const dir = await pickGroupFolder();
+      if (!dir) {
         return;
       }
-      await createInitialShellForGroup(newGroup.id);
-      await refreshGroups();
+      await createGroupInDir(dir, group.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -5295,12 +5300,11 @@ function MainApp() {
     setFolderPickerStatus("Opening folder picker…");
     try {
       await waitForPaintedFrame();
-      const newGroup = await createGroupWithFolder(anchorGroup?.id ?? null);
-      if (!newGroup) {
+      const dir = await pickGroupFolder();
+      if (!dir) {
         return;
       }
-      await createInitialShellForGroup(newGroup.id);
-      await refreshGroups();
+      await createGroupInDir(dir, anchorGroup?.id ?? null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

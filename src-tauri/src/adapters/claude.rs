@@ -8,7 +8,10 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
-use crate::pty::{InitialPaneSize, PtySpawnSpec, qmux_pane_envs, recoverable_dir, spawn_pty};
+use crate::pty::{
+    CommandPlan, InitialPaneSize, PaneMeta, SupportFile, agent_pane_envs, plan_to_spec,
+    recoverable_dir, spawn_pty,
+};
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{
     Turn, TurnStatus, TurnStatusReason, session_id_from_transcript_path, start_transcript_tail,
@@ -24,10 +27,7 @@ use crate::workspace::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::env;
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 const CLAUDE_HOOK_EVENTS: &[&str] = &[
@@ -281,13 +281,14 @@ impl ClaudeAdapter {
             ));
         }
         let pane_id = state.next_id("pane");
-        let settings_path = match write_hook_settings(state.config(), &pane_id) {
-            Ok(settings_path) => settings_path,
-            Err(err) => {
-                let _ = mark_agent_failed(state, &agent.id);
-                return Err(err);
-            }
-        };
+        let (settings_path, hook_settings) =
+            match hook_settings_support_file(state.config(), &pane_id) {
+                Ok(planned) => planned,
+                Err(err) => {
+                    let _ = mark_agent_failed(state, &agent.id);
+                    return Err(err);
+                }
+            };
         let mut args = vec![
             "--settings".to_string(),
             settings_path.display().to_string(),
@@ -313,28 +314,32 @@ impl ClaudeAdapter {
             args.push(prompt.to_string());
         }
 
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let envs = agent_pane_envs(state, &pane_id, &agent.id)?;
 
         attach_agent_pane(state, &agent.id, pane_id.clone())?;
 
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: request.initial_size,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: request.initial_size,
-                recovered: false,
+                support_files: vec![hook_settings],
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
 
         match spawn_result {
             Ok(pane) => {
@@ -415,13 +420,14 @@ impl ClaudeAdapter {
         })?;
 
         let pane_id = state.next_id("pane");
-        let settings_path = match write_hook_settings(state.config(), &pane_id) {
-            Ok(settings_path) => settings_path,
-            Err(err) => {
-                let _ = mark_agent_failed(state, &agent.id);
-                return Err(err);
-            }
-        };
+        let (settings_path, hook_settings) =
+            match hook_settings_support_file(state.config(), &pane_id) {
+                Ok(planned) => planned,
+                Err(err) => {
+                    let _ = mark_agent_failed(state, &agent.id);
+                    return Err(err);
+                }
+            };
 
         let mut args = vec![
             "--settings".to_string(),
@@ -448,28 +454,32 @@ impl ClaudeAdapter {
             args.push(prompt.to_string());
         }
 
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let envs = agent_pane_envs(state, &pane_id, &agent.id)?;
 
         attach_agent_pane(state, &agent.id, pane_id.clone())?;
 
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: None,
-                recovered: false,
+                support_files: vec![hook_settings],
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
 
         let pane = match spawn_result {
             Ok(pane) => pane,
@@ -512,7 +522,7 @@ impl ClaudeAdapter {
             )
         })?;
 
-        let settings_path = write_hook_settings(state.config(), &pane.id)?;
+        let (settings_path, hook_settings) = hook_settings_support_file(state.config(), &pane.id)?;
         let mut args = vec![
             "--settings".to_string(),
             settings_path.display().to_string(),
@@ -536,29 +546,33 @@ impl ClaudeAdapter {
             false
         };
 
-        let mut envs = qmux_pane_envs(state, &pane.id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let envs = agent_pane_envs(state, &pane.id, &agent.id)?;
 
-        let info = spawn_pty(
+        let spec = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane.id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: pane.title.clone(),
                 last_osc_title: pane.last_osc_title.clone(),
-                program: binary,
-                args,
-                cwd,
-                envs,
                 initial_size: Some(InitialPaneSize {
                     cols: pane.cols,
                     rows: pane.rows,
                 }),
                 recovered: true,
             },
+            CommandPlan {
+                program: binary,
+                args,
+                cwd,
+                envs,
+                support_files: vec![hook_settings],
+                support_file_fallback: None,
+            },
         )?;
+        let info = spawn_pty(state, spec)?;
 
         // Re-bind the agent to its restored pane. A recovered Claude process is
         // launched without an inline prompt, even when resuming a session, so it is
@@ -655,7 +669,14 @@ impl ClaudeAdapter {
             resume_session_id.as_deref(),
             &cwd_str,
         )?;
-        let settings_path = match write_hook_settings(state.config(), &request.pane_id) {
+        // The in-shell launch is exec'd by the CLI supervisor as soon as this
+        // response returns — there is no PTY-spawn step in between to
+        // materialize support files, so write the hook settings eagerly here.
+        let settings_path = match hook_settings_support_file(state.config(), &request.pane_id)
+            .and_then(|(settings_path, hook_settings)| {
+                crate::pty::materialize_support_files(&[hook_settings])?;
+                Ok(settings_path)
+            }) {
             Ok(settings_path) => settings_path,
             Err(err) => {
                 let _ = mark_agent_failed(state, &agent.id);
@@ -677,8 +698,7 @@ impl ClaudeAdapter {
             agent
         };
 
-        let mut envs = qmux_pane_envs(state, &request.pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
+        let envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
         let agent_id = agent.id.clone();
         let worktree_dir = agent.worktree_dir.clone();
         state.emit(QmuxEvent::new(
@@ -1427,7 +1447,16 @@ fn hook_settings_nonce() -> Result<String, String> {
 /// same-user process can still overwrite our specific file in the window before Claude
 /// reads it — same-uid file tampering is not preventable — but it can no longer target
 /// a shared file or a guessable per-pane path.
-pub fn write_hook_settings(config: &QmuxConfig, pane_id: &str) -> Result<PathBuf, String> {
+/// Plans the per-spawn Claude hook settings file: the path Claude receives via
+/// `--settings`, and the `SupportFile` the spawn backend materializes before
+/// the process starts. Declarative on purpose — nothing is written here, so a
+/// future remote backend can ship the same file to its host. The support-file
+/// contract carries the previous inline writer's security behavior: owner-only
+/// directory chain, per-pane prefix pruning, and O_EXCL creation at 0600.
+pub fn hook_settings_support_file(
+    config: &QmuxConfig,
+    pane_id: &str,
+) -> Result<(PathBuf, SupportFile), String> {
     // qmux mints pane ids itself, but validate before using one in a filename so a
     // malformed caller can never traverse out of the hooks dir or spoof another pane's
     // prefix during the prune below.
@@ -1440,29 +1469,7 @@ pub fn write_hook_settings(config: &QmuxConfig, pane_id: &str) -> Result<PathBuf
     }
 
     let hooks_dir = config.workspace_root.join(".qmux").join("hooks");
-    fs::create_dir_all(&hooks_dir)
-        .map_err(|err| format!("failed to create {}: {err}", hooks_dir.display()))?;
-    // Keep the hooks dir owner-only (the enclosing .qmux is already 0700; enforce it
-    // here too so the per-spawn files are never group/other-readable).
-    fs::set_permissions(&hooks_dir, fs::Permissions::from_mode(0o700))
-        .map_err(|err| format!("failed to restrict {}: {err}", hooks_dir.display()))?;
-
-    // Drop this pane's previous hook file(s) so the directory stays bounded to one file
-    // per live pane instead of growing on every spawn/resume.
-    if let Ok(entries) = fs::read_dir(&hooks_dir) {
-        let prefix = format!("{pane_id}-");
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with(&prefix))
-            {
-                let _ = fs::remove_file(entry.path());
-            }
-        }
-    }
-
-    let qmux_cli = env::current_exe()
+    let qmux_cli = crate::launch_path::qmux_cli_path()
         .map_err(|err| format!("failed to resolve qmux executable for hooks: {err}"))?;
     let mut hooks = serde_json::Map::new();
     for event in CLAUDE_HOOK_EVENTS {
@@ -1504,18 +1511,20 @@ pub fn write_hook_settings(config: &QmuxConfig, pane_id: &str) -> Result<PathBuf
         .map_err(|err| format!("failed to encode hook settings: {err}"))?;
 
     let settings_path = hooks_dir.join(format!("{pane_id}-{}.json", hook_settings_nonce()?));
-    // create_new (O_CREAT|O_EXCL) at 0600: never follow/truncate a pre-existing path,
-    // so a planted file or symlink at our random target fails the create instead of
-    // being written through.
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&settings_path)
-        .map_err(|err| format!("failed to create {}: {err}", settings_path.display()))?;
-    file.write_all(raw.as_bytes())
-        .map_err(|err| format!("failed to write {}: {err}", settings_path.display()))?;
-    Ok(settings_path)
+    let support_file = SupportFile {
+        root: hooks_dir,
+        path: settings_path.clone(),
+        contents: raw,
+        mode: 0o600,
+        // Never follow/truncate a pre-existing path: a planted file or symlink
+        // at the random target must fail the create instead of being written
+        // through.
+        create_new: true,
+        // Drop this pane's previous hook file(s) so the directory stays bounded
+        // to one file per live pane instead of growing on every spawn/resume.
+        prune_prefix: Some(format!("{pane_id}-")),
+    };
+    Ok((settings_path, support_file))
 }
 
 /// A skill the qmux-managed plugin makes available to launched Claude agents.
@@ -2358,6 +2367,7 @@ mod tests {
     use crate::state::{AgentSendSource, PaneInfo, PaneRuntime, PaneStatus};
     use crate::transcript::TurnBlock;
     use portable_pty::{Child, ChildKiller, ExitStatus, PtySize, native_pty_system};
+    use std::env;
     use std::io::{self, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::{Arc, Mutex};
@@ -2641,7 +2651,8 @@ mod tests {
             opencode_plugin_dir: PathBuf::new(),
         };
 
-        let settings_path = write_hook_settings(&config, "pane-1").unwrap();
+        let (settings_path, support_file) = hook_settings_support_file(&config, "pane-1").unwrap();
+        crate::pty::materialize_support_files(&[support_file]).unwrap();
 
         // Per-pane, per-spawn file under a 0700 `.qmux/hooks/` dir, created 0600.
         let hooks_dir = workspace_root.join(".qmux/hooks");
@@ -2668,7 +2679,8 @@ mod tests {
 
         // A second spawn for the same pane prunes the first file so the dir stays
         // bounded to one file per pane, and mints a fresh unguessable name.
-        let second_path = write_hook_settings(&config, "pane-1").unwrap();
+        let (second_path, second_file) = hook_settings_support_file(&config, "pane-1").unwrap();
+        crate::pty::materialize_support_files(&[second_file]).unwrap();
         assert_ne!(second_path, settings_path);
         assert!(!settings_path.exists());
         assert!(second_path.is_file());

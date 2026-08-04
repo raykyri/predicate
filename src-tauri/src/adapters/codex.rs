@@ -8,7 +8,10 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
-use crate::pty::{InitialPaneSize, PtySpawnSpec, qmux_pane_envs, recoverable_dir, spawn_pty};
+use crate::pty::{
+    CommandPlan, InitialPaneSize, PaneMeta, agent_pane_envs, plan_to_spec, recoverable_dir,
+    spawn_pty,
+};
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{
     Turn, TurnBlock, TurnStatus, TurnStatusReason, codex_transcript_session_id,
@@ -268,9 +271,7 @@ impl CodexAdapter {
             tail_args,
         );
         let pane_id = state.next_id("pane");
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
-        envs.push(("QMUX_CLI".to_string(), qmux_cli_path()?));
+        let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
 
         // Bind before spawn so a fast SessionStart hook can authenticate against the
@@ -278,23 +279,28 @@ impl CodexAdapter {
         // path clears this reserved binding.
         attach_codex_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
 
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: request.initial_size,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: request.initial_size,
-                recovered: false,
+                support_files: Vec::new(),
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
 
         match spawn_result {
             Ok(pane) => Ok(pane),
@@ -328,31 +334,34 @@ impl CodexAdapter {
             agent.session_id.as_deref(),
         );
 
-        let mut envs = qmux_pane_envs(state, &pane.id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
-        envs.push(("QMUX_CLI".to_string(), qmux_cli_path()?));
+        let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
 
-        let info = spawn_pty(
+        let spec = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane.id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: pane.title.clone(),
                 last_osc_title: pane.last_osc_title.clone(),
-                program: binary,
-                args,
-                cwd,
-                envs,
                 initial_size: Some(InitialPaneSize {
                     cols: pane.cols,
                     rows: pane.rows,
                 }),
                 recovered: true,
             },
+            CommandPlan {
+                program: binary,
+                args,
+                cwd,
+                envs,
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
         )?;
+        let info = spawn_pty(state, spec)?;
 
         // A recovered Codex process is launched without an inline prompt, even when
         // resuming a session, so it is ready once the TUI appears. Mark it Idle (not
@@ -449,9 +458,7 @@ impl CodexAdapter {
         );
 
         let pane_id = state.next_id("pane");
-        let mut envs = qmux_pane_envs(state, &pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
-        envs.push(("QMUX_CLI".to_string(), qmux_cli_path()?));
+        let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
 
         // Bind before spawn so a fast Codex SessionStart hook passes the control
@@ -459,23 +466,28 @@ impl CodexAdapter {
         // reserved binding if the process fails to launch.
         attach_codex_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
 
-        let spawn_result = spawn_pty(
+        let spawn_result = plan_to_spec(
             state,
-            PtySpawnSpec {
+            PaneMeta {
                 pane_id: Some(pane_id.clone()),
                 agent_id: Some(agent.id.clone()),
                 group_id: agent.group_id.clone(),
                 kind: PaneKind::Agent,
                 title: self.display_name().to_string(),
                 last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
                 program: binary,
                 args,
                 cwd,
                 envs,
-                initial_size: None,
-                recovered: false,
+                support_files: Vec::new(),
+                support_file_fallback: None,
             },
-        );
+        )
+        .and_then(|spec| spawn_pty(state, spec));
 
         match spawn_result {
             Ok(pane) => {
@@ -575,9 +587,7 @@ impl CodexAdapter {
             &options,
             request.args,
         );
-        let mut envs = qmux_pane_envs(state, &request.pane_id)?;
-        envs.push(("QMUX_AGENT_ID".to_string(), agent.id.clone()));
-        envs.push(("QMUX_CLI".to_string(), qmux_cli_path()?));
+        let mut envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
         let agent_id = agent.id.clone();
         let launch_cwd = shell_cwd.display().to_string();
@@ -1309,8 +1319,8 @@ fn codex_inline_value_flag(arg: &str) -> bool {
 
 fn ensure_codex_integration() -> Result<PathBuf, String> {
     let codex_home = codex_home()?;
-    let qmux_cli = env::current_exe()
-        .map_err(|err| format!("failed to resolve qmux executable for Codex hooks: {err}"))?;
+    let qmux_cli = crate::launch_path::qmux_cli_path()
+        .map_err(|err| format!("{err} (needed for Codex hooks)"))?;
     write_codex_integration_files(&codex_home, &qmux_cli)?;
     Ok(codex_home)
 }
@@ -1320,12 +1330,6 @@ fn codex_home() -> Result<PathBuf, String> {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
         .ok_or_else(|| "CODEX_HOME and HOME are not set; cannot configure Codex hooks".to_string())
-}
-
-fn qmux_cli_path() -> Result<String, String> {
-    env::current_exe()
-        .map(|path| path.display().to_string())
-        .map_err(|err| format!("failed to resolve qmux executable for Codex hooks: {err}"))
 }
 
 fn write_codex_integration_files(codex_home: &Path, qmux_cli: &Path) -> Result<(), String> {

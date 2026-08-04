@@ -1,7 +1,6 @@
 mod adapters;
 mod browser_backend;
 mod browser_engine;
-mod cli;
 mod config;
 mod connection_limit;
 mod control_socket;
@@ -82,8 +81,9 @@ use workspace::{
     AgentInfo, AgentStatus, CreateGroupRequest, GroupInfo, LaunchOrigin, ResearchWorkspaceInfo,
     WorktreeStatus, acknowledge_agent, agent_worktree_status, clear_agent_working_status,
     create_group, create_research_workspace, ensure_default_research_workspace,
-    move_research_workspace, remove_agent_worktree, remove_research_workspace, rename_group,
-    rename_research_workspace, set_group_collapsed, set_group_dir, validate_launch_workspace,
+    move_research_workspace, remove_agent_worktree, remove_pristine_group_scaffold,
+    remove_research_workspace, rename_group, rename_research_workspace, set_group_collapsed,
+    set_group_dir, validate_launch_workspace,
 };
 
 fn handle_global_shortcut(
@@ -1481,31 +1481,73 @@ fn group_set_collapsed(
 // runtime's core workers (one per CPU), so a handful of concurrent git
 // checkouts — or a folder picker parked open — could otherwise starve every
 // other command, including pane writes and turn submits.
+//
+// The group-creation folder picker is split from creation itself so the
+// frontend can compose directory sources — a picked local folder today, a
+// saved remote's path prompt later — before committing to the atomic
+// create-with-shell command below.
 #[tauri::command]
-async fn group_create_pick(
-    app: tauri::AppHandle,
+async fn group_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        pick_folder_dialog(&app, "Select the group directory")
+    })
+    .await
+    .map_err(|err| format!("group_pick_folder task failed: {err}"))?
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupWithInitialPane {
+    group: GroupInfo,
+    pane: PaneInfo,
+}
+
+/// Creates a group and its first shell pane as one operation. The two used to
+/// be separate frontend round trips, which left a dead, empty group behind
+/// whenever the first spawn failed; creation with a rollback keeps the pair
+/// atomic from the frontend's point of view. Remote group creation will need
+/// exactly this shape — connect errors are the common case there, not the
+/// exception — so local creation adopts it first.
+#[tauri::command]
+async fn group_create_with_shell(
     state: tauri::State<'_, AppState>,
+    dir: String,
     after_group_id: Option<String>,
-) -> Result<Option<GroupInfo>, String> {
+    initial_size: Option<InitialPaneSize>,
+) -> Result<GroupWithInitialPane, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        match pick_folder_dialog(&app, "Select the group directory")? {
-            Some(path) => create_group(
-                &state,
-                CreateGroupRequest {
-                    name: None,
-                    dir: Some(path),
-                    after_group_id,
-                    base_repo: None,
-                    base_ref: None,
-                },
-            )
-            .map(Some),
-            None => Ok(None),
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some(dir),
+                after_group_id,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+        )?;
+        match spawn_shell_pane(&state, initial_size, None, Some(&group.id)) {
+            Ok(pane) => Ok(GroupWithInitialPane { group, pane }),
+            Err(err) => {
+                // Best-effort rollback; the spawn error is the one worth
+                // surfacing even if the removal also fails.
+                match state.remove_group(&group.id) {
+                    Ok(()) => remove_pristine_group_scaffold(&group),
+                    Err(remove_err) => {
+                        eprintln!(
+                            "qmux: failed to roll back group {} after its first shell failed to spawn: {remove_err}",
+                            group.id
+                        );
+                    }
+                }
+                Err(err)
+            }
         }
     })
     .await
-    .map_err(|err| format!("group_create_pick task failed: {err}"))?
+    .map_err(|err| format!("group_create_with_shell task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -2299,7 +2341,7 @@ fn main() {
         eprintln!("{err}");
         std::process::exit(1);
     });
-    match cli::run_cli_if_requested() {
+    match qmux_cli::run_cli_if_requested() {
         Ok(true) => return,
         Ok(false) => {}
         Err(err) => {
@@ -2610,7 +2652,8 @@ fn main() {
             group_rename,
             group_reorder,
             group_set_collapsed,
-            group_create_pick,
+            group_pick_folder,
+            group_create_with_shell,
             group_pick_dir,
             spawn_shell,
             use_login_shell_get,

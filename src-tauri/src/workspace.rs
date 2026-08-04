@@ -77,6 +77,31 @@ pub fn validate_launch_workspace(
     }
 }
 
+/// Which multiplexer manages a remote group's panes on its host.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteMultiplexer {
+    Tmux,
+    Herdr,
+}
+
+/// The remote host a group is bound to. Declarative only for now: no group is
+/// ever created with a remote, and `plan_to_spec` rejects one outright — the
+/// field exists so persistence, manifests, and the capability gates are already
+/// remote-shaped before any remote spawning lands.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteRef {
+    /// Stable identity of the saved remote this group was created against.
+    pub id: String,
+    /// Display label, e.g. the ssh-config alias.
+    pub label: String,
+    /// Connection target: an ssh-config alias or `user@host` string. Auth and
+    /// address resolution belong to the system `ssh` client, never to qmux.
+    pub host: String,
+    pub multiplexer: RemoteMultiplexer,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupInfo {
@@ -84,9 +109,13 @@ pub struct GroupInfo {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name_override: Option<String>,
-    /// User-facing working directory represented by this group.
+    /// User-facing working directory represented by this group. For a remote
+    /// group this is a path on the remote host, so it must only be validated
+    /// through the group-aware helpers below, never by a bare local stat.
     pub dir: String,
     /// Qmux-owned storage for the group's manifest and any generated worktrees.
+    /// Always local, remote groups included: the manifest describes the group,
+    /// it does not live with the group's processes.
     pub managed_dir: String,
     pub base_repo: Option<String>,
     pub base_ref: Option<String>,
@@ -101,7 +130,15 @@ pub struct GroupInfo {
     /// finish cleanup after a crash without touching an unrelated archive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_research_archive_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<RemoteRef>,
     pub agents: Vec<String>,
+}
+
+impl GroupInfo {
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -178,6 +215,8 @@ pub struct CreateGroupRequest {
     pub after_group_id: Option<String>,
     pub base_repo: Option<String>,
     pub base_ref: Option<String>,
+    #[serde(default)]
+    pub remote: Option<RemoteRef>,
 }
 
 #[derive(Clone, Debug)]
@@ -293,6 +332,7 @@ fn create_research_workspace_locked(
                 after_group_id: None,
                 base_repo: None,
                 base_ref: Some("HEAD".to_string()),
+                remote: None,
             },
             WorkspaceScope::Research,
         )?;
@@ -334,6 +374,7 @@ fn create_research_workspace_locked(
             after_group_id: None,
             base_repo: None,
             base_ref: Some("HEAD".to_string()),
+            remote: None,
         },
         WorkspaceScope::Research,
     )
@@ -682,7 +723,7 @@ pub(crate) fn create_group_record(
 ) -> Result<GroupInfo, String> {
     let id = state.next_id("group");
     let dir = match request.dir.as_deref() {
-        Some(dir) => canonical_dir(dir)?,
+        Some(dir) => group_canonical_dir(request.remote.as_ref(), dir)?,
         None => state.default_open_dir(),
     };
     let generated_name = group_name_for_dir(&dir);
@@ -711,6 +752,7 @@ pub(crate) fn create_group_record(
         collapsed: false,
         scope,
         imported_research_archive_id: None,
+        remote: request.remote,
         agents: Vec::new(),
     };
 
@@ -754,6 +796,9 @@ pub(crate) fn clone_group_record_for_scope(
         collapsed: false,
         scope,
         imported_research_archive_id: None,
+        // Research runs entirely on the local machine; a research clone of a
+        // remote group deliberately drops the binding.
+        remote: None,
         agents: Vec::new(),
     };
     if let Err(err) = write_group_manifest(&group) {
@@ -772,7 +817,7 @@ pub fn set_group_dir(state: &AppState, group_id: &str, dir: String) -> Result<Gr
             "use the research workspace folder command for Research workspaces".to_string(),
         );
     }
-    let dir = canonical_dir(&dir)?;
+    let dir = group_canonical_dir(group.remote.as_ref(), &dir)?;
     set_group_dir_record(state, group_id, dir)
 }
 
@@ -870,9 +915,20 @@ fn prepare_agent_workspace_locked(
     agent_id_override: Option<String>,
 ) -> Result<AgentInfo, String> {
     let mut group = match request.group_id.as_deref() {
-        Some(group_id) => state
-            .group(group_id)?
-            .ok_or_else(|| format!("group {group_id} was not found"))?,
+        Some(group_id) => {
+            let group = state
+                .group(group_id)?
+                .ok_or_else(|| format!("group {group_id} was not found"))?;
+            // Worktree allocation and every git operation below run local
+            // subprocesses against local paths; on a remote group they would
+            // silently act on the wrong machine.
+            if group.is_remote() {
+                return Err(format!(
+                    "group {group_id} is bound to a remote host; agents in remote groups are not supported yet"
+                ));
+            }
+            group
+        }
         None => create_group(
             state,
             CreateGroupRequest {
@@ -890,6 +946,7 @@ fn prepare_agent_workspace_locked(
                     .base_ref
                     .clone()
                     .or_else(|| Some("HEAD".to_string())),
+                remote: None,
             },
         )?,
     };
@@ -1520,6 +1577,33 @@ fn canonical_dir(path: &str) -> Result<PathBuf, String> {
     Ok(canonical)
 }
 
+/// Group-aware directory canonicalization: the single place that decides how a
+/// group's directory strings are resolved and validated. Every path a group
+/// stores must pass through here (or `group_recoverable_dir`) rather than a
+/// bare local canonicalize/stat, because a remote group's paths live on its
+/// host — a local stat would spuriously fail and silently redirect the caller
+/// to a local fallback directory.
+pub fn group_canonical_dir(remote: Option<&RemoteRef>, path: &str) -> Result<PathBuf, String> {
+    match remote {
+        // Remote paths cannot be resolved locally. Until a remote transport
+        // exists, accept the string as given; the spawn layer refuses to
+        // launch into remote groups, so nothing acts on the unverified path.
+        Some(_) => Ok(PathBuf::from(path)),
+        None => canonical_dir(path),
+    }
+}
+
+/// Group-aware companion to `pty::recoverable_dir`: returns the path only when
+/// it still resolves for the host the group's processes run on. Local groups
+/// stat the local filesystem; remote groups pass the string through untouched
+/// for the same reason as `group_canonical_dir`.
+pub fn group_recoverable_dir(remote: Option<&RemoteRef>, path: &str) -> Option<PathBuf> {
+    match remote {
+        Some(_) => Some(PathBuf::from(path)),
+        None => crate::pty::recoverable_dir(path),
+    }
+}
+
 fn group_name_for_dir(dir: &Path) -> String {
     dir.file_name()
         .and_then(|name| name.to_str())
@@ -1843,6 +1927,75 @@ pub(crate) fn write_group_manifest(group: &GroupInfo) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `dir` holds nothing besides an entry named `allowed`. A missing
+/// directory holds nothing and so cannot make a scaffold non-pristine; any
+/// other read failure reads as "unknown contents" rather than "empty", so an
+/// unreadable directory is never mistaken for a removable one.
+fn dir_holds_nothing_but(dir: &Path, allowed: &str) -> bool {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => return err.kind() == std::io::ErrorKind::NotFound,
+    };
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if entry.file_name() != allowed {
+            return false;
+        }
+    }
+    true
+}
+
+/// Removes the manifest-only directory allocated for a group whose creation is
+/// being rolled back. All-or-nothing: the whole scaffold is confirmed pristine
+/// before any part of it is removed, so if another task raced in a worktree or
+/// any other content, the managed directory is left exactly as found — manifest
+/// included, so it stays self-describing — rather than half-dismantled just to
+/// complete best-effort cleanup.
+pub(crate) fn remove_pristine_group_scaffold(group: &GroupInfo) {
+    if group.managed_dir == group.dir {
+        return;
+    }
+    let managed_dir = PathBuf::from(&group.managed_dir);
+    let qmux_dir = managed_dir.join(".qmux");
+    if !dir_holds_nothing_but(&managed_dir, ".qmux")
+        || !dir_holds_nothing_but(&qmux_dir, "group.json")
+    {
+        return;
+    }
+    let manifest = qmux_dir.join("group.json");
+    if let Err(err) = fs::remove_file(&manifest)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!(
+            "qmux: failed to remove rolled-back group manifest {}: {err}",
+            manifest.display()
+        );
+        return;
+    }
+    // Content racing in after the check above surfaces here as
+    // DirectoryNotEmpty. The directory is preserved either way; say so rather
+    // than swallowing it, since by this point the check claimed it was empty.
+    if let Err(err) = fs::remove_dir(&qmux_dir)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!(
+            "qmux: failed to remove rolled-back group metadata directory {}: {err}",
+            qmux_dir.display()
+        );
+        return;
+    }
+    if let Err(err) = fs::remove_dir(&managed_dir)
+        && err.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!(
+            "qmux: failed to remove rolled-back group directory {}: {err}",
+            managed_dir.display()
+        );
+    }
+}
+
 /// Removes manifest scratch files (`.group.json.tmp-<pid>-<seq>`) stranded by
 /// a writer that died between creating its temp and renaming it into place —
 /// nothing else ever revisits them. Runs on the next manifest write for the
@@ -1890,6 +2043,36 @@ mod tests {
         OpencodeAdapterConfig, QmuxConfig,
     };
 
+    fn test_remote() -> RemoteRef {
+        RemoteRef {
+            id: "remote-1".to_string(),
+            label: "workbox".to_string(),
+            host: "workbox".to_string(),
+            multiplexer: RemoteMultiplexer::Tmux,
+        }
+    }
+
+    // The group-aware path helpers are the chokepoint keeping local stats away
+    // from remote paths: a remote group's directory must pass through
+    // unstatted, while local groups keep the strict canonicalize/exists
+    // behavior. A silent local fallback here is the failure mode the whole
+    // consolidation exists to prevent.
+    #[test]
+    fn group_path_helpers_never_stat_remote_paths_locally() {
+        let remote = test_remote();
+        let missing = "/no/such/dir/on/this/machine";
+        assert_eq!(
+            group_canonical_dir(Some(&remote), missing).unwrap(),
+            PathBuf::from(missing)
+        );
+        assert!(group_canonical_dir(None, missing).is_err());
+        assert_eq!(
+            group_recoverable_dir(Some(&remote), missing),
+            Some(PathBuf::from(missing))
+        );
+        assert_eq!(group_recoverable_dir(None, missing), None);
+    }
+
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let socket_path = workspace_root.join("qmux.sock");
@@ -1928,6 +2111,97 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("qmux-workspace-{prefix}-{nanos}"));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn rolled_back_group_scaffold_is_removed_when_pristine() {
+        let workspace = temp_workspace("rollback-pristine");
+        let project = workspace.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let state = test_state_with_workspace(workspace);
+        let group = create_group_record(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some(project.display().to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+            WorkspaceScope::Terminal,
+        )
+        .unwrap();
+        let managed_dir = PathBuf::from(&group.managed_dir);
+        assert!(managed_dir.join(".qmux/group.json").is_file());
+
+        remove_pristine_group_scaffold(&group);
+
+        assert!(!managed_dir.exists());
+    }
+
+    #[test]
+    fn rolled_back_group_scaffold_preserves_raced_in_content() {
+        let workspace = temp_workspace("rollback-race");
+        let project = workspace.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let state = test_state_with_workspace(workspace);
+        let group = create_group_record(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some(project.display().to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+            WorkspaceScope::Terminal,
+        )
+        .unwrap();
+        let managed_dir = PathBuf::from(&group.managed_dir);
+        let marker = managed_dir.join("raced-worktree/keep");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, "keep").unwrap();
+
+        remove_pristine_group_scaffold(&group);
+
+        assert_eq!(std::fs::read_to_string(marker).unwrap(), "keep");
+        assert!(managed_dir.is_dir());
+        // All-or-nothing: a directory that survives keeps the manifest that
+        // says what it is, rather than being left unidentifiable.
+        assert!(managed_dir.join(".qmux/group.json").is_file());
+    }
+
+    // The same guarantee one level down: scratch left in `.qmux` by a manifest
+    // writer that died mid-rename must not cost the group its manifest either.
+    #[test]
+    fn rolled_back_group_scaffold_preserves_stranded_manifest_scratch() {
+        let workspace = temp_workspace("rollback-scratch");
+        let project = workspace.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let state = test_state_with_workspace(workspace);
+        let group = create_group_record(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some(project.display().to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+            },
+            WorkspaceScope::Terminal,
+        )
+        .unwrap();
+        let managed_dir = PathBuf::from(&group.managed_dir);
+        let scratch = managed_dir.join(".qmux/.group.json.tmp-1234-0");
+        std::fs::write(&scratch, "partial").unwrap();
+
+        remove_pristine_group_scaffold(&group);
+
+        assert!(scratch.is_file());
+        assert!(managed_dir.join(".qmux/group.json").is_file());
     }
 
     fn sample_agent(id: &str, pane_id: Option<&str>, status: AgentStatus) -> AgentInfo {
@@ -1985,6 +2259,7 @@ mod tests {
                 after_group_id: None,
                 base_repo: Some(project.display().to_string()),
                 base_ref: Some("HEAD".to_string()),
+                remote: None,
             },
         )
         .unwrap();
@@ -2028,6 +2303,7 @@ mod tests {
                 after_group_id: None,
                 base_repo: Some(project.display().to_string()),
                 base_ref: Some("HEAD".to_string()),
+                remote: None,
             },
         )
         .unwrap();
@@ -2064,6 +2340,7 @@ mod tests {
                 after_group_id: None,
                 base_repo: None,
                 base_ref: None,
+                remote: None,
             },
         )
         .unwrap();
@@ -2100,6 +2377,7 @@ mod tests {
                 after_group_id: None,
                 base_repo: None,
                 base_ref: None,
+                remote: None,
             },
         )
         .unwrap();
@@ -2378,6 +2656,7 @@ mod tests {
                 collapsed: false,
                 scope: WorkspaceScope::Research,
                 imported_research_archive_id: None,
+                remote: None,
                 agents: Vec::new(),
             },
             trees: Vec::new(),
@@ -2876,6 +3155,7 @@ mod tests {
                 after_group_id: None,
                 base_repo: None,
                 base_ref: None,
+                remote: None,
             },
         )
         .unwrap();
@@ -3228,6 +3508,7 @@ mod tests {
             collapsed: false,
             scope: WorkspaceScope::Terminal,
             imported_research_archive_id: None,
+            remote: None,
             agents: Vec::new(),
         }
     }

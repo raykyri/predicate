@@ -319,8 +319,25 @@ export function revealResearchWorkspace(workspaceId: string) {
   return invoke<void>("research_workspace_reveal", { workspaceId });
 }
 
-export function createGroupWithFolder(afterGroupId?: string | null) {
-  return invoke<GroupInfo | null>("group_create_pick", { afterGroupId: afterGroupId ?? null });
+export function pickGroupFolder() {
+  return invoke<string | null>("group_pick_folder");
+}
+
+export interface GroupWithInitialPane {
+  group: GroupInfo;
+  pane: PaneInfo;
+}
+
+export function createGroupWithShell(
+  dir: string,
+  afterGroupId?: string | null,
+  initialSize?: InitialPaneSize | null,
+) {
+  return invoke<GroupWithInitialPane>("group_create_with_shell", {
+    dir,
+    afterGroupId: afterGroupId ?? null,
+    initialSize: initialSize ?? null,
+  });
 }
 
 export function removeGroup(groupId: string) {

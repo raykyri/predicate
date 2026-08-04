@@ -1,0 +1,16 @@
+[package]
+name = "qmux-cli"
+version = "0.2.0"
+description = "The qmux in-pane CLI: hook notifies, cwd reporting, forks, and agent supervision."
+license = "MIT"
+edition = "2024"
+
+[[bin]]
+name = "qmux-cli"
+path = "src/bin/qmux-cli.rs"
+
+[dependencies]
+libc = "0.2"
+qmux-proto = { path = "../qmux-proto" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

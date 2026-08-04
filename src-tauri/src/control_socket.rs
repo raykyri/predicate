@@ -10,7 +10,8 @@ use crate::state::AppState;
 use crate::workspace::{
     LaunchOrigin, recover_shell_agent_from_session_start, validate_launch_workspace,
 };
-use serde::{Deserialize, Serialize};
+use qmux_proto::{ControlRequest, ControlResponse};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
@@ -31,23 +32,6 @@ const MAX_CONCURRENT_CLIENTS: usize = 64;
 /// FD exhaustion) would otherwise spin this loop hot and flood socket.error
 /// events.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ControlRequest {
-    token: String,
-    command: String,
-    #[serde(default)]
-    payload: Value,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ControlResponse {
-    ok: bool,
-    data: Value,
-    error: Option<String>,
-}
 
 pub fn start_control_socket(state: AppState) -> Result<(), String> {
     let socket_path = state.config().socket_path.clone();

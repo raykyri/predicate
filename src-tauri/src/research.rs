@@ -2502,6 +2502,7 @@ mod tests {
                 collapsed: false,
                 scope: crate::workspace::WorkspaceScope::Research,
                 imported_research_archive_id: None,
+                remote: None,
                 agents: Vec::new(),
             },
             trees: vec![tree],
