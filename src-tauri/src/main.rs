@@ -36,7 +36,7 @@ use adapters::{
 };
 use config::{QmuxConfig, RuntimeConfig};
 use control_socket::start_control_socket;
-use menu_bar::menu_bar_update;
+use menu_bar::{menu_bar_set_visible, menu_bar_update};
 use native_terminal::{
     native_terminal_action, native_terminal_focus, native_terminal_paste_approved_text,
     native_terminal_read_viewport_text, native_terminal_seed_settings,
@@ -2452,9 +2452,6 @@ fn main() {
                 if let Err(err) = customize_app_menu(app) {
                     eprintln!("qmux: failed to customize app menu: {err}");
                 }
-                if let Err(err) = menu_bar::init(app.handle()) {
-                    eprintln!("qmux: failed to initialize menu bar icon: {err}");
-                }
                 app.manage(show_hide_shortcut::ShowHideShortcutState::default());
                 show_hide_shortcut::init(app.handle(), &state.config().workspace_root);
                 app.manage(global_task_launcher::GlobalTaskLauncherState::default());
@@ -2719,6 +2716,7 @@ fn main() {
             app_confirm_exit,
             app_set_prevent_sleep,
             generate_foundation_tab_title,
+            menu_bar_set_visible,
             menu_bar_update,
             show_hide_shortcut_get,
             show_hide_shortcut_set,

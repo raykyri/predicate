@@ -274,6 +274,10 @@ export function updateMenuBar(snapshot: MenuBarSnapshot) {
   return invoke<void>("menu_bar_update", { snapshot });
 }
 
+export function setMenuBarVisible(visible: boolean) {
+  return invoke<void>("menu_bar_set_visible", { visible });
+}
+
 export function listenToMenuBarSelectPane(
   onSelectPane: (event: MenuBarSelectPaneEvent) => void,
 ): Promise<UnlistenFn> {

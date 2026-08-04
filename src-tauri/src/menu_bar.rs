@@ -64,25 +64,61 @@ struct AppliedMenuBar {
 #[cfg(target_os = "macos")]
 static APPLIED_MENU_BAR: std::sync::Mutex<Option<AppliedMenuBar>> = std::sync::Mutex::new(None);
 
-pub fn init(app: &AppHandle) -> tauri::Result<()> {
+#[cfg(target_os = "macos")]
+static LATEST_MENU_BAR_SNAPSHOT: std::sync::Mutex<Option<MenuBarSnapshot>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+fn create_tray(
+    app: &AppHandle,
+    menu: &tauri::menu::Menu<tauri::Wry>,
+) -> tauri::Result<tauri::tray::TrayIcon<tauri::Wry>> {
+    use tauri::tray::TrayIconBuilder;
+
+    TrayIconBuilder::with_id(TRAY_ID)
+        .icon(bento_icon())
+        .icon_as_template(true)
+        .tooltip("qmux")
+        .menu(menu)
+        .show_menu_on_left_click(true)
+        .on_menu_event(handle_menu_event)
+        .build(app)
+}
+
+#[tauri::command]
+pub fn menu_bar_set_visible(app: AppHandle, visible: bool) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        use tauri::tray::TrayIconBuilder;
+        if let Some(tray) = app.tray_by_id(TRAY_ID) {
+            return tray.set_visible(visible).map_err(|err| err.to_string());
+        }
+        if !visible {
+            return Ok(());
+        }
 
-        let (menu, _) = build_menu(app, None)?;
-        TrayIconBuilder::with_id(TRAY_ID)
-            .icon(bento_icon())
-            .icon_as_template(true)
-            .tooltip("qmux")
-            .menu(&menu)
-            .show_menu_on_left_click(true)
-            .on_menu_event(handle_menu_event)
-            .build(app)?;
+        // The frontend sends its current tab snapshot before applying this
+        // preference. Holding the snapshot lock through tray creation keeps a
+        // simultaneous update from being lost between the initial menu build
+        // and the applied-state handoff.
+        let latest = LATEST_MENU_BAR_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (menu, tab_items) = build_menu(&app, latest.as_ref()).map_err(|err| err.to_string())?;
+        create_tray(&app, &menu).map_err(|err| err.to_string())?;
+
+        let mut applied = APPLIED_MENU_BAR
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *applied = latest.as_ref().map(|snapshot| AppliedMenuBar {
+            snapshot: snapshot.clone(),
+            tab_items,
+        });
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
+        let _ = visible;
     }
 
     Ok(())
@@ -92,6 +128,10 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 pub fn menu_bar_update(app: AppHandle, snapshot: MenuBarSnapshot) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
+        let mut latest = LATEST_MENU_BAR_SNAPSHOT
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *latest = Some(snapshot.clone());
         update_menu(&app, snapshot).map_err(|err| err.to_string())
     }
 
@@ -152,6 +192,12 @@ fn update_menu(app: &AppHandle, snapshot: MenuBarSnapshot) -> tauri::Result<()> 
     let mut applied = APPLIED_MENU_BAR
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // Snapshot updates continue while the icon is disabled so creating it
+    // later can render the latest menu immediately.
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        *applied = None;
+        return Ok(());
+    };
     if let Some(current) = applied.as_mut()
         && same_menu_structure(&current.snapshot, &snapshot)
         && current.tab_items.len()
@@ -166,13 +212,6 @@ fn update_menu(app: &AppHandle, snapshot: MenuBarSnapshot) -> tauri::Result<()> 
         return Ok(());
     }
     let (menu, tab_items) = build_menu(app, Some(&snapshot))?;
-    // Without a tray there is nothing on screen to update; drop the applied
-    // record so a later update (with the tray present) rebuilds from scratch
-    // rather than mutating items no tray owns.
-    let Some(tray) = app.tray_by_id(TRAY_ID) else {
-        *applied = None;
-        return Ok(());
-    };
     tray.set_menu(Some(menu))?;
     *applied = Some(AppliedMenuBar {
         snapshot,

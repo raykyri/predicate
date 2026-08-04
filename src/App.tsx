@@ -443,6 +443,7 @@ import {
   setAgentTranscript,
   setAgentTyping,
   setGlobalTaskLauncherHotkey,
+  setMenuBarVisible,
   setShowHideShortcut,
   setShowHideShortcutCaptureActive,
   setPreventSleep,
@@ -4983,6 +4984,10 @@ function MainApp() {
     lastMenuBarSnapshotJsonRef.current = json;
     void updateMenuBar(menuBarSnapshot).catch(() => undefined);
   }, [menuBarSnapshot]);
+
+  useEffect(() => {
+    void setMenuBarVisible(settings.showMenuBarIcon).catch(() => undefined);
+  }, [settings.showMenuBarIcon]);
 
   useEffect(() => {
     agentsRef.current = agents;
@@ -13841,6 +13846,19 @@ function MainApp() {
                   // runs after currentTarget has been nulled out.
                   const preventSleep = event.currentTarget.checked;
                   setSettings((current) => ({ ...current, preventSleep }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Show menu bar icon</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showMenuBarIcon}
+                onChange={(event) => {
+                  const showMenuBarIcon = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showMenuBarIcon }));
                 }}
               />
             </label>

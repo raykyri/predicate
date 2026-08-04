@@ -242,6 +242,8 @@ export interface AppSettings {
   confirmPasteOverChars: number;
   /** show Cmd-held shortcut badges in the sidebar */
   showShortcutHints: boolean;
+  /** show qmux's native menu bar icon */
+  showMenuBarIcon: boolean;
   /** disable decorative/status pulse animations */
   reduceMotion: boolean;
   /** provider used to summarize first user messages into tab titles */
@@ -306,6 +308,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   confirmMultiLinePaste: false,
   confirmPasteOverChars: DEFAULT_CONFIRM_PASTE_OVER_CHARS,
   showShortcutHints: true,
+  showMenuBarIcon: false,
   reduceMotion: false,
   tabTitleProvider: "appleFoundationModels",
   openRouterKey: "",
@@ -490,6 +493,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.showShortcutHints === "boolean"
         ? parsed.showShortcutHints
         : DEFAULT_SETTINGS.showShortcutHints;
+    const showMenuBarIcon =
+      typeof parsed.showMenuBarIcon === "boolean"
+        ? parsed.showMenuBarIcon
+        : DEFAULT_SETTINGS.showMenuBarIcon;
     const reduceMotion =
       typeof parsed.reduceMotion === "boolean"
         ? parsed.reduceMotion
@@ -544,6 +551,7 @@ export function loadSettings(): AppSettings {
       confirmMultiLinePaste,
       confirmPasteOverChars,
       showShortcutHints,
+      showMenuBarIcon,
       reduceMotion,
       tabTitleProvider,
       openRouterKey,
