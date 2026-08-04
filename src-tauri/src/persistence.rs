@@ -1,3 +1,4 @@
+use crate::encyclopedia::EncyclopediaState;
 use crate::research::{ResearchFolderState, ResearchNode, ResearchTree};
 use crate::state::{GlobalDraft, PaneInfo, PaneSplitInfo, QueuedTurn, RecentSessionInfo};
 use crate::thread_graph::ThreadRecord;
@@ -116,6 +117,11 @@ pub struct PersistedState {
     /// files from builds that predate folders round-trip byte-identically.
     #[serde(default, skip_serializing_if = "ResearchFolderState::is_empty")]
     pub research_folders: ResearchFolderState,
+    /// Per-workspace encyclopedia settings and generation cursor. Optional
+    /// and dropped-if-empty so state files from builds that predate the
+    /// encyclopedia round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "EncyclopediaState::is_empty")]
+    pub encyclopedia: EncyclopediaState,
 }
 
 impl Default for PersistedState {
@@ -140,6 +146,7 @@ impl Default for PersistedState {
             research_tree_order: Vec::new(),
             research_nodes: HashMap::new(),
             research_folders: ResearchFolderState::default(),
+            encyclopedia: EncyclopediaState::default(),
         }
     }
 }
@@ -708,6 +715,18 @@ fn deserialize_lenient(value: Value) -> (PersistedState, Vec<String>) {
             }
         },
         None => ResearchFolderState::default(),
+    };
+    // Same one-blob discipline as the folder grouping: a malformed
+    // encyclopedia layer drops whole rather than dropping the session.
+    state.encyclopedia = match map.remove("encyclopedia") {
+        Some(value) => match serde_json::from_value(value) {
+            Ok(encyclopedia) => encyclopedia,
+            Err(err) => {
+                dropped.push(format!("encyclopedia: {err}"));
+                EncyclopediaState::default()
+            }
+        },
+        None => EncyclopediaState::default(),
     };
     state.active_tab_id = map
         .get("activeTabId")

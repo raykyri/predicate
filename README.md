@@ -54,6 +54,13 @@ matching UI adapter on the frontend.
   then `PLAYWRIGHT_BROWSERS_PATH` and the newest default Playwright cache entry;
   `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery. This does not use a
   browser extension or the user's normal browser profile.
+- (Experimental) Workspace encyclopedia: a dedicated Encyclopedia sidebar
+  pane (alongside Terminal and Research) showing an agent-maintained wiki of
+  interlinked Markdown pages in each research folder's `encyclopedia/`
+  directory, distilled from that folder's chats and documents. Pages cite the
+  chats they draw from, update automatically (debounced) as new material
+  lands, and can be regenerated from scratch; the files stay plain Markdown
+  on disk.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install

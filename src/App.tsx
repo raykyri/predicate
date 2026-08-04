@@ -30,6 +30,7 @@ import {
   GitBranch,
   House,
   Layers,
+  Library,
   LoaderCircle,
   MessageSquareText,
   Minimize2,
@@ -120,6 +121,8 @@ import {
   workspaceIsInResearchScope,
 } from "./lib/researchScope";
 import ResearchDocument from "./components/research/ResearchDocument";
+import EncyclopediaPage from "./components/research/EncyclopediaPage";
+import EncyclopediaSection from "./components/research/EncyclopediaSection";
 import ExportToResearchDialog from "./components/research/ExportToResearchDialog";
 import NewDocumentPane from "./components/research/NewDocumentPane";
 import NewResearchDialog from "./components/research/NewResearchDialog";
@@ -286,7 +289,22 @@ import {
   isResearchTreeSelectionChange,
   pruneResearchNavigation,
   pruneResearchNavigationNodes,
+  setSavedResearchSelection,
 } from "./lib/researchNavigation";
+import {
+  nextEncyclopediaAutoUpdateDelay,
+  shouldScheduleEncyclopediaAutoUpdate,
+  type EncyclopediaStatus,
+} from "./lib/encyclopedia";
+import {
+  EMPTY_RESEARCH_HISTORY,
+  canGoBack as historyCanGoBack,
+  canGoForward as historyCanGoForward,
+  pruneResearchHistory as pruneHistoryEntries,
+  pushResearchHistory as pushHistoryEntry,
+  researchHistoryBack as historyBack,
+  researchHistoryForward as historyForward,
+} from "./lib/researchHistory";
 import { isActiveResearchStatus } from "./lib/researchThreads";
 import {
   groupsForScope,
@@ -365,6 +383,10 @@ import {
   cancelResearchNode,
   createResearchDocument,
   createResearchTree,
+  encyclopediaCancel,
+  encyclopediaSetSettings,
+  encyclopediaStatus as fetchEncyclopediaStatus,
+  encyclopediaUpdate as launchEncyclopediaUpdate,
   updateResearchDocument,
   exportPaneToResearch,
   forkResearchNode,
@@ -1681,6 +1703,23 @@ function MainApp() {
   // safely lag behind deletions performed elsewhere.
   const [researchFolderState, setResearchFolderState] =
     useState<ResearchFolderState>(emptyResearchFolderState);
+  // Workspace encyclopedia: the scoped folder's status snapshot, and the page
+  // open on the research stage (a stage view of its own). The status ref lets
+  // agent-event effects consult the latest snapshot without re-subscribing.
+  const [encyclopediaStatus, setEncyclopediaStatus] = useState<EncyclopediaStatus | null>(null);
+  const encyclopediaStatusRef = useRef(encyclopediaStatus);
+  encyclopediaStatusRef.current = encyclopediaStatus;
+  const [activeEncyclopediaPage, setActiveEncyclopediaPage] = useState<string | null>(null);
+  const activeEncyclopediaPageRef = useRef(activeEncyclopediaPage);
+  activeEncyclopediaPageRef.current = activeEncyclopediaPage;
+  // Browser-style visit history over encyclopedia pages, sharing the research
+  // document's reducer (entries here are page file names). Held in App because
+  // the page viewer remounts per page.
+  const [encyclopediaHistory, setEncyclopediaHistory] = useState(EMPTY_RESEARCH_HISTORY);
+  const encyclopediaRefreshTimerRef = useRef<number | null>(null);
+  // Wall-clock of the last auto-launch attempt, so a failing launch cannot
+  // retry in a tight loop off every status refresh.
+  const encyclopediaAutoAttemptAtRef = useRef<number | null>(null);
   const [newResearchFolderRequest, setNewResearchFolderRequest] = useState<{
     workspaceId: string;
     treeIds: string[];
@@ -2769,11 +2808,15 @@ function MainApp() {
     ? null
     : newDocumentOpen
       ? ("composer" as const)
-      : researchMultiSelection.length > 1
-        ? ("multi-select" as const)
-        : activeResearchTreeId
-          ? ("document" as const)
-          : ("home" as const);
+      : sidebarMode === "encyclopedia"
+        ? activeEncyclopediaPage
+          ? ("encyclopedia" as const)
+          : ("encyclopedia-home" as const)
+        : researchMultiSelection.length > 1
+          ? ("multi-select" as const)
+          : activeResearchTreeId
+            ? ("document" as const)
+            : ("home" as const);
   // Menu badges and the folder-replace dialog both count every tree that keeps
   // a folder alive, so archived trees are included (removal is blocked on them).
   const researchFolderTreeCounts = useMemo(() => {
@@ -3881,7 +3924,12 @@ function MainApp() {
     // Recorded synchronously in the event batch, so the run's first turn
     // events — flushed in the same coalesce window as agent.spawned — already
     // see the id when deciding whether to skip thread-graph refreshes.
-    if (source === "research") {
+    if (source === "research" || source === "encyclopedia") {
+      // Encyclopedia update runs behave like research runs for graph work: no
+      // fork lineage will ever exist for them, and their dense turn bursts
+      // (an agent rewriting every page) plus the trailing events after their
+      // pane retires must not schedule thread-graph refreshes — the miss
+      // path's full refetch is a main-thread stall at exactly those moments.
       researchAgentIdsRef.current.add(agent.id);
     }
     registerShellCodexFirstMessageTitle(agent, paneId, source);
@@ -7015,6 +7063,9 @@ function MainApp() {
     activeResearchTreeIdRef.current = treeId;
     setActiveResearchTreeId(treeId);
     localStorage.setItem(ACTIVE_RESEARCH_TREE_KEY, treeId);
+    // An open encyclopedia page would otherwise sit forward of the document
+    // in the stage precedence.
+    setActiveEncyclopediaPage(null);
     setActiveResearchDetail(null);
     setActiveResearchDetailError(null);
     try {
@@ -7071,10 +7122,253 @@ function MainApp() {
     localStorage.removeItem(ACTIVE_RESEARCH_PANE_KEY);
     activeResearchTreeIdRef.current = null;
     setActiveResearchTreeId(null);
+    setActiveEncyclopediaPage(null);
     setActiveResearchDetail(null);
     setActiveResearchDetailError(null);
     localStorage.removeItem(ACTIVE_RESEARCH_TREE_KEY);
   }, [dismissPristineNewDocumentComposer, setActiveSurface, setSidebarMode]);
+  // ---- Workspace encyclopedia ----
+  // Encyclopedia pages have no owning pane, so external links open in the OS
+  // browser and the link menu carries no pane context.
+  const encyclopediaLinkActions = useMemo<LinkActions>(
+    () => ({
+      openLink: (url) => {
+        void openExternalUrl(url);
+      },
+      openLinkMenu: (url, x, y) => setLinkMenu({ url, x, y, paneId: null }),
+    }),
+    [],
+  );
+  const refreshEncyclopediaStatus = useCallback(async () => {
+    const scope = researchScopeRef.current;
+    if (!scope) {
+      setEncyclopediaStatus(null);
+      return;
+    }
+    try {
+      const status = await fetchEncyclopediaStatus(scope);
+      if (researchScopeRef.current === scope) {
+        setEncyclopediaStatus(status);
+      }
+    } catch {
+      // Status is a convenience surface; an unavailable workspace (unmounted
+      // folder) keeps the last snapshot rather than raising a global error.
+    }
+  }, []);
+  // Coalesces the event-driven refetches (a settling run flushes several
+  // research events back to back) into one status IPC.
+  const scheduleEncyclopediaStatusRefresh = useCallback(() => {
+    if (encyclopediaRefreshTimerRef.current !== null) {
+      return;
+    }
+    encyclopediaRefreshTimerRef.current = window.setTimeout(() => {
+      encyclopediaRefreshTimerRef.current = null;
+      void refreshEncyclopediaStatus();
+    }, 1_000);
+  }, [refreshEncyclopediaStatus]);
+  useEffect(() => {
+    // Scope switch: drop the other folder's page, history, and snapshot,
+    // then fetch.
+    setActiveEncyclopediaPage(null);
+    setEncyclopediaHistory(EMPTY_RESEARCH_HISTORY);
+    setEncyclopediaStatus(null);
+    void refreshEncyclopediaStatus();
+  }, [researchScope, refreshEncyclopediaStatus]);
+  const runEncyclopediaUpdate = useCallback(
+    async (full: boolean) => {
+      const scope = researchScopeRef.current;
+      if (!scope) {
+        return;
+      }
+      encyclopediaAutoAttemptAtRef.current = Date.now();
+      try {
+        const status = await launchEncyclopediaUpdate(
+          scope,
+          selectedLauncherAdapterId,
+          null,
+          full,
+        );
+        if (researchScopeRef.current === scope) {
+          setEncyclopediaStatus(status);
+        }
+      } catch (err) {
+        // Launch failures are recorded backend-side (lastError); refresh so
+        // the sidebar shows them, then rethrow for manual callers.
+        scheduleEncyclopediaStatusRefresh();
+        throw err;
+      }
+    },
+    [scheduleEncyclopediaStatusRefresh, selectedLauncherAdapterId],
+  );
+  const updateEncyclopediaNow = useCallback(() => {
+    setError(null);
+    runEncyclopediaUpdate(false).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, [runEncyclopediaUpdate]);
+  const regenerateEncyclopedia = useCallback(() => {
+    setError(null);
+    runEncyclopediaUpdate(true).catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+  }, [runEncyclopediaUpdate]);
+  const enableEncyclopedia = useCallback(() => {
+    const scope = researchScopeRef.current;
+    if (!scope) {
+      return;
+    }
+    setError(null);
+    // Enabling turns auto-update on with it: the encyclopedia's whole point
+    // is staying current as chats land. Both remain toggleable afterwards.
+    encyclopediaSetSettings(scope, true, true)
+      .then((status) => {
+        if (researchScopeRef.current === scope) {
+          setEncyclopediaStatus(status);
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  }, []);
+  const setEncyclopediaAutoUpdate = useCallback((autoUpdate: boolean) => {
+    const scope = researchScopeRef.current;
+    const status = encyclopediaStatusRef.current;
+    if (!scope || !status) {
+      return;
+    }
+    encyclopediaSetSettings(scope, status.enabled, autoUpdate)
+      .then((next) => {
+        if (researchScopeRef.current === scope) {
+          setEncyclopediaStatus(next);
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  }, []);
+  const cancelEncyclopediaUpdate = useCallback(() => {
+    const scope = researchScopeRef.current;
+    if (!scope) {
+      return;
+    }
+    encyclopediaCancel(scope)
+      .then((status) => {
+        if (researchScopeRef.current === scope) {
+          setEncyclopediaStatus(status);
+        }
+      })
+      .catch((err: unknown) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+  }, []);
+  const openEncyclopediaPage = useCallback(
+    (fileName: string) => {
+      dismissPristineNewDocumentComposer();
+      setSidebarMode("encyclopedia");
+      setActiveSurface("research");
+      setResearchMultiSelectIds([]);
+      if (activeEncyclopediaPageRef.current !== fileName) {
+        setEncyclopediaHistory((prev) => pushHistoryEntry(prev, fileName));
+      }
+      setActiveEncyclopediaPage(fileName);
+    },
+    [dismissPristineNewDocumentComposer, setActiveSurface, setSidebarMode],
+  );
+  const encyclopediaGoBack = useCallback(() => {
+    const step = historyBack(encyclopediaHistory);
+    if (!step) {
+      return;
+    }
+    setActiveEncyclopediaPage(step.nodeId);
+    setEncyclopediaHistory(step.history);
+  }, [encyclopediaHistory]);
+  const encyclopediaGoForward = useCallback(() => {
+    const step = historyForward(encyclopediaHistory);
+    if (!step) {
+      return;
+    }
+    setActiveEncyclopediaPage(step.nodeId);
+    setEncyclopediaHistory(step.history);
+  }, [encyclopediaHistory]);
+  useEffect(() => {
+    // Prune visits to pages that no longer exist (a regeneration can delete
+    // pages) whenever a status snapshot delivers the authoritative listing,
+    // mirroring the research document's prune-on-removal. A vanished active
+    // page falls back to the pruned cursor's page, or to the pane's empty
+    // state when nothing survives.
+    const pages = encyclopediaStatus?.pages;
+    if (!pages) {
+      return;
+    }
+    const valid = new Set(pages.map((candidate) => candidate.fileName));
+    const active = activeEncyclopediaPageRef.current;
+    const pruned = pruneHistoryEntries(
+      encyclopediaHistory,
+      valid,
+      active && valid.has(active) ? active : null,
+    );
+    if (active && !valid.has(active)) {
+      setActiveEncyclopediaPage(pruned.entries[pruned.index] ?? null);
+    }
+    const unchanged =
+      pruned.entries.length === encyclopediaHistory.entries.length &&
+      pruned.index === encyclopediaHistory.index &&
+      pruned.entries.every(
+        (entry, position) => entry === encyclopediaHistory.entries[position],
+      );
+    if (!unchanged) {
+      setEncyclopediaHistory(pruned);
+    }
+  }, [encyclopediaHistory, encyclopediaStatus]);
+  const openEncyclopediaCitation = useCallback(
+    (treeId: string, nodeId: string) => {
+      // Aim the tree's saved selection at the cited node before opening, so
+      // the document lands on the exchange the page cited.
+      setSavedResearchSelection(treeId, nodeId);
+      setActiveEncyclopediaPage(null);
+      void selectResearchTree(treeId);
+    },
+    [selectResearchTree],
+  );
+  useEffect(() => {
+    // A run this window never saw spawn (boot restore, another window's
+    // launch) must still be exempt from thread-graph refreshes; see
+    // handleAgentSpawned. Grow-only, like the spawn-time registration.
+    const agentId = encyclopediaStatus?.activeAgentId;
+    if (agentId) {
+      researchAgentIdsRef.current.add(agentId);
+    }
+  }, [encyclopediaStatus]);
+  useEffect(() => {
+    // Auto-update: armed whenever the scoped snapshot says material is
+    // pending; the debounce restarts on every refresh (each new completion
+    // refetches status), so a burst coalesces into one run.
+    if (!shouldScheduleEncyclopediaAutoUpdate(encyclopediaStatus, researchScope)) {
+      return;
+    }
+    const delay = nextEncyclopediaAutoUpdateDelay(
+      Date.now(),
+      encyclopediaAutoAttemptAtRef.current,
+    );
+    const timer = window.setTimeout(() => {
+      runEncyclopediaUpdate(false).catch(() => undefined);
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [encyclopediaStatus, researchScope, runEncyclopediaUpdate]);
+  useEffect(() => {
+    // The tracked update agent going quiet (or vanishing with its pane) is
+    // the refetch signal: the status command reaps the run backend-side,
+    // advancing the cursor and closing the hidden pane.
+    if (!encyclopediaStatus?.updating || !encyclopediaStatus.activeAgentId) {
+      return;
+    }
+    const agent = agents.find(
+      (candidate) => candidate.id === encyclopediaStatus.activeAgentId,
+    );
+    if (!agent || agent.status === "done" || agent.status === "idle" || agent.status === "failed") {
+      scheduleEncyclopediaStatusRefresh();
+    }
+  }, [agents, encyclopediaStatus, scheduleEncyclopediaStatusRefresh]);
   const changeSidebarMode = useCallback(
     (mode: SidebarMode) => {
       setPaneContextMenu(null);
@@ -7095,6 +7389,17 @@ function MainApp() {
         return;
       }
 
+      if (mode === "encyclopedia") {
+        // The Encyclopedia pane rides the research surface (terminals hide,
+        // web stage forward) but drives its own stage view; a lingering
+        // research terminal selection would keep the stage on that pane.
+        setSidebarMode("encyclopedia");
+        activeResearchPaneIdRef.current = null;
+        setActiveResearchPaneId(null);
+        localStorage.removeItem(ACTIVE_RESEARCH_PANE_KEY);
+        setActiveSurface("research");
+        return;
+      }
       setSidebarMode("research");
       const researchPaneId = activeResearchPaneIdRef.current;
       const researchPane = panesRef.current.find((pane) => pane.id === researchPaneId);
@@ -7556,6 +7861,22 @@ function MainApp() {
   );
   const handleResearchEvent = useCallback(
     (rawEvent: QmuxEvent) => {
+      if (rawEvent.type === "research.encyclopedia.changed") {
+        // Encyclopedia settings or run lifecycle changed backend-side; pull a
+        // fresh snapshot. Nothing else in the research surface is affected.
+        scheduleEncyclopediaStatusRefresh();
+        return;
+      }
+      if (
+        rawEvent.type === "research.node.updated" ||
+        rawEvent.type === "research.node.created" ||
+        rawEvent.type === "research.tree.created" ||
+        rawEvent.type === "research.document.updated"
+      ) {
+        // New material may have completed; the encyclopedia's pending-source
+        // count tracks it (and arms the auto-update debounce).
+        scheduleEncyclopediaStatusRefresh();
+      }
       const parsed = parseResearchEvent(rawEvent);
       if (parsed.kind !== "event") {
         if (parsed.kind !== "notResearch") {
@@ -7820,6 +8141,7 @@ function MainApp() {
     [
       commitResearchFolderState,
       focusResearchHome,
+      scheduleEncyclopediaStatusRefresh,
       scheduleResearchRefresh,
       scheduleResearchNavigationRecovery,
       scheduleResearchTreeRecovery,
@@ -8619,7 +8941,7 @@ function MainApp() {
       title: "Home",
       hint: "⇧⌘H",
       action: () => {
-        if (sidebarMode === "research") {
+        if (sidebarMode !== "terminal") {
           focusResearchHome();
         } else {
           focusHomeTab();
@@ -11225,12 +11547,18 @@ function MainApp() {
           changeSidebarMode("research");
           return;
         case "toggleSidebarMode":
-          changeSidebarMode(currentSidebarMode === "terminal" ? "research" : "terminal");
+          changeSidebarMode(
+            currentSidebarMode === "terminal"
+              ? "research"
+              : currentSidebarMode === "research"
+                ? "encyclopedia"
+                : "terminal",
+          );
           return;
         case "cyclePaneTab":
           if (currentSidebarMode === "research") {
             cycleResearchTab(command.direction);
-          } else {
+          } else if (currentSidebarMode === "terminal") {
             cycleTab(command.direction, false, cycleableSidebarPanes);
           }
           return;
@@ -12579,7 +12907,9 @@ function MainApp() {
           ref={sidebarRef}
           className={`sidebar${sidebarWidth < LEFT_SIDEBAR_COMPACT_WIDTH ? " is-narrow" : ""}${
             settings.codeMode ? " is-code-mode" : ""
-          }${sidebarMode === "research" ? " is-research-mode" : ""}`}
+          }${sidebarMode !== "terminal" ? " is-research-mode" : ""}${
+            sidebarMode === "encyclopedia" ? " is-encyclopedia-mode" : ""
+          }`}
         >
           <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
           <button
@@ -12626,7 +12956,7 @@ function MainApp() {
             ) : null}
           </div>
         ) : null}
-        {sidebarMode === "research" ? (
+        {sidebarMode !== "terminal" ? (
           <ResearchFolderSwitcher
             folders={researchGroups}
             scope={researchScope}
@@ -12636,6 +12966,12 @@ function MainApp() {
             onSelectScope={(scope) => {
               changeResearchFolderScope(scope);
               setResearchMultiSelectIds([]);
+              if (sidebarMode === "encyclopedia") {
+                // The scope effect swaps the encyclopedia snapshot and closes
+                // the open page; research selection is untouched so switching
+                // back to Research lands where the user left it.
+                return;
+              }
               // Keep the selection inside the new scope: an active document
               // from another folder would otherwise sit with no sidebar row.
               const allTrees = [...researchTrees, ...archivedResearchTrees];
@@ -12690,7 +13026,13 @@ function MainApp() {
         <nav
           ref={paneListRef}
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
-          aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
+          aria-label={
+            sidebarMode === "terminal"
+              ? "Terminal tabs"
+              : sidebarMode === "research"
+                ? "Research"
+                : "Encyclopedia"
+          }
         >
           {/* Fixed Home tab: not a real pane, so it can't be closed, reordered, or
               nested. Selecting it shows the empty content placeholder (the launcher). */}
@@ -12748,6 +13090,18 @@ function MainApp() {
               onRestore={restoreResearchTreeFromSidebar}
               onRemove={removeResearchTreeFromSidebar}
               onReorder={reorderResearchTreesFromSidebar}
+            />
+          ) : null}
+          {sidebarMode === "encyclopedia" && researchScope ? (
+            <EncyclopediaSection
+              status={encyclopediaStatus}
+              activePageFileName={activeEncyclopediaPage}
+              onSelectPage={openEncyclopediaPage}
+              onEnable={enableEncyclopedia}
+              onSetAutoUpdate={setEncyclopediaAutoUpdate}
+              onUpdateNow={updateEncyclopediaNow}
+              onRegenerateAll={regenerateEncyclopedia}
+              onCancelUpdate={cancelEncyclopediaUpdate}
             />
           ) : null}
           {sidebarMode === "terminal" ? terminalGroups.map((group, groupIndex) => {
@@ -14686,6 +15040,37 @@ function MainApp() {
               <Layers size={48} aria-hidden="true" />
               <span>{researchMultiSelection.length} research items selected</span>
             </div>
+          ) : null}
+          {researchStageView === "encyclopedia-home" ? (
+            <div className="research-empty-state encyclopedia-empty-state">
+              <div className="encyclopedia-empty-copy">
+                <Library size={48} aria-hidden="true" />
+                <span>
+                  {encyclopediaStatus?.enabled
+                    ? encyclopediaStatus.pages.length > 0
+                      ? "Select an encyclopedia page from the sidebar"
+                      : "No encyclopedia pages yet — they appear as chats complete"
+                    : "Enable the encyclopedia in the sidebar to build a wiki from this folder's chats"}
+                </span>
+              </div>
+            </div>
+          ) : null}
+          {researchStageView === "encyclopedia" && activeEncyclopediaPage && researchScope ? (
+            // Keyed by workspace and file: page-local fetch state must not
+            // survive navigating to a different page.
+            <EncyclopediaPage
+              key={`${researchScope}:${activeEncyclopediaPage}`}
+              workspaceId={researchScope}
+              fileName={activeEncyclopediaPage}
+              refreshToken={encyclopediaStatus?.lastGeneratedAt ?? 0}
+              linkActions={encyclopediaLinkActions}
+              canGoBack={historyCanGoBack(encyclopediaHistory)}
+              canGoForward={historyCanGoForward(encyclopediaHistory)}
+              onBack={encyclopediaGoBack}
+              onForward={encyclopediaGoForward}
+              onOpenPage={openEncyclopediaPage}
+              onOpenCitation={openEncyclopediaCitation}
+            />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to
               narrow the id to non-null for the props below. */}

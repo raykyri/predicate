@@ -4,6 +4,7 @@ mod browser_engine;
 mod config;
 mod connection_limit;
 mod control_socket;
+mod encyclopedia;
 mod events;
 mod file_server;
 mod global_task_launcher;
@@ -1046,6 +1047,273 @@ async fn read_markdown_document_file(path: String) -> Result<String, String> {
     })
     .await
     .map_err(|err| format!("read_markdown_document_file task failed: {err}"))?
+}
+
+/// The encyclopedia surface's one-stop snapshot: settings, pages on disk,
+/// pending source count, and whether an update run is in flight. Reaps a
+/// finished run first, so fetching status is also what settles a run whose
+/// completion event the frontend acted on (advancing the cursor and closing
+/// the run's hidden pane).
+#[tauri::command]
+async fn encyclopedia_status(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+) -> Result<encyclopedia::EncyclopediaStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = state.reap_encyclopedia_run(&workspace_id)?;
+        encyclopedia_status_snapshot(&state, &workspace_id, record)
+    })
+    .await
+    .map_err(|err| format!("encyclopedia_status task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn encyclopedia_set_settings(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+    enabled: bool,
+    auto_update: bool,
+) -> Result<encyclopedia::EncyclopediaStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = state.set_encyclopedia_settings(&workspace_id, enabled, auto_update)?;
+        if enabled {
+            // Make the folder visible in the workspace as soon as the feature
+            // is on, so "a special folder called encyclopedia" exists even
+            // before the first generated page lands.
+            let workspace = state
+                .group(&workspace_id)?
+                .ok_or_else(|| format!("workspace {workspace_id} was not found"))?;
+            let dir = encyclopedia::encyclopedia_dir(std::path::Path::new(&workspace.dir));
+            std::fs::create_dir_all(&dir)
+                .map_err(|err| format!("failed to create the encyclopedia folder: {err}"))?;
+        }
+        encyclopedia_status_snapshot(&state, &workspace_id, record)
+    })
+    .await
+    .map_err(|err| format!("encyclopedia_set_settings task failed: {err}"))?
+}
+
+/// Launches an encyclopedia update run: digests the workspace's new chat
+/// material into a launch prompt and starts an agent in the workspace
+/// directory to fold it into `encyclopedia/`. With `full`, digests from the
+/// beginning instead of the cursor (a rebuild).
+#[tauri::command]
+async fn encyclopedia_update(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+    adapter: String,
+    model: Option<String>,
+    full: bool,
+) -> Result<encyclopedia::EncyclopediaStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Settle any finished previous run first so its cursor advance is
+        // visible to the source collection below.
+        let record = state.reap_encyclopedia_run(&workspace_id)?;
+        if !record.enabled {
+            return Err("the encyclopedia is not enabled for this workspace".to_string());
+        }
+        if record.active_run.is_some() {
+            return Err("an encyclopedia update is already running".to_string());
+        }
+        let workspace = {
+            let _guard = workspace::lock_research_workspace_mutations()?;
+            validate_launch_workspace(&state, Some(&workspace_id), LaunchOrigin::Research)?
+                .ok_or_else(|| format!("workspace {workspace_id} was not found"))?
+        };
+        let since = if full { 0 } else { record.last_generated_at };
+        // The cutoff is captured before source collection: material that
+        // lands while the run executes has a later source time and stays
+        // pending for the next update.
+        let cutoff = encyclopedia::now_ms();
+        let refs = state.encyclopedia_source_nodes(&workspace_id, since)?;
+        let sources = load_encyclopedia_sources(&state, refs);
+        let prompt = encyclopedia::encyclopedia_update_prompt(&sources, full)?;
+        let dir = encyclopedia::encyclopedia_dir(std::path::Path::new(&workspace.dir));
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("failed to create the encyclopedia folder: {err}"))?;
+        let spawn = SpawnAgentRequest {
+            adapter_id: adapter,
+            prompt,
+            group_id: Some(workspace.id.clone()),
+            base_repo: Some(workspace.dir.clone()),
+            base_ref: Some("HEAD".to_string()),
+            cwd: None,
+            model,
+            initial_size: None,
+            use_worktree: Some(false),
+            options: serde_json::Value::Null,
+        };
+        let pane = match spawn_agent_pane(&state, spawn) {
+            Ok(pane) => pane,
+            Err(err) => {
+                state.set_encyclopedia_error(&workspace_id, err.clone());
+                return Err(err);
+            }
+        };
+        let launched = pane
+            .agent_id
+            .as_deref()
+            .and_then(|agent_id| state.agent(agent_id).ok().flatten())
+            .ok_or_else(|| "encyclopedia agent was not recorded after launch".to_string())
+            .and_then(|agent| {
+                state
+                    .begin_encyclopedia_run(
+                        &workspace_id,
+                        encyclopedia::EncyclopediaRun {
+                            agent_id: agent.id.clone(),
+                            pane_id: pane.id.clone(),
+                            started_at: cutoff,
+                            cutoff,
+                        },
+                    )
+                    .map(|record| (agent, record))
+            });
+        match launched {
+            Ok((agent, record)) => {
+                // Like fresh research spawns: no frontend caller holds this
+                // pane, so announce it or Background activity misses it.
+                state.emit(events::QmuxEvent::new(
+                    "agent.spawned",
+                    Some(pane.id.clone()),
+                    Some(agent.id.clone()),
+                    serde_json::json!({
+                        "agent": agent,
+                        "pane": pane,
+                        "source": "encyclopedia",
+                    }),
+                ));
+                encyclopedia_status_snapshot(&state, &workspace_id, record)
+            }
+            Err(err) => {
+                match kill_pane(&state, pane.id.clone()) {
+                    Ok(()) => state.clear_last_closed_pane_for_pane(&pane.id),
+                    Err(cleanup_error) => eprintln!(
+                        "qmux: failed to clean up unbound encyclopedia pane {}: {cleanup_error}",
+                        pane.id
+                    ),
+                }
+                state.set_encyclopedia_error(&workspace_id, err.clone());
+                Err(err)
+            }
+        }
+    })
+    .await
+    .map_err(|err| format!("encyclopedia_update task failed: {err}"))?
+}
+
+/// Cancels an in-flight update run without advancing the cursor.
+#[tauri::command]
+async fn encyclopedia_cancel(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+) -> Result<encyclopedia::EncyclopediaStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let record = state.cancel_encyclopedia_run(&workspace_id)?;
+        encyclopedia_status_snapshot(&state, &workspace_id, record)
+    })
+    .await
+    .map_err(|err| format!("encyclopedia_cancel task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn encyclopedia_read_page(
+    state: tauri::State<'_, AppState>,
+    workspace_id: String,
+    file_name: String,
+) -> Result<encyclopedia::EncyclopediaPageContent, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspace = state
+            .group(&workspace_id)?
+            .ok_or_else(|| format!("workspace {workspace_id} was not found"))?;
+        let dir = encyclopedia::encyclopedia_dir(std::path::Path::new(&workspace.dir));
+        encyclopedia::read_encyclopedia_page(&dir, &file_name)
+    })
+    .await
+    .map_err(|err| format!("encyclopedia_read_page task failed: {err}"))?
+}
+
+fn encyclopedia_status_snapshot(
+    state: &AppState,
+    workspace_id: &str,
+    record: encyclopedia::WorkspaceEncyclopedia,
+) -> Result<encyclopedia::EncyclopediaStatus, String> {
+    let workspace = state
+        .group(workspace_id)?
+        .ok_or_else(|| format!("workspace {workspace_id} was not found"))?;
+    let dir = encyclopedia::encyclopedia_dir(std::path::Path::new(&workspace.dir));
+    let pages = encyclopedia::list_encyclopedia_pages(&dir)?;
+    let pending_source_count = state
+        .encyclopedia_source_nodes(workspace_id, record.last_generated_at)?
+        .len();
+    Ok(encyclopedia::EncyclopediaStatus {
+        workspace_id: workspace_id.to_string(),
+        enabled: record.enabled,
+        auto_update: record.auto_update,
+        updating: record.active_run.is_some(),
+        active_agent_id: record.active_run.map(|run| run.agent_id),
+        last_generated_at: record.last_generated_at,
+        pending_source_count,
+        pages,
+        last_error: record.last_error,
+    })
+}
+
+/// Reads each source node's durable response snapshot (falling back to the
+/// live transcript for a snapshot that never landed) and flattens it into
+/// digest text. Sources whose content is unavailable are skipped rather than
+/// failing the whole update.
+fn load_encyclopedia_sources(
+    state: &AppState,
+    refs: Vec<(ResearchNode, String)>,
+) -> Vec<encyclopedia::EncyclopediaSource> {
+    refs.into_iter()
+        .filter_map(|(node, tree_title)| {
+            let turns = research::read_response_snapshot(&state.config().workspace_root, &node.id)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    let ancestor_prompts = state
+                        .research_node_ancestor_prompts(&node.id)
+                        .unwrap_or_default();
+                    research::load_transcript_response(state.config(), &node, &ancestor_prompts)
+                        .ok()
+                })?;
+            let (kind, include_user) = match node.kind {
+                research::ResearchNodeKind::Run => {
+                    (encyclopedia::EncyclopediaSourceKind::Chat, false)
+                }
+                research::ResearchNodeKind::Document => {
+                    (encyclopedia::EncyclopediaSourceKind::Document, false)
+                }
+                research::ResearchNodeKind::Conversation => {
+                    (encyclopedia::EncyclopediaSourceKind::Conversation, true)
+                }
+            };
+            let body = encyclopedia::turns_digest_text(&turns, include_user);
+            let prompt = if matches!(node.kind, research::ResearchNodeKind::Run) {
+                node.prompt.clone()
+            } else {
+                String::new()
+            };
+            let title = node
+                .title
+                .clone()
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or(tree_title);
+            Some(encyclopedia::EncyclopediaSource {
+                kind,
+                title,
+                citation: encyclopedia::citation_path(&node.tree_id, &node.id),
+                prompt,
+                body,
+            })
+        })
+        .collect()
 }
 
 /// Reads a pasted image referenced by a transcript "[Image: source: <path>]"
@@ -2720,6 +2988,11 @@ fn main() {
             export_pane_to_research,
             update_research_document,
             read_markdown_document_file,
+            encyclopedia_status,
+            encyclopedia_set_settings,
+            encyclopedia_update,
+            encyclopedia_cancel,
+            encyclopedia_read_page,
             read_transcript_image,
             save_pasted_image,
             get_research_node_content,

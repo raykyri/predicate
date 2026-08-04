@@ -1,4 +1,4 @@
-import { BookOpen, SquareTerminal } from "lucide-react";
+import { BookOpen, Library, SquareTerminal } from "lucide-react";
 import type { SidebarMode } from "../lib/sidebarMode";
 
 interface SidebarModeToggleProps {
@@ -79,6 +79,24 @@ export default function SidebarModeToggle({
             aria-label={`${unseenResearchCount} research item${unseenResearchCount === 1 ? " has" : "s have"} unseen results`}
           >
             •
+          </span>
+        ) : null}
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={mode === "encyclopedia"}
+        className={`control-button${mode === "encyclopedia" ? " is-selected" : ""}`}
+        onClick={() => onChange("encyclopedia")}
+      >
+        <Library size={14} aria-hidden="true" />
+        <span>Encyclopedia</span>
+        {shortcutHintsShown && mode !== "encyclopedia" ? (
+          <span
+            className="pane-tab-shortcut-hint sidebar-mode-shortcut-hint"
+            aria-hidden="true"
+          >
+            ⌘`
           </span>
         ) : null}
       </button>
