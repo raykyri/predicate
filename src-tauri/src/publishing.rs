@@ -638,20 +638,31 @@ pub async fn publishing_sync(
                 .then_some(desired_description),
             files,
         };
-        let mut builder = client
-            .patch(format!("{GITHUB_API_BASE}/gists/{}", existing.gist_id))
-            .header("Accept", "application/vnd.github+json")
-            .header("Authorization", format!("Bearer {}", token.access_token))
-            .header("User-Agent", GITHUB_USER_AGENT)
-            .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
-        if let Some(etag) = remote.etag.as_deref() {
-            builder = builder.header("If-Match", etag);
-        }
-        let response = builder
-            .json(&payload)
-            .send()
+        let send_update = |with_precondition: bool| {
+            let mut builder = client
+                .patch(format!("{GITHUB_API_BASE}/gists/{}", existing.gist_id))
+                .header("Accept", "application/vnd.github+json")
+                .header("Authorization", format!("Bearer {}", token.access_token))
+                .header("User-Agent", GITHUB_USER_AGENT)
+                .header("X-GitHub-Api-Version", GITHUB_API_VERSION);
+            if with_precondition && let Some(etag) = remote.etag.as_deref() {
+                builder = builder.header("If-Match", strong_etag(etag));
+            }
+            builder.json(&payload).send()
+        };
+        let mut response = send_update(true)
             .await
             .map_err(|error| github_request_error("sync Gist", error))?;
+        // GitHub does not accept every validator it hands out: an If-Match it
+        // rejects comes back as a bodyless 400 instead of being evaluated.
+        // The revision check above already guards external edits, so retry
+        // once without the precondition rather than failing the sync over the
+        // narrower in-flight race it covered.
+        if response.status() == StatusCode::BAD_REQUEST && remote.etag.is_some() {
+            response = send_update(false)
+                .await
+                .map_err(|error| github_request_error("sync Gist", error))?;
+        }
         let status = response.status();
         let body = response
             .text()
@@ -2162,6 +2173,14 @@ fn github_request_error(action: &str, error: reqwest::Error) -> String {
     } else {
         format!("Failed to {action}: {error}")
     }
+}
+
+/// GitHub's REST API serves weak validators (`W/"..."`) on gist reads, but a
+/// weak entity-tag is invalid in If-Match (RFC 9110 §13.1.1), which GitHub
+/// rejects with a bodyless 400 rather than evaluating. Send the strong form
+/// of the tag it gave us.
+fn strong_etag(value: &str) -> &str {
+    value.trim().trim_start_matches("W/")
 }
 
 fn github_response_error(action: &str, status: StatusCode, body: &str) -> String {
