@@ -900,8 +900,8 @@
   z-index: 8;
   display: flex;
   flex-direction: column;
-  width: min(180px, calc(100% - var(--sidebar-width, 268px) - 28px));
-  max-height: min(120px, 21vh);
+  width: min(90px, calc(100% - var(--sidebar-width, 268px) - 28px));
+  max-height: min(60px, 21vh);
   margin: 0;
   padding: 0;
   overflow: hidden;
@@ -916,6 +916,12 @@
   font: inherit;
   appearance: none;
   -webkit-appearance: none;
+}
+
+/* A regular expanded transcript retains its 40px header. Keep the preview
+   below that chrome; split expansion is headerless and keeps the base offset. */
+.terminal-pip.has-pane-header {
+  top: 49px;
 }
 
 .terminal-pip:hover {

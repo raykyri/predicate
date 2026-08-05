@@ -15013,6 +15013,7 @@ function MainApp() {
         <TerminalPip
           paneId={activePane.id}
           title={displayPaneTitle(activePane, agentByPaneId.get(activePane.id))}
+          hasPaneHeader={activePaneHasTurnPaneHeader}
           theme={
             themeCatalog?.find((theme) => theme.name === terminalThemeName) ??
             effectiveTheme

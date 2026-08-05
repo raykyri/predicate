@@ -20,6 +20,8 @@ export interface TerminalPipProps {
   paneId: string;
   /** Shown in the chrome strip above the viewport text. */
   title: string;
+  /** Offset the preview below the expanded transcript's header. */
+  hasPaneHeader: boolean;
   theme: NativeTerminalTheme | null;
   fontFamily: string;
   fontSize: number;
@@ -36,6 +38,7 @@ export interface TerminalPipProps {
 export default function TerminalPip({
   paneId,
   title,
+  hasPaneHeader,
   theme,
   fontFamily,
   fontSize,
@@ -92,7 +95,9 @@ export default function TerminalPip({
 
   return (
     <section
-      className={`terminal-pip${collapsed ? " is-collapsed" : ""}`}
+      className={`terminal-pip${
+        hasPaneHeader ? " has-pane-header" : ""
+      }${collapsed ? " is-collapsed" : ""}`}
       style={style}
       onPointerDown={(event) => event.stopPropagation()}
       aria-label={`Terminal preview: ${displayTitle}`}

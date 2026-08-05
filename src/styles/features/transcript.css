@@ -273,6 +273,13 @@
   width: min(700px, 100%);
 }
 
+/* The compact transcript pins timestamp metadata to the pane's left edge.
+   Expanded mode instead aligns it with the left edge of the centered reading
+   column, just like the message rows around it. */
+.turn-pane.is-expanded .turn-assistant-timestamp {
+  align-self: center;
+}
+
 .turn-pane.is-expanded .turn-sidebar-input-rail {
   width: 100%;
   max-width: 700px;
