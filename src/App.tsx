@@ -2371,6 +2371,10 @@ function MainApp() {
         className={`settings-theme-option${previewed ? " is-previewed" : ""}`}
         onMouseEnter={() => setPreviewThemeId(themeId)}
         onFocus={() => setPreviewThemeId(themeId)}
+        // macOS WebKit does not focus buttons on mouse-down. Without keeping
+        // focus on the trigger, the field's blur handler sees relatedTarget as
+        // null and unmounts this list before the ensuing click can select it.
+        onMouseDown={(event) => event.preventDefault()}
         onClick={() => chooseTheme(themeId)}
         onKeyDown={(event) => handleThemeOptionKeyDown(event, themeId)}
       >
