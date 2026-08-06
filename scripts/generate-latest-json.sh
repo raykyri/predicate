@@ -25,24 +25,31 @@ signature="$(cat "$signature_file")"
 url="https://github.com/raykyri/qmux/releases/download/v$version/qmux.app.tar.gz"
 pub_date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# The updater requests the darwin-<arch> key for the arch the process runs as;
-# a universal archive serves both, so list it under both keys.
-cat >"$bundle_dir/latest.json" <<EOF
-{
-  "version": "$version",
-  "pub_date": "$pub_date",
-  "platforms": {
-    "darwin-aarch64": {
-      "signature": "$signature",
-      "url": "$url"
+# Build the manifest with Python so signature bytes never re-enter the shell
+# parser (unquoted heredocs expand $(...), backticks, and similar).
+if ! command -v python3 >/dev/null; then
+  echo "python3 is required to write latest.json safely." >&2
+  exit 1
+fi
+SIGNATURE="$signature" VERSION="$version" PUB_DATE="$pub_date" URL="$url" \
+  python3 - <<'PY' >"$bundle_dir/latest.json"
+import json, os
+print(json.dumps({
+    "version": os.environ["VERSION"],
+    "pub_date": os.environ["PUB_DATE"],
+    "platforms": {
+        "darwin-aarch64": {
+            "signature": os.environ["SIGNATURE"],
+            "url": os.environ["URL"],
+        },
+        "darwin-x86_64": {
+            "signature": os.environ["SIGNATURE"],
+            "url": os.environ["URL"],
+        },
     },
-    "darwin-x86_64": {
-      "signature": "$signature",
-      "url": "$url"
-    }
-  }
-}
-EOF
+}, indent=2))
+print()
+PY
 
 echo "Wrote $bundle_dir/latest.json"
 echo "Upload these to the v$version GitHub release:"

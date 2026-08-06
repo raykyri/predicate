@@ -2,6 +2,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
+repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
 
 notarize=0
 case "${1:-}" in
@@ -18,14 +19,37 @@ if [[ "$#" -gt 1 ]]; then
   exit 2
 fi
 
-# Use the repository's local build configuration when the caller did not
-# provide a GitHub OAuth client ID explicitly. Automatically export sourced
-# values so they are available to the Tauri and Cargo subprocesses.
-if [[ -z "${QMUX_GITHUB_CLIENT_ID:-}" && -f "$script_dir/../.env" ]]; then
-  set -a
-  source "$script_dir/../.env"
-  set +a
-fi
+# Load KEY=VALUE pairs from .env for variables the caller has not already set.
+# Do not `source` the file: values regularly contain shell metacharacters
+# (Apple signing identities embed a team id in parentheses), and a single
+# unquoted parenthesis turns into `syntax error near unexpected token ')'`.
+load_dotenv() {
+  local env_file="$1"
+  local line name value
+  [[ -f "$env_file" ]] || return 0
+  # `|| [[ -n "$line" ]]` keeps a final line that lacks a trailing newline.
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Skip blanks and comments.
+    [[ "$line" =~ ^[[:space:]]*$ || "$line" =~ ^[[:space:]]*# ]] && continue
+    [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]] || continue
+    name="${line%%=*}"
+    value="${line#*=}"
+    # Strip one layer of matching quotes so KEY="a b" exports as a b.
+    if [[ "$value" =~ ^\"(.*)\"$ || "$value" =~ ^\'(.*)\'$ ]]; then
+      value="${BASH_REMATCH[1]}"
+    fi
+    # Leave caller-provided environment values alone.
+    if [[ -n "${!name+x}" ]]; then
+      continue
+    fi
+    # Use printf-based assignment so parentheses, spaces, and other
+    # metacharacters in the value cannot be re-parsed as shell syntax.
+    printf -v "$name" '%s' "$value"
+    export "$name"
+  done <"$env_file"
+}
+
+load_dotenv "$repo_root/.env"
 
 # Tauri notarizes whenever either supported set of Apple credentials reaches
 # the bundler. Keep ordinary builds local even when .env contains release
@@ -47,19 +71,19 @@ if [[ "$notarize" -eq 1 ]]; then
     exit 1
   fi
 
-  if ! have_apple_id_creds && have_api_key_creds && [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
+  if ! have_apple_id_creds && have_api_key_creds && [[ ! -f "${APPLE_API_KEY_PATH}" ]]; then
     echo "APPLE_API_KEY_PATH does not exist: $APPLE_API_KEY_PATH" >&2
     exit 1
   fi
 else
-  unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
-  unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
-  unset APPLE_PROVIDER_SHORT_NAME
+  unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID || true
+  unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH || true
+  unset APPLE_PROVIDER_SHORT_NAME || true
 fi
 
 # `tauri` lives in node_modules/.bin; put it on PATH so this script also works
 # when invoked directly (e.g. from release.sh) rather than through `npm run`.
-export PATH="$script_dir/../node_modules/.bin:$PATH"
+export PATH="$repo_root/node_modules/.bin:$PATH"
 
 # Shipped bundles must include the Foundation Models tab-title bridge; without
 # this the bridge is optional and a missing Swift toolchain only warns.
@@ -81,8 +105,12 @@ fi
 # builds instead of spending several minutes on an artifact that cannot be
 # signed.
 if [[ "$(uname -s)" == "Darwin" && -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  # Match the identity as a fixed string. Do not interpolate it into a larger
+  # shell word: Developer ID names contain parentheses (team id) that must not
+  # re-enter the parser.
   valid_signing_identities="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-  if ! grep -Fq "\"$APPLE_SIGNING_IDENTITY\"" <<<"$valid_signing_identities"; then
+  identity_pattern="\"${APPLE_SIGNING_IDENTITY}\""
+  if ! printf '%s\n' "$valid_signing_identities" | grep -Fq -- "$identity_pattern"; then
     echo "Configured Apple signing identity is not available to this process:" >&2
     echo "  $APPLE_SIGNING_IDENTITY" >&2
     echo "Run 'security find-identity -v -p codesigning' in the same environment" >&2
@@ -107,4 +135,4 @@ fi
 # successful local and release builds always carry the polished window and icon
 # placement. Headless callers can explicitly set CI=true; Tauri then passes
 # --skip-jenkins and produces the plain, non-interactive fallback instead.
-tauri build --target "$build_target"
+exec tauri build --target "$build_target"
