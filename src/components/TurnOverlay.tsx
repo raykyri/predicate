@@ -1048,12 +1048,15 @@ function MessageItemView({
     item.role === "user" && onForkFromMessage && item.anchor
       ? () => onForkFromMessage(item.anchor as MessageAnchor)
       : null;
-  // Handing off means exporting an outstanding request together with the
-  // history behind it, which only a user message carries. Unlike forking it
-  // needs no adapter support and no live agent, so a detached transcript can
-  // still be handed to another tool.
+  // Handing off exports the transcript up to and including this message: from a
+  // user message that is an outstanding request, from an assistant message it is
+  // where the previous agent stopped. Unlike forking it needs no adapter support
+  // and no live agent, so a detached transcript can still be handed to another
+  // tool.
   const copyHandoff =
-    item.role === "user" && onCopyHandoff ? () => onCopyHandoff(item.key) : null;
+    (item.role === "user" || item.role === "assistant") && onCopyHandoff
+      ? () => onCopyHandoff(item.key)
+      : null;
   const showUserMessageActions = Boolean(
     item.role === "user" &&
       showName &&
@@ -1109,9 +1112,9 @@ const MESSAGE_MENU_PREFERRED_WIDTH = 200;
 // How long the "Copied handoff" confirmation stays up before the menu closes.
 const HANDOFF_FEEDBACK_MS = 900;
 
-// The "..." menu shown at the right of a message header. Assistant messages only
-// offer Copy; user messages can also regenerate the tab title, copy a handoff
-// briefing, or save to the prompt library.
+// The "..." menu shown at the right of a message header. Both roles offer Copy
+// and a handoff briefing; user messages can also regenerate the tab title, fork
+// from the message, or save to the prompt library.
 // Portaled so the scrollable timeline cannot clip it; right-aligned so it grows
 // toward the pane center.
 function MessageActionsMenu({
