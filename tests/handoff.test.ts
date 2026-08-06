@@ -34,16 +34,25 @@ function itemsFor(turns: Turn[]) {
   return buildTimelineItems(turns, true);
 }
 
-function userKey(turns: Turn[], occurrence: number) {
-  const items = itemsFor(turns);
-  const users = items.filter((item) => item.role === "user");
-  return users[occurrence].key;
+function keyFor(turns: Turn[], role: string, occurrence: number) {
+  const matching = itemsFor(turns).filter((item) => item.role === role);
+  return matching[occurrence].key;
 }
 
 function build(turns: Turn[], anchorOccurrence: number, overrides = {}) {
   return buildHandoffDocument({
     items: itemsFor(turns),
-    anchorKey: userKey(turns, anchorOccurrence),
+    anchorKey: keyFor(turns, "user", anchorOccurrence),
+    assistantLabel: "Claude",
+    ...overrides,
+  });
+}
+
+/** Anchored on an assistant message — the same menu action, from the other role. */
+function buildFromAssistant(turns: Turn[], anchorOccurrence: number, overrides = {}) {
+  return buildHandoffDocument({
+    items: itemsFor(turns),
+    anchorKey: keyFor(turns, "assistant", anchorOccurrence),
     assistantLabel: "Claude",
     ...overrides,
   });
@@ -183,6 +192,80 @@ test("skips superseded turns and labels interrupted ones", () => {
   assert.ok(document);
   assert.equal(document.includes("Abandoned branch work."), false);
   assert.match(document, /### Claude \(interrupted\)\nPartial answer/);
+});
+
+test("hands off an assistant reply as where the previous agent left off", () => {
+  const turns = [
+    turn("user", [text("Add retries to the fetch helper.")]),
+    turn("assistant", [text("Done — a backoff loop. Next I'd cover it with a test.")]),
+    turn("user", [text("Ship it.")]),
+  ];
+
+  const document = buildFromAssistant(turns, 0);
+
+  assert.ok(document);
+  assert.match(document, /Read it, then carry on from where the previous agent left off\./);
+  assert.match(document, /### User\nAdd retries to the fetch helper\./);
+  assert.match(
+    document,
+    /## Where the previous agent left off\n\n<last-turn>\nDone — a backoff loop\. Next I'd cover it with a test\.\n<\/last-turn>/,
+  );
+  assert.match(document, /^Pick up from there: continue the work/m);
+  // No outstanding ask travels with an assistant handoff, and nothing after the
+  // anchored reply belongs to it.
+  assert.equal(document.includes("## Current request"), false);
+  assert.equal(document.includes("Ship it."), false);
+  // The anchored reply is the trailing section, not a history entry.
+  assert.equal(document.includes("### Claude"), false);
+});
+
+test("spans an assistant run split by activity and counts its work as done", () => {
+  const turns = [
+    turn("user", [text("Fix the parser.")]),
+    turn("assistant", [
+      text("Looking now."),
+      toolUse("Read", { file_path: "/work/repo/src/parser.ts" }, "t1"),
+      toolResult("export function parse() { /* secret token abc123 */ }", "t1"),
+      toolUse("Edit", { file_path: "/work/repo/src/parser.ts" }, "t2"),
+      toolResult("ok", "t2"),
+      text("Fixed it."),
+    ]),
+  ];
+
+  // The menu hangs off the first card of the run; the handoff covers all of it.
+  const document = buildFromAssistant(turns, 0);
+
+  assert.ok(document);
+  assert.match(document, /<last-turn>\nLooking now\.\n\nFixed it\.\n\[tools: Edit, Read\]\n<\/last-turn>/);
+  assert.match(document, /- Files edited: `\/work\/repo\/src\/parser\.ts`/);
+  // Tool results still never travel with a handoff.
+  assert.equal(document.includes("secret token abc123"), false);
+});
+
+test("marks an interrupted assistant anchor", () => {
+  const turns = [
+    turn("user", [text("Start.")]),
+    turn("assistant", [text("Partial answer")], { status: "interrupted" }),
+  ];
+
+  const document = buildFromAssistant(turns, 0);
+
+  assert.ok(document);
+  assert.match(document, /## Where the previous agent left off \(interrupted\)/);
+});
+
+test("drops the anchor section when an assistant run said and did nothing", () => {
+  const turns = [
+    turn("user", [text("Start.")]),
+    turn("assistant", [{ type: "raw", value: { type: "thinking", thinking: "just musing" } }]),
+  ];
+
+  const document = buildFromAssistant(turns, 0);
+
+  assert.ok(document);
+  assert.equal(document.includes("## Where the previous agent left off"), false);
+  assert.equal(document.includes("just musing"), false);
+  assert.match(document, /^Pick up from there: continue the work/m);
 });
 
 test("returns null when the anchor key is not in the items", () => {
