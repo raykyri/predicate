@@ -19,7 +19,7 @@ export const CLAUDE_EFFORT_OPTIONS: LauncherSelectOption[] = [
   { value: "low", label: "Low effort", dividerBefore: true },
   { value: "medium", label: "Medium effort" },
   { value: "high", label: "High effort" },
-  { value: "xhigh", label: "xHigh effort" },
+  { value: "xhigh", label: "Extra effort" },
   { value: "max", label: "Max effort" },
   { value: "ultracode", label: "Ultracode effort" },
 ];
