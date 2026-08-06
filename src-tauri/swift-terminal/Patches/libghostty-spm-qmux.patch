@@ -240,6 +240,32 @@ index 41783dd..fe34d23 100644
 +        }
 +    }
 +}
+diff --git a/Sources/GhosttyTerminal/Platform/Shared/TerminalHardwareKeyRouter.swift b/Sources/GhosttyTerminal/Platform/Shared/TerminalHardwareKeyRouter.swift
+index 6e64724..95b21f4 100644
+--- a/Sources/GhosttyTerminal/Platform/Shared/TerminalHardwareKeyRouter.swift
++++ b/Sources/GhosttyTerminal/Platform/Shared/TerminalHardwareKeyRouter.swift
+@@ -105,14 +105,13 @@ enum TerminalHardwareKeyRouter {
+         case 0x79:
+             Data("\u{1B}[6~".utf8)
+-        case 0x7B:
+-            Data("\u{1B}[D".utf8)
+-        case 0x7C:
+-            Data("\u{1B}[C".utf8)
+-        case 0x7D:
+-            Data("\u{1B}[B".utf8)
+-        case 0x7E:
+-            Data("\u{1B}[A".utf8)
++        // Cursor-key bytes depend on DECCKM. Full-screen programs such as
++        // less enable application-cursor mode and expect SS3 (ESC O A-D),
++        // while the shell normally expects CSI (ESC [ A-D). Always let
++        // Ghostty encode arrows from its live terminal-mode state instead of
++        // bypassing it with a fixed sequence.
++        case 0x7B ... 0x7E:
++            nil
+         default:
+             nil
+         }
+     }
 diff --git a/Tests/GhosttyKitTest/TerminalLifecycleTests.swift b/Tests/GhosttyKitTest/TerminalLifecycleTests.swift
 index 57692fa..67c14e3 100644
 --- a/Tests/GhosttyKitTest/TerminalLifecycleTests.swift
@@ -324,11 +350,12 @@ diff --git a/Sources/GhosttyTerminal/InMemory/InMemoryTerminalSession.swift b/So
 diff --git a/Tests/GhosttyKitTest/TerminalLifecycleTests.swift b/Tests/GhosttyKitTest/TerminalLifecycleTests.swift
 --- a/Tests/GhosttyKitTest/TerminalLifecycleTests.swift
 +++ b/Tests/GhosttyKitTest/TerminalLifecycleTests.swift
-@@ -1,2 +1,3 @@
+@@ -1,2 +1,4 @@
  @testable import GhosttyTerminal
 +import Foundation
++import GhosttyKit
  import Testing
-@@ -4,3 +5,13 @@ import Testing
+@@ -4,3 +6,13 @@ import Testing
  @MainActor
  struct TerminalLifecycleTests {
 +    @Test
@@ -342,4 +369,28 @@ diff --git a/Tests/GhosttyKitTest/TerminalLifecycleTests.swift b/Tests/GhosttyKi
 +    }
 +
      @Test
-diff --git a/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift b/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
+diff --git a/Tests/GhosttyKitTest/TerminalHardwareKeyRouterTests.swift b/Tests/GhosttyKitTest/TerminalHardwareKeyRouterTests.swift
+index ea59c3c..042cad6 100644
+--- a/Tests/GhosttyKitTest/TerminalHardwareKeyRouterTests.swift
++++ b/Tests/GhosttyKitTest/TerminalHardwareKeyRouterTests.swift
+@@ -93,11 +93,17 @@ struct TerminalHardwareKeyRouterTests {
+     @Test
+-    func `routes app kit arrow keys directly for in memory backends`() {
++    func `routes app kit arrows through ghostty for in memory backends`() {
+         let session = InMemoryTerminalSession(write: { _ in }, resize: { _ in })
+         #expect(
+             TerminalHardwareKeyRouter.routeAppKit(
+-                keyCode: 0x7B,
++                keyCode: 0x7D,
+                 backend: .inMemory(session)
+-            ) == .data(Data("\u{1B}[D".utf8))
++            ) == .ghostty(GHOSTTY_KEY_ARROW_DOWN)
++        )
++        #expect(
++            TerminalHardwareKeyRouter.routeAppKit(
++                keyCode: 0x7E,
++                backend: .inMemory(session)
++            ) == .ghostty(GHOSTTY_KEY_ARROW_UP)
+         )
+         #expect(
+             TerminalHardwareKeyRouter.routeAppKit(
