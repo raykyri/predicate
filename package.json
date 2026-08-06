@@ -33,6 +33,7 @@
     "test:research-threads": "node scripts/test-research-threads.mjs",
     "test:image-markers": "node scripts/test-image-markers.mjs",
     "test:image-lightbox": "node --import tsx --test tests/imageLightbox.test.ts",
+    "test:code-wrap": "node --import tsx --test tests/codeWrap.test.ts",
     "test:markdown-math": "node --import tsx --test tests/markdownMath.test.ts",
     "test:research-prompt-markdown": "node --import tsx --test tests/researchPromptMarkdown.test.ts",
     "test:tagged-instructions": "node scripts/test-tagged-instructions.mjs",

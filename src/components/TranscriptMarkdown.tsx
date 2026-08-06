@@ -23,6 +23,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
+import { getCodeWrap, setCodeWrap, subscribeCodeWrap } from "../lib/codeWrap";
 import { safeHref } from "../lib/links";
 import DiagramBlock, { diagramLangFromClassName, nodeText } from "./DiagramBlock";
 
@@ -157,9 +158,76 @@ function MarkdownDiagramBlock({ lang, code }: { lang: "mermaid" | "dot"; code: s
 
 const CODE_MENU_PREFERRED_WIDTH = 180;
 
+// Wrapping is app-wide, so toggling it also re-lays out every *other* code block
+// in the pane — the ones above the toggled block would push it up or down, out
+// from under the pointer. Remember where the toggled block sits inside its
+// scroller and put it back on the commit that applies the new wrap.
+interface CodeWrapAnchor {
+  scroller: HTMLElement;
+  offsetTop: number;
+  /** The view was parked at the end; keep it there instead of on the block. */
+  atBottom: boolean;
+}
+
+// Treat a view parked this close to the end as pinned to the bottom.
+const CODE_WRAP_BOTTOM_EPSILON = 2;
+
+/** Nearest ancestor that actually scrolls `element` vertically. */
+function verticalScrollParent(element: HTMLElement): HTMLElement | null {
+  let node = element.parentElement;
+  while (node) {
+    const { overflowY } = getComputedStyle(node);
+    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+function codeBlockOffsetIn(block: HTMLElement, scroller: HTMLElement): number {
+  return block.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
+}
+
+function captureCodeWrapAnchor(block: HTMLElement | null): CodeWrapAnchor | null {
+  if (!block) {
+    return null;
+  }
+  const scroller = verticalScrollParent(block);
+  if (!scroller) {
+    return null;
+  }
+  // A view parked at the end stays parked at the end: down there the tail is
+  // what the reader is holding onto, and re-anchoring on the block would leave
+  // the transcript a block's worth of growth short of the bottom — enough to
+  // drop it out of "following live output".
+  const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+  return {
+    scroller,
+    offsetTop: codeBlockOffsetIn(block, scroller),
+    atBottom: distanceFromBottom <= CODE_WRAP_BOTTOM_EPSILON,
+  };
+}
+
+function restoreCodeWrapAnchor(anchor: CodeWrapAnchor, block: HTMLElement | null): void {
+  if (anchor.atBottom) {
+    anchor.scroller.scrollTop = anchor.scroller.scrollHeight;
+    return;
+  }
+  if (!block) {
+    return;
+  }
+  const drift = codeBlockOffsetIn(block, anchor.scroller) - anchor.offsetTop;
+  if (drift !== 0) {
+    anchor.scroller.scrollTop += drift;
+  }
+}
+
 function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
-  const [wrap, setWrap] = useState(false);
+  const wrap = useSyncExternalStore(subscribeCodeWrap, getCodeWrap, getCodeWrap);
   const [open, setOpen] = useState(false);
+  const blockRef = useRef<HTMLDivElement | null>(null);
+  const anchorRef = useRef<CodeWrapAnchor | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{
@@ -210,6 +278,17 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
     };
   }, [open]);
 
+  // Runs on the commit that flipped the class on every block, before paint, so
+  // the anchored block never visibly jumps. Only the block whose menu made the
+  // change holds an anchor; the rest fall straight through.
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current;
+    anchorRef.current = null;
+    if (anchor) {
+      restoreCodeWrapAnchor(anchor, blockRef.current);
+    }
+  }, [wrap]);
+
   useLayoutEffect(() => {
     if (!open) {
       setPos(null);
@@ -226,7 +305,7 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
   }, [open, positionMenu]);
 
   return (
-    <div className={`turn-markdown-code-block${wrap ? " is-wrapped" : ""}`}>
+    <div ref={blockRef} className={`turn-markdown-code-block${wrap ? " is-wrapped" : ""}`}>
       <button
         ref={triggerRef}
         type="button"
@@ -264,11 +343,12 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
                 aria-checked={wrap}
                 className="menu-item turn-message-menu-item"
                 onClick={() => {
-                  setWrap((value) => !value);
+                  anchorRef.current = captureCodeWrapAnchor(blockRef.current);
+                  setCodeWrap(!wrap);
                   setOpen(false);
                 }}
               >
-                {wrap ? "Unwrap code block" : "Wrap code block"}
+                {wrap ? "Unwrap code blocks" : "Wrap code blocks"}
               </button>
               <button
                 type="button"

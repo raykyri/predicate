@@ -71,6 +71,7 @@ import {
   getImageLightbox,
   subscribeImageLightbox,
 } from "./lib/imageLightbox";
+import { getCodeWrap, setCodeWrap, subscribeCodeWrap } from "./lib/codeWrap";
 import ConfirmDialogActionButton from "./components/ConfirmDialogActionButton";
 import { queuedTurnDeliveryLabel } from "./components/QueuedTurnCard";
 import {
@@ -4739,6 +4740,10 @@ function MainApp() {
     getImageLightbox,
     getImageLightbox,
   );
+  // Code-block wrapping is app-wide and lives in its own store so a block's own
+  // menu can flip it without threading a setter through the markdown renderer.
+  // The settings checkbox reads and writes that same store.
+  const wrapCodeBlocks = useSyncExternalStore(subscribeCodeWrap, getCodeWrap, getCodeWrap);
   // This is the shared hard-input policy for every visible native surface and
   // for the logical owner calculation below. Keeping it single-sourced avoids
   // a modal disabling pointer claims while the owner coordinator still grants
@@ -13782,6 +13787,22 @@ function MainApp() {
             <p className="settings-hint settings-hint-weak">
               Places a time under each assistant reply, right before the next
               user message or at the end of the transcript.
+            </p>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Wrap long lines in code blocks</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={wrapCodeBlocks}
+                onChange={(event) => {
+                  setCodeWrap(event.currentTarget.checked);
+                }}
+              />
+            </label>
+            <p className="settings-hint settings-hint-weak">
+              Applies to every code block in transcripts and research documents;
+              each block's ⋯ menu toggles the same setting.
             </p>
 
             <div className="settings-row">
