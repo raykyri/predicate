@@ -255,6 +255,20 @@ export default function TurnOverlay({
   const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
   const [composerHeight, setComposerHeight] = useState(0);
   const [composerBaseHeight, setComposerBaseHeight] = useState(0);
+  // When the shared timeline swaps transcripts, the browser clamps the previous
+  // scrollTop onto the new content and fires onScroll *before* layout effects
+  // run. That intermediate event would overwrite the incoming agent's saved
+  // position (often as stuck-at-bottom) and the restore effect would then read
+  // the poisoned value. Snapshot the restore target during render — still
+  // before any DOM mutation — and ignore scroll events until restore finishes.
+  const prevTranscriptAgentIdRef = useRef<string | undefined>(undefined);
+  const restoringScrollRef = useRef(false);
+  const pendingRestoreRef = useRef<TranscriptScrollPosition | null | undefined>(undefined);
+  if (agentId !== prevTranscriptAgentIdRef.current) {
+    prevTranscriptAgentIdRef.current = agentId;
+    restoringScrollRef.current = true;
+    pendingRestoreRef.current = agentId ? getTranscriptScroll?.(agentId) : undefined;
+  }
 
   const scrollToBottom = () => {
     const timeline = timelineRef.current;
@@ -266,6 +280,11 @@ export default function TurnOverlay({
   const handleTimelineScroll = () => {
     const timeline = timelineRef.current;
     if (!timeline) {
+      return;
+    }
+    // Clamp/restore churn while switching agents is not user intent — leave
+    // stickiness and the store alone until the agentId layout effect settles.
+    if (restoringScrollRef.current) {
       return;
     }
     // The stick-to-bottom ref must update synchronously (layout effects read it
@@ -399,9 +418,28 @@ export default function TurnOverlay({
   // the wrong spot first; the rAF re-assert catches the composer's measured
   // tail-spacer reflow, most visibly on a fresh remount where the composer
   // measures from zero.
+  //
+  // The restore target is snapshotted during render (pendingRestoreRef), not
+  // re-read from the store here: content-swap scroll events can poison the
+  // store between commit and this effect (see restoringScrollRef above).
+  // Keep the snapshot until the next agentId change so React Strict Mode's
+  // effect re-run still sees the unpoisoned value.
   useLayoutEffect(() => {
-    const saved = agentId ? getTranscriptScroll?.(agentId) : undefined;
+    const saved = pendingRestoreRef.current;
     jumpingToLatestRef.current = false;
+
+    const finishRestore = () => {
+      // Only release the gate if we are still restoring this same agent —
+      // a newer agentId change will have re-armed the ref during render.
+      if (prevTranscriptAgentIdRef.current !== agentId) {
+        return;
+      }
+      restoringScrollRef.current = false;
+      // Publish the settled position now that clamp events are done, so the
+      // store matches what the user actually sees (and stickiness is correct).
+      handleTimelineScroll();
+    };
+
     if (saved && !saved.stuck) {
       stickToBottomRef.current = false;
       const restore = () => {
@@ -414,14 +452,28 @@ export default function TurnOverlay({
         }
       };
       restore();
-      const frame = requestAnimationFrame(restore);
-      return () => cancelAnimationFrame(frame);
+      const frame = requestAnimationFrame(() => {
+        restore();
+        finishRestore();
+      });
+      return () => {
+        cancelAnimationFrame(frame);
+        // If agentId changes again before rAF, the next render already set
+        // restoringScrollRef; don't clear it here and reopen the race.
+      };
     }
     stickToBottomRef.current = true;
     setJumpToLatestVisible(false);
     scrollToBottom();
-    const frame = requestAnimationFrame(scrollToBottom);
-    return () => cancelAnimationFrame(frame);
+    const frame = requestAnimationFrame(() => {
+      scrollToBottom();
+      finishRestore();
+    });
+    return () => {
+      cancelAnimationFrame(frame);
+    };
+    // handleTimelineScroll reads live refs/props; agentId is the real trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, getTranscriptScroll]);
 
   // Keep pinned to the bottom when new turns arrive or the composer grows (e.g. a
