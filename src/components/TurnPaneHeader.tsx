@@ -25,10 +25,30 @@ const SESSION_MENU_MAX_HEIGHT = 400;
 // session/browser/transcript controls on the right. Its height matches the
 // browser overlay's address bar so the two read as a single chrome line when
 // the browser is open.
+// Pretty-print a stored model for the session header. Short family names
+// (`fable`) and multi-part presets (`gpt-5.6-sol`) are title-cased per token;
+// unknown full ids are left as-is so nothing is mangled when mapping failed.
+function formatSessionModelLabel(model: string): string {
+  const trimmed = model.trim();
+  // Full Claude API ids that somehow skipped backend normalization — leave raw.
+  if (/^claude-/i.test(trimmed) && /-\d/.test(trimmed)) {
+    return trimmed;
+  }
+  return trimmed.replace(/[A-Za-z]+/g, (token) => {
+    if (token.length === 0) {
+      return token;
+    }
+    return `${token.charAt(0).toUpperCase()}${token.slice(1).toLowerCase()}`;
+  });
+}
+
 interface TurnPaneHeaderProps {
   agentId?: string | null;
   // The active agent's session id, or null before SessionStart lands.
   sessionId: string | null;
+  // Model the agent was launched with, when known (e.g. launcher pick or
+  // inherited on fork). Shell-typed launches often omit it.
+  model?: string | null;
   // Sessions in this agent's folder for the top-left session switcher; the
   // active one is whichever matches transcriptPath.
   transcriptOptions: TranscriptOption[];
@@ -63,6 +83,7 @@ type MenuPos = {
 export default function TurnPaneHeader({
   agentId,
   sessionId,
+  model,
   transcriptOptions,
   transcriptPath,
   onSelectTranscript,
@@ -94,6 +115,12 @@ export default function TurnPaneHeader({
     [transcriptOptions],
   );
   const canOpenSessionMenu = Boolean(sessionId || sessionOptions.length > 0);
+  const modelLabel = model?.trim() ? formatSessionModelLabel(model.trim()) : null;
+  const sessionLabel = sessionId
+    ? modelLabel
+      ? `(${modelLabel}) Session: ${sessionId}`
+      : `Session: ${sessionId}`
+    : "New session";
 
   // Clear any pending toast timer on unmount so it can't fire into a gone component.
   useEffect(() => {
@@ -212,10 +239,10 @@ export default function TurnPaneHeader({
             aria-expanded={sessionMenuOpen}
             onClick={() => setSessionMenuOpen((open) => !open)}
           >
-            {sessionId ? `Session: ${sessionId}` : "New session"}
+            {sessionLabel}
           </button>
         ) : (
-          <span className="turn-pane-session">New session</span>
+          <span className="turn-pane-session">{sessionLabel}</span>
         )}
         {sessionMenuOpen
           ? createPortal(

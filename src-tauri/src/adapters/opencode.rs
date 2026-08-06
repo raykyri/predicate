@@ -1,8 +1,9 @@
 use super::{
     AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy, LaunchEnv,
     PrepareShellAgentLaunchRequest, PreparedShellAgentLaunch, ShellCommandIntegration,
-    SpawnAgentRequest, TranscriptLifecycleEvent, ensure_on_path, prepared_shell_agent,
-    record_shell_session_lineage, reusable_session_agent, shell_quote_arg,
+    SpawnAgentRequest, TranscriptLifecycleEvent, apply_shell_cli_model, ensure_on_path,
+    prepared_shell_agent, record_shell_session_lineage, reusable_session_agent, shell_cli_model,
+    shell_quote_arg,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -499,7 +500,7 @@ impl OpencodeAdapter {
                             base_repo: Some(cwd_str.clone()),
                             base_ref: Some("HEAD".to_string()),
                             adapter: self.id().to_string(),
-                            model: None,
+                            model: shell_cli_model(&request.args),
                             effort: None,
                             // Typing `opencode` in a shell runs in the current directory.
                             use_worktree: false,
@@ -516,6 +517,7 @@ impl OpencodeAdapter {
             resume_session_id.as_deref(),
             &cwd_str,
         )?;
+        let agent = apply_shell_cli_model(state, agent, &request.args)?;
         let agent = attach_opencode_agent_pane(
             state,
             &agent.id,

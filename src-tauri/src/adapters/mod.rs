@@ -141,6 +141,162 @@ pub(crate) fn record_shell_session_lineage(
     record_shell_resume_identity(state, agent, resume_session_id)
 }
 
+/// Value of a CLI flag from shell args: `--flag value` or `--flag=value`.
+/// Stops at a bare `--` so positional prompts after the separator are not
+/// mistaken for flag values.
+pub(crate) fn cli_flag_value(args: &[String], flag: &str) -> Option<String> {
+    let eq_prefix = format!("{flag}=");
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            break;
+        }
+        if let Some(value) = arg.strip_prefix(&eq_prefix) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        } else if arg == flag {
+            if let Some(value) = args.get(index + 1) {
+                if !value.starts_with('-') {
+                    let value = value.trim();
+                    if !value.is_empty() {
+                        return Some(value.to_string());
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Normalize a raw model id for storage/display. Maps Claude API-style ids
+/// (`claude-fable-5`, `claude-opus-4-7`) to short launcher names (`fable`,
+/// `opus`) when the family is recognized; otherwise keeps the trimmed raw id.
+/// Returns `None` for empty values and Claude's synthetic placeholders.
+pub(crate) fn normalize_agent_model(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.eq_ignore_ascii_case("<synthetic>") {
+        return None;
+    }
+    const CLAUDE_FAMILIES: &[&str] = &["fable", "opus", "sonnet", "haiku"];
+    if CLAUDE_FAMILIES.iter().any(|family| raw.eq_ignore_ascii_case(family)) {
+        return Some(raw.to_ascii_lowercase());
+    }
+    if let Some(rest) = raw
+        .strip_prefix("claude-")
+        .or_else(|| raw.strip_prefix("Claude-"))
+    {
+        // Prefer a known family token anywhere in the remainder so both
+        // `claude-fable-5` and older `claude-3-5-sonnet-…` ids map cleanly.
+        for part in rest.split('-') {
+            let part_lower = part.to_ascii_lowercase();
+            if CLAUDE_FAMILIES.iter().any(|family| *family == part_lower) {
+                return Some(part_lower);
+            }
+        }
+    }
+    Some(raw.to_string())
+}
+
+/// Model declared on a Claude-native (or Grok Claude-compatible) transcript
+/// line: `message.model` on assistant records. Ignores other line types.
+pub(crate) fn model_from_claude_native_transcript_line(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let is_assistant = value.get("type").and_then(Value::as_str) == Some("assistant")
+        || value
+            .get("message")
+            .and_then(|message| message.get("role"))
+            .and_then(Value::as_str)
+            == Some("assistant");
+    if !is_assistant {
+        return None;
+    }
+    value
+        .get("message")
+        .and_then(|message| string_field(message, "model"))
+        .or_else(|| string_field(&value, "model"))
+}
+
+/// Model declared on a Codex-style rollout line (`turn_context`,
+/// `session_meta`, or `world_state` payload).
+pub(crate) fn model_from_codex_transcript_line(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let payload = value.get("payload")?;
+    match value.get("type").and_then(Value::as_str)? {
+        "turn_context" | "session_meta" => string_field(payload, "model"),
+        "world_state" => payload
+            .get("state")
+            .and_then(|state| string_field(state, "model")),
+        _ => None,
+    }
+}
+
+/// Model from shell CLI args (`--model`), already normalized. Used when minting
+/// a shell agent so the first `agent.spawned` event can carry it.
+pub(crate) fn shell_cli_model(args: &[String]) -> Option<String> {
+    cli_flag_value(args, "--model").and_then(|model| normalize_agent_model(&model))
+}
+
+/// Apply an explicit `--model` from shell args onto a resolved agent when it
+/// differs from the stored value (covers prepared/resumed agents that did not
+/// receive the model at mint time).
+pub(crate) fn apply_shell_cli_model(
+    state: &AppState,
+    agent: AgentInfo,
+    args: &[String],
+) -> Result<AgentInfo, String> {
+    let Some(model) = shell_cli_model(args) else {
+        return Ok(agent);
+    };
+    if agent.model.as_deref() == Some(model.as_str()) {
+        return Ok(agent);
+    }
+    state
+        .mutate_agent(&agent.id, |agent| {
+            agent.model = Some(model);
+        })?
+        .ok_or_else(|| {
+            format!(
+                "agent {} disappeared while recording shell launch model",
+                agent.id
+            )
+        })
+}
+
+/// Record a model discovered from a tailed transcript line. Updates the agent
+/// only when the normalized value differs, and emits `agent.updated` so the UI
+/// can show it without a full agent-list refetch.
+pub(crate) fn maybe_record_agent_model(
+    state: &AppState,
+    agent_id: &str,
+    raw_model: &str,
+) -> Result<Option<AgentInfo>, String> {
+    let Some(model) = normalize_agent_model(raw_model) else {
+        return Ok(None);
+    };
+    let Some(current) = state.agent(agent_id)? else {
+        return Ok(None);
+    };
+    if current.model.as_deref() == Some(model.as_str()) {
+        return Ok(None);
+    }
+    let updated = state.mutate_agent(agent_id, |agent| {
+        agent.model = Some(model);
+    })?;
+    if let Some(agent) = updated.as_ref() {
+        state.emit(QmuxEvent::new(
+            "agent.updated",
+            agent.pane_id.clone(),
+            Some(agent.id.clone()),
+            json!({ "agent": agent }),
+        ));
+    }
+    Ok(updated)
+}
+
 /// Resolves a qmux-reserved agent for an automatically started shell command.
 /// Ordinary commands typed by the user do not carry `prepared_agent_id` and keep
 /// the existing create/reuse behavior. A prepared id must describe an unbound
@@ -611,6 +767,14 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     fn parse_transcript_lifecycle_event(&self, _line: &str) -> Option<TranscriptLifecycleEvent> {
+        None
+    }
+
+    /// Best-effort model id carried by a single transcript line, when the
+    /// adapter's native format records one (e.g. Claude `message.model` on
+    /// assistant turns). The transcript tailer uses this to fill in
+    /// `AgentInfo.model` for bare shell launches that never passed `--model`.
+    fn transcript_line_model(&self, _line: &str) -> Option<String> {
         None
     }
 
@@ -1497,6 +1661,114 @@ mod tests {
         let agent = record_shell_resume_identity(&state, agent, None).unwrap();
 
         assert_eq!(agent.session_id.as_deref(), Some("known-session"));
+    }
+
+    #[test]
+    fn cli_flag_value_reads_space_and_equals_forms() {
+        assert_eq!(
+            cli_flag_value(
+                &["--model".into(), "fable".into(), "hello".into()],
+                "--model"
+            )
+            .as_deref(),
+            Some("fable")
+        );
+        assert_eq!(
+            cli_flag_value(&["--model=opus".into(), "hello".into()], "--model").as_deref(),
+            Some("opus")
+        );
+        // Values after `--` are positional, not flag args.
+        assert_eq!(
+            cli_flag_value(&["--".into(), "--model".into(), "fable".into()], "--model"),
+            None
+        );
+        assert_eq!(cli_flag_value(&["--model".into()], "--model"), None);
+    }
+
+    #[test]
+    fn normalize_agent_model_maps_claude_families_and_keeps_unknown_ids() {
+        assert_eq!(
+            normalize_agent_model("claude-fable-5").as_deref(),
+            Some("fable")
+        );
+        assert_eq!(
+            normalize_agent_model("claude-opus-4-7").as_deref(),
+            Some("opus")
+        );
+        assert_eq!(
+            normalize_agent_model("claude-3-5-sonnet-20241022").as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(normalize_agent_model("Fable").as_deref(), Some("fable"));
+        assert_eq!(
+            normalize_agent_model("gpt-5.6-sol").as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        assert_eq!(normalize_agent_model("<synthetic>"), None);
+        assert_eq!(normalize_agent_model("  "), None);
+    }
+
+    #[test]
+    fn claude_native_transcript_line_exposes_assistant_model() {
+        let assistant = r#"{"type":"assistant","message":{"role":"assistant","model":"claude-fable-5","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(
+            model_from_claude_native_transcript_line(assistant).as_deref(),
+            Some("claude-fable-5")
+        );
+        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        assert_eq!(model_from_claude_native_transcript_line(user), None);
+        let synthetic = r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[]}}"#;
+        assert_eq!(
+            model_from_claude_native_transcript_line(synthetic).as_deref(),
+            Some("<synthetic>")
+        );
+    }
+
+    #[test]
+    fn codex_transcript_line_exposes_turn_context_model() {
+        let turn_context = r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","turn_id":"t1"}}"#;
+        assert_eq!(
+            model_from_codex_transcript_line(turn_context).as_deref(),
+            Some("gpt-5.6-sol")
+        );
+        let world = r#"{"type":"world_state","payload":{"state":{"model":"gpt-5.4"}}}"#;
+        assert_eq!(
+            model_from_codex_transcript_line(world).as_deref(),
+            Some("gpt-5.4")
+        );
+        let other = r#"{"type":"event_msg","payload":{"type":"task_started"}}"#;
+        assert_eq!(model_from_codex_transcript_line(other), None);
+    }
+
+    #[test]
+    fn maybe_record_agent_model_updates_once_and_normalizes() {
+        let state = AppState::new(test_config());
+        let mut agent = session_agent("agent-1", Some("pane-1"), "/work", "sess-1");
+        agent.model = None;
+        state.insert_agent(agent).unwrap();
+
+        let updated = maybe_record_agent_model(&state, "agent-1", "claude-fable-5")
+            .unwrap()
+            .expect("should update empty model");
+        assert_eq!(updated.model.as_deref(), Some("fable"));
+
+        // Same normalized value is a no-op.
+        assert!(
+            maybe_record_agent_model(&state, "agent-1", "claude-fable-5")
+                .unwrap()
+                .is_none()
+        );
+        // Synthetic placeholders are ignored.
+        assert!(
+            maybe_record_agent_model(&state, "agent-1", "<synthetic>")
+                .unwrap()
+                .is_none()
+        );
+        // A real model change (e.g. /model) updates again.
+        let switched = maybe_record_agent_model(&state, "agent-1", "claude-opus-5")
+            .unwrap()
+            .expect("should update changed model");
+        assert_eq!(switched.model.as_deref(), Some("opus"));
     }
 
     #[test]

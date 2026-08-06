@@ -2,9 +2,10 @@ use super::{
     AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy,
     FORK_AT_MESSAGE_EMPTY_ERROR, LaunchEnv, MessageAnchor, PermissionAction,
     PrepareShellAgentLaunchRequest, PreparedShellAgentLaunch, ShellCommandIntegration,
-    SpawnAgentRequest, TranscriptLifecycleEvent, ensure_on_path, new_uuid_v4,
-    parse_transcript_records, prepared_shell_agent, record_shell_session_lineage,
-    reusable_session_agent, shell_quote_arg, shell_quote_path,
+    SpawnAgentRequest, TranscriptLifecycleEvent, apply_shell_cli_model, ensure_on_path,
+    model_from_claude_native_transcript_line, new_uuid_v4, parse_transcript_records,
+    prepared_shell_agent, record_shell_session_lineage, reusable_session_agent, shell_cli_model,
+    shell_quote_arg, shell_quote_path,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -169,6 +170,10 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn parse_transcript_lifecycle_event(&self, line: &str) -> Option<TranscriptLifecycleEvent> {
         parse_transcript_lifecycle_event(line)
+    }
+
+    fn transcript_line_model(&self, line: &str) -> Option<String> {
+        model_from_claude_native_transcript_line(line)
     }
 
     fn resolve_transcript_turns(
@@ -647,6 +652,7 @@ impl ClaudeAdapter {
             .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
         let resume_session_id = claude_resume_session_id(&request.args).map(str::to_string);
         let fork_point = claude_fork_source_session_id(&request.args).map(str::to_string);
+        let shell_model = shell_cli_model(&request.args);
         let agent = match prepared_shell_agent(
             state,
             self.id(),
@@ -670,7 +676,7 @@ impl ClaudeAdapter {
                         base_repo: Some(cwd_str.clone()),
                         base_ref: Some("HEAD".to_string()),
                         adapter: self.id().to_string(),
-                        model: None,
+                        model: shell_model,
                         effort: None,
                         // Typing `claude` in a shell runs in the current directory; no worktree.
                         use_worktree: false,
@@ -686,6 +692,7 @@ impl ClaudeAdapter {
             resume_session_id.as_deref(),
             &cwd_str,
         )?;
+        let agent = apply_shell_cli_model(state, agent, &request.args)?;
         // The in-shell launch is exec'd by the CLI supervisor as soon as this
         // response returns — there is no PTY-spawn step in between to
         // materialize support files, so write the hook settings eagerly here.

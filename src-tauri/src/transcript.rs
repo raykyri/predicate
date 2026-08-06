@@ -1,4 +1,4 @@
-use crate::adapters::{TranscriptLifecycleEvent, adapter_registry};
+use crate::adapters::{TranscriptLifecycleEvent, adapter_registry, maybe_record_agent_model};
 use crate::events::QmuxEvent;
 use crate::state::{AgentSendSource, AppState};
 use crate::turn_queue::{IdleResolution, advance_after_interruption};
@@ -305,6 +305,14 @@ pub fn start_transcript_tail(
                             }
                             Ok(false) => {}
                         }
+                    }
+                    // Bare shell launches often omit `--model`; Claude/Codex still
+                    // write the active model into the transcript. Record it once it
+                    // differs so the session header can show e.g. "(Fable)".
+                    if let Some(model) = adapter.transcript_line_model(&line)
+                        && let Err(err) = maybe_record_agent_model(&state, &agent_id, &model)
+                    {
+                        state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
                     }
                     if !should_refresh_turns {
                         raw_lines.push(line.to_string());

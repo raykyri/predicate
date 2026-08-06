@@ -12397,6 +12397,7 @@ function MainApp() {
             <TurnPaneHeader
               agentId={agent?.id ?? null}
               sessionId={agent?.sessionId ?? null}
+              model={agent?.model ?? null}
               transcriptOptions={agent ? surface.transcriptOptions : []}
               transcriptPath={agent?.transcriptPath ?? null}
               onSelectTranscript={(path) => {
