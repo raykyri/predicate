@@ -3,6 +3,21 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 
+notarize=0
+case "${1:-}" in
+  "") ;;
+  --notarize) notarize=1 ;;
+  *)
+    echo "Usage: $0 [--notarize]" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "$#" -gt 1 ]]; then
+  echo "Usage: $0 [--notarize]" >&2
+  exit 2
+fi
+
 # Use the repository's local build configuration when the caller did not
 # provide a GitHub OAuth client ID explicitly. Automatically export sourced
 # values so they are available to the Tauri and Cargo subprocesses.
@@ -10,6 +25,36 @@ if [[ -z "${QMUX_GITHUB_CLIENT_ID:-}" && -f "$script_dir/../.env" ]]; then
   set -a
   source "$script_dir/../.env"
   set +a
+fi
+
+# Tauri notarizes whenever either supported set of Apple credentials reaches
+# the bundler. Keep ordinary builds local even when .env contains release
+# secrets; --notarize is the explicit boundary for sending an artifact to
+# Apple's notary service.
+have_apple_id_creds() {
+  [[ -n "${APPLE_ID:-}" && -n "${APPLE_PASSWORD:-}" && -n "${APPLE_TEAM_ID:-}" ]]
+}
+
+have_api_key_creds() {
+  [[ -n "${APPLE_API_KEY:-}" && -n "${APPLE_API_ISSUER:-}" && -n "${APPLE_API_KEY_PATH:-}" ]]
+}
+
+if [[ "$notarize" -eq 1 ]]; then
+  if ! have_apple_id_creds && ! have_api_key_creds; then
+    echo "A release build requires notarization credentials:" >&2
+    echo "  APPLE_ID + APPLE_PASSWORD + APPLE_TEAM_ID, or" >&2
+    echo "  APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_KEY_PATH" >&2
+    exit 1
+  fi
+
+  if ! have_apple_id_creds && have_api_key_creds && [[ ! -f "$APPLE_API_KEY_PATH" ]]; then
+    echo "APPLE_API_KEY_PATH does not exist: $APPLE_API_KEY_PATH" >&2
+    exit 1
+  fi
+else
+  unset APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+  unset APPLE_API_KEY APPLE_API_ISSUER APPLE_API_KEY_PATH
+  unset APPLE_PROVIDER_SHORT_NAME
 fi
 
 # `tauri` lives in node_modules/.bin; put it on PATH so this script also works

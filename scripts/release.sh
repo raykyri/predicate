@@ -144,7 +144,13 @@ fi
 npm run test:pane-splits
 cargo test --manifest-path src-tauri/Cargo.toml
 
-"$script_dir/build.sh"
+if have_notary_creds; then
+  "$script_dir/build.sh" --notarize
+else
+  # The credential check above permits this only when the caller explicitly
+  # accepted an unnotarized release with QMUX_ALLOW_UNNOTARIZED=1.
+  "$script_dir/build.sh"
+fi
 "$script_dir/generate-latest-json.sh"
 
 bundle_root="src-tauri/target/$target/release/bundle"

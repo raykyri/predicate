@@ -112,6 +112,13 @@ npm run build
 CI=true npm run build
 ```
 
+Ordinary builds do not notarize, even when Apple credentials are present in
+`.env`. To build, sign, and notarize release artifacts:
+
+```
+npm run build:release
+```
+
 Run a release build directly:
 
 ```
