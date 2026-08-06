@@ -51,12 +51,27 @@ const RESTORED_SCROLLBACK_TERMINAL_RESET: &[u8] = b"\x18\x1b>\x1b[0m\x1b(B\x1b[4
 // restore and any trim still close a mid-alternate-screen entry.
 const LIVE_PANE_TERMINAL_MODE_RESET: &[u8] = b"\x1b>\x1b[0m\x1b(B\x1b[4l\x1b[?1l\x1b[?7h\x1b[?9l\x1b[?25h\x1b[?45l\x1b[?66l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?2004l\x1b[?2026l\x1b[>4;0m\x1b[=0u";
 const SUBMIT_KEY_DELAY: Duration = Duration::from_millis(15);
-/// Ghostty can accept a synthesized Return before its PTY write callback runs.
-/// Retry only that Return a small, bounded number of times; the pasted payload
-/// is deliberately outside this retry loop so a missing acknowledgement cannot
-/// duplicate a queued turn.
-const NATIVE_SUBMIT_ACK_ATTEMPTS: usize = 2;
-const NATIVE_SUBMIT_ACK_RETRY_DELAY: Duration = Duration::from_millis(50);
+/// Timing for the native paste/submit handshake. Ghostty's approved-paste action
+/// and synthesized key path both return before their in-memory-session callbacks
+/// necessarily reach the PTY writer, so delivery is observed through bounded polls.
+#[derive(Clone, Copy)]
+struct NativeSubmitTiming {
+    data_poll_interval: Duration,
+    data_max_rechecks: usize,
+    data_quiet_rechecks: usize,
+    submit_key_delay: Duration,
+    submit_poll_interval: Duration,
+    submit_max_rechecks: usize,
+}
+
+const NATIVE_SUBMIT_TIMING: NativeSubmitTiming = NativeSubmitTiming {
+    data_poll_interval: Duration::from_millis(25),
+    data_max_rechecks: 8,
+    data_quiet_rechecks: 2,
+    submit_key_delay: SUBMIT_KEY_DELAY,
+    submit_poll_interval: Duration::from_millis(50),
+    submit_max_rechecks: 2,
+};
 const NATIVE_INPUT_FLUSH_TIMEOUT: Duration = Duration::from_secs(2);
 const DEFAULT_PTY_COLS: u16 = 100;
 const DEFAULT_PTY_ROWS: u16 = 24;
@@ -1537,10 +1552,9 @@ fn dispatch_native_pane_input(
                 }
             },
             || crate::native_terminal::submit(&options.pane_id),
+            || write_acknowledged_native_host_input(&options.pane_id, SUBMIT_KEY),
             || flush_native_host_input(&options.pane_id),
-            SUBMIT_KEY_DELAY,
-            NATIVE_SUBMIT_ACK_RETRY_DELAY,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            NATIVE_SUBMIT_TIMING,
         );
     }
     write_native_pane_input(
@@ -1555,61 +1569,109 @@ fn dispatch_native_pane_input(
 fn write_native_data_and_submit(
     data: &str,
     emit_data: impl FnOnce() -> Result<(), String>,
-    mut submit: impl FnMut() -> Result<(), String>,
+    submit: impl FnOnce() -> Result<(), String>,
+    submit_bytes: impl FnOnce() -> Result<(), String>,
     mut flush_input: impl FnMut() -> Result<u64, String>,
-    submit_key_delay: Duration,
-    submit_retry_delay: Duration,
-    submit_attempts: usize,
+    timing: NativeSubmitTiming,
 ) -> Result<(), PaneWriteFailure> {
     let before_data = flush_input().map_err(PaneWriteFailure::before_data)?;
     emit_data().map_err(PaneWriteFailure::before_data)?;
-    // Once the payload action succeeded, its bytes are queued toward the PTY, so any
-    // later failure — a barrier, the submit key — reports the data as delivered.
-    let after_data = flush_input().map_err(PaneWriteFailure::after_data)?;
-    if !data.is_empty() && after_data <= before_data {
-        return Err(PaneWriteFailure::before_data(
-            "native terminal accepted input action but emitted no PTY input".to_string(),
-        ));
-    }
-
-    if !submit_key_delay.is_zero() {
-        thread::sleep(submit_key_delay);
-    }
-    let submit_attempts = submit_attempts.max(1);
-    for attempt in 1..=submit_attempts {
-        submit().map_err(PaneWriteFailure::after_data)?;
-        if flush_input().map_err(PaneWriteFailure::after_data)? > after_data {
-            return Ok(());
+    // The action being accepted does not mean Ghostty's deferred write callbacks have
+    // finished. Wait for input to arrive and then for the PTY position to stay still:
+    // the first advance may be only the opening paste marker or body, and treating a
+    // later paste chunk as Return would produce a false submit acknowledgement.
+    let mut after_data = flush_input().map_err(PaneWriteFailure::after_data)?;
+    if !data.is_empty() {
+        let mut observed_data = after_data > before_data;
+        let mut quiet_rechecks = 0;
+        for _ in 0..timing.data_max_rechecks {
+            if observed_data && quiet_rechecks >= timing.data_quiet_rechecks {
+                break;
+            }
+            if !timing.data_poll_interval.is_zero() {
+                thread::sleep(timing.data_poll_interval);
+            }
+            let position = flush_input().map_err(PaneWriteFailure::after_data)?;
+            if position > after_data {
+                observed_data = true;
+                quiet_rechecks = 0;
+                after_data = position;
+            } else if observed_data {
+                quiet_rechecks += 1;
+            }
         }
 
-        // Give a deferred Ghostty input callback a chance to reach the PTY before
-        // sending another Return. A second barrier after the pause distinguishes a
-        // late acknowledgement from a genuinely missing write and avoids an
-        // unnecessary duplicate keypress in the common race.
-        if !submit_retry_delay.is_zero() {
-            thread::sleep(submit_retry_delay);
+        if !observed_data {
+            return Err(PaneWriteFailure::before_data(
+                "native terminal accepted input action but emitted no PTY input".to_string(),
+            ));
         }
-        if flush_input().map_err(PaneWriteFailure::after_data)? > after_data {
-            return Ok(());
-        }
-
-        if attempt == submit_attempts {
-            // The paste is already durable in the composer and the Return has been
-            // issued; we simply could not observe its bytes reach the PTY within the
-            // local window. Do NOT fail here: an error would make the turn queue treat
-            // the whole turn as undelivered and requeue it (see send_claimed_turn),
-            // re-pasting duplicate text even though the Return usually lands moments
-            // later. Report best-effort delivery and let the outstanding-send watchdog
-            // (watch_agent_after_queued_send) confirm the submit — and re-send a bare
-            // Return, never a re-paste — if it was genuinely dropped.
+        if quiet_rechecks < timing.data_quiet_rechecks {
             eprintln!(
-                "qmux: native submit not acknowledged after {submit_attempts} attempts; \
-                 treating as delivered and deferring to the submit watchdog"
+                "qmux: native paste input did not become quiescent after {} rechecks; \
+                 submitting from the latest observed PTY boundary",
+                timing.data_max_rechecks
             );
-            return Ok(());
         }
     }
-    unreachable!("submit attempt loop always returns")
+
+    if !timing.submit_key_delay.is_zero() {
+        thread::sleep(timing.submit_key_delay);
+    }
+    let synthetic_submit_error = match submit() {
+        Ok(()) => {
+            // Send the Ghostty-encoded key only once. Polling gives its deferred
+            // callback time to arrive without risking multiple late Returns.
+            for recheck in 0..=timing.submit_max_rechecks {
+                if flush_input().map_err(PaneWriteFailure::after_data)? > after_data {
+                    return Ok(());
+                }
+                if recheck < timing.submit_max_rechecks && !timing.submit_poll_interval.is_zero() {
+                    thread::sleep(timing.submit_poll_interval);
+                }
+            }
+            None
+        }
+        Err(err) => Some(err),
+    };
+
+    // The correctly encoded key either failed or produced no observable bytes.
+    // Queue a raw carriage return directly behind all prior native input and wait
+    // for the writer's barrier; success now acknowledges this exact fallback write,
+    // rather than inferring it from an unrelated cumulative-position increase.
+    match submit_bytes() {
+        Ok(()) => {
+            if let Some(err) = synthetic_submit_error {
+                eprintln!(
+                    "qmux: native synthetic submit failed ({err}); delivered the raw submit byte \
+                     through the pane writer instead"
+                );
+            } else {
+                eprintln!(
+                    "qmux: native synthetic submit emitted no acknowledged PTY input; delivered \
+                     the raw submit byte through the pane writer instead"
+                );
+            }
+            Ok(())
+        }
+        Err(raw_err) => {
+            let error = synthetic_submit_error.map_or_else(
+                || {
+                    format!(
+                        "native terminal emitted no PTY input for Return and the raw submit \
+                         fallback failed: {raw_err}"
+                    )
+                },
+                |synthetic_err| {
+                    format!(
+                        "native terminal submit failed: {synthetic_err}; raw submit fallback \
+                         failed: {raw_err}"
+                    )
+                },
+            );
+            Err(PaneWriteFailure::after_data(error))
+        }
+    }
 }
 
 fn write_native_pane_input(
@@ -1867,6 +1929,31 @@ pub fn write_native_host_input(
         .write_all(&bytes)
         .and_then(|()| writer.flush())
         .map_err(|err| format!("failed to write native pane {pane_id}: {err}"))
+}
+
+/// Writes bytes through a native pane's ordered input worker and waits until the
+/// worker has written and flushed that exact preceding message. Unlike comparing
+/// cumulative writer positions around a Ghostty action, the successful barrier
+/// cannot be satisfied by unrelated user input: FIFO ordering guarantees these
+/// bytes were processed before the acknowledgement was sent.
+fn write_acknowledged_native_host_input(pane_id: &str, bytes: &[u8]) -> Result<(), String> {
+    let sender = NATIVE_INPUT_SENDERS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(pane_id)
+        .cloned()
+        .ok_or_else(|| format!("native input writer for pane {pane_id} is unavailable"))?;
+    let (acknowledge, result) = std::sync::mpsc::sync_channel(0);
+    sender
+        .send(NativeInputMessage::Data(bytes.to_vec()))
+        .map_err(|_| format!("native input writer for pane {pane_id} stopped before write"))?;
+    sender
+        .send(NativeInputMessage::Flush(acknowledge))
+        .map_err(|_| format!("native input writer for pane {pane_id} stopped before flush"))?;
+    result
+        .recv_timeout(NATIVE_INPUT_FLUSH_TIMEOUT)
+        .map_err(|_| format!("timed out flushing native input for pane {pane_id}"))??;
+    Ok(())
 }
 
 /// Waits until every native input message queued before this call has reached
@@ -2789,12 +2876,13 @@ mod tests {
         assert_eq!(flush_native_host_input(pane_id).unwrap(), 6);
         write_native_host_input(&state, pane_id, b"world".to_vec()).unwrap();
         assert_eq!(flush_native_host_input(pane_id).unwrap(), 11);
+        write_acknowledged_native_host_input(pane_id, SUBMIT_KEY).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while sink.lock().unwrap().len() < 11 && std::time::Instant::now() < deadline {
+        while sink.lock().unwrap().len() < 12 && std::time::Instant::now() < deadline {
             thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(*sink.lock().unwrap(), b"hello world");
+        assert_eq!(*sink.lock().unwrap(), b"hello world\r");
 
         // Once the registration is gone, the fallback path reports the missing
         // pane synchronously instead of silently dropping input.
@@ -3508,10 +3596,19 @@ mod tests {
         assert_eq!(approved_paste.as_deref(), Some("test"));
     }
 
+    const TEST_NATIVE_SUBMIT_TIMING: NativeSubmitTiming = NativeSubmitTiming {
+        data_poll_interval: Duration::ZERO,
+        data_max_rechecks: 8,
+        data_quiet_rechecks: 2,
+        submit_key_delay: Duration::ZERO,
+        submit_poll_interval: Duration::ZERO,
+        submit_max_rechecks: 2,
+    };
+
     #[test]
     fn native_submission_flushes_paste_and_submit_separately() {
         let calls = RefCell::new(Vec::new());
-        let positions = RefCell::new(vec![0_u64, 12, 13].into_iter());
+        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 13].into_iter());
 
         write_native_data_and_submit(
             "test",
@@ -3523,6 +3620,7 @@ mod tests {
                 calls.borrow_mut().push("submit".to_string());
                 Ok(())
             },
+            || panic!("an acknowledged synthetic Return must not use the raw fallback"),
             || {
                 calls.borrow_mut().push("flush".to_string());
                 positions
@@ -3530,22 +3628,57 @@ mod tests {
                     .next()
                     .ok_or_else(|| "unexpected flush".to_string())
             },
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap();
 
         assert_eq!(
             calls.into_inner(),
-            ["flush", "paste", "flush", "submit", "flush"]
+            [
+                "flush", "paste", "flush", "flush", "flush", "submit", "flush"
+            ]
         );
+    }
+
+    #[test]
+    fn native_submission_waits_for_the_payload_to_arrive_and_become_quiet() {
+        let data_calls = Cell::new(0);
+        let submit_calls = Cell::new(0);
+        // The first post-paste barrier overtakes Ghostty's deferred input callback.
+        // Ghostty then emits the paste in two chunks; submission must wait through
+        // two unchanged positions after the final chunk rather than treating that
+        // chunk as acknowledgement of Return.
+        let positions = RefCell::new(vec![0_u64, 0, 5, 12, 12, 12, 13].into_iter());
+
+        write_native_data_and_submit(
+            "test",
+            || {
+                data_calls.set(data_calls.get() + 1);
+                Ok(())
+            },
+            || {
+                submit_calls.set(submit_calls.get() + 1);
+                Ok(())
+            },
+            || panic!("an acknowledged synthetic Return must not use the raw fallback"),
+            || {
+                positions
+                    .borrow_mut()
+                    .next()
+                    .ok_or_else(|| "unexpected flush".to_string())
+            },
+            TEST_NATIVE_SUBMIT_TIMING,
+        )
+        .unwrap();
+
+        assert_eq!(data_calls.get(), 1);
+        assert_eq!(submit_calls.get(), 1);
     }
 
     #[test]
     fn native_submission_accepts_a_late_submit_ack_without_retrying_return() {
         let submit_calls = Cell::new(0);
-        let positions = RefCell::new(vec![0_u64, 12, 12, 13].into_iter());
+        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 12, 13].into_iter());
 
         write_native_data_and_submit(
             "test",
@@ -3554,15 +3687,14 @@ mod tests {
                 submit_calls.set(submit_calls.get() + 1);
                 Ok(())
             },
+            || panic!("a late synthetic acknowledgement must not use the raw fallback"),
             || {
                 positions
                     .borrow_mut()
                     .next()
                     .ok_or_else(|| "unexpected flush".to_string())
             },
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap();
 
@@ -3570,10 +3702,11 @@ mod tests {
     }
 
     #[test]
-    fn native_submission_retries_only_return_after_missing_ack() {
+    fn native_submission_falls_back_to_one_acknowledged_raw_return() {
         let data_calls = Cell::new(0);
         let submit_calls = Cell::new(0);
-        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 13].into_iter());
+        let raw_submit_calls = Cell::new(0);
+        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 12, 12, 12].into_iter());
 
         write_native_data_and_submit(
             "test",
@@ -3586,35 +3719,7 @@ mod tests {
                 Ok(())
             },
             || {
-                positions
-                    .borrow_mut()
-                    .next()
-                    .ok_or_else(|| "unexpected flush".to_string())
-            },
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
-        )
-        .unwrap();
-
-        assert_eq!(data_calls.get(), 1);
-        assert_eq!(submit_calls.get(), 2);
-    }
-
-    #[test]
-    fn native_submission_defers_unacknowledged_submit_to_the_watchdog() {
-        let submit_calls = Cell::new(0);
-        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 12, 12].into_iter());
-
-        // The paste landed (12 > 0) but the Return's bytes never showed up at the PTY
-        // within the local window. This must NOT error: an error requeues the turn and
-        // re-pastes duplicate text. Instead we exhaust the bounded Return retries and
-        // report best-effort delivery, leaving final confirmation to the submit watchdog.
-        write_native_data_and_submit(
-            "test",
-            || Ok(()),
-            || {
-                submit_calls.set(submit_calls.get() + 1);
+                raw_submit_calls.set(raw_submit_calls.get() + 1);
                 Ok(())
             },
             || {
@@ -3623,40 +3728,65 @@ mod tests {
                     .next()
                     .ok_or_else(|| "unexpected flush".to_string())
             },
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap();
 
-        assert_eq!(submit_calls.get(), NATIVE_SUBMIT_ACK_ATTEMPTS);
+        assert_eq!(data_calls.get(), 1);
+        assert_eq!(submit_calls.get(), 1);
+        assert_eq!(raw_submit_calls.get(), 1);
     }
 
     #[test]
-    fn native_submit_leg_failure_reports_payload_delivered() {
-        let positions = RefCell::new(vec![0_u64, 12].into_iter());
+    fn native_submission_uses_raw_return_when_the_synthetic_bridge_fails() {
+        let raw_submit_calls = Cell::new(0);
+        let positions = RefCell::new(vec![0_u64, 12, 12, 12].into_iter());
 
-        // The paste landed (12 > 0) before the submit key errored: the turn queue
-        // must learn the text is already in the composer so the retry doesn't
-        // paste a duplicate copy.
-        let failure = write_native_data_and_submit(
+        write_native_data_and_submit(
             "test",
             || Ok(()),
             || Err("bridge lost".to_string()),
+            || {
+                raw_submit_calls.set(raw_submit_calls.get() + 1);
+                Ok(())
+            },
             || {
                 positions
                     .borrow_mut()
                     .next()
                     .ok_or_else(|| "unexpected flush".to_string())
             },
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
+        )
+        .unwrap();
+
+        assert_eq!(raw_submit_calls.get(), 1);
+    }
+
+    #[test]
+    fn native_submit_fallback_failure_reports_payload_delivered() {
+        let positions = RefCell::new(vec![0_u64, 12, 12, 12, 12, 12, 12].into_iter());
+
+        // The paste landed before both submit paths failed: the turn queue must
+        // learn that the text is already in the composer so its retry sends only
+        // Return instead of pasting a duplicate copy.
+        let failure = write_native_data_and_submit(
+            "test",
+            || Ok(()),
+            || Ok(()),
+            || Err("writer lost".to_string()),
+            || {
+                positions
+                    .borrow_mut()
+                    .next()
+                    .ok_or_else(|| "unexpected flush".to_string())
+            },
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap_err();
 
         assert!(failure.data_delivered);
-        assert!(failure.error.contains("bridge lost"));
+        assert!(failure.error.contains("writer lost"));
     }
 
     #[test]
@@ -3667,10 +3797,9 @@ mod tests {
             "test",
             || Err("paste rejected".to_string()),
             || Ok(()),
+            || panic!("an undelivered payload must not reach the raw submit fallback"),
             || Ok(0),
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap_err();
         assert!(!failure.data_delivered);
@@ -3681,10 +3810,9 @@ mod tests {
             "test",
             || Ok(()),
             || Ok(()),
+            || panic!("an undelivered payload must not reach the raw submit fallback"),
             || Ok(0),
-            Duration::ZERO,
-            Duration::ZERO,
-            NATIVE_SUBMIT_ACK_ATTEMPTS,
+            TEST_NATIVE_SUBMIT_TIMING,
         )
         .unwrap_err();
         assert!(!failure.data_delivered);
