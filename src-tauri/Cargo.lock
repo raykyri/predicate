@@ -3016,7 +3016,7 @@ checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
 
 [[package]]
 name = "qmux"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64 0.22.1",
  "dirs",
@@ -3046,7 +3046,7 @@ dependencies = [
 
 [[package]]
 name = "qmux-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libc",
  "qmux-proto",
@@ -3056,7 +3056,7 @@ dependencies = [
 
 [[package]]
 name = "qmux-proto"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
