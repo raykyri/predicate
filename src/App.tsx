@@ -856,10 +856,16 @@ type TitleGenerationTestState =
   | { status: "error"; providerLabel: string; message: string };
 
 function sanitizeTerminalTitle(rawTitle: string): string | null {
-  const title = rawTitle
+  let title = rawTitle
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+  if (!title) {
+    return null;
+  }
+  // Grok's CLI brands OSC 0/2 titles with a trailing " - grok". Drop it so the
+  // tab shows the meaningful title (directory, process, etc.) alone.
+  title = title.replace(/ - grok$/i, "").trimEnd();
   if (!title) {
     return null;
   }

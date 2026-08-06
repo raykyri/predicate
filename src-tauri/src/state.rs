@@ -798,6 +798,21 @@ fn sanitize_active_tab_id(tab_id: Option<String>) -> Option<String> {
     })
 }
 
+/// Grok's CLI brands OSC 0/2 titles with a trailing `" - grok"`. Strip it so
+/// tab labels show the meaningful title alone. Case-insensitive; only the
+/// suffix is removed.
+fn strip_grok_terminal_title_suffix(title: &str) -> &str {
+    const SUFFIX: &str = " - grok";
+    let title = title.trim_end();
+    if title.len() >= SUFFIX.len() {
+        let split = title.len() - SUFFIX.len();
+        if title.is_char_boundary(split) && title[split..].eq_ignore_ascii_case(SUFFIX) {
+            return title[..split].trim_end();
+        }
+    }
+    title
+}
+
 fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
     let mut title = String::new();
     let mut chars = 0_usize;
@@ -837,6 +852,14 @@ fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
             title.pop();
         }
         title.push('…');
+    } else {
+        // Strip after whitespace normalization so "Foo\t-\tgrok" still matches,
+        // and before the empty check so a title that is only the branding
+        // suffix becomes None.
+        let stripped = strip_grok_terminal_title_suffix(&title);
+        if stripped.len() != title.len() {
+            title = stripped.to_string();
+        }
     }
 
     (!title.is_empty()).then_some(title)
@@ -16237,6 +16260,33 @@ mod tests {
             .chars()
             .count(),
             MAX_LAST_OSC_TITLE_CHARS
+        );
+    }
+
+    #[test]
+    fn osc_title_sanitization_strips_grok_branding_suffix() {
+        assert_eq!(
+            sanitize_last_osc_title("qmux - grok").as_deref(),
+            Some("qmux")
+        );
+        assert_eq!(
+            sanitize_last_osc_title("  Fix the build  - Grok  ").as_deref(),
+            Some("Fix the build")
+        );
+        assert_eq!(
+            sanitize_last_osc_title("src/App.tsx\t-\tGROK").as_deref(),
+            Some("src/App.tsx")
+        );
+        // A title that is only the branding suffix collapses to empty.
+        assert_eq!(sanitize_last_osc_title("x - grok").as_deref(), Some("x"));
+        // Only a trailing suffix is stripped.
+        assert_eq!(
+            sanitize_last_osc_title("grok - tools - grok").as_deref(),
+            Some("grok - tools")
+        );
+        assert_eq!(
+            sanitize_last_osc_title("keep - grok around").as_deref(),
+            Some("keep - grok around")
         );
     }
 
