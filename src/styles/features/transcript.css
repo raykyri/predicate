@@ -896,7 +896,11 @@ header + .turn-blocks {
   margin: 0;
 }
 
-.turn-markdown-code-block.is-wrapped pre code {
+/* Global preference (html.wrap-code-blocks), toggled from any code-block menu.
+   Applied at the root so every fenced block updates in one layout pass without
+   React re-rendering each block — which also lets the toggle pin scroll to the
+   block the user clicked. */
+html.wrap-code-blocks .turn-markdown-code-block pre code {
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }

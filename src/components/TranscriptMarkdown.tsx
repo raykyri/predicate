@@ -157,9 +157,63 @@ function MarkdownDiagramBlock({ lang, code }: { lang: "mermaid" | "dot"; code: s
 
 const CODE_MENU_PREFERRED_WIDTH = 180;
 
+// Fenced-code wrapping is a single session-wide preference, not a per-block
+// toggle: flipping the menu checkbox on any code block applies (or clears)
+// wrap for every fenced block in the app. The visual is driven by a root CSS
+// class so the layout change is synchronous with the click — React does not
+// need to re-render every block — which lets the toggle also pin the clicked
+// block's viewport position while siblings above it grow or shrink.
+const WRAP_CODE_BLOCKS_CLASS = "wrap-code-blocks";
+let wrapCodeBlocks = false;
+
+function applyWrapCodeBlocksClass(wrap: boolean) {
+  if (typeof document === "undefined") {
+    return;
+  }
+  document.documentElement.classList.toggle(WRAP_CODE_BLOCKS_CLASS, wrap);
+}
+
+// Keep the root class in sync with the module flag (clears a stale class after
+// HMR reloads the module with wrapCodeBlocks reset to false).
+applyWrapCodeBlocksClass(wrapCodeBlocks);
+
+/** Nearest ancestor that can scroll vertically, if any. */
+function verticalScrollParent(element: HTMLElement): HTMLElement | null {
+  let node: HTMLElement | null = element.parentElement;
+  while (node) {
+    const { overflowY } = getComputedStyle(node);
+    if (overflowY === "auto" || overflowY === "scroll" || overflowY === "overlay") {
+      return node;
+    }
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Set the global fenced-code wrap preference. When `anchor` is the code block
+ * the user toggled from, adjust its scroll parent so that block stays at the
+ * same viewport Y after every other block's height changes with wrap.
+ */
+function setWrapCodeBlocks(next: boolean, anchor?: HTMLElement | null) {
+  if (next === wrapCodeBlocks) {
+    return;
+  }
+  const scroller = anchor ? verticalScrollParent(anchor) : null;
+  const beforeTop = anchor?.getBoundingClientRect().top ?? 0;
+  wrapCodeBlocks = next;
+  applyWrapCodeBlocksClass(next);
+  if (anchor && scroller) {
+    // Reading layout after the class toggle forces a reflow so afterTop
+    // reflects every code block's new height, not a stale pre-wrap geometry.
+    const afterTop = anchor.getBoundingClientRect().top;
+    scroller.scrollTop += afterTop - beforeTop;
+  }
+}
+
 function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre">) {
-  const [wrap, setWrap] = useState(false);
   const [open, setOpen] = useState(false);
+  const blockRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const popoverRef = useRef<HTMLDivElement | null>(null);
   const [pos, setPos] = useState<{
@@ -225,8 +279,13 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
     };
   }, [open, positionMenu]);
 
+  // Snapshot the global preference when the menu opens (or re-renders while
+  // open). The root CSS class is the source of truth for layout; this value is
+  // only for the checkbox label/aria state.
+  const wrap = wrapCodeBlocks;
+
   return (
-    <div className={`turn-markdown-code-block${wrap ? " is-wrapped" : ""}`}>
+    <div ref={blockRef} className="turn-markdown-code-block">
       <button
         ref={triggerRef}
         type="button"
@@ -264,11 +323,11 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
                 aria-checked={wrap}
                 className="menu-item turn-message-menu-item"
                 onClick={() => {
-                  setWrap((value) => !value);
+                  setWrapCodeBlocks(!wrap, blockRef.current);
                   setOpen(false);
                 }}
               >
-                {wrap ? "Unwrap code block" : "Wrap code block"}
+                {wrap ? "Unwrap code blocks" : "Wrap code blocks"}
               </button>
               <button
                 type="button"

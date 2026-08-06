@@ -273,11 +273,10 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
   // Keys derive from the originating turn id and block position, not a running
   // sequence number: when older turns are truncated (the per-agent cap) or a
   // graph refresh prepends history, sequence-numbered keys shift and React
-  // transfers per-item DOM state — expanded <details>, code-wrap toggles — onto
-  // unrelated content. Turn ids are stable across re-parses, so these keys
-  // stick to their content. Item creation always happens while some block is
-  // being processed, and each block creates at most one item per prefix, so
-  // keys stay unique.
+  // transfers per-item DOM state — expanded <details> — onto unrelated content.
+  // Turn ids are stable across re-parses, so these keys stick to their content.
+  // Item creation always happens while some block is being processed, and each
+  // block creates at most one item per prefix, so keys stay unique.
   let keyBase = "";
 
   const nextKey = (prefix: string) => `${prefix}-${keyBase}`;
