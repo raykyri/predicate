@@ -5,7 +5,13 @@ export interface TerminalAttentionState {
   activePaneId: string | null;
   paneId: string | null;
   paneExists: boolean;
-  documentFocused: boolean;
+  /**
+   * True when the qmux window is the focused app surface. This is not the same
+   * as `document.hasFocus()`: a native Ghostty terminal can be first responder
+   * while the webview document is blurred, and keyboard tab switches happen in
+   * exactly that state.
+   */
+  appFocused: boolean;
   documentVisible: boolean;
 }
 
@@ -15,7 +21,28 @@ export function terminalPaneHasUserAttention(state: TerminalAttentionState): boo
     state.paneId !== null &&
     state.activePaneId === state.paneId &&
     state.paneExists &&
-    state.documentFocused &&
+    state.appFocused &&
+    state.documentVisible
+  );
+}
+
+/**
+ * Intentional activation (tab click, keyboard cycle, menu-bar select) means the
+ * user chose this pane. The active-pane match is still required so a BTW remap
+ * or stale callback cannot clear a different pane, but webview document focus
+ * is not — native terminals own first responder during keyboard navigation.
+ */
+export function terminalPaneWasIntentionallyActivated(
+  state: Pick<
+    TerminalAttentionState,
+    "activeSurface" | "activePaneId" | "paneId" | "paneExists" | "documentVisible"
+  >,
+): boolean {
+  return (
+    state.activeSurface === "pane" &&
+    state.paneId !== null &&
+    state.activePaneId === state.paneId &&
+    state.paneExists &&
     state.documentVisible
   );
 }

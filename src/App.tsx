@@ -204,6 +204,7 @@ import {
   applicableSpeculativeAcknowledgements,
   terminalAttentionProbeIsDue,
   terminalPaneHasUserAttention,
+  terminalPaneWasIntentionallyActivated,
 } from "./lib/terminalAttention";
 import {
   appShortcutAllowsRepeat,
@@ -5807,26 +5808,40 @@ function MainApp() {
     }
   }
 
-  function acknowledgePaneIfDone(paneId: string | null, checkBackend = false) {
+  function acknowledgePaneIfDone(
+    paneId: string | null,
+    checkBackend = false,
+    // True for user-driven activation (tab click, keyboard cycle, menu-bar
+    // select, terminal pointer-down). Native Ghostty owns first responder then,
+    // so document.hasFocus() is false even though the user just chose this pane.
+    intentional = false,
+  ) {
     if (!paneId) {
       return;
     }
-    if (
-      !terminalPaneHasUserAttention({
-        activeSurface: activeSurfaceRef.current,
-        activePaneId: activePaneIdRef.current,
-        paneId,
-        paneExists: panesRef.current.some((pane) => pane.id === paneId),
-        documentFocused: document.hasFocus(),
-        documentVisible: document.visibilityState === "visible",
-      })
-    ) {
+    const attentionBase = {
+      activeSurface: activeSurfaceRef.current,
+      activePaneId: activePaneIdRef.current,
+      paneId,
+      paneExists: panesRef.current.some((pane) => pane.id === paneId),
+      documentVisible: document.visibilityState === "visible",
+    };
+    // App focus covers both the webview and a native terminal first-responder
+    // inside the focused qmux window. document.hasFocus() alone misses the
+    // latter, which is exactly how keyboard tab switches arrive.
+    const appFocused = document.hasFocus() || nativeWindowFocusedRef.current;
+    const allowed = intentional
+      ? terminalPaneWasIntentionallyActivated(attentionBase)
+      : terminalPaneHasUserAttention({ ...attentionBase, appFocused });
+    if (!allowed) {
       return;
     }
     if (checkBackend) {
       const now = performance.now();
       const lastProbeAt = terminalAttentionProbeAtRef.current.get(paneId);
-      if (!terminalAttentionProbeIsDue(lastProbeAt, now)) {
+      // Intentional activation always probes: a prior ambient key/scroll probe
+      // on this pane must not swallow the Done clear for a real tab switch.
+      if (!intentional && !terminalAttentionProbeIsDue(lastProbeAt, now)) {
         return;
       }
       terminalAttentionProbeAtRef.current.set(paneId, now);
@@ -6520,12 +6535,17 @@ function MainApp() {
   useEffect(() => {
     // Probe the backend on a real view transition. Its Done event can still be
     // crossing the event bridge, so the local agent snapshot is not sufficient.
-    acknowledgePaneIfDone(activePaneId, true);
+    // Intentional: activePaneId changes are user/system navigation to this pane
+    // (keyboard cycle, click, restore), including while a native terminal owns
+    // first responder and document.hasFocus() is false.
+    acknowledgePaneIfDone(activePaneId, true, true);
   }, [activePaneId, activeSurface]);
 
   useEffect(() => {
     // If the pane was already visible when Done arrived, acknowledge it as soon
     // as the event reaches React instead of waiting for another focus change.
+    // Ambient: requires the qmux window to be focused so a backgrounded app
+    // does not clear Done on a still-selected pane.
     acknowledgePaneIfDone(activePaneId);
   }, [activePaneId, activeSurface, agents, paneSplits]);
 
@@ -6755,7 +6775,7 @@ function MainApp() {
           activeResearchTreeIdRef.current !== treeId),
     );
     setActivePaneId(paneId);
-    acknowledgePaneIfDone(paneId, true);
+    acknowledgePaneIfDone(paneId, true, true);
     if (treeId) {
       void markVisibleResearchTreeViewedRef.current(treeId, {
         force: researchExposureChanged,
@@ -8541,7 +8561,6 @@ function MainApp() {
   }
 
   function focusPaneTab(paneId: string) {
-    const requestedPaneId = paneId;
     const split = paneSplitForPane(paneSplitsRef.current, paneId);
     const focusingBtw = Boolean(split?.btwPaneIds?.includes(paneId));
     if (focusingBtw && split) {
@@ -8561,7 +8580,11 @@ function MainApp() {
           activeResearchTreeIdRef.current !== treeId),
     );
     setActivePaneId(paneId);
-    acknowledgePaneIfDone(requestedPaneId, true);
+    // Acknowledge the pane that actually became active (after BTW remap). Split
+    // status groups include BTW members, so their Done badges clear with the
+    // owner. Pass intentional so native-terminal keyboard cycles are not gated
+    // on webview document focus.
+    acknowledgePaneIfDone(paneId, true, true);
     if (focusingBtw) {
       setRightBarCollapsedForPane(false, paneId);
     }
@@ -8785,7 +8808,6 @@ function MainApp() {
         return;
       }
       focusPaneTab(paneId);
-      acknowledgePaneIfDone(paneId, true);
     }).then((unlisten) => {
       if (disposed) {
         unlisten();
@@ -8974,7 +8996,6 @@ function MainApp() {
       void selectResearchTree(researchNode.treeId);
     }
     focusPaneTab(paneId);
-    acknowledgePaneIfDone(paneId, true);
   }
 
   function handlePaneTabDoubleClick(pane: PaneInfo) {
@@ -12530,7 +12551,12 @@ function MainApp() {
         <BtwFloatingPane
           key={surface.pane.id}
           title={displayPaneTitle(surface.pane, surface.agent)}
-          onActivate={() => acknowledgePaneIfDone(surface.pane.id, true)}
+          onActivate={() => {
+            // BTW floats over its owner; the owner remains the active terminal
+            // pane id. Acknowledge through the owner so split-group Done status
+            // (including this BTW agent) clears on interaction.
+            acknowledgePaneIfDone(ownerPaneId, true, true);
+          }}
           offset={index}
         >
           {renderTurnPaneSurface(surface, false)}

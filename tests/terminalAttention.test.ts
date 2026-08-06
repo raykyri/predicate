@@ -6,6 +6,7 @@ import {
   TERMINAL_ATTENTION_PROBE_INTERVAL_MS,
   terminalAttentionProbeIsDue,
   terminalPaneHasUserAttention,
+  terminalPaneWasIntentionallyActivated,
   type TerminalAttentionState,
 } from "../src/lib/terminalAttention";
 
@@ -16,7 +17,7 @@ const attentionState = (
   activePaneId: "pane-1",
   paneId: "pane-1",
   paneExists: true,
-  documentFocused: true,
+  appFocused: true,
   documentVisible: true,
   ...overrides,
 });
@@ -41,12 +42,39 @@ test("only a visible active terminal pane has user attention", () => {
     false,
   );
   assert.equal(terminalPaneHasUserAttention(attentionState({ paneExists: false })), false);
+  assert.equal(terminalPaneHasUserAttention(attentionState({ appFocused: false })), false);
   assert.equal(
-    terminalPaneHasUserAttention(attentionState({ documentFocused: false })),
+    terminalPaneHasUserAttention(attentionState({ documentVisible: false })),
+    false,
+  );
+});
+
+test("intentional activation does not require webview document focus", () => {
+  // Native Ghostty owns first responder while the user Ctrl-Tabs between
+  // terminals. Ambient attention needs the app focused; intentional tab
+  // activation only needs the pane to be the one just selected.
+  assert.equal(
+    terminalPaneWasIntentionallyActivated(
+      attentionState({ appFocused: false }),
+    ),
+    true,
+  );
+  assert.equal(
+    terminalPaneWasIntentionallyActivated(
+      attentionState({ activePaneId: "pane-2", appFocused: false }),
+    ),
     false,
   );
   assert.equal(
-    terminalPaneHasUserAttention(attentionState({ documentVisible: false })),
+    terminalPaneWasIntentionallyActivated(
+      attentionState({ activeSurface: "research", appFocused: false }),
+    ),
+    false,
+  );
+  assert.equal(
+    terminalPaneWasIntentionallyActivated(
+      attentionState({ documentVisible: false, appFocused: false }),
+    ),
     false,
   );
 });
