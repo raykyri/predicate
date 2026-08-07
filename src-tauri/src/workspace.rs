@@ -1092,11 +1092,11 @@ fn prepare_agent_workspace_locked(
                 create_worktree(&host, base_repo, &dir, &branch_name, &base_ref)?;
                 branch = Some(branch_name);
             }
-            None => {
-                fs::create_dir_all(&dir).map_err(|err| {
-                    format!("failed to create agent directory {}: {err}", dir.display())
-                })?;
-            }
+            // Not a git repo, so there is no worktree to add — just a
+            // directory to run in. It belongs on the group's host: creating it
+            // locally would leave a stray tree here and the agent pointed at a
+            // path that does not exist over there.
+            None => host.create_dir_all(&dir)?,
         }
         dir.display().to_string()
     } else {
@@ -1798,7 +1798,7 @@ fn allocate_agent_worktree_dir(
     // managed directory and the project-local placements below are all resolved
     // against this filesystem — canonicalizing a remote path here would silently
     // produce a local directory and the agent would edit the wrong tree.
-    if let Some(root) = host.remote_workspace_root() {
+    if let Some(root) = host.remote_workspace_root()? {
         return Ok(PathBuf::from(root).join(&group.id).join(agent_name));
     }
 
@@ -2315,6 +2315,10 @@ mod tests {
     fn a_remote_host_without_a_root_still_lands_remotely() {
         let root = std::env::temp_dir().join("qmux-remote-alloc-default");
         let state = test_state_with_workspace(root);
+        // The default root is `~/.qmux/workspaces`, and every argument sent
+        // over ssh is quoted, so it has to be expanded here or the worktree
+        // lands in a directory literally named `~`.
+        host::seed_remote_home("user@devbox", "/home/dev");
         let dir = allocate_agent_worktree_dir(
             &state,
             &remote_host(None),
@@ -2323,7 +2327,8 @@ mod tests {
             "a",
         )
         .expect("allocates");
-        assert!(dir.starts_with("~/.qmux/workspaces"), "{dir:?}");
+        assert!(dir.starts_with("/home/dev/.qmux/workspaces"), "{dir:?}");
+        assert!(dir.is_absolute(), "the bridge requires an absolute cwd");
     }
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {

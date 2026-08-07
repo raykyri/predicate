@@ -29,7 +29,10 @@
 
 use crate::adapters::shell_quote_arg;
 use crate::workspace::{RemoteMultiplexer, RemoteRef};
+use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 
 /// Refuse to sit on a dead connection: a worktree call is on the path to
 /// opening a pane, so failing fast beats hanging the launch.
@@ -296,15 +299,143 @@ impl Host {
     /// applies. A remote path must never be run through it — canonicalizing or
     /// stat'ing the far side's path here resolves against *this* filesystem and
     /// silently produces a local directory.
-    pub fn remote_workspace_root(&self) -> Option<String> {
-        let target = self.remote()?;
-        Some(
-            target
-                .workspace_root
-                .clone()
-                .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string()),
-        )
+    pub fn remote_workspace_root(&self) -> Result<Option<String>, String> {
+        let Some(target) = self.remote() else {
+            return Ok(None);
+        };
+        let root = target
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string());
+        self.expand_home(&root).map(Some)
     }
+
+    /// Expands a leading `~` against the *remote's* home directory.
+    ///
+    /// Necessary because every token this module sends is single-quoted — that
+    /// is its security property, and it applies to paths as much as to refs —
+    /// so a `~/…` path reaches the far side's shell as a literal tilde. Left
+    /// alone, the default workspace root produces a directory actually named
+    /// `~`, and the path qmux then hands the agent is not absolute.
+    pub fn expand_home(&self, path: &str) -> Result<String, String> {
+        let Some(target) = self.remote() else {
+            return Ok(path.to_string());
+        };
+        let rest = if path == "~" {
+            ""
+        } else if let Some(rest) = path.strip_prefix("~/") {
+            rest
+        } else {
+            return Ok(path.to_string());
+        };
+        let home = remote_home(target)?;
+        Ok(match rest {
+            "" => home,
+            rest => format!("{}/{rest}", home.trim_end_matches('/')),
+        })
+    }
+
+    /// Creates `dir` (and its parents) on this host.
+    ///
+    /// A remote group's directories are remote: `std::fs` here would make a
+    /// stray tree on the machine qmux runs on and leave the agent pointed at a
+    /// path that does not exist.
+    pub fn create_dir_all(&self, dir: &Path) -> Result<(), String> {
+        if self.is_local() {
+            return std::fs::create_dir_all(dir)
+                .map_err(|err| format!("failed to create {}: {err}", dir.display()));
+        }
+        let output = self
+            .command(RemoteCommand {
+                program: "mkdir",
+                args: vec![
+                    "-p".to_string(),
+                    "--".to_string(),
+                    dir.display().to_string(),
+                ],
+                ..Default::default()
+            })
+            .output()
+            .map_err(|err| {
+                format!(
+                    "failed to create {} on {}: {err}",
+                    dir.display(),
+                    self.label()
+                )
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(format!(
+            "failed to create {} on {}: {}",
+            dir.display(),
+            self.label(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// The remote's `$HOME`, probed once per destination.
+///
+/// Cached because it cannot change under a live connection and every worktree
+/// allocation would otherwise pay for another round trip.
+static REMOTE_HOMES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn remote_home(target: &RemoteTarget) -> Result<String, String> {
+    if let Some(home) = REMOTE_HOMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&target.ssh)
+    {
+        return Ok(home.clone());
+    }
+
+    // Deliberately *not* built through `remote_command_line`: this is the one
+    // command whose point is that the far side's shell expands it, and it is
+    // safe to leave unquoted precisely because it is a fixed literal with no
+    // user-influenced part.
+    let output = Command::new("ssh")
+        .args([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            &format!("ConnectTimeout={CONNECT_TIMEOUT_SECONDS}"),
+            "--",
+            &target.ssh,
+            "printf %s \"$HOME\"",
+        ])
+        .output()
+        .map_err(|err| format!("failed to reach remote '{}': {err}", target.label))?;
+    if !output.status.success() {
+        return Err(format!(
+            "could not read the home directory on remote '{}': {}",
+            target.label,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let home = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !home.starts_with('/') {
+        return Err(format!(
+            "remote '{}' reported an unusable home directory ({home:?}); set workspaceRoot for it in qmux.config.json",
+            target.label
+        ));
+    }
+    REMOTE_HOMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(target.ssh.clone(), home.clone());
+    Ok(home)
+}
+
+/// Seeds the home-directory cache so tests can exercise `~` expansion without
+/// an ssh connection.
+#[cfg(test)]
+pub(crate) fn seed_remote_home(ssh: &str, home: &str) {
+    REMOTE_HOMES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(ssh.to_string(), home.to_string());
 }
 
 impl RemoteTarget {
@@ -686,16 +817,30 @@ mod tests {
     fn only_a_remote_host_overrides_where_worktrees_live() {
         // `None` locally is what keeps the existing placement logic — global
         // vs project-local — in charge on this machine.
-        assert_eq!(Host::Local.remote_workspace_root(), None);
+        assert_eq!(Host::Local.remote_workspace_root(), Ok(None));
         assert_eq!(
-            remote_host().remote_workspace_root().as_deref(),
+            remote_host().remote_workspace_root().unwrap().as_deref(),
             Some("/srv/work")
         );
+    }
 
+    #[test]
+    fn the_default_workspace_root_is_expanded_against_the_remotes_home() {
+        // Every token this module sends is quoted, so a `~` would arrive at the
+        // far side's shell literally: the worktree would land in a directory
+        // actually *named* `~`, and the path handed to the agent would not be
+        // absolute. Resolving it here is what stops that.
+        seed_remote_home("user@devbox", "/home/dev");
         let bare = for_group(Some(&remote_ref(None, None)));
         assert_eq!(
-            bare.remote_workspace_root().as_deref(),
-            Some(DEFAULT_REMOTE_WORKSPACE_ROOT)
+            bare.remote_workspace_root().unwrap().as_deref(),
+            Some("/home/dev/.qmux/workspaces")
         );
+        assert_eq!(bare.expand_home("~").unwrap(), "/home/dev");
+        // Only a leading `~/` is a home reference; nothing else is touched.
+        assert_eq!(bare.expand_home("/srv/x").unwrap(), "/srv/x");
+        assert_eq!(bare.expand_home("~x/y").unwrap(), "~x/y");
+        // A local host never has a home to expand against.
+        assert_eq!(Host::Local.expand_home("~/x").unwrap(), "~/x");
     }
 }

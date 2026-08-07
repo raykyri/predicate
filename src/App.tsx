@@ -51,6 +51,7 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapters";
+import { ACP_ADAPTER_ID } from "./adapters/acp";
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
@@ -4112,7 +4113,14 @@ function MainApp() {
   const launcherAdapters = useMemo(() => {
     const runtimeAdapters = config?.adapters
       .map((adapter) => findAgentUiAdapter(adapter.id))
-      .filter((adapter): adapter is NonNullable<typeof adapter> => Boolean(adapter));
+      .filter((adapter): adapter is NonNullable<typeof adapter> => Boolean(adapter))
+      // The ACP adapter's id names a protocol, not a program: with nothing
+      // under adapters.acp.agents and nothing added from the registry there is
+      // no agent behind it, so offering it would only produce a launch that
+      // fails.
+      .filter(
+        (adapter) => adapter.id !== ACP_ADAPTER_ID || (config?.acpAgents?.length ?? 0) > 0,
+      );
     return runtimeAdapters && runtimeAdapters.length > 0 ? runtimeAdapters : agentUiAdapters;
   }, [config]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
@@ -11882,6 +11890,7 @@ function MainApp() {
             <div className="command-launcher-options">
               <LauncherOptions
                 value={launcherOptions}
+                config={config}
                 onChange={(next) => {
                   setLauncherOptionsByAdapter((current) => ({
                     ...current,

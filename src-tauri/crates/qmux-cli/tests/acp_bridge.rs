@@ -111,6 +111,14 @@ fn main() {
             "a_streaming_bridge_writes_no_local_transcript",
             a_streaming_bridge_writes_no_local_transcript,
         ),
+        (
+            "a_question_raised_before_the_session_opens_reaches_the_pane",
+            a_question_raised_before_the_session_opens_reaches_the_pane,
+        ),
+        (
+            "the_filesystem_is_confined_to_the_session_directory",
+            the_filesystem_is_confined_to_the_session_directory,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -696,6 +704,27 @@ fn fake_agent(scenario: &str) {
                 "id": id,
                 "error": { "code": -32601, "message": "this agent cannot load sessions" },
             })),
+            // Authentication before the session exists. The client is blocked
+            // inside `session/new` here, which used to be a moment when nothing
+            // was servicing questions at all.
+            "session/new" if scenario == "startup_auth" => {
+                let agent = Arc::clone(&agent);
+                thread::spawn(move || {
+                    let outcome = agent.call(
+                        "elicitation/create",
+                        json!({
+                            "mode": "url",
+                            "elicitationId": "startup-001",
+                            "url": "https://example.com/sign-in",
+                            "message": "Sign in before the session starts.",
+                        }),
+                    );
+                    agent.note("startup_auth", outcome);
+                    agent.send(json!({
+                        "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" },
+                    }));
+                });
+            }
             "session/new" => {
                 let mut result = json!({ "sessionId": "s1" });
                 if scenario == "config" {
@@ -791,6 +820,7 @@ fn run_scenario(agent: &Arc<Agent>, scenario: &str, id: Option<Value>) {
             }));
         }
         "terminal" => run_terminal_scenario(agent),
+        "fs" => run_fs_scenario(agent),
         "form" | "form_decline" | "form_cancel" => {
             let outcome = agent.call(
                 "elicitation/create",
@@ -943,6 +973,57 @@ fn run_terminal_scenario(agent: &Arc<Agent>) {
     agent.note(
         "after_release",
         json!({ "ok": after_release.get("output").is_some() }),
+    );
+}
+
+/// Every way an agent might reach for a file, inside the session and out.
+///
+/// ACP hands the client the filesystem, so nothing but the client stands
+/// between "the agent asked for ~/.ssh/id_rsa" and it being read.
+fn run_fs_scenario(agent: &Arc<Agent>) {
+    let cwd = env::current_dir().expect("the agent runs in the session directory");
+    let inside = cwd.join("notes.txt");
+    let read = |path: PathBuf| json!({ "sessionId": "s1", "path": path.display().to_string() });
+
+    agent.note(
+        "write_inside",
+        agent.call(
+            "fs/write_text_file",
+            json!({
+                "sessionId": "s1",
+                "path": inside.display().to_string(),
+                "content": "kept\n",
+            }),
+        ),
+    );
+    agent.note("read_inside", agent.call("fs/read_text_file", read(inside)));
+
+    // `..` is folded before the check, so this is the parent directory rather
+    // than something that merely looks like it is under the session.
+    let escape = cwd.join("../escape.txt");
+    agent.note(
+        "read_outside",
+        agent.call("fs/read_text_file", read(escape.clone())),
+    );
+    agent.note(
+        "write_outside",
+        agent.call(
+            "fs/write_text_file",
+            json!({
+                "sessionId": "s1",
+                "path": escape.display().to_string(),
+                "content": "leaked",
+            }),
+        ),
+    );
+
+    // A symlink the agent itself planted inside the session is the other way
+    // out, and the one a lexical check alone would miss.
+    let link = cwd.join("out");
+    let _ = std::os::unix::fs::symlink(cwd.parent().unwrap_or(Path::new("/")), &link);
+    agent.note(
+        "read_symlink",
+        agent.call("fs/read_text_file", read(link.join("escape.txt"))),
     );
 }
 
@@ -1116,4 +1197,50 @@ fn a_streaming_bridge_writes_no_local_transcript() {
             .any(|frame| frame.contains("initialize")),
         "the protocol still runs normally"
     );
+}
+
+fn a_question_raised_before_the_session_opens_reaches_the_pane() {
+    // The one place a question had no servicer: the main thread was blocked in
+    // `session/new`, and the only loop that drained interactions ran inside a
+    // turn. The agent waited for an answer that could never arrive, and the
+    // pane hung with nothing on it — so a hang here is the regression.
+    let session = run_bridge("startup_auth", "y\ngo\n");
+
+    assert_eq!(
+        session.note("startup_auth")["action"],
+        "accept",
+        "the sign-in prompt should have been answered from the pane"
+    );
+    assert!(
+        session.pane.contains("https://example.com/sign-in"),
+        "the URL should have been shown before the session opened: {}",
+        session.pane
+    );
+    // And the session goes on to do its job with the input that follows.
+    assert!(
+        session
+            .turns()
+            .iter()
+            .any(|turn| turn["role"] == "user" && text_of(turn) == "go"),
+        "the prompt after the sign-in should still run: {:#?}",
+        session.transcript
+    );
+}
+
+fn the_filesystem_is_confined_to_the_session_directory() {
+    let session = run_bridge("fs", "go\n");
+
+    // Inside the session, the agent has the filesystem it was given.
+    assert_eq!(session.note("read_inside")["content"], "kept\n");
+
+    // Outside it, nothing — by `..`, by absolute path, or through a symlink
+    // the agent planted itself.
+    for note in ["read_outside", "write_outside", "read_symlink"] {
+        let outcome = session.note(note);
+        let message = outcome["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("outside this session's directory"),
+            "{note} should have been refused, got {outcome}"
+        );
+    }
 }

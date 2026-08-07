@@ -353,7 +353,9 @@ created against one by passing its id:
 `host` is passed to `ssh` verbatim, so `~/.ssh/config` aliases work; everything
 else is optional (`label` falls back to the id, `multiplexer` to `tmux`).
 `workspaceRoot` is where worktrees live there, since a group's `managedDir` is
-always local.
+always local; it defaults to `~/.qmux/workspaces`, resolved against the
+*remote's* home (every argument qmux sends is quoted, so the tilde has to be
+expanded on this side or it would arrive at the far shell as a literal).
 
 The group **snapshots** the entry it was created against rather than
 referencing it, keeping the id only as provenance. Editing or deleting a
@@ -439,6 +441,11 @@ Notable properties and limits:
 - `terminal/create` runs commands on a real pty, so anything checking `isatty`
   behaves the way it does for a human rather than taking its piped-output
   branch.
+- `fs/read_text_file` and `fs/write_text_file` are confined to the session's
+  directory. ACP hands the *client* the filesystem, so nothing but qmux stands
+  between an agent asking for `~/.ssh/id_rsa` and it being read; the tree the
+  session was pointed at is the boundary. `..`, an absolute path, and a symlink
+  the agent planted itself are all refused by name rather than quietly served.
 - Elicitation is supported in both modes. A form is filled in field by field in
   the pane, with enums numbered, defaults pre-filled, and `/decline` and
   `/cancel` distinguished — agents are required to branch on which they got. A

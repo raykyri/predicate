@@ -1,9 +1,10 @@
 import type { ComponentType, ReactNode } from "react";
+import { acpUiAdapter } from "./acp";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
 import { grokUiAdapter } from "./grok";
 import { opencodeUiAdapter } from "./opencode";
-import type { AgentInfo, PaneInfo, Turn, TurnBlock } from "../types";
+import type { AgentInfo, PaneInfo, RuntimeConfig, Turn, TurnBlock } from "../types";
 
 export type AgentStatus = AgentInfo["status"];
 
@@ -23,6 +24,9 @@ export interface ComposerPolicy {
 export interface LauncherOptionsProps {
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
+  /** The runtime config, for options whose choices are declared rather than
+   * compiled in — the ACP agent list is read from it. */
+  config: RuntimeConfig | null;
 }
 
 export interface AgentUiAdapter {
@@ -40,6 +44,7 @@ export const agentUiAdapters = [
   codexUiAdapter,
   opencodeUiAdapter,
   grokUiAdapter,
+  acpUiAdapter,
 ];
 
 export function findAgentUiAdapter(adapterId: string | null | undefined): AgentUiAdapter | null {

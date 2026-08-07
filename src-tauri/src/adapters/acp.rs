@@ -99,15 +99,13 @@ impl AcpAdapter {
                 transcript.display().to_string(),
             )),
             // Remote: it cannot see that filesystem, so records are streamed
-            // back over the control socket and the log goes somewhere local
-            // to the machine the bridge is actually on.
-            None => {
-                envs.push(("QMUX_ACP_TRANSCRIPT_STREAM".to_string(), "1".to_string()));
-                envs.push((
-                    "QMUX_ACP_LOG".to_string(),
-                    format!("/tmp/qmux-acp-{agent_key}.log"),
-                ));
-            }
+            // back over the control socket. Where the agent's stderr lands is
+            // left to the bridge — it is the one running on that machine, so
+            // it can put the log under the user's own home. Naming a path
+            // here would have to be a guess, and the obvious guess (a fixed
+            // name in /tmp) is both shared between concurrent panes and a
+            // symlink anyone else on that host can plant.
+            None => envs.push(("QMUX_ACP_TRANSCRIPT_STREAM".to_string(), "1".to_string())),
         }
         if !agent.env.is_empty() {
             envs.push((
@@ -1271,8 +1269,10 @@ mod tests {
             !envs.contains_key("QMUX_ACP_TRANSCRIPT"),
             "a path here would be a file nobody reads"
         );
-        // The agent's stderr still needs somewhere writable on its own machine.
-        assert!(envs["QMUX_ACP_LOG"].starts_with("/tmp/"));
+        // The agent's stderr needs somewhere writable on its own machine, and
+        // only the bridge knows where that is. Naming one from here would be a
+        // guess shared by every pane running this agent on that host.
+        assert!(!envs.contains_key("QMUX_ACP_LOG"));
         assert_eq!(envs["QMUX_ACP_CWD"], "/srv/work/repo");
     }
 
