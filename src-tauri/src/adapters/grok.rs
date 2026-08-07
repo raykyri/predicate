@@ -210,6 +210,7 @@ impl GrokAdapter {
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,
@@ -378,6 +379,7 @@ impl GrokAdapter {
         let mut agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: Some(source.group_id.clone()),
                 base_repo: if use_worktree {
                     None
@@ -508,6 +510,7 @@ impl GrokAdapter {
                 None => prepare_agent_workspace(
                     state,
                     PrepareAgentWorkspaceRequest {
+                        host: None,
                         group_id: Some(pane_group_id),
                         base_repo: Some(cwd_str.clone()),
                         base_ref: Some("HEAD".to_string()),
@@ -2048,6 +2051,7 @@ mod tests {
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
+            hosts: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-grok-tests"),
             socket_path: PathBuf::from("/tmp/qmux-grok-tests.sock"),
             adapters: AdapterConfigs {
@@ -2077,6 +2081,7 @@ mod tests {
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
+            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),

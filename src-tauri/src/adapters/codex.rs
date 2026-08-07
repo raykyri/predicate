@@ -246,6 +246,7 @@ impl CodexAdapter {
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,
@@ -420,6 +421,7 @@ impl CodexAdapter {
         let mut agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: Some(source.group_id.clone()),
                 // Worktree forks branch off the group's base repo; in-place forks run
                 // in the source's own directory so they see the same files.
@@ -567,6 +569,7 @@ impl CodexAdapter {
                 None => prepare_agent_workspace(
                     state,
                     PrepareAgentWorkspaceRequest {
+                        host: None,
                         group_id: Some(pane_group_id),
                         base_repo: Some(cwd_str.clone()),
                         base_ref: Some("HEAD".to_string()),
@@ -3827,6 +3830,7 @@ trusted_hash = "sha256:trusted"
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            hosts: Default::default(),
             workspace_root: temp_dir(),
             socket_path: PathBuf::from("/tmp/qmux-codex-test.sock"),
             adapters: AdapterConfigs {
@@ -3882,6 +3886,7 @@ trusted_hash = "sha256:trusted"
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
+            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),

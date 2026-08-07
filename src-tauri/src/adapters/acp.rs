@@ -142,6 +142,7 @@ impl AcpAdapter {
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,

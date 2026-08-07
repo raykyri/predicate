@@ -2892,6 +2892,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            hosts: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-workspaces"),
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
@@ -2917,6 +2918,7 @@ mod tests {
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
         AppState::new(QmuxConfig {
+            hosts: Default::default(),
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
@@ -3945,6 +3947,7 @@ mod tests {
         );
         state
             .insert_agent(AgentInfo {
+                host: None,
                 acp_config_options: Vec::new(),
                 acp_agent: None,
                 id: "agent-1".to_string(),

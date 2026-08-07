@@ -326,6 +326,33 @@ compatibility. If the config file is absent, qmux uses the platform data
 directory for workspace state and the platform runtime directory, or a `run/`
 subdirectory of the data directory, for the control socket.
 
+### Hosts
+
+Agents normally run on the machine qmux is running on. A `hosts` block declares
+others:
+
+```json
+{
+  "hosts": {
+    "devbox": {
+      "ssh": "user@devbox",
+      "qmuxCli": "qmux-cli",
+      "workspaceRoot": "/srv/qmux/workspaces",
+      "sshOptions": ["-J", "bastion"]
+    }
+  }
+}
+```
+
+`ssh` is passed to `ssh` verbatim, so `~/.ssh/config` aliases work. `qmuxCli`
+(default `qmux-cli`) is how the CLI is invoked on that machine; `workspaceRoot`
+is where agent worktrees live there; `sshOptions` are extra flags for hosts
+needing a jump box, identity file, or port.
+
+Git worktree creation, status, and removal already run on the agent's host. The
+pane's process itself does not yet — nothing selects a non-local host, so every
+agent is still local. Wiring the launch path is the next piece.
+
 ### ACP agents
 
 The `acp` adapter speaks the [Agent Client

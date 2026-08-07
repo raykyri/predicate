@@ -951,6 +951,7 @@ mod tests {
             OpencodeAdapterConfig, QmuxConfig,
         };
         let config = QmuxConfig {
+            hosts: Default::default(),
             workspace_root: base.join("state"),
             socket_path: base.join("x.sock"),
             adapters: AdapterConfigs {

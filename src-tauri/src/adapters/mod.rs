@@ -943,6 +943,7 @@ fn fork_agent_in_shell(
     let mut agent = prepare_agent_workspace(
         state,
         PrepareAgentWorkspaceRequest {
+            host: None,
             group_id: Some(source.group_id.clone()),
             base_repo: if use_worktree {
                 None
@@ -1412,6 +1413,7 @@ mod tests {
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
+            hosts: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-adapter-tests"),
             socket_path: PathBuf::from("/tmp/qmux-adapter-tests.sock"),
             adapters: AdapterConfigs {
@@ -1482,6 +1484,7 @@ mod tests {
         // An adapter without a native fork command is rejected before any spawn is attempted.
         state
             .insert_agent(AgentInfo {
+                host: None,
                 acp_config_options: Vec::new(),
                 acp_agent: None,
                 id: "agent-1".to_string(),
@@ -1511,6 +1514,7 @@ mod tests {
 
     fn session_agent(id: &str, pane_id: Option<&str>, dir: &str, session: &str) -> AgentInfo {
         AgentInfo {
+            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),

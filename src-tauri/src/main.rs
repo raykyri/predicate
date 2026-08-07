@@ -8,6 +8,7 @@ mod control_socket;
 mod events;
 mod file_server;
 mod global_task_launcher;
+mod host;
 mod human_browser;
 mod image_files;
 mod launch_path;
@@ -1354,6 +1355,7 @@ fn launch_research_child_run(
                 }
             };
             AgentInfo {
+                host: None,
                 acp_config_options: Vec::new(),
                 id: parent
                     .agent_id

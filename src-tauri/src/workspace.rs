@@ -1,4 +1,5 @@
 use crate::events::QmuxEvent;
+use crate::host::{self, Host};
 use crate::persistence::{self, WorktreeLocation};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
@@ -228,6 +229,11 @@ pub struct AgentInfo {
     /// remember which agent behind that protocol to start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,
+    /// The `hosts` entry this agent's worktree and process live on. Absent for
+    /// local agents, which is every agent created before hosts existed — so the
+    /// absent case has to stay indistinguishable from "local".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// Session configuration an ACP agent exposes for itself — its model list,
     /// mode, reasoning level. Read-only for now: qmux renders it, and the agent
     /// remains the source of truth. Persisted so a restored pane shows the
@@ -301,6 +307,9 @@ pub struct PrepareAgentWorkspaceRequest {
     /// When false, the agent runs directly in the base repository / cwd with no
     /// isolated git worktree (the default).
     pub use_worktree: bool,
+    /// Which `hosts` entry the agent's work runs on. `None` is the local
+    /// machine, which is what every caller meant before hosts existed.
+    pub host: Option<String>,
 }
 
 pub fn create_group(state: &AppState, request: CreateGroupRequest) -> Result<GroupInfo, String> {
@@ -1056,6 +1065,9 @@ fn prepare_agent_workspace_locked(
         .or_else(|| group.base_ref.clone())
         .unwrap_or_else(|| "HEAD".to_string());
     let mut branch = None;
+    // Resolved before any directory is allocated so an unknown host name
+    // fails the launch cleanly rather than after side effects on disk.
+    let host = host::resolve(&state.config().hosts, request.host.as_deref())?;
 
     let worktree_dir = if request.use_worktree {
         // Isolated git worktree in the configured global or project-local root
@@ -1065,7 +1077,7 @@ fn prepare_agent_workspace_locked(
             Some(base_repo) => {
                 let branch_name =
                     format!("qmux/{}/{}", sanitize_ref_segment(&group.id), agent_name);
-                create_worktree(base_repo, &dir, &branch_name, &base_ref)?;
+                create_worktree(&host, base_repo, &dir, &branch_name, &base_ref)?;
                 branch = Some(branch_name);
             }
             None => {
@@ -1098,6 +1110,7 @@ fn prepare_agent_workspace_locked(
         // Set by the ACP adapter immediately after this returns; the shared
         // workspace request has no reason to carry an adapter-specific field.
         acp_agent: None,
+        host: request.host.clone(),
         parent_id: None,
         fork_point: None,
         root_session_id: None,
@@ -1179,6 +1192,7 @@ pub fn recover_shell_agent_from_session_start(
         prepare_agent_workspace_locked(
             state,
             PrepareAgentWorkspaceRequest {
+                host: None,
                 group_id: Some(pane.group_id.clone()),
                 base_repo: Some(pane.cwd.clone()),
                 base_ref: Some("HEAD".to_string()),
@@ -1530,6 +1544,16 @@ pub struct CapturedWorktreeRemoval {
     run_dir: String,
     worktree_dir: String,
     branch: String,
+    /// Captured with the paths rather than re-resolved later: removal runs
+    /// after the agent record is gone, so the host has to be carried along.
+    host: Host,
+}
+
+/// Resolves an agent's recorded host. A name that is no longer in config is an
+/// error rather than a silent fallback to local: running a worktree command on
+/// the wrong machine is worse than refusing to run it.
+fn agent_host(state: &AppState, name: &Option<String>) -> Result<Host, String> {
+    host::resolve(&state.config().hosts, name.as_deref())
 }
 
 /// Reports whether an agent's git worktree has uncommitted changes — staged,
@@ -1540,16 +1564,15 @@ pub fn agent_worktree_status(state: &AppState, agent_id: &str) -> Result<Worktre
         .ok_or_else(|| format!("agent {agent_id} was not found"))?;
     let dir = agent.worktree_dir;
 
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("status")
-        .arg("--porcelain")
+    let host = agent_host(state, &agent.host)?;
+    let output = host
+        .git(["-C", dir.as_str(), "status", "--porcelain"])
         .output()
         .map_err(|err| format!("failed to run git status in {dir}: {err}"))?;
     if !output.status.success() {
         return Err(format!(
-            "git status failed in {dir}: {}",
+            "git status failed in {dir} on {}: {}",
+            host.label(),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -1598,6 +1621,7 @@ pub fn capture_agent_worktree_removal(
         run_dir,
         worktree_dir,
         branch,
+        host: agent_host(state, &agent.host)?,
     })
 }
 
@@ -1606,15 +1630,18 @@ pub fn remove_captured_worktree(removal: CapturedWorktreeRemoval) -> Result<(), 
         run_dir,
         worktree_dir,
         branch,
+        host,
     } = removal;
 
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&run_dir)
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(&worktree_dir)
+    let output = host
+        .git([
+            "-C",
+            run_dir.as_str(),
+            "worktree",
+            "remove",
+            "--force",
+            worktree_dir.as_str(),
+        ])
         .output()
         .map_err(|err| format!("failed to run git worktree remove: {err}"))?;
 
@@ -1629,7 +1656,7 @@ pub fn remove_captured_worktree(removal: CapturedWorktreeRemoval) -> Result<(), 
     // Best-effort: the worktree is gone, so the branch can be soft-deleted. A
     // declined delete (unmerged commits) or a git error is logged, not fatal —
     // the worktree removal the user confirmed has already succeeded.
-    match soft_delete_branch(&run_dir, &branch) {
+    match soft_delete_branch(&host, &run_dir, &branch) {
         Ok(true) => {}
         Ok(false) => eprintln!("qmux: kept branch {branch}: not fully merged"),
         Err(err) => eprintln!("qmux: {err}"),
@@ -1641,13 +1668,9 @@ pub fn remove_captured_worktree(removal: CapturedWorktreeRemoval) -> Result<(), 
 /// Soft-deletes `branch` in the repository at `run_dir`. Returns `Ok(true)` if
 /// the branch was removed, `Ok(false)` if git declined because it is not fully
 /// merged, or `Err` if git could not be run.
-fn soft_delete_branch(run_dir: &str, branch: &str) -> Result<bool, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(run_dir)
-        .arg("branch")
-        .arg("-d")
-        .arg(branch)
+fn soft_delete_branch(host: &Host, run_dir: &str, branch: &str) -> Result<bool, String> {
+    let output = host
+        .git(["-C", run_dir, "branch", "-d", branch])
         .output()
         .map_err(|err| format!("failed to run git branch -d {branch}: {err}"))?;
     Ok(output.status.success())
@@ -1920,6 +1943,7 @@ fn is_git_repo(path: &str) -> bool {
 }
 
 fn create_worktree(
+    host: &Host,
     base_repo: &str,
     worktree_dir: &Path,
     branch: &str,
@@ -1929,20 +1953,25 @@ fn create_worktree(
     // option-looking value (e.g. "--detach") can't be interpreted by git as a flag
     // rather than a starting point. `--end-of-options` keeps a ref beginning with
     // "-" from being parsed as an option by rev-parse itself.
-    verify_base_ref(base_repo, base_ref)?;
+    verify_base_ref(host, base_repo, base_ref)?;
 
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(base_repo)
-        .arg("worktree")
-        .arg("add")
-        .arg("-b")
-        .arg(branch)
-        // Stop option parsing before the user-influenced positional arguments so
-        // neither the worktree path nor the ref can be mistaken for a flag.
-        .arg("--")
-        .arg(worktree_dir)
-        .arg(base_ref)
+    let output = host
+        .git([
+            "-C",
+            base_repo,
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            // Stop option parsing before the user-influenced positional
+            // arguments so neither the worktree path nor the ref can be
+            // mistaken for a flag. On a remote host `Host::git` additionally
+            // quotes each one, so the far side's shell cannot re-split them
+            // and undo this guard.
+            "--",
+            &worktree_dir.display().to_string(),
+            base_ref,
+        ])
         .output()
         .map_err(|err| format!("failed to run git worktree add: {err}"))?;
 
@@ -1950,7 +1979,8 @@ fn create_worktree(
         Ok(())
     } else {
         Err(format!(
-            "git worktree add failed: {}{}",
+            "git worktree add failed on {}: {}{}",
+            host.label(),
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ))
@@ -1960,15 +1990,17 @@ fn create_worktree(
 /// Verifies that `base_ref` resolves to a commit in `base_repo`, rejecting values
 /// that don't (including option-looking input). `--end-of-options` ensures a ref
 /// starting with "-" is treated as a revision rather than a flag.
-fn verify_base_ref(base_repo: &str, base_ref: &str) -> Result<(), String> {
-    let resolved = Command::new("git")
-        .arg("-C")
-        .arg(base_repo)
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg("--quiet")
-        .arg("--end-of-options")
-        .arg(format!("{base_ref}^{{commit}}"))
+fn verify_base_ref(host: &Host, base_repo: &str, base_ref: &str) -> Result<(), String> {
+    let resolved = host
+        .git([
+            "-C",
+            base_repo,
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &format!("{base_ref}^{{commit}}"),
+        ])
         .output()
         .map_err(|err| format!("failed to verify base ref: {err}"))?;
 
@@ -2168,6 +2200,7 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let socket_path = workspace_root.join("qmux.sock");
         AppState::new(QmuxConfig {
+            hosts: Default::default(),
             workspace_root,
             socket_path,
             adapters: AdapterConfigs {
@@ -2298,6 +2331,7 @@ mod tests {
 
     fn sample_agent(id: &str, pane_id: Option<&str>, status: AgentStatus) -> AgentInfo {
         AgentInfo {
+            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),
@@ -3792,7 +3826,10 @@ mod tests {
 
         // A branch at HEAD is fully merged, so the soft delete removes it.
         git(&["branch", "merged"]);
-        assert_eq!(soft_delete_branch(&repo_str, "merged"), Ok(true));
+        assert_eq!(
+            soft_delete_branch(&Host::Local, &repo_str, "merged"),
+            Ok(true)
+        );
         assert!(!branch_exists(&repo, "merged"));
 
         // A branch with its own commit is not merged into main, so git declines
@@ -3800,7 +3837,10 @@ mod tests {
         git(&["checkout", "-b", "feature"]);
         git(&["commit", "--allow-empty", "-m", "work"]);
         git(&["checkout", "main"]);
-        assert_eq!(soft_delete_branch(&repo_str, "feature"), Ok(false));
+        assert_eq!(
+            soft_delete_branch(&Host::Local, &repo_str, "feature"),
+            Ok(false)
+        );
         assert!(branch_exists(&repo, "feature"));
 
         fs::remove_dir_all(&repo).ok();
