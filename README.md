@@ -333,15 +333,58 @@ rather than to an individual agent: the directory, its repository, and every
 pane opened against it are one machine's, so binding it at the group level is
 what stops an agent ending up somewhere other than the code it is editing.
 
-A group's `remote` names the ssh destination, a label, and which multiplexer
-manages its panes there. It may also carry `qmuxCli` (default `qmux-cli`) and
-`workspaceRoot`, since a group's `managedDir` is always local and a remote
-group needs somewhere on its own machine for worktrees.
+Machines are declared under `remotes` in `qmux.config.json` and a group is
+created against one by passing its id:
 
-Git worktree creation, status, removal, and every repository probe already run
-on the group's host. Spawning the panes themselves does not yet — both
-`prepare_agent_workspace` and `plan_to_spec` still refuse remote groups, so no
-group can currently be created with a remote.
+```json
+{
+  "remotes": {
+    "devbox": {
+      "host": "user@devbox",
+      "label": "Dev box",
+      "multiplexer": "tmux",
+      "qmuxCli": "qmux-cli",
+      "workspaceRoot": "/srv/qmux/workspaces"
+    }
+  }
+}
+```
+
+`host` is passed to `ssh` verbatim, so `~/.ssh/config` aliases work; everything
+else is optional (`label` falls back to the id, `multiplexer` to `tmux`).
+`workspaceRoot` is where worktrees live there, since a group's `managedDir` is
+always local.
+
+The group **snapshots** the entry it was created against rather than
+referencing it, keeping the id only as provenance. Editing or deleting a
+`remotes` entry therefore never moves a workspace whose worktrees already live
+on the old machine.
+
+Git worktree creation, status, removal, and every repository probe run on the
+group's host, and panes are spawned there too: `plan_to_spec` wraps a remote
+group's command in `ssh` plus its multiplexer, so this is adapter-agnostic — the
+pty still runs one local process, it is just `ssh`.
+
+The multiplexer is what makes a pane survive a dropped connection. Plain `ssh`
+cannot: on disconnect sshd closes the pty master and the foreground process
+group takes a SIGHUP, and nothing in `ssh` buffers output for an absent client
+or lets a new connection re-attach to an old process's stdio. With `tmux`, panes
+run under `tmux new-session -A -s qmux-<pane>`, so the same command line starts
+a session the first time and reattaches to it afterwards. `herdr` is recognised
+but not yet driveable — its attach-or-create invocation isn't something to
+guess at, since a wrong flag would start a second session on every reconnect
+rather than reattaching — so a herdr group refuses to launch and says so.
+
+Two things a remote group cannot do yet, both refused rather than half-done.
+Shell panes: their integration is delivered as files written to the local
+filesystem and referenced by `ZDOTDIR`, and on the far side those paths don't
+exist, so a shell would come up silently missing cwd reporting and the agent
+wrappers. And every adapter except ACP: they resolve their binary against the
+local `PATH`, point flags at locally-materialized plugin directories, and rely
+on the pane's cwd being the worktree — all of which start fine over there and
+are then wrong in ways that look like the agent misbehaving. Adapters opt in
+through `AgentAdapter::supports_remote` once they've been checked for all
+three.
 
 ### ACP agents
 

@@ -239,23 +239,79 @@ pub struct PaneMeta {
 }
 
 /// The single decision point between "what should run for this pane" and "how
-/// it is executed". The only launch target today is the local machine, so a
-/// plan maps 1:1 onto a `PtySpawnSpec`; a remote group's target would instead
-/// wrap the plan in its transport (ssh + multiplexer) here. Until that lands,
-/// remote groups are rejected outright so a remote path can never fall through
-/// to a local spawn.
+/// it is executed". A local plan maps 1:1 onto a `PtySpawnSpec`; a remote
+/// group's is wrapped in its transport — ssh, plus the multiplexer that lets the
+/// pane survive a dropped connection — before it ever reaches the pty layer.
+///
+/// Doing it here rather than in each adapter is what makes remote panes an
+/// adapter-agnostic property: the pty still runs one local process, it is just
+/// `ssh` instead of the agent.
 pub fn plan_to_spec(
     state: &AppState,
     meta: PaneMeta,
     plan: CommandPlan,
 ) -> Result<PtySpawnSpec, String> {
     let remote = state.group(&meta.group_id)?.and_then(|group| group.remote);
-    if let Some(remote) = remote {
+    let host = crate::host::for_group(remote.as_ref());
+    let pane_id = meta.pane_id.clone();
+
+    // Shell integration is delivered as files written to *this* filesystem and
+    // referenced by env (ZDOTDIR and friends). On a remote pane those paths do
+    // not exist, so the shell would come up silently stripped of cwd reporting
+    // and the agent wrappers. Refuse rather than hand back a pane that looks
+    // fine and quietly isn't; agent panes carry no support files and are
+    // unaffected.
+    // An adapter has to have been built for this. The failure mode otherwise is
+    // silent: the process starts over there with a binary path resolved here, a
+    // plugin directory that exists only here, and its worktree not as its cwd.
+    if !host.is_local()
+        && let Some(agent_id) = meta.agent_id.as_deref()
+        && let Some(agent) = state.agent(agent_id)?
+    {
+        let registry = crate::adapters::adapter_registry(state.config());
+        if !registry.get(&agent.adapter)?.supports_remote() {
+            return Err(format!(
+                "the {} adapter cannot run on remote '{}' yet; it resolves paths on the machine qmux is running on",
+                agent.adapter,
+                host.label()
+            ));
+        }
+    }
+
+    if !host.is_local() && !plan.support_files.is_empty() {
         return Err(format!(
-            "group {} is bound to remote '{}'; spawning panes on a remote host is not implemented yet",
-            meta.group_id, remote.label
+            "group {} is bound to remote '{}'; panes needing shell integration cannot run there yet",
+            meta.group_id,
+            host.label()
         ));
     }
+
+    let (program, args, envs, cwd) = match pane_id
+        .as_deref()
+        .and_then(|pane_id| {
+            host.pane_argv(
+                pane_id,
+                &state.config().socket_path.display().to_string(),
+                &plan.program,
+                &plan.args,
+                &plan.envs,
+            )
+        })
+        .transpose()?
+    {
+        Some(argv) => (
+            argv[0].clone(),
+            argv[1..].to_vec(),
+            // Everything the remote process reads is in the command line; ssh
+            // itself needs nothing.
+            Vec::new(),
+            // The pty runs `ssh` here, so its directory must exist on *this*
+            // machine — the plan's cwd is the far side's.
+            state.default_open_dir(),
+        ),
+        None => (plan.program, plan.args, plan.envs, plan.cwd),
+    };
+
     Ok(PtySpawnSpec {
         pane_id: meta.pane_id,
         agent_id: meta.agent_id,
@@ -263,10 +319,10 @@ pub fn plan_to_spec(
         kind: meta.kind,
         title: meta.title,
         last_osc_title: meta.last_osc_title,
-        program: plan.program,
-        args: plan.args,
-        cwd: plan.cwd,
-        envs: plan.envs,
+        program,
+        args,
+        cwd,
+        envs,
         support_files: plan.support_files,
         support_file_fallback: plan.support_file_fallback,
         initial_size: meta.initial_size,
@@ -347,6 +403,7 @@ pub fn spawn_shell_pane(
         None => create_group(
             state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: None,
                 after_group_id: None,
@@ -2892,6 +2949,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-workspaces"),
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
@@ -2917,6 +2975,7 @@ mod tests {
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
@@ -2955,6 +3014,32 @@ mod tests {
             .find_map(|(env_key, value)| (env_key == key).then(|| value.clone()))
     }
 
+    fn sample_remote_agent(group_id: &str) -> crate::workspace::AgentInfo {
+        crate::workspace::AgentInfo {
+            id: "agent-remote".to_string(),
+            group_id: group_id.to_string(),
+            adapter: "acp".to_string(),
+            worktree_dir: "/srv/code/project".to_string(),
+            branch: None,
+            pane_id: None,
+            orphaned_queue_pane_id: None,
+            session_id: None,
+            transcript_path: None,
+            status: crate::workspace::AgentStatus::Starting,
+            model: None,
+            effort: None,
+            acp_agent: None,
+            acp_config_options: Vec::new(),
+            parent_id: None,
+            fork_point: None,
+            root_session_id: None,
+            thread_id: None,
+            branch_id: None,
+            paused: false,
+            created_at: 0,
+        }
+    }
+
     fn test_remote() -> crate::workspace::RemoteRef {
         crate::workspace::RemoteRef {
             id: "remote-1".to_string(),
@@ -2977,6 +3062,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: None,
                 after_group_id: None,
@@ -3059,6 +3145,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: None,
                 after_group_id: None,
@@ -3152,11 +3239,12 @@ mod tests {
     }
 
     #[test]
-    fn plan_to_spec_refuses_remote_groups() {
+    fn plan_to_spec_refuses_remote_panes_that_need_shell_integration() {
         let state = test_state_with_workspace(temp_workspace());
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 // A remote path that does not exist locally: creation must not
                 // stat it, and the spawn layer must refuse rather than fall
@@ -3181,7 +3269,121 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(error.contains("not implemented yet"), "{error}");
+        assert!(
+            error.contains("shell integration"),
+            "a shell pane's integration files are local-only: {error}"
+        );
+    }
+
+    #[test]
+    fn plan_to_spec_refuses_an_adapter_that_is_not_remote_ready() {
+        let state = test_state_with_workspace(temp_workspace());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some("/srv/code/project".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(test_remote()),
+                remote_id: None,
+            },
+        )
+        .unwrap();
+
+        let mut agent = sample_remote_agent(&group.id);
+        agent.adapter = "claude".to_string();
+        state.insert_agent(agent.clone()).unwrap();
+
+        let error = plan_to_spec(
+            &state,
+            PaneMeta {
+                pane_id: Some("pane-9".to_string()),
+                agent_id: Some(agent.id.clone()),
+                group_id: group.id.clone(),
+                kind: PaneKind::Agent,
+                title: "Claude".to_string(),
+                last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
+                program: "/usr/local/bin/claude".to_string(),
+                args: Vec::new(),
+                cwd: PathBuf::from("/srv/code/project"),
+                envs: Vec::new(),
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
+        )
+        .unwrap_err();
+
+        // Silently succeeding would launch claude over there with a binary path
+        // resolved here and a plugin directory that only exists here.
+        assert!(error.contains("claude"), "{error}");
+        assert!(error.contains("cannot run on remote"), "{error}");
+    }
+
+    #[test]
+    fn plan_to_spec_wraps_a_remote_agent_pane_in_ssh_and_tmux() {
+        let state = test_state_with_workspace(temp_workspace());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                remote_id: None,
+                name: None,
+                dir: Some("/srv/code/project".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(test_remote()),
+            },
+        )
+        .unwrap();
+
+        let agent = sample_remote_agent(&group.id);
+        state.insert_agent(agent.clone()).unwrap();
+
+        // An ACP pane carries no support files, so nothing local is needed.
+        let spec = plan_to_spec(
+            &state,
+            PaneMeta {
+                pane_id: Some("pane-9".to_string()),
+                agent_id: Some(agent.id.clone()),
+                group_id: group.id.clone(),
+                kind: PaneKind::Agent,
+                title: "ACP".to_string(),
+                last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
+                program: "/Applications/qmux".to_string(),
+                args: vec!["acp".to_string()],
+                cwd: PathBuf::from("/srv/code/project"),
+                envs: vec![("QMUX_TOKEN".to_string(), "tok".to_string())],
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
+        )
+        .expect("a remote agent pane is wrapped rather than refused");
+
+        // The pty still runs one local process; it is just ssh.
+        assert_eq!(spec.program, "ssh");
+        let line = spec.args.last().expect("remote command line");
+        assert!(
+            line.contains("'tmux' 'new-session' '-A' '-s' 'qmux-pane-9'"),
+            "{line}"
+        );
+        assert!(line.ends_with("'/Applications/qmux' 'acp'"), "{line}");
+        assert!(line.contains("QMUX_TOKEN='tok'"), "{line}");
+        // The plan's cwd is the far side's, so the local pty cannot use it.
+        assert_ne!(spec.cwd, PathBuf::from("/srv/code/project"));
+        assert!(
+            spec.envs.is_empty(),
+            "the remote reads its env from the command line"
+        );
     }
 
     #[test]

@@ -732,6 +732,18 @@ pub trait AgentAdapter: Send + Sync {
 
     fn shell_commands(&self) -> Vec<ShellCommandIntegration>;
 
+    /// Whether this adapter can launch into a remote group.
+    ///
+    /// Defaults to `false`, and deliberately so. A remote launch is not just an
+    /// ssh wrapper: an adapter that resolves its binary against the local
+    /// `PATH`, points a flag at a locally-materialized plugin directory, or
+    /// relies on the pane's cwd being its worktree will start successfully over
+    /// there and then be wrong in ways that look like the agent misbehaving.
+    /// Opting in means an adapter has been checked for all three.
+    fn supports_remote(&self) -> bool {
+        false
+    }
+
     /// The shell command that resumes `session_id` through this adapter's injected
     /// wrapper function (e.g. `claude --resume <id>`), used to re-launch the agent in
     /// a recovered shell pane. Defaults to `None` for adapters without a resume command.
@@ -1412,6 +1424,7 @@ mod tests {
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
+            remotes: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-adapter-tests"),
             socket_path: PathBuf::from("/tmp/qmux-adapter-tests.sock"),
             adapters: AdapterConfigs {

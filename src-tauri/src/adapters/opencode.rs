@@ -1229,6 +1229,7 @@ mod tests {
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
+            remotes: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-opencode-tests"),
             socket_path: PathBuf::from("/tmp/qmux-opencode-tests.sock"),
             adapters: AdapterConfigs {

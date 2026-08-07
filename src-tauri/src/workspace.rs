@@ -78,17 +78,21 @@ pub fn validate_launch_workspace(
 }
 
 /// Which multiplexer manages a remote group's panes on its host.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteMultiplexer {
+    /// The default because it is the one qmux can currently drive.
+    #[default]
     Tmux,
     Herdr,
 }
 
-/// The remote host a group is bound to. Declarative only for now: no group is
-/// ever created with a remote, and `plan_to_spec` rejects one outright — the
-/// field exists so persistence, manifests, and the capability gates are already
-/// remote-shaped before any remote spawning lands.
+/// The remote host a group is bound to.
+///
+/// Created from a `remotes` entry in `qmux.config.json` and then snapshotted
+/// here, so editing that entry never moves a group whose worktrees already live
+/// on the old machine. `plan_to_spec` wraps this group's panes in ssh plus the
+/// named multiplexer; adapters opt in through `AgentAdapter::supports_remote`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteRef {
@@ -293,6 +297,11 @@ pub struct CreateGroupRequest {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub remote: Option<RemoteRef>,
+    /// Names a `remotes` entry in `qmux.config.json` to bind this group to.
+    /// Resolved into `remote` before the group is created; ignored when
+    /// `remote` is already set.
+    #[serde(default)]
+    pub remote_id: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -310,7 +319,19 @@ pub struct PrepareAgentWorkspaceRequest {
     pub use_worktree: bool,
 }
 
-pub fn create_group(state: &AppState, request: CreateGroupRequest) -> Result<GroupInfo, String> {
+pub fn create_group(
+    state: &AppState,
+    mut request: CreateGroupRequest,
+) -> Result<GroupInfo, String> {
+    // Resolve the saved remote before anything is created, so an id that is no
+    // longer declared fails the request rather than silently producing a local
+    // group where the caller asked for a remote one.
+    if request.remote.is_none()
+        && let Some(id) = request.remote_id.as_deref()
+    {
+        request.remote = Some(state.config().saved_remote(id)?);
+    }
+
     create_scoped_group(state, request, WorkspaceScope::Terminal)
 }
 
@@ -406,6 +427,7 @@ fn create_research_workspace_locked(
         let mut group = create_group_record(
             state,
             CreateGroupRequest {
+                remote_id: None,
                 name: name.or(archive_name),
                 dir: Some(canonical.display().to_string()),
                 after_group_id: None,
@@ -448,6 +470,7 @@ fn create_research_workspace_locked(
     create_scoped_group(
         state,
         CreateGroupRequest {
+            remote_id: None,
             name,
             dir: Some(canonical.display().to_string()),
             after_group_id: None,
@@ -1007,23 +1030,13 @@ fn prepare_agent_workspace_locked(
     agent_id_override: Option<String>,
 ) -> Result<AgentInfo, String> {
     let mut group = match request.group_id.as_deref() {
-        Some(group_id) => {
-            let group = state
-                .group(group_id)?
-                .ok_or_else(|| format!("group {group_id} was not found"))?;
-            // Worktree allocation and every git operation below run local
-            // subprocesses against local paths; on a remote group they would
-            // silently act on the wrong machine.
-            if group.is_remote() {
-                return Err(format!(
-                    "group {group_id} is bound to a remote host; agents in remote groups are not supported yet"
-                ));
-            }
-            group
-        }
+        Some(group_id) => state
+            .group(group_id)?
+            .ok_or_else(|| format!("group {group_id} was not found"))?,
         None => create_group(
             state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: request
                     .base_repo
@@ -2211,6 +2224,69 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_id_binds_the_group_to_that_machine() {
+        // Without this the whole feature can be a no-op: the request is
+        // accepted, a group is created, and it is silently local.
+        let root = std::env::temp_dir().join("qmux-remote-id");
+        let state = test_state_with_remotes(
+            root,
+            std::collections::BTreeMap::from([(
+                "devbox".to_string(),
+                crate::config::SavedRemote {
+                    host: "user@devbox".to_string(),
+                    label: Some("Dev box".to_string()),
+                    ..Default::default()
+                },
+            )]),
+        );
+
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some("/srv/code/project".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+                remote_id: Some("devbox".to_string()),
+            },
+        )
+        .expect("creates");
+
+        let remote = group.remote.as_ref().expect("bound to the remote");
+        assert_eq!(remote.id, "devbox");
+        assert_eq!(remote.host, "user@devbox");
+        assert_eq!(remote.label, "Dev box");
+        assert!(group.is_remote());
+    }
+
+    #[test]
+    fn an_unknown_remote_id_fails_before_a_group_exists() {
+        let root = std::env::temp_dir().join("qmux-remote-id-unknown");
+        let state = test_state_with_workspace(root);
+        let before = state.list_groups().expect("groups").len();
+
+        let err = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some("/tmp".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+                remote_id: Some("nope".to_string()),
+            },
+        )
+        .expect_err("unknown remote");
+
+        assert!(err.contains("nope"), "{err}");
+        // A half-created local group would be worse than the error.
+        assert_eq!(state.list_groups().expect("groups").len(), before);
+    }
+
+    #[test]
     fn a_remote_worktree_is_allocated_under_the_host_root() {
         let root = std::env::temp_dir().join("qmux-remote-alloc");
         let state = test_state_with_workspace(root);
@@ -2251,9 +2327,17 @@ mod tests {
     }
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
+        test_state_with_remotes(workspace_root, Default::default())
+    }
+
+    fn test_state_with_remotes(
+        workspace_root: PathBuf,
+        remotes: std::collections::BTreeMap<String, crate::config::SavedRemote>,
+    ) -> AppState {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let socket_path = workspace_root.join("qmux.sock");
         AppState::new(QmuxConfig {
+            remotes,
             workspace_root,
             socket_path,
             adapters: AdapterConfigs {
@@ -2300,6 +2384,7 @@ mod tests {
         let group = create_group_record(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(project.display().to_string()),
                 after_group_id: None,
@@ -2327,6 +2412,7 @@ mod tests {
         let group = create_group_record(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(project.display().to_string()),
                 after_group_id: None,
@@ -2362,6 +2448,7 @@ mod tests {
         let group = create_group_record(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(project.display().to_string()),
                 after_group_id: None,
@@ -2435,6 +2522,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(project.display().to_string()),
                 after_group_id: None,
@@ -2479,6 +2567,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(project.display().to_string()),
                 after_group_id: None,
@@ -2516,6 +2605,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(source_dir.to_string_lossy().to_string()),
                 after_group_id: None,
@@ -2553,6 +2643,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(first_dir.to_string_lossy().to_string()),
                 after_group_id: None,
@@ -3338,6 +3429,7 @@ mod tests {
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(source_dir.to_string_lossy().to_string()),
                 after_group_id: None,

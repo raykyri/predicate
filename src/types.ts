@@ -9,6 +9,9 @@ export interface RuntimeConfig {
    * protocol, so this is the actual choice a launcher offers; pass the id as
    * the adapter's `agent` launch option. */
   acpAgents: AcpAgentChoice[];
+  /** Machines a workspace can be created on. Empty means local-only. Pass a
+   * choice's `id` as `remoteId` when creating a group to bind it there. */
+  remotes: RemoteChoice[];
   // The user's home directory (empty if HOME is unset), used to render
   // home-relative paths as ~/… rather than bare relative segments.
   homeDir: string;
@@ -130,6 +133,17 @@ export interface InitialPaneSize {
 }
 
 export type RemoteMultiplexer = "tmux" | "herdr";
+
+/** A machine declared under `remotes` in qmux.config.json. */
+export interface RemoteChoice {
+  id: string;
+  label: string;
+  host: string;
+  multiplexer: RemoteMultiplexer;
+  /** False for a multiplexer qmux cannot drive yet — list it, but don't offer
+   * a launch that is going to fail. */
+  usable: boolean;
+}
 
 /** The remote host a group is bound to. Mirrors Rust's `RemoteRef`. */
 export interface RemoteRef {

@@ -1,5 +1,6 @@
 use crate::adapters::{AdapterMetadata, adapter_registry};
 use crate::title_generation;
+use crate::workspace::{RemoteMultiplexer, RemoteRef};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::env;
@@ -13,6 +14,12 @@ pub struct QmuxConfig {
     pub socket_path: PathBuf,
     #[serde(default)]
     pub adapters: AdapterConfigs,
+    /// Machines a workspace can be created on, keyed by a stable id. A group
+    /// snapshots the one it was created against into its own `RemoteRef`, so
+    /// editing or removing an entry here never redirects a group that already
+    /// exists — the id survives only as provenance.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, SavedRemote>,
     #[serde(
         default,
         rename = "claudeBinary",
@@ -161,6 +168,54 @@ impl AcpAdapterConfig {
     }
 }
 
+/// A machine declared in `qmux.config.json` that workspaces can be created on.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedRemote {
+    /// ssh destination: an alias from `~/.ssh/config`, or `user@host`. Auth and
+    /// address resolution belong to the system `ssh` client, never to qmux.
+    pub host: String,
+    /// Display name; falls back to the map key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub multiplexer: RemoteMultiplexer,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qmux_cli: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+}
+
+impl SavedRemote {
+    /// Snapshots this entry into the binding a group carries.
+    ///
+    /// A copy rather than a reference on purpose: a group that already exists
+    /// must keep pointing at the machine its worktrees are actually on, even
+    /// after the config entry is edited or deleted.
+    pub fn to_ref(&self, id: &str) -> RemoteRef {
+        RemoteRef {
+            id: id.to_string(),
+            label: self.label.clone().unwrap_or_else(|| id.to_string()),
+            host: self.host.clone(),
+            multiplexer: self.multiplexer,
+            qmux_cli: self.qmux_cli.clone(),
+            workspace_root: self.workspace_root.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteChoice {
+    pub id: String,
+    pub label: String,
+    pub host: String,
+    pub multiplexer: RemoteMultiplexer,
+    /// False for a multiplexer qmux cannot drive yet, so a picker can list the
+    /// entry without offering a launch that is going to fail.
+    pub usable: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AcpAgentChoice {
@@ -183,6 +238,9 @@ pub struct RuntimeConfig {
     /// merged with whatever was added from the registry. The `acp` adapter's id
     /// names a protocol, so this is what a launcher offers as the actual choice.
     pub acp_agents: Vec<AcpAgentChoice>,
+    /// Machines a workspace can be created on. Empty means local-only, which is
+    /// every install that has not declared any.
+    pub remotes: Vec<RemoteChoice>,
     // The user's home directory, so the UI can render home-relative paths as ~/…
     // instead of bare relative segments. Empty if HOME is unset.
     pub home_dir: String,
@@ -309,12 +367,45 @@ impl QmuxConfig {
             .collect()
     }
 
+    /// The declared remotes, for a picker.
+    pub fn remote_choices(&self) -> Vec<RemoteChoice> {
+        self.remotes
+            .iter()
+            .map(|(id, remote)| RemoteChoice {
+                id: id.clone(),
+                label: remote.label.clone().unwrap_or_else(|| id.clone()),
+                host: remote.host.clone(),
+                multiplexer: remote.multiplexer,
+                usable: remote.multiplexer == RemoteMultiplexer::Tmux,
+            })
+            .collect()
+    }
+
+    /// Resolves a `remotes` id into the binding a new group will carry.
+    pub fn saved_remote(&self, id: &str) -> Result<RemoteRef, String> {
+        let remote = self.remotes.get(id).ok_or_else(|| {
+            if self.remotes.is_empty() {
+                format!("unknown remote '{id}'; no remotes are declared in qmux.config.json")
+            } else {
+                format!(
+                    "unknown remote '{id}'; declared remotes: {}",
+                    self.remotes.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            }
+        })?;
+        if remote.host.trim().is_empty() {
+            return Err(format!("remote '{id}' has no ssh host"));
+        }
+        Ok(remote.to_ref(id))
+    }
+
     pub fn runtime(&self) -> RuntimeConfig {
         RuntimeConfig {
             workspace_root: self.workspace_root.display().to_string(),
             socket_path: self.socket_path.display().to_string(),
             adapters: adapter_registry(self).metadata(),
             acp_agents: self.acp_agent_choices(),
+            remotes: self.remote_choices(),
             home_dir: env::var("HOME").unwrap_or_default(),
             tab_title_generation: TabTitleGenerationRuntimeConfig {
                 apple_foundation_models_available: title_generation::foundation_models_available(),
@@ -409,6 +500,7 @@ impl QmuxConfig {
                 },
                 acp: AcpAdapterConfig::default(),
             },
+            remotes: BTreeMap::new(),
             legacy_claude_binary: None,
             // Overwritten by load() once the cwd is known; this default is only a
             // placeholder for the no-config-file path.
@@ -573,6 +665,117 @@ fn absolutize(cwd: &Path, path: &Path) -> PathBuf {
         path.to_path_buf()
     } else {
         cwd.join(path)
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+
+    fn config(remotes: &[(&str, SavedRemote)]) -> QmuxConfig {
+        let mut config = QmuxConfig::default_config().expect("defaults");
+        config.remotes = remotes
+            .iter()
+            .map(|(id, remote)| (id.to_string(), remote.clone()))
+            .collect();
+        config
+    }
+
+    fn saved(host: &str) -> SavedRemote {
+        SavedRemote {
+            host: host.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_saved_remote_is_snapshotted_into_the_group_not_referenced() {
+        let config = config(&[(
+            "devbox",
+            SavedRemote {
+                host: "user@devbox".to_string(),
+                label: Some("Dev box".to_string()),
+                multiplexer: RemoteMultiplexer::Tmux,
+                qmux_cli: Some("/opt/qmux-cli".to_string()),
+                workspace_root: Some("/srv/qmux".to_string()),
+            },
+        )]);
+
+        let reference = config.saved_remote("devbox").expect("declared");
+        assert_eq!(reference.id, "devbox");
+        assert_eq!(reference.label, "Dev box");
+        assert_eq!(reference.host, "user@devbox");
+        assert_eq!(reference.qmux_cli.as_deref(), Some("/opt/qmux-cli"));
+        assert_eq!(reference.workspace_root.as_deref(), Some("/srv/qmux"));
+
+        // The copy is the point: a group already holding worktrees on that
+        // machine must keep pointing at it after the entry is edited away. The
+        // binding owns its data, so dropping the config it came from cannot
+        // reach it — which is what makes a group's host stable.
+        drop(config);
+        assert_eq!(reference.host, "user@devbox");
+        assert_eq!(reference.label, "Dev box");
+    }
+
+    #[test]
+    fn a_remote_without_a_label_falls_back_to_its_id() {
+        let reference = config(&[("box", saved("box.internal"))])
+            .saved_remote("box")
+            .expect("declared");
+        assert_eq!(reference.label, "box");
+        // tmux is the default because it is the one qmux can drive.
+        assert_eq!(reference.multiplexer, RemoteMultiplexer::Tmux);
+    }
+
+    #[test]
+    fn an_unknown_remote_names_what_is_declared() {
+        let err = config(&[("devbox", saved("devbox"))])
+            .saved_remote("nope")
+            .expect_err("unknown");
+        assert!(err.contains("devbox"), "{err}");
+
+        let err = config(&[])
+            .saved_remote("devbox")
+            .expect_err("none declared");
+        assert!(err.contains("no remotes are declared"), "{err}");
+    }
+
+    #[test]
+    fn a_remote_without_an_ssh_host_is_rejected_before_a_group_exists() {
+        let err = config(&[("broken", SavedRemote::default())])
+            .saved_remote("broken")
+            .expect_err("no host");
+        assert!(err.contains("no ssh host"), "{err}");
+    }
+
+    #[test]
+    fn a_multiplexer_qmux_cannot_drive_is_listed_but_marked_unusable() {
+        let mut herdr = saved("box");
+        herdr.multiplexer = RemoteMultiplexer::Herdr;
+        let choices = config(&[("a", saved("a-host")), ("b", herdr)]).remote_choices();
+
+        assert_eq!(choices.len(), 2);
+        assert!(choices[0].usable, "tmux is driveable");
+        assert!(
+            !choices[1].usable,
+            "a picker should show herdr without offering a launch that will fail"
+        );
+    }
+
+    #[test]
+    fn remotes_parse_from_config_with_only_a_host() {
+        let parsed: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock",
+              "remotes": { "devbox": { "host": "user@devbox" } }
+            }"#,
+        )
+        .expect("parses");
+        let remote = &parsed.remotes["devbox"];
+        assert_eq!(remote.host, "user@devbox");
+        assert_eq!(remote.multiplexer, RemoteMultiplexer::Tmux);
+        assert_eq!(remote.label, None);
     }
 }
 

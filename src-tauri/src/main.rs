@@ -1725,6 +1725,7 @@ async fn group_create_with_shell(
         let group = create_group(
             &state,
             CreateGroupRequest {
+                remote_id: None,
                 name: None,
                 dir: Some(dir),
                 after_group_id,

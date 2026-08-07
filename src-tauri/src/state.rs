@@ -9839,6 +9839,7 @@ mod tests {
 
     fn test_config(workspace_root: PathBuf) -> QmuxConfig {
         QmuxConfig {
+            remotes: Default::default(),
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux-test.sock"),
             adapters: AdapterConfigs {

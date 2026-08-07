@@ -1022,6 +1022,37 @@
   width: min(180px, calc(100vw - 16px));
 }
 
+/* The remote-directory prompt replaces the remote list in place, so it has to
+   sit inside the same narrow popover without widening it. */
+.settings-remote-group-form {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px 6px;
+}
+
+.settings-remote-group-form label {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.settings-remote-group-form input {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 5px;
+  color: inherit;
+  background: var(--surface-input-bg, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--surface-input-border, rgba(127, 127, 127, 0.3));
+  border-radius: 4px;
+}
+
+.settings-remote-group-form input:focus-visible {
+  outline: 1px solid var(--accent, #6aa9ff);
+  outline-offset: 0;
+}
+
 /* Unchecked research filters intentionally have no icon; keep their labels in
    the same text column as the checked option's label. */
 .group-context-actions button.settings-research-filter-option span {

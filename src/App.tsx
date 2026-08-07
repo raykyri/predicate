@@ -354,6 +354,7 @@ import {
   clearAgentWorkingStatus,
   closeWorktreePane,
   confirmAppExit,
+  createGroup,
   createGroupWithShell,
   pickGroupFolder,
   createResearchWorkspaceWithFolder,
@@ -2480,10 +2481,24 @@ function MainApp() {
   const exitConfirmButtonRef = useRef<HTMLButtonElement | null>(null);
   const [exitPreflightRequest, setExitPreflightRequest] =
     useState<ExitPreflightRequest | null>(null);
+  // A remote workspace's directory lives on the far side, so a folder picker
+  // cannot browse to it — the id is chosen from the menu and the path typed.
+  const [remoteGroupDraft, setRemoteGroupDraft] = useState<{
+    remoteId: string;
+    label: string;
+    dir: string;
+  } | null>(null);
   const [renamePaneId, setRenamePaneId] = useState<string | null>(null);
   const [renameGroupId, setRenameGroupId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  // Reopening the settings menu should offer the remote list again rather than
+  // a half-typed path from a dismissed attempt.
+  useEffect(() => {
+    if (!settingsMenu) {
+      setRemoteGroupDraft(null);
+    }
+  }, [settingsMenu]);
   const [titleGenerationTest, setTitleGenerationTest] =
     useState<TitleGenerationTestState | null>(null);
   const [paneContextMenu, setPaneContextMenu] = useState<PaneContextMenuState | null>(null);
@@ -5310,6 +5325,30 @@ function MainApp() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setFolderPickerStatus(null);
+    }
+  }
+
+  /** Creates a workspace bound to a declared remote.
+   *
+   * Deliberately not `group_create_with_shell`: a remote group cannot host a
+   * shell pane yet — shell integration is delivered as files on this machine —
+   * so bundling one would fail every remote creation. The group opens empty and
+   * an ACP agent is launched into it. */
+  async function createRemoteGroup(remoteId: string, dir: string) {
+    setSettingsMenu(null);
+    setRemoteGroupDraft(null);
+    setError(null);
+    try {
+      const anchorGroupId = launchGroupId();
+      const created = await createGroup({
+        dir,
+        remoteId,
+        afterGroupId: anchorGroupId ?? null,
+      });
+      await refreshGroups();
+      setLastActiveGroupId(created.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
     }
   }
 
@@ -13080,6 +13119,74 @@ function MainApp() {
                 <kbd className="context-menu-shortcut">⌘⇧N</kbd>
               </button>
             ) : null}
+            {sidebarMode === "terminal" && (config?.remotes?.length ?? 0) > 0
+              ? remoteGroupDraft
+                ? (
+                    <form
+                      className="settings-remote-group-form"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        const dir = remoteGroupDraft.dir.trim();
+                        if (dir) {
+                          void createRemoteGroup(remoteGroupDraft.remoteId, dir);
+                        }
+                      }}
+                    >
+                      <label htmlFor="remote-group-dir">
+                        Directory on {remoteGroupDraft.label}
+                      </label>
+                      <input
+                        id="remote-group-dir"
+                        type="text"
+                        autoFocus
+                        spellCheck={false}
+                        placeholder="/srv/code/project"
+                        value={remoteGroupDraft.dir}
+                        onChange={(event) =>
+                          setRemoteGroupDraft({
+                            ...remoteGroupDraft,
+                            dir: event.target.value,
+                          })
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            event.preventDefault();
+                            setRemoteGroupDraft(null);
+                          }
+                        }}
+                      />
+                    </form>
+                  )
+                : (
+                    config?.remotes ?? []
+                  ).map((remote) => (
+                    <button
+                      key={remote.id}
+                      type="button"
+                      role="menuitem"
+                      className="control-button"
+                      // A multiplexer qmux cannot drive is shown rather than
+                      // hidden, so the remote is discoverable and the reason it
+                      // is unavailable is visible.
+                      disabled={!remote.usable}
+                      title={
+                        remote.usable
+                          ? `${remote.host} · ${remote.multiplexer}`
+                          : `${remote.host} · qmux cannot drive the ${remote.multiplexer} multiplexer yet`
+                      }
+                      onClick={() => {
+                        setRemoteGroupDraft({
+                          remoteId: remote.id,
+                          label: remote.label,
+                          dir: "",
+                        });
+                      }}
+                    >
+                      <Globe size={13} aria-hidden="true" />
+                      <span>New group on {remote.label}...</span>
+                    </button>
+                  ))
+              : null}
             {sidebarMode === "research" ? (
               <>
                 {RESEARCH_VISIBILITY_FILTER_OPTIONS.map(({ id, label }) => (

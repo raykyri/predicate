@@ -344,6 +344,27 @@ export function createGroupWithShell(
   });
 }
 
+/** Creates a workspace, optionally bound to a machine declared under `remotes`
+ * in qmux.config.json. The group snapshots that remote, so later config edits
+ * never move a workspace whose worktrees already live on it. */
+export function createGroup(options: {
+  dir?: string | null;
+  name?: string | null;
+  afterGroupId?: string | null;
+  remoteId?: string | null;
+}) {
+  return invoke<GroupInfo>("group_create", {
+    request: {
+      name: options.name ?? null,
+      dir: options.dir ?? null,
+      afterGroupId: options.afterGroupId ?? null,
+      baseRepo: null,
+      baseRef: null,
+      remoteId: options.remoteId ?? null,
+    },
+  });
+}
+
 export function removeGroup(groupId: string) {
   return invoke<void>("group_remove", { groupId });
 }

@@ -3827,6 +3827,7 @@ trusted_hash = "sha256:trusted"
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root: temp_dir(),
             socket_path: PathBuf::from("/tmp/qmux-codex-test.sock"),
             adapters: AdapterConfigs {

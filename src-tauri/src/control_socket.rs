@@ -551,6 +551,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root: temp_dir(),
             socket_path: PathBuf::from("/tmp/qmux-control-test.sock"),
             adapters: AdapterConfigs {

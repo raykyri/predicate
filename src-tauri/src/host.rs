@@ -129,6 +129,59 @@ pub struct RemoteCommand<'a> {
 }
 
 impl Host {
+    /// The full `ssh …` argv that runs a pane's command on this host, or `None`
+    /// locally.
+    ///
+    /// One wrapping site for every adapter. A pane's process needs the same
+    /// three things rewritten no matter who launched it: its control socket
+    /// must point at a reverse-forwarded path, its qmux CLI must be the remote
+    /// binary, and its environment has to travel in the command line because
+    /// ssh forwards none of it.
+    pub fn pane_argv(
+        &self,
+        pane_id: &str,
+        local_socket: &str,
+        program: &str,
+        args: &[String],
+        envs: &[(String, String)],
+    ) -> Option<Result<Vec<String>, String>> {
+        let target = self.remote()?;
+        let remote_socket = format!("/tmp/qmux-{pane_id}.sock");
+        let mut remote_envs: Vec<(String, String)> = envs
+            .iter()
+            .map(|(key, value)| match key.as_str() {
+                // Local paths that mean nothing on the far side.
+                "QMUX_SOCK" => (key.clone(), remote_socket.clone()),
+                "QMUX_CLI" => (key.clone(), target.qmux_cli.clone()),
+                _ => (key.clone(), value.clone()),
+            })
+            .collect();
+        remote_envs.sort();
+        remote_envs.dedup_by(|a, b| a.0 == b.0);
+
+        Some(
+            target
+                .multiplexed(&format!("qmux-{pane_id}"), program, args)
+                .and_then(|argv| {
+                    let (program, args) =
+                        argv.split_first().expect("multiplexed argv is never empty");
+                    self.ssh_argv(
+                        &RemoteCommand {
+                            program,
+                            args: args.to_vec(),
+                            envs: remote_envs,
+                            forwards: vec![SocketForward {
+                                remote_path: remote_socket,
+                                local_path: local_socket.to_string(),
+                            }],
+                        },
+                        Interaction::Interactive,
+                    )
+                    .ok_or_else(|| "a remote host must yield an ssh command".to_string())
+                }),
+        )
+    }
+
     #[allow(dead_code)]
     pub fn is_local(&self) -> bool {
         matches!(self, Host::Local)
@@ -251,6 +304,51 @@ impl Host {
                 .clone()
                 .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string()),
         )
+    }
+}
+
+impl RemoteTarget {
+    /// Wraps a pane's command in whatever keeps it alive across a dropped
+    /// connection.
+    ///
+    /// This is the whole reason `RemoteRef` carries a multiplexer. Plain ssh
+    /// cannot be made restorable: on disconnect sshd closes the pty master and
+    /// the foreground process group takes a SIGHUP, and nothing in ssh buffers
+    /// output for an absent client or lets a new connection re-attach to an old
+    /// process's stdio. Something on the far side has to own the process.
+    fn multiplexed(
+        &self,
+        session: &str,
+        program: &str,
+        args: &[String],
+    ) -> Result<Vec<String>, String> {
+        match self.multiplexer {
+            // `new-session -A` attaches when the session exists and creates it
+            // otherwise, so one command line both starts a pane and reattaches
+            // to it after a reconnect. `--` keeps a program name beginning with
+            // "-" from being read as a tmux flag.
+            RemoteMultiplexer::Tmux => {
+                let mut argv = vec![
+                    "tmux".to_string(),
+                    "new-session".to_string(),
+                    "-A".to_string(),
+                    "-s".to_string(),
+                    session.to_string(),
+                    "--".to_string(),
+                    program.to_string(),
+                ];
+                argv.extend(args.iter().cloned());
+                Ok(argv)
+            }
+            // herdr is a real client-server multiplexer with session
+            // persistence, but its attach-or-create invocation is not something
+            // to guess at: a wrong flag would silently start a second session on
+            // every reconnect rather than reattaching to the first.
+            RemoteMultiplexer::Herdr => Err(format!(
+                "remote '{}' uses the herdr multiplexer, which qmux cannot drive yet; use tmux for now",
+                self.label
+            )),
+        }
     }
 }
 
@@ -455,6 +553,77 @@ mod tests {
         let line = argv.last().unwrap();
         assert_eq!(line, "env GOOD_1='x' 'true'");
         assert!(!line.contains("rm -rf"));
+    }
+
+    #[test]
+    fn a_remote_pane_runs_under_tmux_so_it_survives_a_dropped_connection() {
+        let argv = remote_host()
+            .pane_argv(
+                "pane-7",
+                "/local/run/qmux.sock",
+                "/Applications/qmux",
+                &["acp".to_string()],
+                &[
+                    ("QMUX_SOCK".to_string(), "/local/run/qmux.sock".to_string()),
+                    ("QMUX_CLI".to_string(), "/Applications/qmux".to_string()),
+                    ("QMUX_TOKEN".to_string(), "tok".to_string()),
+                ],
+            )
+            .expect("remote host")
+            .expect("tmux is supported");
+
+        assert_eq!(argv[0], "ssh");
+        let line = argv.last().expect("remote command line");
+
+        // `new-session -A` is the whole reattach story: the same command line
+        // creates the session the first time and attaches to it afterwards, so
+        // a reconnect finds the agent still running rather than starting a
+        // second one.
+        assert!(
+            line.contains("'tmux' 'new-session' '-A' '-s' 'qmux-pane-7' '--'"),
+            "{line}"
+        );
+        assert!(line.ends_with("'/Applications/qmux' 'acp'"), "{line}");
+
+        // Both local paths are rewritten; leaving either would point the remote
+        // process at something that does not exist there.
+        assert!(line.contains("QMUX_SOCK='/tmp/qmux-pane-7.sock'"), "{line}");
+        assert!(line.contains("QMUX_CLI='qmux-cli'"), "{line}");
+        assert!(line.contains("QMUX_TOKEN='tok'"), "{line}");
+
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-R", "/tmp/qmux-pane-7.sock:/local/run/qmux.sock"]),
+            "{argv:?}"
+        );
+        // A pane may legitimately prompt for a passphrase, so not batch mode.
+        assert!(argv.contains(&"-t".to_string()));
+        assert!(!argv.iter().any(|arg| arg == "BatchMode=yes"));
+    }
+
+    #[test]
+    fn a_local_pane_is_not_wrapped_at_all() {
+        assert!(
+            Host::Local
+                .pane_argv("pane-1", "/run/qmux.sock", "qmux", &[], &[])
+                .is_none(),
+            "a local pane must reach the pty exactly as its adapter built it"
+        );
+    }
+
+    #[test]
+    fn an_unsupported_multiplexer_fails_the_launch_rather_than_guessing() {
+        let mut reference = remote_ref(None, None);
+        reference.multiplexer = RemoteMultiplexer::Herdr;
+        let err = for_group(Some(&reference))
+            .pane_argv("pane-1", "/run/qmux.sock", "qmux", &[], &[])
+            .expect("remote host")
+            .expect_err("herdr is not driveable yet");
+
+        // Guessing an attach flag would silently start a second session on every
+        // reconnect instead of reattaching, which is worse than refusing.
+        assert!(err.contains("herdr"), "{err}");
+        assert!(err.contains("tmux for now"), "{err}");
     }
 
     #[test]

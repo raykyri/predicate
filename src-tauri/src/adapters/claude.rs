@@ -2637,6 +2637,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-hooks-test"),
             socket_path: PathBuf::from("/tmp/qmux-hooks-test.sock"),
             adapters: AdapterConfigs {
@@ -2662,6 +2663,7 @@ mod tests {
 
     fn test_state_with_claude_binary(binary: &Path) -> AppState {
         AppState::new(QmuxConfig {
+            remotes: Default::default(),
             workspace_root: unique_test_dir("qmux-claude-workspace"),
             socket_path: unique_test_dir("qmux-claude-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
@@ -2690,6 +2692,7 @@ mod tests {
         let workspace_root = unique_test_dir("qmux-claude-global-hooks");
         let project_dir = unique_test_dir("qmux-claude-project");
         let config = QmuxConfig {
+            remotes: Default::default(),
             workspace_root: workspace_root.clone(),
             socket_path: unique_test_dir("qmux-claude-hooks-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
@@ -4227,6 +4230,7 @@ mod tests {
         .unwrap();
 
         let config = QmuxConfig {
+            remotes: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-list.sock"),
             adapters: AdapterConfigs {
@@ -4266,6 +4270,7 @@ mod tests {
         };
 
         let config = QmuxConfig {
+            remotes: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-empty.sock"),
             adapters: AdapterConfigs {
@@ -4317,6 +4322,7 @@ mod tests {
         }
 
         let config = QmuxConfig {
+            remotes: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-dup.sock"),
             adapters: AdapterConfigs {

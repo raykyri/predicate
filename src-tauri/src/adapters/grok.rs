@@ -2048,6 +2048,7 @@ mod tests {
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
+            remotes: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-grok-tests"),
             socket_path: PathBuf::from("/tmp/qmux-grok-tests.sock"),
             adapters: AdapterConfigs {
