@@ -21,21 +21,32 @@ mod terminal;
 use crate::request_silent;
 use elicitation::{Field, FieldKind};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
-use std::fs::{File, OpenOptions};
+use std::ffi::OsString;
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use terminal::TerminalRegistry;
 
 /// The ACP major version this client implements.
 const PROTOCOL_VERSION: i64 = 1;
+
+/// How long to wait for the agent to answer `initialize`.
+///
+/// Nothing else in the session is time-bounded — a question for a human is
+/// allowed to take as long as it takes — but this one is, because the thing it
+/// catches is a *misconfiguration*: a command that starts fine and never
+/// speaks ACP (a REPL, a missing `--acp` flag) otherwise leaves the pane
+/// blank forever with the explanation sitting in the log file.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Set by the SIGINT handler. Polled by the cancel watcher rather than acted on
 /// in the handler itself, which must stay async-signal-safe.
@@ -100,17 +111,37 @@ impl BridgeConfig {
 }
 
 /// Where the agent's stderr is parked. Beside the transcript when there is
-/// one, otherwise a temp file — the log must land somewhere writable on
-/// *this* machine, which a streamed transcript's path is not.
+/// one, otherwise under the user's own home — the log must land somewhere
+/// writable on *this* machine, which a streamed transcript's path is not.
+///
+/// The fallback deliberately avoids a shared temp directory. qmux cannot pick
+/// this path for a streaming bridge, because it does not know where that
+/// machine keeps anything; but a fixed name in a world-writable directory is
+/// both a collision between concurrent panes and a symlink someone else can
+/// plant, so the choice is made here, where `$HOME` is knowable.
 fn log_path() -> PathBuf {
     if let Some(explicit) = optional_env("QMUX_ACP_LOG") {
         return PathBuf::from(explicit);
     }
-    match optional_env("QMUX_ACP_TRANSCRIPT")
+    if let Some(transcript) = optional_env("QMUX_ACP_TRANSCRIPT")
         .filter(|_| optional_env("QMUX_ACP_TRANSCRIPT_STREAM").is_none())
     {
-        Some(transcript) => PathBuf::from(transcript).with_extension("agent.log"),
-        None => env::temp_dir().join(format!("qmux-acp-{}.log", std::process::id())),
+        return PathBuf::from(transcript).with_extension("agent.log");
+    }
+    let name = format!("qmux-acp-{}.log", std::process::id());
+    match optional_env("HOME").map(|home| PathBuf::from(home).join(".qmux/logs")) {
+        // 0700 so the directory is the user's alone; the log carries whatever
+        // the agent decided to print, which can include prompts and paths.
+        Some(dir)
+            if DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&dir)
+                .is_ok() =>
+        {
+            dir.join(name)
+        }
+        _ => env::temp_dir().join(name),
     }
 }
 
@@ -213,12 +244,6 @@ impl Connection {
             return Err(err);
         }
         Ok(rx)
-    }
-
-    fn request(&self, method: &str, params: Value) -> Result<Value, String> {
-        self.request_async(method, params)?
-            .recv()
-            .map_err(|_| format!("the ACP agent exited while handling {method}"))?
     }
 
     /// Routes a response to its waiter. An unknown id means the agent answered
@@ -355,8 +380,165 @@ enum InteractionKind {
 }
 
 enum MainEvent {
-    PromptDone(Result<Value, String>),
+    /// A line typed in the pane, or `None` once stdin closes. Read by a thread
+    /// of its own so that waiting for the user and waiting for the agent are
+    /// the same wait — see [`Console`].
+    Input(Option<String>),
+    /// The answer to whatever request the main thread is currently waiting on.
+    Response(Result<Value, String>),
     Interact(Interaction),
+}
+
+/// The main thread's single wait.
+///
+/// Everything the main thread can be waiting for — a typed line, a reply from
+/// the agent, a question the agent wants asked — arrives on one channel, so it
+/// can always service whichever comes first. That is the whole point: an
+/// `elicitation/create` raised while the bridge is still inside `initialize`
+/// or `session/load` (which is exactly when an agent asks you to sign in) used
+/// to have no servicer at all, because the only loop that drained interactions
+/// ran inside a turn. The agent waited for an answer that could never come.
+struct Console {
+    events: Receiver<MainEvent>,
+    /// Lines that arrived while the main thread was busy elsewhere. Before
+    /// stdin had its own reader the pty buffered these for us and the next
+    /// read consumed the oldest first; queueing them keeps that order.
+    typed: VecDeque<String>,
+    /// Questions raised while another one was already on screen. Only one can
+    /// be answered at a time — they share the pane's stdin.
+    deferred: VecDeque<Interaction>,
+    /// A response that landed while a question was being answered.
+    response: Option<Result<Value, String>>,
+    eof: bool,
+}
+
+impl Console {
+    fn new(events: Receiver<MainEvent>) -> Self {
+        Self {
+            events,
+            typed: VecDeque::new(),
+            deferred: VecDeque::new(),
+            response: None,
+            eof: false,
+        }
+    }
+
+    /// One line of input for a question that is already on screen. An
+    /// interaction arriving here is queued rather than serviced: this thread
+    /// is inside one, and two questions cannot share the prompt.
+    fn read_line(&mut self) -> Option<String> {
+        loop {
+            if let Some(line) = self.typed.pop_front() {
+                return Some(line.trim().to_string());
+            }
+            if self.eof {
+                return None;
+            }
+            match self.events.recv() {
+                Ok(MainEvent::Input(Some(line))) => return Some(line.trim().to_string()),
+                Ok(MainEvent::Input(None)) | Err(_) => {
+                    self.eof = true;
+                    return None;
+                }
+                Ok(MainEvent::Interact(interaction)) => self.deferred.push_back(interaction),
+                Ok(MainEvent::Response(response)) => self.response = Some(response),
+            }
+        }
+    }
+
+    /// Prints `prompt` and reads the answer to it.
+    fn ask(&mut self, prompt: &str) -> Option<String> {
+        print_now(&bold(prompt));
+        self.read_line()
+    }
+
+    /// The next prompt at the idle `›`. Unlike [`Console::read_line`], a
+    /// question arriving here is answered on the spot — nothing else is going
+    /// to service it.
+    fn read_prompt(&mut self, prompt: &str) -> Option<String> {
+        loop {
+            self.service_deferred();
+            if self.eof && self.typed.is_empty() {
+                return None;
+            }
+            print_now(prompt);
+            if let Some(line) = self.typed.pop_front() {
+                return Some(line.trim().to_string());
+            }
+            match self.events.recv() {
+                Ok(MainEvent::Input(Some(line))) => return Some(line.trim().to_string()),
+                Ok(MainEvent::Input(None)) | Err(_) => {
+                    self.eof = true;
+                    return None;
+                }
+                Ok(MainEvent::Interact(interaction)) => self.service(interaction),
+                // Nothing is outstanding at an idle prompt; a late response to
+                // an abandoned request is not the user's problem.
+                Ok(MainEvent::Response(_)) => {}
+            }
+        }
+    }
+
+    /// Blocks until the outstanding request answers, asking the user anything
+    /// the agent raises in the meantime.
+    ///
+    /// `timeout` bounds only the *waiting*; it restarts after a question is
+    /// answered, since a human deliberating is not a stalled agent.
+    fn wait_for_response(&mut self, timeout: Option<Duration>) -> Result<Value, String> {
+        let mut deadline = timeout.map(|timeout| Instant::now() + timeout);
+        loop {
+            self.service_deferred();
+            if let Some(response) = self.response.take() {
+                return response;
+            }
+            let event = match deadline {
+                Some(deadline) => self
+                    .events
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                None => self
+                    .events
+                    .recv()
+                    .map_err(|_| std::sync::mpsc::RecvTimeoutError::Disconnected),
+            };
+            match event {
+                Ok(MainEvent::Response(response)) => return response,
+                Ok(MainEvent::Interact(interaction)) => {
+                    self.service(interaction);
+                    deadline = timeout.map(|timeout| Instant::now() + timeout);
+                }
+                // Typed while the agent is working: queued, exactly as the pty
+                // used to queue it, and picked up once the turn ends.
+                Ok(MainEvent::Input(Some(line))) => self.typed.push_back(line),
+                // stdin closing does not abandon a request in flight; the pane
+                // still wants whatever the agent is about to say.
+                Ok(MainEvent::Input(None)) => self.eof = true,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("the ACP agent did not answer in time".to_string());
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the ACP session ended".to_string());
+                }
+            }
+        }
+    }
+
+    fn service_deferred(&mut self) {
+        while let Some(interaction) = self.deferred.pop_front() {
+            self.service(interaction);
+        }
+    }
+
+    /// Asks the user an agent's question on the pane's stdin.
+    fn service(&mut self, interaction: Interaction) {
+        println!("\n{}", bold(&interaction.heading));
+        let result = match &interaction.kind {
+            InteractionKind::Permission { options } => service_permission(self, options),
+            InteractionKind::Form { fields } => service_form(self, fields),
+            InteractionKind::Url { url } => service_url(self, url),
+        };
+        let _ = request_silent("hook.notify", hook_payload("PermissionResolved", json!({})));
+        let _ = interaction.reply.send(result);
+    }
 }
 
 /// One finished assistant message: its accumulated text and the `messageId` it
@@ -556,11 +738,16 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let reader_bridge = Arc::clone(&bridge);
     let reader = thread::spawn(move || read_agent_messages(reader_bridge, child_stdout));
 
+    // stdin gets a thread of its own so the main thread never has to choose
+    // between reading the user and reading the agent — both arrive as events.
+    let input = bridge.events.clone();
+    thread::spawn(move || read_pane_input(input));
+
     install_interrupt_handler();
     let watcher_bridge = Arc::clone(&bridge);
     thread::spawn(move || watch_for_interrupts(watcher_bridge));
 
-    let outcome = session_loop(&bridge, &config, &event_rx);
+    let outcome = session_loop(&bridge, &config, Console::new(event_rx));
 
     // ACP's shutdown is "close stdin, then terminate the subprocess". Give the
     // agent that EOF and a moment to exit on its own — many flush state on the
@@ -602,12 +789,50 @@ fn spawn_agent(config: &BridgeConfig, log: Stdio) -> Result<Child, String> {
     })
 }
 
+/// Reads the pane's stdin, one line per event, until it closes.
+fn read_pane_input(events: Sender<MainEvent>) {
+    let stdin = std::io::stdin();
+    loop {
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {
+                if events.send(MainEvent::Input(Some(line))).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+    let _ = events.send(MainEvent::Input(None));
+}
+
+/// Sends a request and waits for it on the console, so questions the agent
+/// raises while it works still reach the user.
+fn request_serviced(
+    bridge: &Arc<Bridge>,
+    console: &mut Console,
+    method: &str,
+    params: Value,
+    timeout: Option<Duration>,
+) -> Result<Value, String> {
+    let response = bridge.connection.request_async(method, params)?;
+    let events = bridge.events.clone();
+    let method = method.to_string();
+    thread::spawn(move || {
+        let outcome = response
+            .recv()
+            .unwrap_or_else(|_| Err(format!("the ACP agent exited while handling {method}")));
+        let _ = events.send(MainEvent::Response(outcome));
+    });
+    console.wait_for_response(timeout)
+}
+
 /// Runs initialization, then one turn per line the user (or the qmux composer)
 /// sends. Returns when stdin closes.
 fn session_loop(
     bridge: &Arc<Bridge>,
     config: &BridgeConfig,
-    events: &Receiver<MainEvent>,
+    mut console: Console,
 ) -> Result<(), String> {
     println!(
         "{}",
@@ -618,7 +843,9 @@ fn session_loop(
         ))
     );
 
-    let init = bridge.connection.request(
+    let init = request_serviced(
+        bridge,
+        &mut console,
         "initialize",
         json!({
             "protocolVersion": PROTOCOL_VERSION,
@@ -640,7 +867,15 @@ fn session_loop(
             },
             "clientInfo": { "name": "qmux", "title": "qmux", "version": env!("CARGO_PKG_VERSION") },
         }),
-    )?;
+        Some(INITIALIZE_TIMEOUT),
+    )
+    .map_err(|err| {
+        format!(
+            "{err} — '{}' did not complete the ACP handshake. Check that it is an ACP agent and that adapters.acp gives it whatever flag puts it in ACP mode; its output is in {}.",
+            config.command,
+            config.log.display()
+        )
+    })?;
 
     // A version we don't implement is worth saying out loud, but the agent
     // picked it and the overlap is usually workable, so carry on rather than
@@ -668,7 +903,7 @@ fn session_loop(
         );
     }
 
-    let session = start_session(bridge, config)?;
+    let session = start_session(bridge, &mut console, config)?;
     *bridge
         .session_id
         .lock()
@@ -682,26 +917,20 @@ fn session_loop(
     }
 
     if let Some(prompt) = config.initial_prompt.clone() {
-        run_turn(bridge, events, &prompt)?;
+        run_turn(bridge, &mut console, &prompt)?;
     }
 
-    let stdin = std::io::stdin();
     loop {
-        print_now(&bold("\n› "));
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(err) => return Err(format!("failed to read input: {err}")),
-        }
-        let prompt = line.trim();
+        let Some(prompt) = console.read_prompt(&bold("\n› ")) else {
+            return Ok(());
+        };
         if prompt.is_empty() {
             continue;
         }
-        if matches!(prompt, "/exit" | "/quit") {
+        if matches!(prompt.as_str(), "/exit" | "/quit") {
             return Ok(());
         }
-        run_turn(bridge, events, prompt)?;
+        run_turn(bridge, &mut console, &prompt)?;
     }
 }
 
@@ -716,7 +945,11 @@ struct StartedSession {
     config_options: Option<Value>,
 }
 
-fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<StartedSession, String> {
+fn start_session(
+    bridge: &Arc<Bridge>,
+    console: &mut Console,
+    config: &BridgeConfig,
+) -> Result<StartedSession, String> {
     let params = json!({ "cwd": config.cwd.display().to_string(), "mcpServers": [] });
 
     // Resuming is best-effort: `loadSession` is an optional agent capability and
@@ -728,7 +961,7 @@ fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<StartedS
         // The agent answers `session/load` only after it has streamed the whole
         // history back, so this flag brackets exactly the replay.
         bridge.replaying.store(true, Ordering::SeqCst);
-        let loaded = bridge.connection.request("session/load", load);
+        let loaded = request_serviced(bridge, console, "session/load", load, None);
         // The last replayed message is still buffered; drop it rather than
         // recording it, then reopen recording for live turns.
         bridge.flush_message();
@@ -750,7 +983,7 @@ fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<StartedS
         }
     }
 
-    let result = bridge.connection.request("session/new", params)?;
+    let result = request_serviced(bridge, console, "session/new", params, None)?;
     let id = result
         .get("sessionId")
         .and_then(Value::as_str)
@@ -829,11 +1062,7 @@ fn current_value_label(option: &Value) -> String {
 }
 
 /// One prompt turn: submit, then service agent traffic until the response lands.
-fn run_turn(
-    bridge: &Arc<Bridge>,
-    events: &Receiver<MainEvent>,
-    prompt: &str,
-) -> Result<(), String> {
+fn run_turn(bridge: &Arc<Bridge>, console: &mut Console, prompt: &str) -> Result<(), String> {
     let session_id = bridge
         .session()
         .ok_or_else(|| "no ACP session is open".to_string())?;
@@ -847,38 +1076,19 @@ fn run_turn(
     INTERRUPTED.store(false, Ordering::SeqCst);
     bridge.turn_active.store(true, Ordering::SeqCst);
 
-    let response = bridge.connection.request_async(
+    // The console waits for the response, so permission requests raised mid-turn
+    // still reach the user — they need the same stdin this thread owns. No
+    // timeout: a turn takes as long as the agent takes.
+    let result = request_serviced(
+        bridge,
+        console,
         "session/prompt",
         json!({
             "sessionId": session_id,
             "prompt": [{ "type": "text", "text": prompt }],
         }),
+        None,
     );
-    let response = match response {
-        Ok(response) => response,
-        Err(err) => {
-            bridge.turn_active.store(false, Ordering::SeqCst);
-            return Err(err);
-        }
-    };
-
-    // The reader thread routes the prompt response here so this loop can also
-    // service permission requests, which need the same stdin this thread owns.
-    let forward = bridge.events.clone();
-    thread::spawn(move || {
-        let outcome = response
-            .recv()
-            .unwrap_or_else(|_| Err("the ACP agent exited mid-turn".to_string()));
-        let _ = forward.send(MainEvent::PromptDone(outcome));
-    });
-
-    let result = loop {
-        match events.recv() {
-            Ok(MainEvent::PromptDone(outcome)) => break outcome,
-            Ok(MainEvent::Interact(interaction)) => service_interaction(interaction),
-            Err(_) => break Err("the ACP session ended".to_string()),
-        }
-    };
 
     bridge.turn_active.store(false, Ordering::SeqCst);
     bridge.flush_message();
@@ -920,36 +1130,14 @@ fn run_turn(
     Ok(())
 }
 
-/// Asks the user an agent's question on the pane's stdin. Only ever called from
-/// the main thread.
-fn service_interaction(interaction: Interaction) {
-    println!("\n{}", bold(&interaction.heading));
-    let result = match &interaction.kind {
-        InteractionKind::Permission { options } => service_permission(options),
-        InteractionKind::Form { fields } => service_form(fields),
-        InteractionKind::Url { url } => service_url(url),
-    };
-    let _ = request_silent("hook.notify", hook_payload("PermissionResolved", json!({})));
-    let _ = interaction.reply.send(result);
-}
-
-/// Reads one line, or `None` at EOF. EOF means the pane is closing, which every
-/// caller treats as "no decision" rather than as an answer.
-fn read_answer(prompt: &str) -> Option<String> {
-    print_now(&bold(prompt));
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) | Err(_) => None,
-        Ok(_) => Some(line.trim().to_string()),
-    }
-}
-
-fn service_permission(options: &[(String, String)]) -> Value {
+fn service_permission(console: &mut Console, options: &[(String, String)]) -> Value {
     for (index, (_, label)) in options.iter().enumerate() {
         println!("  {}. {label}", index + 1);
     }
     loop {
-        let Some(choice) = read_answer("choose › ") else {
+        // `None` is EOF: the pane is closing, which every caller treats as "no
+        // decision" rather than as an answer.
+        let Some(choice) = console.ask("choose › ") else {
             return json!({ "outcome": { "outcome": "cancelled" } });
         };
         if choice.is_empty() {
@@ -969,7 +1157,7 @@ fn service_permission(options: &[(String, String)]) -> Value {
 /// Walks the form's fields. `/decline` refuses outright, `/cancel` (and EOF)
 /// backs out without deciding — ACP treats those differently and agents are
 /// required to branch on which they got.
-fn service_form(fields: &[Field]) -> Value {
+fn service_form(console: &mut Console, fields: &[Field]) -> Value {
     let flagged = elicitation::secret_looking_fields(fields);
     if !flagged.is_empty() {
         // The spec forbids collecting secrets this way — they are supposed to
@@ -996,7 +1184,7 @@ fn service_form(fields: &[Field]) -> Value {
             }
         }
         let value = loop {
-            let Some(input) = read_answer(&format!("{} › ", elicitation::prompt_label(field)))
+            let Some(input) = console.ask(&format!("{} › ", elicitation::prompt_label(field)))
             else {
                 return json!({ "action": "cancel" });
             };
@@ -1035,14 +1223,14 @@ fn service_form(fields: &[Field]) -> Value {
 /// nor the agent's model can read — which is what the browser overlay's
 /// isolated tab is. Accepting means "the user agreed to open this", not that
 /// the external flow finished; `elicitation/complete` reports that later.
-fn service_url(url: &str) -> Value {
+fn service_url(console: &mut Console, url: &str) -> Value {
     println!("  {url}");
     for warning in elicitation::url_warnings(url) {
         println!("{}", dim(&format!("  warning: {warning}")));
     }
 
     loop {
-        let Some(answer) = read_answer("open in the browser? [y/N, /decline] › ") else {
+        let Some(answer) = console.ask("open in the browser? [y/N, /decline] › ") else {
             return json!({ "action": "cancel" });
         };
         match answer.to_ascii_lowercase().as_str() {
@@ -1553,20 +1741,76 @@ fn elicit(bridge: &Arc<Bridge>, params: &Value) -> Result<Value, String> {
     Ok(outcome)
 }
 
-/// Resolves a path from the agent, which ACP requires to be absolute. Relative
-/// paths are still resolved against the session cwd rather than rejected —
-/// agents get this wrong, and guessing right is harmless here.
+/// Resolves a path from the agent and confines it to the session directory.
+///
+/// ACP hands the *client* the filesystem, which means qmux is the thing that
+/// would open `~/.ssh/id_rsa` if an agent asked — no vendor CLI's permission
+/// system sits in front of these two methods, and neither does a prompt. The
+/// session's own directory is the boundary that makes that answerable: it is
+/// the tree the agent was pointed at, and everything else is refused by name
+/// rather than silently served.
+///
+/// ACP requires the path to be absolute. Relative ones are still resolved
+/// against the session cwd rather than rejected — agents get this wrong, and
+/// guessing right is harmless once the result is confined.
 fn session_path(bridge: &Arc<Bridge>, params: &Value) -> Result<PathBuf, String> {
     let raw = params
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| "request had no path".to_string())?;
     let path = Path::new(raw);
-    Ok(if path.is_absolute() {
+    let requested = if path.is_absolute() {
         path.to_path_buf()
     } else {
         bridge.cwd.join(path)
-    })
+    };
+
+    let resolved = resolve_symlinks(&requested);
+    let root = resolve_symlinks(&bridge.cwd);
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "{raw} is outside this session's directory ({}); qmux only lets an ACP agent read and write inside it",
+            root.display()
+        ));
+    }
+    Ok(resolved)
+}
+
+/// The path with `.`/`..` folded away and every symlink on it followed, so a
+/// link inside the session cannot be used to step outside it.
+///
+/// Canonicalizing outright is not an option: `fs/write_text_file` is required
+/// to create files that do not exist yet. So the deepest ancestor that *does*
+/// exist is canonicalized and the rest is reattached — a component that has
+/// never existed cannot be a symlink.
+fn resolve_symlinks(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+
+    let mut head = normalized.clone();
+    let mut tail: Vec<OsString> = Vec::new();
+    loop {
+        if let Ok(canonical) = std::fs::canonicalize(&head) {
+            let mut resolved = canonical;
+            resolved.extend(tail.iter().rev());
+            return resolved;
+        }
+        let Some(name) = head.file_name().map(|name| name.to_os_string()) else {
+            return normalized;
+        };
+        tail.push(name);
+        if !head.pop() {
+            return normalized;
+        }
+    }
 }
 
 /// Applies ACP's optional `line`/`limit` window to a file's contents. `line` is
