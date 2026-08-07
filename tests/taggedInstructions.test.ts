@@ -193,7 +193,7 @@ test("strips the research launch instruction block the backend prepends", () => 
 
 test("strips the research launch instruction block appended after slash commands", () => {
   const sent = [
-    "/qmux:deep-research Why is the sky blue?",
+    "/deep-research Why is the sky blue?",
     "",
     "<research-instructions>",
     "Answer concisely.",
@@ -202,10 +202,10 @@ test("strips the research launch instruction block appended after slash commands
 
   assert.equal(
     stripTaggedUserInstructionBlocks(sent).trim(),
-    "/qmux:deep-research Why is the sky blue?",
+    "/deep-research Why is the sky blue?",
   );
   assert.equal(
     stripTaggedInstructionBlocksForPreview(sent).trim(),
-    "/qmux:deep-research Why is the sky blue?",
+    "/deep-research Why is the sky blue?",
   );
 });

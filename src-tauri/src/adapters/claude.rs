@@ -1582,10 +1582,10 @@ pub struct ClaudeSkill {
     /// key and selection id, so it must be unique even if two skills declare the
     /// same frontmatter `name:`.
     pub id: String,
-    /// Human label for the launcher checkbox (e.g. `Deep Research`).
+    /// Human label for the launcher checkbox (e.g. `Open in browser`).
     pub name: String,
     /// Slash command that invokes the skill, namespaced by the plugin
-    /// (e.g. `/qmux:deep-research`).
+    /// (e.g. `/qmux:open-in-browser`).
     pub command: String,
 }
 

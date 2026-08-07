@@ -10267,7 +10267,7 @@ function MainApp() {
     launchingAgentRef.current = true;
     const trimmed = promptRef.current.trim();
     // A selected skill is sent as a leading slash command so the launched agent
-    // invokes it before the user's prompt (e.g. `/qmux:deep-research <prompt>`).
+    // invokes it before the user's prompt (e.g. `/qmux:open-in-browser <prompt>`).
     const finalPrompt = selectedSkill ? `${selectedSkill.command} ${trimmed}`.trim() : trimmed;
     setError(null);
     rememberLauncherAdapter(launchAdapter.id);

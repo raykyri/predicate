@@ -1785,8 +1785,8 @@ pub fn document_markdown_from_turns(turns: &[crate::transcript::Turn]) -> Option
 /// can answer questions about it. Refused above the document word cap —
 /// possible only for imported archives, since creation enforces the same cap.
 ///
-/// A question that begins with a slash command (deep-research mode prefixes
-/// one at submit time) must keep it at the very start of the message or the
+/// A question that begins with a slash command (e.g. Claude's built-in
+/// `/deep-research`) must keep it at the very start of the message or the
 /// adapter will not recognize it, so the document context follows the
 /// question in that form; otherwise the question comes last, adjacent to the
 /// answer the agent produces.
@@ -3409,11 +3409,11 @@ mod tests {
     #[test]
     fn research_launch_instructions_follow_slash_command_prompts() {
         let sent = prompt_with_research_launch_instruction(
-            "/qmux:deep-research Why?".to_string(),
+            "/deep-research Why?".to_string(),
             Some("Keep it short."),
         );
         // The slash command only registers at the very start of the message.
-        assert!(sent.starts_with("/qmux:deep-research Why?"), "{sent}");
+        assert!(sent.starts_with("/deep-research Why?"), "{sent}");
         assert!(
             sent.ends_with("<research-instructions>\nKeep it short.\n</research-instructions>"),
             "{sent}"
@@ -3545,10 +3545,10 @@ mod tests {
         );
         assert!(prompt.ends_with("What does it say?"), "{prompt}");
 
-        // Deep-research mode prefixes a slash command; it only registers at
-        // the start of the message, so the document context follows it.
-        let deep = document_followup_prompt("Doc", "Body", "/qmux:deep-research What?").unwrap();
-        assert!(deep.starts_with("/qmux:deep-research What?"), "{deep}");
+        // A leading slash command (e.g. Claude's built-in /deep-research) only
+        // registers at the start of the message, so the document context follows it.
+        let deep = document_followup_prompt("Doc", "Body", "/deep-research What?").unwrap();
+        assert!(deep.starts_with("/deep-research What?"), "{deep}");
         assert!(deep.contains("<document title=\"Doc\">"), "{deep}");
 
         let oversized = vec!["word"; MAX_RESEARCH_DOCUMENT_WORDS + 1].join(" ");
@@ -3600,11 +3600,10 @@ mod tests {
         // response-boundary matching keeps working on the child run.
         assert!(prompt.ends_with("Why?"), "{prompt}");
 
-        // Deep-research mode prefixes a slash command; it only registers at
-        // the start of the message, so the context follows it.
-        let deep =
-            conversation_followup_prompt("Title", &turns, "/qmux:deep-research Why?").unwrap();
-        assert!(deep.starts_with("/qmux:deep-research Why?"), "{deep}");
+        // A leading slash command (e.g. Claude's built-in /deep-research) only
+        // registers at the start of the message, so the context follows it.
+        let deep = conversation_followup_prompt("Title", &turns, "/deep-research Why?").unwrap();
+        assert!(deep.starts_with("/deep-research Why?"), "{deep}");
         assert!(deep.contains("<conversation title=\"Title\">"), "{deep}");
     }
 
