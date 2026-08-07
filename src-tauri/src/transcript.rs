@@ -55,8 +55,27 @@ pub enum TurnStatusReason {
     UnknownBranch,
 }
 
+/// A block of one turn, as the frontend receives it.
+///
+/// Both `rename_all` settings are load-bearing and easy to confuse: on an enum,
+/// `rename_all` renames the *variants* (so the `type` tag reads `toolResult`),
+/// while `rename_all_fields` renames the fields *inside* variants. Without the
+/// latter, struct-variant fields keep their Rust spelling — which is what
+/// happened here: `toolResult` shipped with `tool_use_id`/`is_error` while
+/// `TurnBlock` in `src/types.ts` had always declared `toolUseId`/`isError`. The
+/// frontend therefore never paired a tool result with its call and never
+/// rendered a tool error as one.
+///
+/// The `alias` attributes are the migration: `ThreadRecord` embeds these blocks
+/// and is persisted, so every session recorded before this fix has the old
+/// spelling on disk. Serialization now emits camelCase only; deserialization
+/// accepts both, forever, because those files are never rewritten.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", tag = "type")]
+#[serde(
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    tag = "type"
+)]
 pub enum TurnBlock {
     Text {
         text: String,
@@ -67,8 +86,10 @@ pub enum TurnBlock {
         input: Value,
     },
     ToolResult {
+        #[serde(alias = "tool_use_id")]
         tool_use_id: Option<String>,
         content: Value,
+        #[serde(alias = "is_error")]
         is_error: bool,
     },
     Raw {
@@ -1646,6 +1667,88 @@ mod tests {
         OpencodeAdapterConfig, QmuxConfig,
     };
     use std::time::UNIX_EPOCH;
+
+    fn tool_result() -> TurnBlock {
+        TurnBlock::ToolResult {
+            tool_use_id: Some("call_1".to_string()),
+            content: json!("ok"),
+            is_error: true,
+        }
+    }
+
+    /// The frontend's `TurnBlock` union in `src/types.ts` is the contract this
+    /// has to satisfy. It went unmet for a long time because enum `rename_all`
+    /// does not reach struct-variant fields, and nothing asserted the shape.
+    #[test]
+    fn blocks_serialize_with_the_field_names_the_frontend_declares() {
+        assert_eq!(
+            serde_json::to_value(tool_result()).unwrap(),
+            json!({
+                "type": "toolResult",
+                "toolUseId": "call_1",
+                "content": "ok",
+                "isError": true,
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(TurnBlock::ToolUse {
+                id: Some("call_1".to_string()),
+                name: "Read".to_string(),
+                input: json!({ "path": "/tmp/x" }),
+            })
+            .unwrap(),
+            json!({ "type": "toolUse", "id": "call_1", "name": "Read", "input": { "path": "/tmp/x" } })
+        );
+        assert_eq!(
+            serde_json::to_value(TurnBlock::Text {
+                text: "hi".to_string()
+            })
+            .unwrap(),
+            json!({ "type": "text", "text": "hi" })
+        );
+    }
+
+    /// Thread records embed these blocks and are persisted, so sessions written
+    /// before the rename still hold the old spelling. Those files are never
+    /// rewritten; the aliases have to stay.
+    #[test]
+    fn blocks_recorded_before_the_rename_still_deserialize() {
+        let legacy = json!({
+            "type": "toolResult",
+            "tool_use_id": "call_1",
+            "content": "ok",
+            "is_error": true,
+        });
+        assert_eq!(
+            serde_json::from_value::<TurnBlock>(legacy).unwrap(),
+            tool_result()
+        );
+    }
+
+    #[test]
+    fn blocks_round_trip_through_their_own_serialization() {
+        for block in [
+            tool_result(),
+            TurnBlock::Text {
+                text: "hi".to_string(),
+            },
+            TurnBlock::ToolUse {
+                id: None,
+                name: "Read".to_string(),
+                input: Value::Null,
+            },
+            TurnBlock::Raw {
+                value: json!({ "any": "thing" }),
+            },
+        ] {
+            let encoded = serde_json::to_value(&block).unwrap();
+            assert_eq!(
+                serde_json::from_value::<TurnBlock>(encoded.clone()).unwrap(),
+                block,
+                "failed to round-trip {encoded}"
+            );
+        }
+    }
 
     #[test]
     fn tail_continues_only_while_bound_to_the_same_path() {

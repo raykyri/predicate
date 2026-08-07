@@ -972,18 +972,15 @@ fn handle_session_update(bridge: &Arc<Bridge>, params: &Value) {
             bridge.record(
                 "assistant",
                 update.get("toolCallId").and_then(Value::as_str),
-                // Field names are snake_case on purpose. `TurnBlock` is
-                // `#[serde(rename_all = "camelCase", tag = "type")]`, and on an
-                // enum that renames the *variants* only — struct-variant fields
-                // keep their Rust spelling. So the tag is `toolResult` while the
-                // fields are `tool_use_id`/`is_error`. The adapter deserializes
-                // `TurnBlock` directly, so this has to match exactly; the
-                // adapter's round-trip test is the contract.
+                // These lines are deserialized as `TurnBlock` by the adapter, in
+                // a crate that cannot import the type, so the spelling has to
+                // match its serde attributes exactly — camelCase fields under a
+                // camelCase tag. The adapter's round-trip test is the contract.
                 json!([{
                     "type": "toolResult",
-                    "tool_use_id": update.get("toolCallId").and_then(Value::as_str),
+                    "toolUseId": update.get("toolCallId").and_then(Value::as_str),
                     "content": content,
-                    "is_error": status == "failed",
+                    "isError": status == "failed",
                 }]),
             );
             let _ = request_silent("hook.notify", hook_payload("PostToolUse", update.clone()));

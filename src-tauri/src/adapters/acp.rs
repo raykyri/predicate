@@ -735,18 +735,16 @@ mod tests {
             }]
         );
 
-        // Note the snake_case fields under a camelCase tag: `rename_all` on an
-        // enum renames variants, not struct-variant fields. This test exists to
-        // pin that down — the bridge writes these lines from another crate and
-        // cannot share the type.
+        // The bridge writes these lines from a crate that cannot import
+        // `TurnBlock`, so this pins the exact spelling it has to produce.
         let line = json!({
             "type": "turn",
             "role": "assistant",
             "blocks": [{
                 "type": "toolResult",
-                "tool_use_id": "call_1",
+                "toolUseId": "call_1",
                 "content": [{ "type": "content", "content": { "type": "text", "text": "ok" } }],
-                "is_error": true,
+                "isError": true,
             }],
         })
         .to_string();
@@ -774,7 +772,7 @@ mod tests {
         "\n",
         r#"{"blocks":[{"id":"c1","input":null,"name":"Run a command","type":"toolUse"}],"nativeId":"c1","role":"assistant","sessionId":"sess_fake_1","timestamp":1786084826811,"type":"turn"}"#,
         "\n",
-        r#"{"blocks":[{"content":[{"content":{"text":"done","type":"text"},"type":"content"}],"is_error":false,"tool_use_id":"c1","type":"toolResult"}],"nativeId":"c1","role":"assistant","sessionId":"sess_fake_1","timestamp":1786084826819,"type":"turn"}"#,
+        r#"{"blocks":[{"content":[{"content":{"text":"done","type":"text"},"type":"content"}],"isError":false,"toolUseId":"c1","type":"toolResult"}],"nativeId":"c1","role":"assistant","sessionId":"sess_fake_1","timestamp":1786084826819,"type":"turn"}"#,
         "\n",
         r#"{"blocks":[{"type":"raw","value":{"plan":[{"content":"probe","priority":"high","status":"completed"}]}}],"nativeId":null,"role":"assistant","sessionId":"sess_fake_1","timestamp":1786084826820,"type":"turn"}"#,
     );
@@ -817,6 +815,33 @@ mod tests {
             other => panic!("expected a tool result, got {other:?}"),
         }
         assert!(matches!(turns[4].blocks[0], TurnBlock::Raw { .. }));
+    }
+
+    /// Transcripts written by an older bridge sit on disk beside newer ones and
+    /// are re-tailed on every resume, so the parser has to keep reading them.
+    #[test]
+    fn transcripts_written_before_the_field_rename_still_parse() {
+        let line = json!({
+            "type": "turn",
+            "role": "assistant",
+            "blocks": [{
+                "type": "toolResult",
+                "tool_use_id": "call_1",
+                "content": "ok",
+                "is_error": true,
+            }],
+        })
+        .to_string();
+
+        let turn = parse_transcript_line("agent-1", 0, &line).expect("a turn");
+        assert_eq!(
+            turn.blocks,
+            vec![TurnBlock::ToolResult {
+                tool_use_id: Some("call_1".to_string()),
+                content: json!("ok"),
+                is_error: true,
+            }]
+        );
     }
 
     #[test]

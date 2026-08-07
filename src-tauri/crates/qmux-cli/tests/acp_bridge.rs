@@ -324,8 +324,10 @@ fn a_tool_call_and_its_updates_collapse_to_two_blocks() {
         .filter(|block| block["type"] == "toolResult")
         .collect();
     assert_eq!(results.len(), 1, "expected exactly one result block");
-    assert_eq!(results[0]["tool_use_id"], "c1");
-    assert_eq!(results[0]["is_error"], false);
+    // camelCase: the transcript has to deserialize as `TurnBlock`, and the
+    // frontend reads these same names off the wire.
+    assert_eq!(results[0]["toolUseId"], "c1");
+    assert_eq!(results[0]["isError"], false);
 }
 
 fn a_permission_request_mid_turn_is_answered_from_the_pane() {
