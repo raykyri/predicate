@@ -105,38 +105,53 @@ pub struct AcpAgentConfig {
 }
 
 impl AcpAdapterConfig {
+    /// Every agent qmux can launch: those written into `qmux.config.json` plus
+    /// those added from the registry.
+    ///
+    /// Hand-written entries win an id collision. Config is the thing a user
+    /// edited on purpose, and a registry refresh must never quietly redirect it.
+    pub fn merged_agents(
+        &self,
+        installed: &BTreeMap<String, AcpAgentConfig>,
+    ) -> BTreeMap<String, AcpAgentConfig> {
+        let mut agents = installed.clone();
+        agents.extend(self.agents.clone());
+        agents
+    }
+
     /// The agent a launch resolves to, given an optional explicit choice.
-    /// Falls back to `defaultAgent`, then to the sole configured agent when
+    /// Falls back to `defaultAgent`, then to the sole available agent when
     /// there is exactly one — a single-agent setup shouldn't need to name it.
-    pub fn resolve(&self, requested: Option<&str>) -> Result<(String, AcpAgentConfig), String> {
-        if self.agents.is_empty() {
+    pub fn resolve_with(
+        &self,
+        installed: &BTreeMap<String, AcpAgentConfig>,
+        requested: Option<&str>,
+    ) -> Result<(String, AcpAgentConfig), String> {
+        let agents = self.merged_agents(installed);
+        if agents.is_empty() {
             return Err(
-                "no ACP agents are configured; add adapters.acp.agents to qmux.config.json"
+                "no ACP agents are configured; add one from the registry or via adapters.acp.agents in qmux.config.json"
                     .to_string(),
             );
         }
+        let available = || agents.keys().cloned().collect::<Vec<_>>().join(", ");
         let id = match requested.map(str::trim).filter(|id| !id.is_empty()) {
             Some(id) => id.to_string(),
             None => match self.default_agent.as_deref().map(str::trim) {
                 Some(id) if !id.is_empty() => id.to_string(),
-                _ if self.agents.len() == 1 => self
-                    .agents
-                    .keys()
-                    .next()
-                    .expect("len checked above")
-                    .clone(),
+                _ if agents.len() == 1 => agents.keys().next().expect("len checked above").clone(),
                 _ => {
                     return Err(format!(
-                        "no ACP agent selected and adapters.acp.defaultAgent is unset; configured agents: {}",
-                        self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+                        "no ACP agent selected and adapters.acp.defaultAgent is unset; available agents: {}",
+                        available()
                     ));
                 }
             },
         };
-        let agent = self.agents.get(&id).cloned().ok_or_else(|| {
+        let agent = agents.get(&id).cloned().ok_or_else(|| {
             format!(
-                "unknown ACP agent '{id}'; configured agents: {}",
-                self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+                "unknown ACP agent '{id}'; available agents: {}",
+                available()
             )
         })?;
         if agent.command.trim().is_empty() {
@@ -146,12 +161,28 @@ impl AcpAdapterConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentChoice {
+    pub id: String,
+    pub label: String,
+    /// Whether `adapters.acp.defaultAgent` names this one.
+    pub default: bool,
+    /// Added from the registry rather than written into `qmux.config.json`, so
+    /// the UI can offer to remove it — config entries are the user's to edit.
+    pub from_registry: bool,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeConfig {
     pub workspace_root: String,
     pub socket_path: String,
     pub adapters: Vec<AdapterMetadata>,
+    /// Every ACP agent that can be launched right now — hand-written config
+    /// merged with whatever was added from the registry. The `acp` adapter's id
+    /// names a protocol, so this is what a launcher offers as the actual choice.
+    pub acp_agents: Vec<AcpAgentChoice>,
     // The user's home directory, so the UI can render home-relative paths as ~/…
     // instead of bare relative segments. Empty if HOME is unset.
     pub home_dir: String,
@@ -259,11 +290,31 @@ impl QmuxConfig {
         Ok(config)
     }
 
+    /// The launchable ACP agents, sorted for a stable picker. Reads the
+    /// registry store from disk; a missing or damaged store degrades to
+    /// config-only rather than failing the whole runtime config.
+    pub fn acp_agent_choices(&self) -> Vec<AcpAgentChoice> {
+        let installed =
+            crate::acp_registry::installed_configs(&self.workspace_root).unwrap_or_default();
+        self.adapters
+            .acp
+            .merged_agents(&installed)
+            .into_iter()
+            .map(|(id, agent)| AcpAgentChoice {
+                label: agent.name.unwrap_or_else(|| id.clone()),
+                default: self.adapters.acp.default_agent.as_deref() == Some(id.as_str()),
+                from_registry: !self.adapters.acp.agents.contains_key(&id),
+                id,
+            })
+            .collect()
+    }
+
     pub fn runtime(&self) -> RuntimeConfig {
         RuntimeConfig {
             workspace_root: self.workspace_root.display().to_string(),
             socket_path: self.socket_path.display().to_string(),
             adapters: adapter_registry(self).metadata(),
+            acp_agents: self.acp_agent_choices(),
             home_dir: env::var("HOME").unwrap_or_default(),
             tab_title_generation: TabTitleGenerationRuntimeConfig {
                 apple_foundation_models_available: title_generation::foundation_models_available(),

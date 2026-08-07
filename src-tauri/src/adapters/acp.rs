@@ -114,11 +114,17 @@ impl AcpAdapter {
         Ok(envs)
     }
 
-    /// Resolves the configured agent and checks its binary exists before any
-    /// workspace is created, so a typo in config fails as a clean error rather
-    /// than an empty pane with a dead process in it.
-    fn resolve(&self, requested: Option<&str>) -> Result<(String, AcpAgentConfig, String), String> {
-        let (key, agent) = self.config.resolve(requested)?;
+    /// Resolves the agent to launch — from `qmux.config.json` or the registry
+    /// store — and checks its binary exists before any workspace is created, so
+    /// a typo fails as a clean error rather than an empty pane with a dead
+    /// process in it.
+    fn resolve(
+        &self,
+        state: &AppState,
+        requested: Option<&str>,
+    ) -> Result<(String, AcpAgentConfig, String), String> {
+        let installed = crate::acp_registry::installed_configs(&state.config().workspace_root)?;
+        let (key, agent) = self.config.resolve_with(&installed, requested)?;
         let binary = ensure_on_path(&agent.command).ok_or_else(|| {
             format!(
                 "ACP agent '{key}' runs '{}', which was not found on PATH or standard macOS tool paths.",
@@ -130,7 +136,7 @@ impl AcpAdapter {
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
         let options = AcpLaunchOptions::from_value(request.options)?;
-        let (agent_key, acp_agent, binary) = self.resolve(options.agent.as_deref())?;
+        let (agent_key, acp_agent, binary) = self.resolve(state, options.agent.as_deref())?;
         let bridge = crate::launch_path::qmux_cli_path()?;
 
         let agent = prepare_agent_workspace(
@@ -213,7 +219,7 @@ impl AcpAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
-        let (agent_key, acp_agent, binary) = self.resolve(agent.acp_agent.as_deref())?;
+        let (agent_key, acp_agent, binary) = self.resolve(state, agent.acp_agent.as_deref())?;
         let bridge = crate::launch_path::qmux_cli_path()?;
         let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
             format!(
@@ -695,7 +701,7 @@ mod tests {
     #[test]
     fn a_lone_configured_agent_needs_no_default() {
         let (key, resolved) = config(&[("gemini", "gemini")], None)
-            .resolve(None)
+            .resolve_with(&BTreeMap::new(), None)
             .expect("the only agent is unambiguous");
         assert_eq!(key, "gemini");
         assert_eq!(resolved.command, "gemini");
@@ -704,30 +710,108 @@ mod tests {
     #[test]
     fn several_agents_without_a_default_require_an_explicit_choice() {
         let config = config(&[("gemini", "gemini"), ("goose", "goose")], None);
-        let err = config.resolve(None).expect_err("ambiguous");
+        let err = config
+            .resolve_with(&BTreeMap::new(), None)
+            .expect_err("ambiguous");
         assert!(err.contains("defaultAgent"), "{err}");
         assert!(err.contains("gemini") && err.contains("goose"), "{err}");
 
-        assert_eq!(config.resolve(Some("goose")).unwrap().0, "goose");
-        assert_eq!(config.resolve(None.or(Some("gemini"))).unwrap().0, "gemini");
+        assert_eq!(
+            config
+                .resolve_with(&BTreeMap::new(), Some("goose"))
+                .unwrap()
+                .0,
+            "goose"
+        );
+        assert_eq!(
+            config
+                .resolve_with(&BTreeMap::new(), None.or(Some("gemini")))
+                .unwrap()
+                .0,
+            "gemini"
+        );
     }
 
     #[test]
     fn an_explicit_choice_outranks_the_default() {
         let config = config(&[("gemini", "gemini"), ("goose", "goose")], Some("gemini"));
-        assert_eq!(config.resolve(None).unwrap().0, "gemini");
-        assert_eq!(config.resolve(Some("goose")).unwrap().0, "goose");
+        assert_eq!(
+            config.resolve_with(&BTreeMap::new(), None).unwrap().0,
+            "gemini"
+        );
+        assert_eq!(
+            config
+                .resolve_with(&BTreeMap::new(), Some("goose"))
+                .unwrap()
+                .0,
+            "goose"
+        );
     }
 
     #[test]
     fn unknown_and_unconfigured_agents_report_what_is_available() {
         let err = AcpAdapterConfig::default()
-            .resolve(None)
+            .resolve_with(&BTreeMap::new(), None)
             .expect_err("nothing configured");
         assert!(err.contains("adapters.acp.agents"), "{err}");
 
         let err = config(&[("gemini", "gemini")], None)
-            .resolve(Some("cline"))
+            .resolve_with(&BTreeMap::new(), Some("cline"))
+            .expect_err("unknown agent");
+        assert!(err.contains("cline") && err.contains("gemini"), "{err}");
+    }
+
+    #[test]
+    fn registry_agents_are_launchable_alongside_configured_ones() {
+        let config = config(&[("gemini", "gemini")], Some("gemini"));
+        let installed = BTreeMap::from([("cline".to_string(), agent("npx"))]);
+
+        assert_eq!(
+            config
+                .resolve_with(&installed, Some("cline"))
+                .unwrap()
+                .1
+                .command,
+            "npx"
+        );
+        // The configured default still wins when nothing is asked for.
+        assert_eq!(config.resolve_with(&installed, None).unwrap().0, "gemini");
+        assert_eq!(config.merged_agents(&installed).len(), 2);
+    }
+
+    #[test]
+    fn a_hand_written_entry_outranks_a_registry_one_with_the_same_id() {
+        // Config is the thing someone edited on purpose; a registry refresh
+        // must not quietly redirect it somewhere else.
+        let config = config(&[("cline", "/my/patched/cline")], None);
+        let installed = BTreeMap::from([("cline".to_string(), agent("npx"))]);
+        assert_eq!(
+            config
+                .resolve_with(&installed, Some("cline"))
+                .unwrap()
+                .1
+                .command,
+            "/my/patched/cline"
+        );
+    }
+
+    #[test]
+    fn a_lone_registry_agent_needs_no_default_either() {
+        let installed = BTreeMap::from([("cline".to_string(), agent("npx"))]);
+        assert_eq!(
+            AcpAdapterConfig::default()
+                .resolve_with(&installed, None)
+                .unwrap()
+                .0,
+            "cline"
+        );
+    }
+
+    #[test]
+    fn errors_list_registry_agents_too_so_the_message_is_actionable() {
+        let installed = BTreeMap::from([("cline".to_string(), agent("npx"))]);
+        let err = config(&[("gemini", "gemini")], None)
+            .resolve_with(&installed, Some("nope"))
             .expect_err("unknown agent");
         assert!(err.contains("cline") && err.contains("gemini"), "{err}");
     }
@@ -735,7 +819,7 @@ mod tests {
     #[test]
     fn an_empty_command_is_rejected_rather_than_spawned() {
         let err = config(&[("broken", "")], None)
-            .resolve(None)
+            .resolve_with(&BTreeMap::new(), None)
             .expect_err("empty command");
         assert!(err.contains("empty command"), "{err}");
     }

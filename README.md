@@ -352,6 +352,20 @@ without an explicit choice gets, and is unnecessary when only one agent is
 configured. Consult your agent's own docs for the flag that puts it in ACP
 mode — it is not standardized.
 
+Agents can also be added from the published [ACP
+registry](https://agentclientprotocol.com/get-started/registry) instead of being
+written out by hand. qmux reads the registry index, shows what it can run, and
+pins the resolved command line into its own store (`.qmux/acp-agents.json`) —
+`qmux.config.json` is yours and qmux never writes to it. A hand-written entry
+always wins over a registry one with the same id.
+
+Only the `npx` and `uvx` distribution channels are supported, which is 23 of the
+38 agents currently listed; those need no install because the package manager
+fetches on demand. Agents shipping only a prebuilt binary are listed with the
+reason they're unavailable rather than hidden. Note that adding an agent this
+way records a command line but downloads nothing — the package is fetched and
+executed by `npx`/`uvx` the first time you launch that agent.
+
 The process qmux runs in the pane is `qmux acp`, a bridge that is an ACP client
 on one side and an ordinary qmux agent on the other. ACP agents have no TUI —
 the protocol makes the *client* responsible for rendering, the filesystem,

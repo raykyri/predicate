@@ -1,3 +1,4 @@
+mod acp_registry;
 mod adapters;
 mod browser_backend;
 mod browser_engine;
@@ -194,6 +195,52 @@ fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) 
     } else {
         app.exit(0);
     }
+}
+
+/// The ACP registry, annotated with what qmux can actually launch. `refresh`
+/// bypasses the on-disk cache. Async because it may hit the network.
+#[tauri::command]
+async fn acp_registry_list(
+    app: tauri::AppHandle,
+    refresh: Option<bool>,
+) -> Result<Vec<acp_registry::RegistryEntry>, String> {
+    let workspace_root = app.state::<AppState>().config().workspace_root.clone();
+    let index = acp_registry::fetch_index(&workspace_root, refresh.unwrap_or(false)).await?;
+    let installed = acp_registry::load_installed(&workspace_root)?;
+    Ok(index
+        .agents
+        .iter()
+        .map(|agent| acp_registry::describe(agent, installed.agents.contains_key(&agent.id)))
+        .collect())
+}
+
+/// Adds a registry agent to the qmux-managed store, pinning the command line
+/// resolved from its distribution. Returns the refreshed launcher choices so
+/// the caller doesn't have to refetch the whole runtime config.
+#[tauri::command]
+async fn acp_registry_install(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Vec<config::AcpAgentChoice>, String> {
+    let config = app.state::<AppState>().config().clone();
+    let index = acp_registry::fetch_index(&config.workspace_root, false).await?;
+    let agent = index
+        .agents
+        .iter()
+        .find(|agent| agent.id == id)
+        .ok_or_else(|| format!("'{id}' is not in the ACP registry"))?;
+    acp_registry::install(&config.workspace_root, agent, &index.version)?;
+    Ok(config.acp_agent_choices())
+}
+
+#[tauri::command]
+async fn acp_registry_uninstall(
+    app: tauri::AppHandle,
+    id: String,
+) -> Result<Vec<config::AcpAgentChoice>, String> {
+    let config = app.state::<AppState>().config().clone();
+    acp_registry::uninstall(&config.workspace_root, &id)?;
+    Ok(config.acp_agent_choices())
 }
 
 #[tauri::command]
@@ -2746,6 +2793,9 @@ fn main() {
             app_window_ready,
             acknowledge_interface_health_probe,
             get_runtime_config,
+            acp_registry_list,
+            acp_registry_install,
+            acp_registry_uninstall,
             launcher_adapter_preference_get,
             launcher_adapter_preference_set,
             openrouter_key_get,

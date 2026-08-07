@@ -4,6 +4,11 @@ export interface RuntimeConfig {
   workspaceRoot: string;
   socketPath: string;
   adapters: AgentAdapterMetadata[];
+  /** ACP agents that can be launched right now — `qmux.config.json` entries
+   * merged with ones added from the registry. The `acp` adapter's id names a
+   * protocol, so this is the actual choice a launcher offers; pass the id as
+   * the adapter's `agent` launch option. */
+  acpAgents: AcpAgentChoice[];
   // The user's home directory (empty if HOME is unset), used to render
   // home-relative paths as ~/… rather than bare relative segments.
   homeDir: string;
@@ -11,6 +16,36 @@ export interface RuntimeConfig {
   // Port of the loopback file server, so the UI can recognize token-bearing file-server
   // URLs (see isFileServerUrl) and always sandbox them. Null until the server has bound.
   fileServerPort: number | null;
+}
+
+export interface AcpAgentChoice {
+  id: string;
+  label: string;
+  /** Whether `adapters.acp.defaultAgent` names this one. */
+  default: boolean;
+  /** Added from the registry rather than hand-written into qmux.config.json,
+   * so only these are qmux's to remove. */
+  fromRegistry: boolean;
+}
+
+/** An entry in the published ACP agent registry, annotated with whether qmux
+ * can launch it. Returned by the `acp_registry_list` command. */
+export interface AcpRegistryEntry {
+  id: string;
+  name: string;
+  version: string;
+  description?: string | null;
+  repository?: string | null;
+  website?: string | null;
+  icon?: string | null;
+  authors?: string[];
+  license?: string | null;
+  /** `available` for agents distributed via npx/uvx; `unavailable` carries the
+   * reason, most often that the agent ships only as a prebuilt binary. */
+  availability:
+    | { available: { channel: "npx" | "uvx" } }
+    | { unavailable: { reason: string } };
+  installed: boolean;
 }
 
 export interface TabTitleGenerationRuntimeConfig {
