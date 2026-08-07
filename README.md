@@ -379,6 +379,19 @@ Notable properties and limits:
 - `terminal/create` runs commands on a real pty, so anything checking `isatty`
   behaves the way it does for a human rather than taking its piped-output
   branch.
+- Elicitation is supported in both modes. A form is filled in field by field in
+  the pane, with enums numbered, defaults pre-filled, and `/decline` and
+  `/cancel` distinguished — agents are required to branch on which they got. A
+  URL elicitation shows the full link, warns about plain HTTP, punycode
+  domains, and embedded credentials, and opens it in the qmux browser overlay
+  only after you say yes; the overlay's isolated tab is the "context the client
+  and the agent's model cannot inspect" the spec asks for. ACP forbids
+  collecting secrets through a form — that is what URL mode is for — so a form
+  asking for something that looks like a token or password is flagged before
+  you answer it.
+- Session config options are displayed but not yet settable. An agent's `model`
+  and `thought_level` show up as the pane's model and effort; changing them
+  from qmux is not wired up.
 - Follow-ups queue rather than steer. ACP has one `session/prompt` per turn and
   no mid-turn steering; `session/cancel` is the only in-flight control.
 - Resume is best-effort: `session/load` is an optional agent capability, and

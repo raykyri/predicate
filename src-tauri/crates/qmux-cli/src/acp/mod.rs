@@ -15,11 +15,13 @@
 //! The payoff is that one adapter covers every ACP agent — a new one is a
 //! config entry, not Rust.
 
+mod elicitation;
 mod terminal;
 
 use crate::request_silent;
+use elicitation::{Field, FieldKind};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
@@ -290,10 +292,23 @@ fn now_ms() -> i64 {
 
 /// Something the agent needs a human answer for. Raised from a handler thread
 /// and serviced by the main loop, which is the only thread that reads stdin.
+/// Something the agent needs a human answer for, raised from a handler thread
+/// onto the main thread — the only one that reads the pane's stdin.
 struct Interaction {
     heading: String,
-    options: Vec<(String, String)>,
-    reply: Sender<Option<String>>,
+    kind: InteractionKind,
+    /// The JSON-RPC `result` to answer the agent's request with. Each kind
+    /// builds its own shape, so the servicer stays a renderer.
+    reply: Sender<Value>,
+}
+
+enum InteractionKind {
+    /// `session/request_permission`: pick one of the agent's options.
+    Permission { options: Vec<(String, String)> },
+    /// `elicitation/create` in form mode: fill in a flat schema.
+    Form { fields: Vec<Field> },
+    /// `elicitation/create` in url mode: consent to opening a link.
+    Url { url: String },
 }
 
 enum MainEvent {
@@ -357,6 +372,9 @@ struct Bridge {
     /// "this turn failed" from "there is no agent left to talk to".
     agent_alive: AtomicBool,
     buffer: Mutex<MessageBuffer>,
+    /// Outstanding url-mode elicitation ids. The spec requires ignoring a
+    /// `elicitation/complete` for an id we never issued or already closed.
+    pending_elicitations: Mutex<HashSet<String>>,
     events: Sender<MainEvent>,
     cwd: PathBuf,
 }
@@ -484,6 +502,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         replaying: AtomicBool::new(false),
         agent_alive: AtomicBool::new(true),
         buffer: Mutex::new(MessageBuffer::default()),
+        pending_elicitations: Mutex::new(HashSet::new()),
         events,
         cwd: config.cwd.clone(),
     });
@@ -566,6 +585,12 @@ fn session_loop(
                 // on/off is rendered correctly even though it isn't yet
                 // settable.
                 "session": { "configOptions": { "boolean": {} } },
+                // Both modes must be named explicitly and non-null; an
+                // empty `elicitation` object advertises neither. url mode
+                // is the one that matters most — it is where the spec
+                // sends anything sensitive, and the browser overlay gives
+                // it a context neither qmux nor the model can read.
+                "elicitation": { "form": {}, "url": {} },
             },
             "clientInfo": { "name": "qmux", "title": "qmux", "version": env!("CARGO_PKG_VERSION") },
         }),
@@ -853,32 +878,153 @@ fn run_turn(
 /// the main thread.
 fn service_interaction(interaction: Interaction) {
     println!("\n{}", bold(&interaction.heading));
-    for (index, (_, label)) in interaction.options.iter().enumerate() {
+    let result = match &interaction.kind {
+        InteractionKind::Permission { options } => service_permission(options),
+        InteractionKind::Form { fields } => service_form(fields),
+        InteractionKind::Url { url } => service_url(url),
+    };
+    let _ = request_silent("hook.notify", hook_payload("PermissionResolved", json!({})));
+    let _ = interaction.reply.send(result);
+}
+
+/// Reads one line, or `None` at EOF. EOF means the pane is closing, which every
+/// caller treats as "no decision" rather than as an answer.
+fn read_answer(prompt: &str) -> Option<String> {
+    print_now(&bold(prompt));
+    let mut line = String::new();
+    match std::io::stdin().lock().read_line(&mut line) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(line.trim().to_string()),
+    }
+}
+
+fn service_permission(options: &[(String, String)]) -> Value {
+    for (index, (_, label)) in options.iter().enumerate() {
         println!("  {}. {label}", index + 1);
     }
-
-    let stdin = std::io::stdin();
-    let answer = loop {
-        print_now(&bold("choose › "));
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) | Err(_) => break None,
-            Ok(_) => {}
-        }
-        let choice = line.trim();
+    loop {
+        let Some(choice) = read_answer("choose › ") else {
+            return json!({ "outcome": { "outcome": "cancelled" } });
+        };
         if choice.is_empty() {
             continue;
         }
         match choice.parse::<usize>() {
-            Ok(index) if index >= 1 && index <= interaction.options.len() => {
-                break Some(interaction.options[index - 1].0.clone());
+            Ok(index) if index >= 1 && index <= options.len() => {
+                return json!({
+                    "outcome": { "outcome": "selected", "optionId": options[index - 1].0 }
+                });
             }
-            _ => println!("{}", dim(&format!("enter 1-{}", interaction.options.len()))),
+            _ => println!("{}", dim(&format!("enter 1-{}", options.len()))),
         }
-    };
+    }
+}
 
-    let _ = request_silent("hook.notify", hook_payload("PermissionResolved", json!({})));
-    let _ = interaction.reply.send(answer);
+/// Walks the form's fields. `/decline` refuses outright, `/cancel` (and EOF)
+/// backs out without deciding — ACP treats those differently and agents are
+/// required to branch on which they got.
+fn service_form(fields: &[Field]) -> Value {
+    let flagged = elicitation::secret_looking_fields(fields);
+    if !flagged.is_empty() {
+        // The spec forbids collecting secrets this way — they are supposed to
+        // go through url mode, out of band. The agent is the one breaking the
+        // rule, but qmux is the one that would hand over the value.
+        println!(
+            "{}",
+            dim(&format!(
+                "warning: this form asks for {} — ACP forbids collecting secrets in a form, and the value would pass through the agent. Decline unless you are sure.",
+                flagged.join(", ")
+            ))
+        );
+    }
+    println!("{}", dim("/decline to refuse, /cancel to back out"));
+
+    let mut answers: Vec<(Field, Option<Value>)> = Vec::new();
+    for field in fields {
+        if let Some(description) = &field.description {
+            println!("{}", dim(&format!("  {description}")));
+        }
+        if let FieldKind::Choice(choices) = &field.kind {
+            for (index, choice) in choices.iter().enumerate() {
+                println!("  {}. {choice}", index + 1);
+            }
+        }
+        let value = loop {
+            let Some(input) = read_answer(&format!("{} › ", elicitation::prompt_label(field)))
+            else {
+                return json!({ "action": "cancel" });
+            };
+            match input.as_str() {
+                "/decline" => return json!({ "action": "decline" }),
+                "/cancel" => return json!({ "action": "cancel" }),
+                // Blank takes the default, or skips an optional field.
+                "" if field.default.is_some() || !field.required => break None,
+                "" => {
+                    println!("{}", dim("this one is required"));
+                    continue;
+                }
+                _ => match elicitation::coerce(field, &input) {
+                    Ok(value) => break Some(value),
+                    Err(err) => println!("{}", dim(&err)),
+                },
+            }
+        };
+        answers.push((field.clone(), value));
+    }
+
+    match elicitation::build_content(answers) {
+        Ok(content) => json!({ "action": "accept", "content": content }),
+        // Unreachable given the loop above enforces required fields, but a
+        // wrong answer here would be a silent protocol violation.
+        Err(err) => {
+            println!("{}", dim(&format!("could not submit: {err}")));
+            json!({ "action": "cancel" })
+        }
+    }
+}
+
+/// Shows the full URL, warns about it, and opens it only on explicit consent.
+///
+/// ACP requires all three, and requires the page open somewhere neither qmux
+/// nor the agent's model can read — which is what the browser overlay's
+/// isolated tab is. Accepting means "the user agreed to open this", not that
+/// the external flow finished; `elicitation/complete` reports that later.
+fn service_url(url: &str) -> Value {
+    println!("  {url}");
+    for warning in elicitation::url_warnings(url) {
+        println!("{}", dim(&format!("  warning: {warning}")));
+    }
+
+    loop {
+        let Some(answer) = read_answer("open in the browser? [y/N, /decline] › ") else {
+            return json!({ "action": "cancel" });
+        };
+        match answer.to_ascii_lowercase().as_str() {
+            "y" | "yes" => break,
+            "" | "n" | "no" | "/cancel" => return json!({ "action": "cancel" }),
+            "/decline" | "d" | "decline" => return json!({ "action": "decline" }),
+            _ => println!("{}", dim("enter y or n")),
+        }
+    }
+
+    if let Err(err) = request_silent(
+        "browser.open",
+        json!({
+            "target": url,
+            "cwd": env::current_dir().ok().map(|path| path.display().to_string()),
+        }),
+    ) {
+        // Consent was given, so this is still an `accept`; the user just has to
+        // open the link themselves. Failing the elicitation instead would strand
+        // the agent waiting on a flow the user is perfectly able to complete.
+        println!(
+            "{}",
+            dim(&format!(
+                "could not open the qmux browser ({err}); open the link above manually"
+            ))
+        );
+    }
+    json!({ "action": "accept" })
 }
 
 fn hook_payload(event: &str, payload: Value) -> Value {
@@ -993,9 +1139,31 @@ fn rpc_error_message(error: &Value) -> String {
 fn handle_agent_notification(bridge: &Arc<Bridge>, message: &Value) {
     let method = message.get("method").and_then(Value::as_str).unwrap_or("");
     let params = message.get("params").cloned().unwrap_or(Value::Null);
-    if method == "session/update" {
-        handle_session_update(bridge, &params);
+    match method {
+        "session/update" => handle_session_update(bridge, &params),
+        "elicitation/complete" => handle_elicitation_complete(bridge, &params),
+        _ => {}
     }
+}
+
+/// Closes the loop on a url-mode elicitation. An `accept` only ever meant the
+/// user agreed to open the link; this is the agent saying the flow finished.
+fn handle_elicitation_complete(bridge: &Arc<Bridge>, params: &Value) {
+    let Some(id) = params.get("elicitationId").and_then(Value::as_str) else {
+        return;
+    };
+    // Unknown or already-completed ids are ignored, not reported: the id is
+    // opaque and a duplicate says nothing the user needs.
+    if !bridge
+        .pending_elicitations
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .remove(id)
+    {
+        return;
+    }
+    bridge.flush_message();
+    println!("\n{}", dim("· the browser step finished"));
 }
 
 fn handle_session_update(bridge: &Arc<Bridge>, params: &Value) {
@@ -1184,6 +1352,7 @@ fn dispatch_agent_request(
     let failed = |message: String| RequestError::Failed(message);
     match method {
         "session/request_permission" => request_permission(bridge, params).map_err(failed),
+        "elicitation/create" => elicit(bridge, params).map_err(failed),
         "fs/read_text_file" => read_text_file(bridge, params).map_err(failed),
         "fs/write_text_file" => write_text_file(bridge, params).map_err(failed),
         "terminal/create" => create_terminal(bridge, params).map_err(failed),
@@ -1231,24 +1400,111 @@ fn request_permission(bridge: &Arc<Bridge>, params: &Value) -> Result<Value, Str
         hook_payload("PermissionRequest", params.clone()),
     );
 
+    ask(
+        bridge,
+        heading,
+        InteractionKind::Permission { options },
+        json!({ "outcome": { "outcome": "cancelled" } }),
+    )
+}
+
+/// Raises a question to the main thread and blocks for the answer.
+///
+/// No timeout: these are questions for a human, and ACP's own escape hatch is
+/// `session/cancel`, which ends the turn and resolves them. `abandoned` is the
+/// answer to give if the session ends first — never a silent success.
+fn ask(
+    bridge: &Arc<Bridge>,
+    heading: String,
+    kind: InteractionKind,
+    abandoned: Value,
+) -> Result<Value, String> {
     let (reply, answer) = channel();
     bridge
         .events
         .send(MainEvent::Interact(Interaction {
             heading,
-            options,
+            kind,
             reply,
         }))
-        .map_err(|_| "the session ended before the permission could be answered".to_string())?;
+        .map_err(|_| "the session ended before the question could be answered".to_string())?;
+    Ok(answer.recv().unwrap_or(abandoned))
+}
 
-    // No timeout: a permission request is a question for a human, and ACP's own
-    // escape hatch is `session/cancel`, which resolves this by ending the turn.
-    match answer.recv() {
-        Ok(Some(option_id)) => {
-            Ok(json!({ "outcome": { "outcome": "selected", "optionId": option_id } }))
+/// `elicitation/create` — the agent asking the user for structured input.
+fn elicit(bridge: &Arc<Bridge>, params: &Value) -> Result<Value, String> {
+    let message = params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("The agent needs some information");
+    // Absent `mode` is treated as `form`, which is the only mode a pre-modes
+    // agent could have meant.
+    let mode = params.get("mode").and_then(Value::as_str).unwrap_or("form");
+
+    // The scope fields (`sessionId`, `toolCallId`, `requestId`) are ignored on
+    // purpose: a bridge hosts exactly one session, so there is nothing to route
+    // between and the question reaches the one pane either way.
+    let mut elicitation_id = None;
+    let kind = match mode {
+        "form" => {
+            let schema = params
+                .get("requestedSchema")
+                .ok_or_else(|| "form elicitation carried no requestedSchema".to_string())?;
+            InteractionKind::Form {
+                fields: elicitation::parse_schema(schema)?,
+            }
         }
-        Ok(None) | Err(_) => Ok(json!({ "outcome": { "outcome": "cancelled" } })),
+        "url" => {
+            let url = params
+                .get("url")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "url elicitation carried no url".to_string())?;
+            // Track it so a later `elicitation/complete` can be matched, and
+            // an unknown or replayed id ignored.
+            if let Some(id) = params.get("elicitationId").and_then(Value::as_str) {
+                elicitation_id = Some(id.to_string());
+                bridge
+                    .pending_elicitations
+                    .lock()
+                    .unwrap_or_else(|err| err.into_inner())
+                    .insert(id.to_string());
+            }
+            InteractionKind::Url {
+                url: url.to_string(),
+            }
+        }
+        other => return Err(format!("unsupported elicitation mode '{other}'")),
+    };
+
+    // Reuses the permission hooks rather than adding parallel ones. An
+    // elicitation blocks on the user exactly the way a permission does, and
+    // `AwaitingPermission` is the status that makes the composer *queue* a
+    // typed turn rather than send it — which matters here, because a sent turn
+    // would be swallowed as a form answer.
+    let _ = request_silent(
+        "hook.notify",
+        hook_payload("PermissionRequest", params.clone()),
+    );
+    let outcome = ask(
+        bridge,
+        message.to_string(),
+        kind,
+        json!({ "action": "cancel" }),
+    )?;
+
+    // Only an accepted URL flow can still be completed. Dropping the id on any
+    // other outcome stops a later stray completion from announcing a step the
+    // user declined to take.
+    if let Some(id) = elicitation_id
+        && outcome.get("action").and_then(Value::as_str) != Some("accept")
+    {
+        bridge
+            .pending_elicitations
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .remove(&id);
     }
+    Ok(outcome)
 }
 
 /// Resolves a path from the agent, which ACP requires to be absolute. Relative

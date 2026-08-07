@@ -87,6 +87,26 @@ fn main() {
             "initialize_advertises_boolean_config_support",
             initialize_advertises_boolean_config_support,
         ),
+        (
+            "a_form_elicitation_collects_typed_answers",
+            a_form_elicitation_collects_typed_answers,
+        ),
+        (
+            "a_declined_form_is_distinct_from_a_cancelled_one",
+            a_declined_form_is_distinct_from_a_cancelled_one,
+        ),
+        (
+            "a_url_elicitation_needs_consent_and_reports_completion",
+            a_url_elicitation_needs_consent_and_reports_completion,
+        ),
+        (
+            "a_refused_url_elicitation_opens_nothing",
+            a_refused_url_elicitation_opens_nothing,
+        ),
+        (
+            "initialize_advertises_both_elicitation_modes",
+            initialize_advertises_both_elicitation_modes,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -747,6 +767,66 @@ fn run_scenario(agent: &Arc<Agent>, scenario: &str, id: Option<Value>) {
             }));
         }
         "terminal" => run_terminal_scenario(agent),
+        "form" | "form_decline" | "form_cancel" => {
+            let outcome = agent.call(
+                "elicitation/create",
+                json!({
+                    "sessionId": "s1", "mode": "form",
+                    "message": "How should I approach this refactoring?",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {
+                            "strategy": { "type": "string", "enum": ["conservative", "aggressive"] },
+                            "runs": { "type": "integer", "default": 3 },
+                            "note": { "type": "string" },
+                        },
+                        "required": ["strategy"],
+                    },
+                }),
+            );
+            agent.note("form", outcome);
+        }
+        "url" | "url_refused" => {
+            let outcome = agent.call(
+                "elicitation/create",
+                json!({
+                    "sessionId": "s1", "mode": "url",
+                    "elicitationId": "oauth-001",
+                    "url": "https://example.com/connect?elicitationId=oauth-001",
+                    "message": "Authorize access to your repositories.",
+                }),
+            );
+            let accepted = outcome.get("action").and_then(Value::as_str) == Some("accept");
+            agent.note("url", outcome);
+            if !accepted {
+                // The user refused, so this id is dead; announcing it anyway
+                // would report a step they declined to take.
+                agent.send(json!({
+                    "jsonrpc": "2.0", "method": "elicitation/complete",
+                    "params": { "elicitationId": "oauth-001" },
+                }));
+                thread::sleep(Duration::from_millis(200));
+            }
+            if accepted {
+                // Only after the out-of-band flow finishes; `accept` alone just
+                // meant the user agreed to open the link.
+                agent.send(json!({
+                    "jsonrpc": "2.0", "method": "elicitation/complete",
+                    "params": { "elicitationId": "oauth-001" },
+                }));
+                // Both must be ignored: an id we never issued, and one that
+                // has already been completed.
+                agent.send(json!({
+                    "jsonrpc": "2.0", "method": "elicitation/complete",
+                    "params": { "elicitationId": "never-issued" },
+                }));
+                agent.send(json!({
+                    "jsonrpc": "2.0", "method": "elicitation/complete",
+                    "params": { "elicitationId": "oauth-001" },
+                }));
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
         _ => {}
     }
 
@@ -904,4 +984,85 @@ fn initialize_advertises_boolean_config_support() {
         "boolean config support should be advertised: {}",
         session.frames[0]
     );
+}
+
+fn a_form_elicitation_collects_typed_answers() {
+    // strategy by index, runs left blank to take its default, note skipped.
+    let session = run_bridge("form", "go\n2\n\n\n");
+    let outcome = session.note("form");
+
+    assert_eq!(outcome["action"], "accept");
+    assert_eq!(outcome["content"]["strategy"], "aggressive");
+    assert_eq!(outcome["content"]["runs"], 3, "the default fills in");
+    assert!(
+        outcome["content"].get("note").is_none(),
+        "a blank optional is absent, not an empty string: {outcome}"
+    );
+    assert!(
+        session
+            .pane
+            .contains("How should I approach this refactoring?"),
+        "the message should be shown: {}",
+        session.pane
+    );
+}
+
+fn a_declined_form_is_distinct_from_a_cancelled_one() {
+    // Agents are required to branch on these, so they must not collapse.
+    assert_eq!(
+        run_bridge("form_decline", "go\n/decline\n").note("form")["action"],
+        "decline"
+    );
+    assert_eq!(
+        run_bridge("form_cancel", "go\n/cancel\n").note("form")["action"],
+        "cancel"
+    );
+}
+
+fn a_url_elicitation_needs_consent_and_reports_completion() {
+    let session = run_bridge("url", "go\ny\n");
+    assert_eq!(session.note("url")["action"], "accept");
+
+    // The spec requires the full URL be shown before consent is asked for.
+    assert!(
+        session
+            .pane
+            .contains("https://example.com/connect?elicitationId=oauth-001"),
+        "the full URL must be displayed: {}",
+        session.pane
+    );
+    assert!(
+        session.pane.contains("the browser step finished"),
+        "elicitation/complete should close the loop: {}",
+        session.pane
+    );
+    // The follow-up completions carried an id we never issued and one already
+    // closed; both must be ignored rather than reported again.
+    assert_eq!(
+        session.pane.matches("the browser step finished").count(),
+        1,
+        "unknown and repeated elicitationIds must be ignored: {}",
+        session.pane
+    );
+}
+
+fn a_refused_url_elicitation_opens_nothing() {
+    // Bare enter is the safe default: no consent, no navigation.
+    let session = run_bridge("url_refused", "go\n\n");
+    assert_eq!(session.note("url")["action"], "cancel");
+    assert!(
+        !session.pane.contains("the browser step finished"),
+        "nothing should have been opened: {}",
+        session.pane
+    );
+}
+
+fn initialize_advertises_both_elicitation_modes() {
+    // Each mode must be present and non-null; an empty object advertises
+    // neither, and an agent may not use a mode it wasn't offered.
+    let session = run_bridge("form", "go\n1\n\n\n");
+    let initialize: Value = serde_json::from_str(&session.frames[0]).expect("first frame parses");
+    let elicitation = &initialize["params"]["clientCapabilities"]["elicitation"];
+    assert_eq!(elicitation["form"], json!({}), "{initialize}");
+    assert_eq!(elicitation["url"], json!({}), "{initialize}");
 }
