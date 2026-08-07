@@ -197,6 +197,14 @@ impl Host {
         argv.push("-o".to_string());
         argv.push(format!("ConnectTimeout={CONNECT_TIMEOUT_SECONDS}"));
 
+        if !remote.forwards.is_empty() {
+            // A unix-socket forward fails outright if the remote path already
+            // exists, which it will after any unclean disconnect. Let ssh
+            // remove it rather than stranding the host until someone cleans up
+            // by hand.
+            argv.push("-o".to_string());
+            argv.push("StreamLocalBindUnlink=yes".to_string());
+        }
         for forward in &remote.forwards {
             argv.push("-R".to_string());
             argv.push(format!("{}:{}", forward.remote_path, forward.local_path));
@@ -339,6 +347,10 @@ mod tests {
         assert!(argv.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         assert!(argv.iter().any(|arg| arg == "ConnectTimeout=10"));
         assert!(!argv.contains(&"-t".to_string()), "batch needs no tty");
+        assert!(
+            !argv.iter().any(|arg| arg == "StreamLocalBindUnlink=yes"),
+            "only a forwarding session should unlink sockets"
+        );
         // Configured options survive, and `--` guards the destination.
         assert!(argv.windows(2).any(|pair| pair == ["-p", "2222"]));
         let end = argv.iter().position(|arg| arg == "--").expect("-- present");
@@ -475,6 +487,13 @@ mod tests {
         assert!(
             argv.windows(2)
                 .any(|pair| pair == ["-R", "/tmp/qmux-remote.sock:/run/qmux.sock"]),
+            "{argv:?}"
+        );
+        // Without this a reconnect after an unclean disconnect fails, because
+        // the socket the last session left behind is still on the remote.
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-o", "StreamLocalBindUnlink=yes"]),
             "{argv:?}"
         );
     }

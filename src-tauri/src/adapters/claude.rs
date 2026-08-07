@@ -1450,6 +1450,7 @@ impl SpawnClaudeRequest {
         };
 
         SpawnAgentRequest {
+            host: None,
             adapter_id: "claude".to_string(),
             prompt: self.prompt,
             group_id: self.group_id,

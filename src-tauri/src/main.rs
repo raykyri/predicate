@@ -958,6 +958,7 @@ fn launch_fresh_research_run(
         }
     };
     let spawn = SpawnAgentRequest {
+        host: None,
         adapter_id: adapter.to_string(),
         prompt,
         group_id: Some(workspace.id.clone()),

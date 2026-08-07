@@ -349,9 +349,17 @@ others:
 is where agent worktrees live there; `sshOptions` are extra flags for hosts
 needing a jump box, identity file, or port.
 
-Git worktree creation, status, and removal already run on the agent's host. The
-pane's process itself does not yet — nothing selects a non-local host, so every
-agent is still local. Wiring the launch path is the next piece.
+ACP agents can run on a host: pass its name as the launch's `host` and the pane
+runs `ssh <host> qmux-cli acp` instead of a local bridge, with the worktree
+created on that machine too. The control socket is reverse-forwarded over the
+same ssh channel, so lifecycle hooks and transcript records reach qmux without
+the pane token ever becoming a network credential — the socket stays guarded by
+its filesystem permissions, reachable only by whoever already holds the ssh
+connection.
+
+A remote host needs `qmux-cli` installed and the ACP agent on its `PATH`. The
+other adapters are not remote yet: they get host-aware worktrees, but their
+processes still launch locally.
 
 ### ACP agents
 

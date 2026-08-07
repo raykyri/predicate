@@ -26,6 +26,7 @@ use super::{
 };
 use crate::config::{AcpAdapterConfig, AcpAgentConfig, QmuxConfig};
 use crate::events::QmuxEvent;
+use crate::host::{Host, Interaction, RemoteCommand, SocketForward};
 use crate::pty::{
     CommandPlan, InitialPaneSize, PaneMeta, agent_pane_envs, plan_to_spec, recoverable_dir,
     spawn_pty,
@@ -40,6 +41,17 @@ use crate::workspace::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+
+/// A pane's command, resolved for the host it runs on.
+#[derive(Clone, Debug)]
+struct PaneLaunch {
+    program: String,
+    args: Vec<String>,
+    envs: Vec<(String, String)>,
+    /// Always a directory on *this* machine — the pty runs here even when the
+    /// process it starts is `ssh`.
+    cwd: PathBuf,
+}
 
 #[derive(Clone, Debug)]
 pub struct AcpAdapter {
@@ -72,8 +84,8 @@ impl AcpAdapter {
         agent_key: &str,
         agent: &AcpAgentConfig,
         binary: &str,
-        cwd: &Path,
-        transcript: &Path,
+        cwd: &str,
+        transcript: Option<&Path>,
         prompt: Option<&str>,
         load_session: Option<&str>,
     ) -> Result<Vec<(String, String)>, String> {
@@ -89,12 +101,25 @@ impl AcpAdapter {
                 serde_json::to_string(&agent.args)
                     .map_err(|err| format!("failed to encode ACP agent args: {err}"))?,
             ),
-            ("QMUX_ACP_CWD".to_string(), cwd.display().to_string()),
-            (
+            ("QMUX_ACP_CWD".to_string(), cwd.to_string()),
+        ];
+        match transcript {
+            // Local: the bridge writes the file the sidebar tails.
+            Some(transcript) => envs.push((
                 "QMUX_ACP_TRANSCRIPT".to_string(),
                 transcript.display().to_string(),
-            ),
-        ];
+            )),
+            // Remote: it cannot see that filesystem, so records are streamed
+            // back over the control socket and the log goes somewhere local
+            // to the machine the bridge is actually on.
+            None => {
+                envs.push(("QMUX_ACP_TRANSCRIPT_STREAM".to_string(), "1".to_string()));
+                envs.push((
+                    "QMUX_ACP_LOG".to_string(),
+                    format!("/tmp/qmux-acp-{agent_key}.log"),
+                ));
+            }
+        }
         if !agent.env.is_empty() {
             envs.push((
                 "QMUX_ACP_ENV".to_string(),
@@ -114,6 +139,88 @@ impl AcpAdapter {
         Ok(envs)
     }
 
+    /// Where the bridge should record turns, given where it will run.
+    ///
+    /// A remote bridge must be told *nothing*: handing it this path would have
+    /// it faithfully write a transcript on a filesystem the sidebar cannot see,
+    /// and the pane would look like it had no history. `None` is what switches
+    /// it to streaming records back over the control socket instead.
+    fn transcript_sink<'a>(host: &Host, transcript: &'a Path) -> Option<&'a Path> {
+        host.is_local().then_some(transcript)
+    }
+
+    /// Builds the command that puts a bridge in the pane, for whichever host
+    /// the agent runs on.
+    ///
+    /// Locally that is just `qmux acp`. Remotely the pane runs `ssh` instead,
+    /// and three things have to change with it: the bridge's environment is
+    /// carried explicitly (ssh forwards none of it), `QMUX_SOCK` points at a
+    /// reverse-forwarded socket so lifecycle hooks and streamed transcript
+    /// records reach this machine, and `QMUX_CLI` names the remote binary.
+    ///
+    /// The forward is what keeps the security model intact. The control socket
+    /// is guarded by its filesystem permissions rather than by the pane token,
+    /// and `ssh -R` preserves that: the far end is reachable only by whoever
+    /// already holds the ssh channel, so the token never becomes a network
+    /// credential.
+    fn launch_plan(
+        state: &AppState,
+        host: &Host,
+        pane_id: &str,
+        local_cwd: PathBuf,
+        envs: Vec<(String, String)>,
+    ) -> Result<PaneLaunch, String> {
+        let Host::Remote { config, .. } = host else {
+            let bridge = crate::launch_path::qmux_cli_path()?;
+            return Ok(PaneLaunch {
+                program: bridge.display().to_string(),
+                args: vec!["acp".to_string()],
+                envs,
+                cwd: local_cwd,
+            });
+        };
+
+        let remote_socket = format!("/tmp/qmux-{pane_id}.sock");
+        let local_socket = state.config().socket_path.display().to_string();
+        let mut remote_envs: Vec<(String, String)> = envs
+            .into_iter()
+            .map(|(key, value)| match key.as_str() {
+                // These name local paths that mean nothing on the far side.
+                "QMUX_SOCK" => (key, remote_socket.clone()),
+                "QMUX_CLI" => (key, config.qmux_cli.clone()),
+                _ => (key, value),
+            })
+            .collect();
+        remote_envs.sort();
+        remote_envs.dedup_by(|a, b| a.0 == b.0);
+
+        let argv = host
+            .ssh_argv(
+                &RemoteCommand {
+                    program: &config.qmux_cli,
+                    args: vec!["acp".to_string()],
+                    envs: remote_envs,
+                    forwards: vec![SocketForward {
+                        remote_path: remote_socket,
+                        local_path: local_socket,
+                    }],
+                },
+                Interaction::Interactive,
+            )
+            .ok_or_else(|| "a remote host must yield an ssh command".to_string())?;
+
+        Ok(PaneLaunch {
+            program: argv[0].clone(),
+            args: argv[1..].to_vec(),
+            // ssh itself needs no environment: everything the bridge reads is
+            // in the remote command line.
+            envs: Vec::new(),
+            // The pty still runs `ssh` here, so it needs a directory that
+            // exists on *this* machine.
+            cwd: state.default_open_dir(),
+        })
+    }
+
     /// Resolves the agent to launch — from `qmux.config.json` or the registry
     /// store — and checks its binary exists before any workspace is created, so
     /// a typo fails as a clean error rather than an empty pane with a dead
@@ -121,28 +228,39 @@ impl AcpAdapter {
     fn resolve(
         &self,
         state: &AppState,
+        host: &Host,
         requested: Option<&str>,
     ) -> Result<(String, AcpAgentConfig, String), String> {
         let installed = crate::acp_registry::installed_configs(&state.config().workspace_root)?;
         let (key, agent) = self.config.resolve_with(&installed, requested)?;
-        let binary = ensure_on_path(&agent.command).ok_or_else(|| {
-            format!(
-                "ACP agent '{key}' runs '{}', which was not found on PATH or standard macOS tool paths.",
-                agent.command
-            )
-        })?;
-        Ok((key, agent, binary.display().to_string()))
+        // Only a local agent's binary can be checked here. A remote one is
+        // resolved by the remote shell's PATH, and probing it over ssh would
+        // cost a round trip to produce an error the launch reports anyway.
+        let binary = match host {
+            Host::Local => ensure_on_path(&agent.command)
+                .ok_or_else(|| {
+                    format!(
+                        "ACP agent '{key}' runs '{}', which was not found on PATH or standard macOS tool paths.",
+                        agent.command
+                    )
+                })?
+                .display()
+                .to_string(),
+            Host::Remote { .. } => agent.command.clone(),
+        };
+        Ok((key, agent, binary))
     }
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
         let options = AcpLaunchOptions::from_value(request.options)?;
-        let (agent_key, acp_agent, binary) = self.resolve(state, options.agent.as_deref())?;
-        let bridge = crate::launch_path::qmux_cli_path()?;
+        let host = crate::host::resolve(&state.config().hosts, request.host.as_deref())?;
+        let (agent_key, acp_agent, binary) =
+            self.resolve(state, &host, options.agent.as_deref())?;
 
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
-                host: None,
+                host: request.host.clone(),
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,
@@ -154,16 +272,17 @@ impl AcpAdapter {
         )?;
         let cwd = request
             .cwd
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(&agent.worktree_dir));
-        if !cwd.is_dir() {
+            .clone()
+            .unwrap_or_else(|| agent.worktree_dir.clone());
+        // Only meaningful for a local agent: a remote path says nothing about
+        // this filesystem, and the launch reports a missing directory anyway.
+        if host.is_local() && !Path::new(&cwd).is_dir() {
             let _ = mark_agent_failed(state, &agent.id);
-            return Err(format!(
-                "ACP working directory {} does not exist",
-                cwd.display()
-            ));
+            return Err(format!("ACP working directory {cwd} does not exist"));
         }
 
+        // The transcript always lives here — a remote bridge streams its
+        // records back rather than writing them where nothing would read them.
         let transcript = Self::transcript_path_for(state, &agent.id);
         let has_initial_prompt = !request.prompt.trim().is_empty();
 
@@ -174,13 +293,15 @@ impl AcpAdapter {
             &acp_agent,
             &binary,
             &cwd,
-            &transcript,
+            Self::transcript_sink(&host, &transcript),
             has_initial_prompt.then_some(request.prompt.as_str()),
             None,
         )?);
 
         let agent = attach_acp_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
         bind_transcript(state, &agent, &agent_key, &transcript, self.id())?;
+
+        let launch = Self::launch_plan(state, &host, &pane_id, PathBuf::from(&cwd), envs)?;
 
         let spawn_result = plan_to_spec(
             state,
@@ -195,10 +316,10 @@ impl AcpAdapter {
                 recovered: false,
             },
             CommandPlan {
-                program: bridge.display().to_string(),
-                args: vec!["acp".to_string()],
-                cwd,
-                envs,
+                program: launch.program,
+                args: launch.args,
+                cwd: launch.cwd,
+                envs: launch.envs,
                 support_files: Vec::new(),
                 support_file_fallback: None,
             },
@@ -220,14 +341,25 @@ impl AcpAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
-        let (agent_key, acp_agent, binary) = self.resolve(state, agent.acp_agent.as_deref())?;
-        let bridge = crate::launch_path::qmux_cli_path()?;
-        let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
-            format!(
-                "agent worktree {} no longer exists; relaunch manually",
-                agent.worktree_dir
-            )
-        })?;
+        let host = crate::host::resolve(&state.config().hosts, agent.host.as_deref())?;
+        let (agent_key, acp_agent, binary) =
+            self.resolve(state, &host, agent.acp_agent.as_deref())?;
+        // A worktree on another machine cannot be stat'd from here. Recovery
+        // still has to check the local case, where a deleted directory is the
+        // common reason a respawn would otherwise fail confusingly.
+        let cwd = if host.is_local() {
+            recoverable_dir(&agent.worktree_dir)
+                .ok_or_else(|| {
+                    format!(
+                        "agent worktree {} no longer exists; relaunch manually",
+                        agent.worktree_dir
+                    )
+                })?
+                .display()
+                .to_string()
+        } else {
+            agent.worktree_dir.clone()
+        };
 
         let transcript = Self::transcript_path_for(state, &agent.id);
         let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
@@ -236,10 +368,12 @@ impl AcpAdapter {
             &acp_agent,
             &binary,
             &cwd,
-            &transcript,
+            Self::transcript_sink(&host, &transcript),
             None,
             agent.session_id.as_deref(),
         )?);
+
+        let launch = Self::launch_plan(state, &host, &pane.id, PathBuf::from(&cwd), envs)?;
 
         let spec = plan_to_spec(
             state,
@@ -257,10 +391,10 @@ impl AcpAdapter {
                 recovered: true,
             },
             CommandPlan {
-                program: bridge.display().to_string(),
-                args: vec!["acp".to_string()],
-                cwd,
-                envs,
+                program: launch.program,
+                args: launch.args,
+                cwd: launch.cwd,
+                envs: launch.envs,
                 support_files: Vec::new(),
                 support_file_fallback: None,
             },
@@ -1155,6 +1289,171 @@ mod tests {
         assert!(AcpLaunchOptions::from_value(json!({ "agnet": "goose" })).is_err());
     }
 
+    fn state_with_host(host: Option<(&str, &str)>) -> AppState {
+        let mut config = crate::config::QmuxConfig {
+            hosts: Default::default(),
+            workspace_root: PathBuf::from("/tmp/qmux-acp-host-tests"),
+            socket_path: PathBuf::from("/tmp/qmux-acp-host-tests.sock"),
+            adapters: Default::default(),
+            legacy_claude_binary: None,
+            claude_plugin_dir: PathBuf::new(),
+            opencode_plugin_dir: PathBuf::new(),
+        };
+        if let Some((name, ssh)) = host {
+            config.hosts.insert(
+                name.to_string(),
+                crate::host::HostConfig {
+                    ssh: ssh.to_string(),
+                    qmux_cli: "/opt/qmux-cli".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        AppState::new(config)
+    }
+
+    #[test]
+    fn only_a_local_bridge_is_given_a_transcript_path() {
+        let transcript = Path::new("/data/session.jsonl");
+        assert_eq!(
+            AcpAdapter::transcript_sink(&Host::Local, transcript),
+            Some(transcript)
+        );
+
+        let remote = Host::Remote {
+            name: "devbox".to_string(),
+            config: crate::host::HostConfig {
+                ssh: "devbox".to_string(),
+                ..Default::default()
+            },
+        };
+        assert_eq!(
+            AcpAdapter::transcript_sink(&remote, transcript),
+            None,
+            "a remote bridge told this path would write where nothing reads"
+        );
+    }
+
+    #[test]
+    fn a_remote_launch_runs_the_bridge_through_ssh_with_the_socket_forwarded() {
+        let state = state_with_host(Some(("devbox", "user@devbox")));
+        let host = crate::host::resolve(&state.config().hosts, Some("devbox")).expect("configured");
+
+        let launch = AcpAdapter::launch_plan(
+            &state,
+            &host,
+            "pane-7",
+            PathBuf::from("/srv/work/repo"),
+            vec![
+                ("QMUX_SOCK".to_string(), "/local/run/qmux.sock".to_string()),
+                ("QMUX_CLI".to_string(), "/Applications/qmux".to_string()),
+                ("QMUX_TOKEN".to_string(), "tok".to_string()),
+            ],
+        )
+        .expect("builds a plan");
+
+        assert_eq!(launch.program, "ssh");
+        let line = launch.args.last().expect("remote command line");
+
+        // The bridge's environment travels in the command line, because ssh
+        // forwards none of it.
+        assert!(line.contains("QMUX_TOKEN='tok'"), "{line}");
+        // Both local paths are rewritten: the socket to the forwarded one, the
+        // CLI to the remote binary. Leaving either would point the bridge at
+        // something that does not exist on the far side.
+        assert!(line.contains("QMUX_SOCK='/tmp/qmux-pane-7.sock'"), "{line}");
+        assert!(line.contains("QMUX_CLI='/opt/qmux-cli'"), "{line}");
+        assert!(line.ends_with("'/opt/qmux-cli' 'acp'"), "{line}");
+
+        // The reverse forward is what carries hooks and streamed transcript
+        // records home without the pane token becoming a network credential.
+        assert!(
+            launch.args.windows(2).any(|pair| {
+                pair == ["-R", "/tmp/qmux-pane-7.sock:/tmp/qmux-acp-host-tests.sock"]
+            }),
+            "{:?}",
+            launch.args
+        );
+        // A pane's ssh may legitimately prompt, so it must not be batch mode.
+        assert!(launch.args.contains(&"-t".to_string()));
+        assert!(!launch.args.iter().any(|arg| arg == "BatchMode=yes"));
+
+        assert!(
+            launch.envs.is_empty(),
+            "nothing is passed through ssh's own env"
+        );
+        assert!(
+            launch.cwd.is_absolute() && !launch.cwd.starts_with("/srv/work"),
+            "the pty runs ssh locally, so its cwd must exist here: {:?}",
+            launch.cwd
+        );
+    }
+
+    #[test]
+    fn a_local_launch_still_runs_the_bridge_directly() {
+        let state = state_with_host(None);
+        let launch = AcpAdapter::launch_plan(
+            &state,
+            &Host::Local,
+            "pane-1",
+            PathBuf::from("/repo"),
+            vec![("QMUX_SOCK".to_string(), "/local/run/qmux.sock".to_string())],
+        )
+        .expect("builds a plan");
+
+        assert_ne!(launch.program, "ssh");
+        assert_eq!(launch.args, ["acp"]);
+        // Local envs are handed to the process untouched, and it runs in the
+        // worktree rather than somewhere else.
+        assert_eq!(launch.envs[0].1, "/local/run/qmux.sock");
+        assert_eq!(launch.cwd, PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn a_remote_bridge_streams_its_transcript_instead_of_writing_one() {
+        let envs = AcpAdapter::bridge_envs(
+            "gemini",
+            &agent("gemini"),
+            "gemini",
+            "/srv/work/repo",
+            // `None` is what a remote launch passes: the sidebar's filesystem
+            // is not reachable from where the bridge runs.
+            None,
+            None,
+            None,
+        )
+        .expect("encodes");
+        let envs: BTreeMap<String, String> = envs.into_iter().collect();
+
+        assert_eq!(envs["QMUX_ACP_TRANSCRIPT_STREAM"], "1");
+        assert!(
+            !envs.contains_key("QMUX_ACP_TRANSCRIPT"),
+            "a path here would be a file nobody reads"
+        );
+        // The agent's stderr still needs somewhere writable on its own machine.
+        assert!(envs["QMUX_ACP_LOG"].starts_with("/tmp/"));
+        assert_eq!(envs["QMUX_ACP_CWD"], "/srv/work/repo");
+    }
+
+    #[test]
+    fn a_local_bridge_still_writes_the_file_the_sidebar_tails() {
+        let envs = AcpAdapter::bridge_envs(
+            "gemini",
+            &agent("gemini"),
+            "gemini",
+            "/repo",
+            Some(Path::new("/data/session.jsonl")),
+            None,
+            None,
+        )
+        .expect("encodes");
+        let envs: BTreeMap<String, String> = envs.into_iter().collect();
+
+        assert_eq!(envs["QMUX_ACP_TRANSCRIPT"], "/data/session.jsonl");
+        assert!(!envs.contains_key("QMUX_ACP_TRANSCRIPT_STREAM"));
+        assert!(!envs.contains_key("QMUX_ACP_LOG"), "derived from the path");
+    }
+
     #[test]
     fn bridge_envs_carry_everything_the_bridge_requires() {
         let mut acp_agent = agent("gemini");
@@ -1165,8 +1464,8 @@ mod tests {
             "gemini",
             &acp_agent,
             "/usr/local/bin/gemini",
-            Path::new("/repo"),
-            Path::new("/data/session.jsonl"),
+            "/repo",
+            Some(Path::new("/data/session.jsonl")),
             Some("  hi  "),
             Some("sess_9"),
         )
@@ -1189,8 +1488,8 @@ mod tests {
             "gemini",
             &agent("gemini"),
             "gemini",
-            Path::new("/repo"),
-            Path::new("/data/session.jsonl"),
+            "/repo",
+            Some(Path::new("/data/session.jsonl")),
             Some("   "),
             Some(""),
         )

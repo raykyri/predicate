@@ -590,6 +590,9 @@ pub struct SpawnAgentRequest {
     pub initial_size: Option<InitialPaneSize>,
     /// Opt in to an isolated git worktree; defaults to false (run in place).
     pub use_worktree: Option<bool>,
+    /// Which `hosts` entry to run on. Absent means the local machine.
+    #[serde(default)]
+    pub host: Option<String>,
     #[serde(default)]
     pub options: Value,
 }
@@ -1245,6 +1248,7 @@ pub fn spawn_sibling_agent_session(
         .launch(
             state,
             SpawnAgentRequest {
+                host: None,
                 adapter_id: source.adapter.clone(),
                 prompt: prompt.to_string(),
                 group_id: Some(source.group_id.clone()),
