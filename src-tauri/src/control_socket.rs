@@ -549,6 +549,7 @@ mod tests {
 
     fn agent_bound_to(pane_id: &str) -> AgentInfo {
         AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),

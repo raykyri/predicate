@@ -34,8 +34,8 @@ use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{Turn, TurnBlock, start_transcript_tail, string_field};
 use crate::turn_queue::{IdleResolution, advance_after_idle};
 use crate::workspace::{
-    AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
-    mark_agent_spawn_failed, prepare_agent_workspace,
+    AcpConfigOption, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
+    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -314,6 +314,30 @@ impl AcpAdapter {
                     })?;
                 }
                 "agent.session_start"
+            }
+            "ConfigOptions" => {
+                if let Some(current) = agent.as_ref() {
+                    let options = parse_config_options(&notification.payload);
+                    let model = category_label(&options, "model");
+                    let effort = category_label(&options, "thought_level");
+                    state.mutate_agent(&current.id, |agent| {
+                        // The agent owns this state; a later push always
+                        // replaces what came before rather than merging.
+                        agent.acp_config_options = options.clone();
+                        // `model` and `thought_level` have somewhere to go
+                        // already, so an ACP pane gets the same header as every
+                        // other adapter for free. Only overwrite when the agent
+                        // actually exposes the category — a agent without a
+                        // model selector shouldn't blank a model set at launch.
+                        if let Some(model) = model.clone() {
+                            agent.model = Some(model);
+                        }
+                        if let Some(effort) = effort.clone() {
+                            agent.effort = Some(effort);
+                        }
+                    })?;
+                }
+                "agent.config_options"
             }
             "UserPromptSubmit" => {
                 if let Some(agent) = agent.as_mut() {
@@ -601,6 +625,36 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
     })
 }
 
+/// Reads the `configOptions` array out of a `ConfigOptions` hook payload.
+///
+/// Malformed entries are skipped rather than failing the batch: ACP is
+/// explicitly extensible, and one option shaped in a way qmux doesn't
+/// understand must not cost the user the rest of their model picker.
+fn parse_config_options(payload: &Value) -> Vec<AcpConfigOption> {
+    payload
+        .get("configOptions")
+        .and_then(Value::as_array)
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| serde_json::from_value(option.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The display label of the first option in `category`, if the agent exposes
+/// one. Categories are unique in practice but the spec does not require it, so
+/// first-wins rather than asserting.
+fn category_label(options: &[AcpConfigOption], category: &str) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.category.as_deref() == Some(category))
+        .and_then(AcpConfigOption::current_label)
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+}
+
 fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEvent> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("lifecycle") {
@@ -842,6 +896,127 @@ mod tests {
                 is_error: true,
             }]
         );
+    }
+
+    fn config_payload() -> Value {
+        json!({ "configOptions": [
+            {
+                "id": "mode", "name": "Session Mode", "category": "mode", "type": "select",
+                "currentValue": "ask",
+                "options": [
+                    { "value": "ask", "name": "Ask" },
+                    { "value": "code", "name": "Code" },
+                ],
+            },
+            {
+                "id": "model", "name": "Model", "category": "model", "type": "select",
+                "currentValue": "model-2",
+                "options": [
+                    { "value": "model-1", "name": "Sonnet" },
+                    { "value": "model-2", "name": "Opus" },
+                ],
+            },
+            {
+                "id": "thinking", "name": "Thinking", "category": "thought_level", "type": "select",
+                "currentValue": "high",
+                "options": [{ "value": "high", "name": "Extra" }],
+            },
+            { "id": "brave", "name": "Brave Mode", "type": "boolean", "currentValue": true },
+        ]})
+    }
+
+    #[test]
+    fn config_options_parse_including_boolean_and_uncategorized_entries() {
+        let options = parse_config_options(&config_payload());
+        assert_eq!(options.len(), 4);
+
+        let model = &options[1];
+        assert_eq!(model.id, "model");
+        assert_eq!(model.kind, "select");
+        assert_eq!(model.category.as_deref(), Some("model"));
+        assert_eq!(model.options.len(), 2);
+
+        // A boolean carries no choices and has no category.
+        let brave = &options[3];
+        assert_eq!(brave.kind, "boolean");
+        assert_eq!(brave.current_value, json!(true));
+        assert!(brave.options.is_empty());
+        assert_eq!(brave.category, None);
+    }
+
+    #[test]
+    fn the_current_value_label_prefers_the_choice_name_over_its_id() {
+        let options = parse_config_options(&config_payload());
+        // "model-2" is meaningless in a header; "Opus" is the point.
+        assert_eq!(category_label(&options, "model").as_deref(), Some("Opus"));
+        assert_eq!(
+            category_label(&options, "thought_level").as_deref(),
+            Some("Extra")
+        );
+        assert_eq!(category_label(&options, "mode").as_deref(), Some("Ask"));
+        assert_eq!(category_label(&options, "model_config"), None);
+    }
+
+    #[test]
+    fn a_value_with_no_matching_choice_falls_back_to_itself() {
+        let options = parse_config_options(&json!({ "configOptions": [
+            { "id": "m", "name": "Model", "category": "model", "type": "select",
+              "currentValue": "gpt-9", "options": [{ "value": "other", "name": "Other" }] },
+        ]}));
+        assert_eq!(category_label(&options, "model").as_deref(), Some("gpt-9"));
+    }
+
+    #[test]
+    fn booleans_and_empty_values_produce_sensible_labels() {
+        let options = parse_config_options(&json!({ "configOptions": [
+            { "id": "a", "name": "A", "category": "_x", "type": "boolean", "currentValue": true },
+            { "id": "b", "name": "B", "category": "_y", "type": "boolean", "currentValue": false },
+            { "id": "c", "name": "C", "category": "_z", "type": "select", "currentValue": null },
+            { "id": "d", "name": "D", "category": "_w", "type": "select", "currentValue": "  " },
+        ]}));
+        assert_eq!(category_label(&options, "_x").as_deref(), Some("on"));
+        assert_eq!(category_label(&options, "_y").as_deref(), Some("off"));
+        // Nothing worth showing beats showing an empty string.
+        assert_eq!(category_label(&options, "_z"), None);
+        assert_eq!(category_label(&options, "_w"), None);
+    }
+
+    #[test]
+    fn one_malformed_option_does_not_discard_the_rest() {
+        // ACP is extensible; a shape qmux can't read must not cost the user
+        // their whole model picker.
+        let options = parse_config_options(&json!({ "configOptions": [
+            { "nonsense": true },
+            { "id": "model", "name": "Model", "category": "model", "type": "select",
+              "currentValue": "m1", "options": [{ "value": "m1", "name": "One" }] },
+        ]}));
+        assert_eq!(options.len(), 1);
+        assert_eq!(category_label(&options, "model").as_deref(), Some("One"));
+    }
+
+    #[test]
+    fn a_payload_without_config_options_parses_as_empty() {
+        for payload in [json!({}), json!({ "configOptions": [] }), json!(null)] {
+            assert!(parse_config_options(&payload).is_empty(), "{payload}");
+        }
+    }
+
+    #[test]
+    fn config_options_round_trip_to_the_frontend_shape() {
+        let options = parse_config_options(&config_payload());
+        let encoded = serde_json::to_value(&options).expect("serializes");
+        // `type` and `currentValue` are the names the protocol and the UI both
+        // use; `kind` is only the Rust spelling.
+        assert_eq!(encoded[1]["type"], "select");
+        assert_eq!(encoded[1]["currentValue"], "model-2");
+        assert_eq!(encoded[1]["options"][1]["name"], "Opus");
+        assert!(
+            encoded[3].get("options").is_none(),
+            "empty choices are omitted"
+        );
+
+        let decoded: Vec<AcpConfigOption> = serde_json::from_value(encoded).expect("round-trips");
+        assert_eq!(decoded, options);
     }
 
     #[test]

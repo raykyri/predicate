@@ -1482,6 +1482,7 @@ mod tests {
         // An adapter without a native fork command is rejected before any spawn is attempted.
         state
             .insert_agent(AgentInfo {
+                acp_config_options: Vec::new(),
                 acp_agent: None,
                 id: "agent-1".to_string(),
                 group_id: "group-1".to_string(),
@@ -1510,6 +1511,7 @@ mod tests {
 
     fn session_agent(id: &str, pane_id: Option<&str>, dir: &str, session: &str) -> AgentInfo {
         AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),

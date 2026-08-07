@@ -3882,6 +3882,7 @@ trusted_hash = "sha256:trusted"
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),

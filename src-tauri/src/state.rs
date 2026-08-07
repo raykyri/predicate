@@ -9864,6 +9864,7 @@ mod tests {
 
     fn sample_agent(id: &str) -> AgentInfo {
         AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
@@ -15865,6 +15866,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let mut agent = AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
@@ -15918,6 +15920,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
@@ -16030,6 +16033,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),

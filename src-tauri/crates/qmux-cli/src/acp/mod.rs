@@ -560,6 +560,12 @@ fn session_loop(
             "clientCapabilities": {
                 "fs": { "readTextFile": true, "writeTextFile": true },
                 "terminal": true,
+                // Agents MUST NOT send `type: "boolean"` config options unless
+                // the client says it can render them. qmux only displays them
+                // for now, which is enough to advertise: a boolean shown as
+                // on/off is rendered correctly even though it isn't yet
+                // settable.
+                "session": { "configOptions": { "boolean": {} } },
             },
             "clientInfo": { "name": "qmux", "title": "qmux", "version": env!("CARGO_PKG_VERSION") },
         }),
@@ -591,15 +597,18 @@ fn session_loop(
         );
     }
 
-    let session_id = start_session(bridge, config)?;
+    let session = start_session(bridge, config)?;
     *bridge
         .session_id
         .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some(session_id.clone());
+        .unwrap_or_else(|err| err.into_inner()) = Some(session.id.clone());
     let _ = request_silent(
         "hook.notify",
-        hook_payload("SessionStart", json!({ "session_id": session_id })),
+        hook_payload("SessionStart", json!({ "session_id": session.id })),
     );
+    if let Some(options) = session.config_options {
+        report_config_options(&options, false);
+    }
 
     if let Some(prompt) = config.initial_prompt.clone() {
         run_turn(bridge, events, &prompt)?;
@@ -625,7 +634,18 @@ fn session_loop(
     }
 }
 
-fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<String, String> {
+/// A session that is open and ready for prompts, plus whatever configuration
+/// the agent chose to expose for it.
+struct StartedSession {
+    id: String,
+    /// The agent's `configOptions`, verbatim. Absent when the agent exposes
+    /// none — and, in ACP v1, after a resume: `session/load` answers with
+    /// `null`, so a resumed session has no configuration until the agent
+    /// pushes a `config_option_update`.
+    config_options: Option<Value>,
+}
+
+fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<StartedSession, String> {
     let params = json!({ "cwd": config.cwd.display().to_string(), "mcpServers": [] });
 
     // Resuming is best-effort: `loadSession` is an optional agent capability and
@@ -643,9 +663,12 @@ fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<String, 
         bridge.flush_message();
         bridge.replaying.store(false, Ordering::SeqCst);
         match loaded {
-            Ok(_) => {
+            Ok(result) => {
                 println!("{}", dim(&format!("\nresumed session {session_id}")));
-                return Ok(session_id.to_string());
+                return Ok(StartedSession {
+                    id: session_id.to_string(),
+                    config_options: config_options_of(&result),
+                });
             }
             Err(err) => println!(
                 "{}",
@@ -657,11 +680,81 @@ fn start_session(bridge: &Arc<Bridge>, config: &BridgeConfig) -> Result<String, 
     }
 
     let result = bridge.connection.request("session/new", params)?;
-    result
+    let id = result
         .get("sessionId")
         .and_then(Value::as_str)
         .map(str::to_string)
-        .ok_or_else(|| "the ACP agent's session/new response had no sessionId".to_string())
+        .ok_or_else(|| "the ACP agent's session/new response had no sessionId".to_string())?;
+    Ok(StartedSession {
+        config_options: config_options_of(&result),
+        id,
+    })
+}
+
+/// Pulls a non-empty `configOptions` array out of a session-setup result.
+fn config_options_of(result: &Value) -> Option<Value> {
+    let options = result.get("configOptions")?.as_array()?;
+    (!options.is_empty()).then(|| Value::Array(options.clone()))
+}
+
+/// Shows the agent's configuration in the pane and hands it to qmux, which maps
+/// the `model` and `thought_level` categories onto the fields it already
+/// displays. Both the setup response and `config_option_update` carry the
+/// *complete* list, so this always replaces rather than merges.
+///
+/// `mid_stream` is set when this interrupts a turn: streamed assistant text has
+/// no trailing newline, so the summary would otherwise land on the end of the
+/// agent's sentence.
+fn report_config_options(options: &Value, mid_stream: bool) {
+    let entries = options.as_array().map(Vec::as_slice).unwrap_or_default();
+    if entries.is_empty() {
+        return;
+    }
+    let summary = entries
+        .iter()
+        .filter_map(|option| {
+            let name = option.get("name").and_then(Value::as_str)?;
+            Some(format!("{name}: {}", current_value_label(option)))
+        })
+        .collect::<Vec<_>>();
+    if !summary.is_empty() {
+        let lead = if mid_stream { "\n" } else { "" };
+        println!("{lead}{}", dim(&summary.join(" · ")));
+    }
+    let _ = request_silent(
+        "hook.notify",
+        hook_payload("ConfigOptions", json!({ "configOptions": options })),
+    );
+}
+
+/// The human-readable form of an option's current value: the matching choice's
+/// `name` for a select, the raw value otherwise. Agents pick opaque ids
+/// (`"model-1"`), so showing the label is the difference between a useful
+/// header and a meaningless one.
+///
+/// qmux applies the same rule to render these in the UI
+/// (`workspace::AcpConfigOption::current_label`). The two live in different
+/// crates and cannot share code; change them together.
+fn current_value_label(option: &Value) -> String {
+    let current = option.get("currentValue").unwrap_or(&Value::Null);
+    if let Some(current) = current.as_str() {
+        let labelled = option
+            .get("options")
+            .and_then(Value::as_array)
+            .and_then(|choices| {
+                choices
+                    .iter()
+                    .find(|choice| choice.get("value").and_then(Value::as_str) == Some(current))
+            })
+            .and_then(|choice| choice.get("name").and_then(Value::as_str));
+        return labelled.unwrap_or(current).to_string();
+    }
+    match current {
+        Value::Bool(true) => "on".to_string(),
+        Value::Bool(false) => "off".to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
 }
 
 /// One prompt turn: submit, then service agent traffic until the response lands.
@@ -1007,6 +1100,15 @@ fn handle_session_update(bridge: &Arc<Bridge>, params: &Value) {
                 json!([{ "type": "raw", "value": { "plan": entries } }]),
             );
         }
+        "config_option_update" => {
+            // Agents push these on their own — a model falling back under rate
+            // limiting, a mode switching itself. Like the setup response, the
+            // payload is the complete list.
+            if let Some(options) = update.get("configOptions") {
+                bridge.flush_message();
+                report_config_options(options, true);
+            }
+        }
         _ => {}
     }
 }
@@ -1259,7 +1361,7 @@ fn create_terminal(bridge: &Arc<Bridge>, params: &Value) -> Result<Value, String
 
     println!(
         "\n{}",
-        dim(&format!("· $ {command} {}", args.join(" ")).trim_end())
+        dim(format!("· $ {command} {}", args.join(" ")).trim_end())
     );
     let terminal_id = bridge
         .terminals

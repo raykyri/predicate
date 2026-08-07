@@ -79,6 +79,14 @@ fn main() {
             "a_refused_resume_falls_back_to_a_new_session",
             a_refused_resume_falls_back_to_a_new_session,
         ),
+        (
+            "session_config_options_are_reported_and_relabelled",
+            session_config_options_are_reported_and_relabelled,
+        ),
+        (
+            "initialize_advertises_boolean_config_support",
+            initialize_advertises_boolean_config_support,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -644,9 +652,13 @@ fn fake_agent(scenario: &str) {
                 "id": id,
                 "error": { "code": -32601, "message": "this agent cannot load sessions" },
             })),
-            "session/new" => agent.send(json!({
-                "jsonrpc": "2.0", "id": id, "result": { "sessionId": "s1" },
-            })),
+            "session/new" => {
+                let mut result = json!({ "sessionId": "s1" });
+                if scenario == "config" {
+                    result["configOptions"] = config_options("model-1");
+                }
+                agent.send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+            }
             "session/prompt" => {
                 // Off the read loop: several scenarios call back into the
                 // client and would otherwise deadlock against their own reader.
@@ -699,6 +711,15 @@ fn run_scenario(agent: &Arc<Agent>, scenario: &str, id: Option<Value>) {
             agent.note("permission", outcome);
         }
         "cancelled" => stop_reason = "cancelled",
+        "config" => {
+            // Agents push their own changes — a model falling back under rate
+            // limiting is the canonical case — and the push carries the whole
+            // list, not a delta.
+            agent.update(json!({
+                "sessionUpdate": "config_option_update",
+                "configOptions": config_options("model-2"),
+            }));
+        }
         "junk" => {
             agent.send_raw("this is not JSON at all");
             agent.send_raw("{\"partial\": ");
@@ -818,5 +839,69 @@ fn run_terminal_scenario(agent: &Arc<Agent>) {
     agent.note(
         "after_release",
         json!({ "ok": after_release.get("output").is_some() }),
+    );
+}
+
+/// The config an agent exposes, with `current` selected as the model. Includes
+/// a boolean option, which an agent may only send once the client advertised
+/// support for rendering one.
+fn config_options(current: &str) -> Value {
+    json!([
+        {
+            "id": "model", "name": "Model", "category": "model", "type": "select",
+            "currentValue": current,
+            "options": [
+                { "value": "model-1", "name": "Sonnet" },
+                { "value": "model-2", "name": "Opus" },
+            ],
+        },
+        {
+            "id": "thinking", "name": "Thinking", "category": "thought_level", "type": "select",
+            "currentValue": "high",
+            "options": [{ "value": "high", "name": "Extra" }],
+        },
+        { "id": "brave", "name": "Brave Mode", "type": "boolean", "currentValue": true },
+    ])
+}
+
+fn session_config_options_are_reported_and_relabelled() {
+    let session = run_bridge("config", "go\n");
+
+    // Opaque ids are useless in a header; the pane shows the choice names, and
+    // a boolean reads as on/off rather than `true`.
+    assert!(
+        session.pane.contains("Model: Sonnet"),
+        "setup config should be shown: {}",
+        session.pane
+    );
+    assert!(
+        session.pane.contains("Thinking: Extra") && session.pane.contains("Brave Mode: on"),
+        "every option should be summarised: {}",
+        session.pane
+    );
+
+    // The agent-initiated update replaces the previous state wholesale.
+    let last_model = session
+        .pane
+        .rmatch_indices("Model: ")
+        .next()
+        .map(|(index, _)| session.pane[index..].lines().next().unwrap_or_default())
+        .unwrap_or_default();
+    assert!(
+        last_model.contains("Model: Opus"),
+        "a config_option_update should supersede the setup values, got {last_model:?}"
+    );
+}
+
+fn initialize_advertises_boolean_config_support() {
+    // Agents MUST NOT send boolean options unless the client advertised it, so
+    // the capability and the boolean assertion above have to travel together.
+    let session = run_bridge("config", "go\n");
+    let initialize: Value = serde_json::from_str(&session.frames[0]).expect("first frame parses");
+    assert_eq!(
+        initialize["params"]["clientCapabilities"]["session"]["configOptions"]["boolean"],
+        json!({}),
+        "boolean config support should be advertised: {}",
+        session.frames[0]
     );
 }

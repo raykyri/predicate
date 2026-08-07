@@ -2,7 +2,7 @@ use crate::events::QmuxEvent;
 use crate::persistence::{self, WorktreeLocation};
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -150,6 +150,58 @@ pub struct ResearchWorkspaceInfo {
     pub tree_count: usize,
 }
 
+/// One setting an ACP agent exposes for a session (ACP "session config
+/// options"). Deliberately lenient: the protocol lets agents add categories and
+/// value kinds qmux has never heard of, so unknown shapes must survive the trip
+/// to the UI rather than being rejected here.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigOption {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `model`, `mode`, `model_config`, `thought_level`, or an agent-specific
+    /// one (which the spec requires to be `_`-prefixed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// `select` or `boolean`. Named `kind` because `type` is a keyword.
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub current_value: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<AcpConfigChoice>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpConfigChoice {
+    pub value: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+impl AcpConfigOption {
+    /// The label for `current_value`: a select's matching choice name, or the
+    /// bare value. Agents choose opaque ids (`"model-1"`), so the label is what
+    /// makes a header worth reading.
+    pub fn current_label(&self) -> Option<String> {
+        match &self.current_value {
+            Value::String(current) => Some(
+                self.options
+                    .iter()
+                    .find(|choice| &choice.value == current)
+                    .map(|choice| choice.name.clone())
+                    .unwrap_or_else(|| current.clone()),
+            ),
+            Value::Bool(value) => Some(if *value { "on" } else { "off" }.to_string()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentInfo {
@@ -176,6 +228,12 @@ pub struct AgentInfo {
     /// remember which agent behind that protocol to start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,
+    /// Session configuration an ACP agent exposes for itself — its model list,
+    /// mode, reasoning level. Read-only for now: qmux renders it, and the agent
+    /// remains the source of truth. Persisted so a restored pane shows the
+    /// session's settings before the agent has said anything.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acp_config_options: Vec<AcpConfigOption>,
     pub parent_id: Option<String>,
     pub fork_point: Option<String>,
     pub root_session_id: Option<String>,
@@ -1024,6 +1082,7 @@ fn prepare_agent_workspace_locked(
     };
 
     let agent = AgentInfo {
+        acp_config_options: Vec::new(),
         id: agent_id.clone(),
         group_id: group.id.clone(),
         adapter: request.adapter,
@@ -2239,6 +2298,7 @@ mod tests {
 
     fn sample_agent(id: &str, pane_id: Option<&str>, status: AgentStatus) -> AgentInfo {
         AgentInfo {
+            acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),

@@ -1307,6 +1307,7 @@ fn launch_research_child_run(
                 }
             };
             AgentInfo {
+                acp_config_options: Vec::new(),
                 id: parent
                     .agent_id
                     .clone()

@@ -121,6 +121,25 @@ export interface GroupInfo {
   agents: string[];
 }
 
+/** One ACP session config option. `category` is a rendering hint — `model`
+ * and `thought_level` are already surfaced as the agent's model and effort;
+ * agent-specific categories are `_`-prefixed. */
+export interface AcpConfigOption {
+  id: string;
+  name: string;
+  description?: string | null;
+  category?: string | null;
+  type: "select" | "boolean";
+  currentValue: string | boolean | null;
+  options?: AcpConfigChoice[];
+}
+
+export interface AcpConfigChoice {
+  value: string;
+  name: string;
+  description?: string | null;
+}
+
 export interface AgentInfo {
   id: string;
   groupId: string;
@@ -148,6 +167,11 @@ export interface AgentInfo {
    * ACP adapter's id names a protocol rather than a program, so this is what
    * identifies the actual agent. Absent for every other adapter. */
   acpAgent?: string | null;
+  /** Session settings an ACP agent exposes for itself (model, mode, reasoning
+   * level). Read-only: the agent owns this state and pushes the complete list
+   * whenever any of it changes, so replace rather than merge. Empty for every
+   * other adapter. */
+  acpConfigOptions?: AcpConfigOption[];
   // True when the queue has paused after a pause-after turn finished.
   paused?: boolean;
   createdAt: number;
