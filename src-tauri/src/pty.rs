@@ -1885,17 +1885,13 @@ fn write_pane_input<W: Write + ?Sized>(
 }
 
 pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> Result<(), String> {
-    // Grok's current macOS TUI does not reliably wake from the SIGWINCH that
-    // TIOCSWINSZ is documented to generate. Its terminal emulator still reflows
-    // to the new grid, but the Ratatui frame remains at the previous width until
-    // another explicit SIGWINCH arrives. Resolve the adapter before taking the
-    // master lock so this path never inverts the model -> PTY lock order.
-    #[cfg(target_os = "macos")]
-    let explicitly_notify_resize = state
-        .agent_by_pane(&pane_id)
-        .ok()
-        .flatten()
-        .is_some_and(|agent| adapter_needs_explicit_resize_signal(Some(&agent.adapter)));
+    // After TIOCSWINSZ, always re-signal the foreground process group with
+    // SIGWINCH. The kernel is documented to generate one, but several TUIs
+    // (Grok's Ratatui UI, and occasionally other agents nested under
+    // agent-exec) still fail to redraw until a second, explicit WINCH — most
+    // noticeable on one-shot layout changes (split close, right-pane toggle)
+    // that only produce a single TIOCSWINSZ. Window resizes often paper over
+    // the gap with a storm of intermediate sizes.
     let master = state
         .pane_master(&pane_id)?
         .ok_or_else(|| format!("pane {pane_id} was not found"))?;
@@ -1916,28 +1912,21 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
         })
         .map_err(|err| format!("failed to resize pane {pane_id}: {err}"))?;
     #[cfg(target_os = "macos")]
-    if size_changed
-        && explicitly_notify_resize
-        && let Some(process_group) = master.process_group_leader()
-    {
-        // Signal the foreground group, not just the pane's direct child. A Grok
-        // launched from a shell pane runs below qmux's agent-exec supervisor,
-        // while a dedicated Grok pane has the same process as its group leader.
-        // SIGWINCH is ignored by default, so an exit/detach race is harmless.
+    if size_changed && let Some(process_group) = master.process_group_leader() {
+        // Signal the foreground group, not just the pane's direct child. An
+        // agent launched from a shell pane runs below qmux's agent-exec
+        // supervisor, while a dedicated agent pane has the same process as
+        // its group leader. SIGWINCH is ignored by default, so an exit/detach
+        // race is harmless.
         let result = unsafe { libc::kill(-process_group, libc::SIGWINCH) };
         if result != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() != Some(libc::ESRCH) {
-                eprintln!("qmux: failed to explicitly notify Grok pane {pane_id} of resize: {err}");
+                eprintln!("qmux: failed to notify pane {pane_id} of resize: {err}");
             }
         }
     }
     state.update_pane_size(&pane_id, cols, rows)
-}
-
-#[cfg(target_os = "macos")]
-fn adapter_needs_explicit_resize_signal(adapter_id: Option<&str>) -> bool {
-    adapter_id == Some("grok")
 }
 
 pub fn resize_native_host_pane(
@@ -2785,15 +2774,6 @@ mod tests {
     #[test]
     fn pane_shell_is_never_empty() {
         assert!(!pane_shell().is_empty());
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn only_grok_needs_an_explicit_resize_signal() {
-        assert!(adapter_needs_explicit_resize_signal(Some("grok")));
-        assert!(!adapter_needs_explicit_resize_signal(Some("codex")));
-        assert!(!adapter_needs_explicit_resize_signal(Some("claude")));
-        assert!(!adapter_needs_explicit_resize_signal(None));
     }
 
     #[test]
