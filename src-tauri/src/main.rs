@@ -958,7 +958,6 @@ fn launch_fresh_research_run(
         }
     };
     let spawn = SpawnAgentRequest {
-        host: None,
         adapter_id: adapter.to_string(),
         prompt,
         group_id: Some(workspace.id.clone()),
@@ -1356,7 +1355,6 @@ fn launch_research_child_run(
                 }
             };
             AgentInfo {
-                host: None,
                 acp_config_options: Vec::new(),
                 id: parent
                     .agent_id

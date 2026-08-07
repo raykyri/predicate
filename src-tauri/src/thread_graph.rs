@@ -1399,7 +1399,6 @@ mod tests {
         worktree_dir: String,
     ) -> AgentInfo {
         AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),

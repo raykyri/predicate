@@ -6,6 +6,12 @@
 //! behaviour) or an ssh destination, and every command that has to run *where
 //! the code lives* goes through it.
 //!
+//! A host is derived from the group's [`RemoteRef`], never declared separately.
+//! Remoteness is a property of the workspace — the directory, its repository,
+//! and every pane opened against it are all on one machine — so binding it to
+//! the group is what keeps an agent from ending up on a different machine from
+//! the code it is editing.
+//!
 //! The reason this is a seam rather than an ssh call bolted onto the ACP
 //! adapter is that `prepare_agent_workspace` runs for *every* adapter. Teaching
 //! the workspace layer where it is buys remote panes for Claude and Codex too,
@@ -22,8 +28,7 @@
 //! the tests below are mostly about that.
 
 use crate::adapters::shell_quote_arg;
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use crate::workspace::{RemoteMultiplexer, RemoteRef};
 use std::process::Command;
 
 /// Refuse to sit on a dead connection: a worktree call is on the path to
@@ -31,29 +36,25 @@ use std::process::Command;
 const CONNECT_TIMEOUT_SECONDS: u32 = 10;
 /// Where worktrees land on a host that does not name a `workspaceRoot`.
 const DEFAULT_REMOTE_WORKSPACE_ROOT: &str = "~/.qmux/workspaces";
+/// How the qmux CLI is invoked on a host that does not name one.
+const DEFAULT_REMOTE_CLI: &str = "qmux-cli";
 
-/// A machine qmux can run agents on, as declared in `qmux.config.json`.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct HostConfig {
-    /// The ssh destination, e.g. `devbox` or `user@10.0.0.4`. Passed to `ssh`
-    /// as-is so `~/.ssh/config` aliases work.
+/// A remote host, flattened out of the group's [`RemoteRef`] into the shape the
+/// transport actually needs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteTarget {
+    /// Display name, for error messages.
+    pub label: String,
+    /// Connection target: an ssh-config alias or `user@host`. Auth and address
+    /// resolution belong to the system `ssh` client, never to qmux.
     pub ssh: String,
-    /// How to invoke the qmux CLI on that machine. It services hooks and, later,
-    /// runs the ACP bridge.
-    #[serde(default = "default_remote_cli")]
+    /// How to invoke the qmux CLI over there. It services hooks and runs the
+    /// ACP bridge.
     pub qmux_cli: String,
-    /// Where agent worktrees live on that machine. Falls back to the remote
-    /// user's home when unset.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Where agent worktrees live on that machine.
     pub workspace_root: Option<String>,
-    /// Extra `ssh` flags, for hosts needing a jump box, identity file, or port.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ssh_options: Vec<String>,
-}
-
-fn default_remote_cli() -> String {
-    "qmux-cli".to_string()
+    /// Chooses how a pane survives a dropped connection.
+    pub multiplexer: RemoteMultiplexer,
 }
 
 /// Resolved execution target. `Local` is the default everywhere and behaves
@@ -62,10 +63,27 @@ fn default_remote_cli() -> String {
 pub enum Host {
     #[default]
     Local,
-    Remote {
-        name: String,
-        config: HostConfig,
-    },
+    Remote(RemoteTarget),
+}
+
+/// Derives the host from a group's remote binding.
+///
+/// `None` — a group with no remote — is the local machine, which is every group
+/// qmux has ever created, so nothing needs migrating.
+pub fn for_group(remote: Option<&RemoteRef>) -> Host {
+    match remote {
+        None => Host::Local,
+        Some(remote) => Host::Remote(RemoteTarget {
+            label: remote.label.clone(),
+            ssh: remote.host.clone(),
+            qmux_cli: remote
+                .qmux_cli
+                .clone()
+                .unwrap_or_else(|| DEFAULT_REMOTE_CLI.to_string()),
+            workspace_root: remote.workspace_root.clone(),
+            multiplexer: remote.multiplexer,
+        }),
+    }
 }
 
 /// How a remote command should be run: interactive commands get a tty and may
@@ -120,14 +138,14 @@ impl Host {
     pub fn label(&self) -> &str {
         match self {
             Host::Local => "local",
-            Host::Remote { name, .. } => name,
+            Host::Remote(target) => &target.label,
         }
     }
 
-    pub fn config(&self) -> Option<&HostConfig> {
+    pub fn remote(&self) -> Option<&RemoteTarget> {
         match self {
             Host::Local => None,
-            Host::Remote { config, .. } => Some(config),
+            Host::Remote(target) => Some(target),
         }
     }
 
@@ -160,7 +178,7 @@ impl Host {
                 }
                 command
             }
-            Host::Remote { .. } => {
+            Host::Remote(_) => {
                 let argv = self
                     .ssh_argv(&remote, Interaction::Batch)
                     .expect("a remote host always yields an ssh argv");
@@ -181,7 +199,7 @@ impl Host {
         remote: &RemoteCommand<'_>,
         interaction: Interaction,
     ) -> Option<Vec<String>> {
-        let Host::Remote { config, .. } = self else {
+        let Host::Remote(target) = self else {
             return None;
         };
         let mut argv = vec!["ssh".to_string()];
@@ -210,12 +228,11 @@ impl Host {
             argv.push("-R".to_string());
             argv.push(format!("{}:{}", forward.remote_path, forward.local_path));
         }
-        argv.extend(config.ssh_options.iter().cloned());
 
         // Ends ssh's own option parsing, so a destination that begins with "-"
         // is treated as a destination.
         argv.push("--".to_string());
-        argv.push(config.ssh.clone());
+        argv.push(target.ssh.clone());
         argv.push(remote_command_line(remote));
         Some(argv)
     }
@@ -227,9 +244,9 @@ impl Host {
     /// stat'ing the far side's path here resolves against *this* filesystem and
     /// silently produces a local directory.
     pub fn remote_workspace_root(&self) -> Option<String> {
-        let config = self.config()?;
+        let target = self.remote()?;
         Some(
-            config
+            target
                 .workspace_root
                 .clone()
                 .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string()),
@@ -264,53 +281,23 @@ fn remote_command_line(remote: &RemoteCommand<'_>) -> String {
     parts.join(" ")
 }
 
-/// The declared hosts, keyed by the short name a launch refers to.
-pub type HostConfigs = BTreeMap<String, HostConfig>;
-
-/// Resolves a launch's requested host name.
-///
-/// `None` and an empty name both mean local, so every existing caller and every
-/// stored agent keeps working without a migration.
-pub fn resolve(hosts: &HostConfigs, requested: Option<&str>) -> Result<Host, String> {
-    let Some(name) = requested.map(str::trim).filter(|name| !name.is_empty()) else {
-        return Ok(Host::Local);
-    };
-    if name == "local" {
-        return Ok(Host::Local);
-    }
-    let config = hosts.get(name).cloned().ok_or_else(|| {
-        if hosts.is_empty() {
-            format!("unknown host '{name}'; no hosts are configured in qmux.config.json")
-        } else {
-            format!(
-                "unknown host '{name}'; configured hosts: {}",
-                hosts.keys().cloned().collect::<Vec<_>>().join(", ")
-            )
-        }
-    })?;
-    if config.ssh.trim().is_empty() {
-        return Err(format!("host '{name}' has no ssh destination"));
-    }
-    Ok(Host::Remote {
-        name: name.to_string(),
-        config,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn remote_host() -> Host {
-        Host::Remote {
-            name: "devbox".to_string(),
-            config: HostConfig {
-                ssh: "user@devbox".to_string(),
-                qmux_cli: "qmux-cli".to_string(),
-                workspace_root: Some("/srv/work".to_string()),
-                ssh_options: vec!["-p".to_string(), "2222".to_string()],
-            },
+    fn remote_ref(workspace_root: Option<&str>, qmux_cli: Option<&str>) -> RemoteRef {
+        RemoteRef {
+            id: "saved-1".to_string(),
+            label: "devbox".to_string(),
+            host: "user@devbox".to_string(),
+            multiplexer: RemoteMultiplexer::Tmux,
+            qmux_cli: qmux_cli.map(str::to_string),
+            workspace_root: workspace_root.map(str::to_string),
         }
+    }
+
+    fn remote_host() -> Host {
+        for_group(Some(&remote_ref(Some("/srv/work"), None)))
     }
 
     fn argv(host: &Host, remote: RemoteCommand<'_>, interaction: Interaction) -> Vec<String> {
@@ -355,8 +342,7 @@ mod tests {
             !argv.iter().any(|arg| arg == "StreamLocalBindUnlink=yes"),
             "only a forwarding session should unlink sockets"
         );
-        // Configured options survive, and `--` guards the destination.
-        assert!(argv.windows(2).any(|pair| pair == ["-p", "2222"]));
+        // `--` guards a destination that begins with "-".
         let end = argv.iter().position(|arg| arg == "--").expect("-- present");
         assert_eq!(argv[end + 1], "user@devbox");
         assert_eq!(argv[end + 2], "'git' 'status'");
@@ -503,67 +489,28 @@ mod tests {
     }
 
     #[test]
-    fn an_absent_or_local_host_name_resolves_to_the_local_machine() {
-        let hosts = HostConfigs::new();
-        for requested in [None, Some(""), Some("   "), Some("local")] {
-            assert_eq!(resolve(&hosts, requested).unwrap(), Host::Local);
-        }
+    fn a_group_without_a_remote_is_the_local_machine() {
+        // Every group qmux has ever created, so this is what keeps the change
+        // from needing a migration.
+        assert_eq!(for_group(None), Host::Local);
+        assert!(Host::Local.remote().is_none());
     }
 
     #[test]
-    fn a_configured_host_resolves_and_an_unknown_one_lists_the_options() {
-        let hosts = HostConfigs::from([
-            (
-                "devbox".to_string(),
-                HostConfig {
-                    ssh: "user@devbox".to_string(),
-                    qmux_cli: "qmux-cli".to_string(),
-                    ..Default::default()
-                },
-            ),
-            (
-                "builder".to_string(),
-                HostConfig {
-                    ssh: "builder".to_string(),
-                    ..Default::default()
-                },
-            ),
-        ]);
+    fn a_groups_remote_becomes_its_host() {
+        let host = for_group(Some(&remote_ref(Some("/srv/work"), Some("/opt/qmux-cli"))));
+        let target = host.remote().expect("remote");
 
-        let host = resolve(&hosts, Some("devbox")).expect("configured");
         assert_eq!(host.label(), "devbox");
-        assert!(!host.is_local());
-
-        let err = resolve(&hosts, Some("nope")).expect_err("unknown");
-        assert!(err.contains("builder") && err.contains("devbox"), "{err}");
+        assert_eq!(target.ssh, "user@devbox");
+        assert_eq!(target.qmux_cli, "/opt/qmux-cli");
+        assert_eq!(target.multiplexer, RemoteMultiplexer::Tmux);
     }
 
     #[test]
-    fn a_host_without_an_ssh_destination_is_rejected_before_it_is_used() {
-        let hosts = HostConfigs::from([("broken".to_string(), HostConfig::default())]);
-        let err = resolve(&hosts, Some("broken")).expect_err("no destination");
-        assert!(err.contains("no ssh destination"), "{err}");
-    }
-
-    #[test]
-    fn an_unknown_host_says_so_even_with_nothing_configured() {
-        let err = resolve(&HostConfigs::new(), Some("devbox")).expect_err("unknown");
-        assert!(err.contains("no hosts are configured"), "{err}");
-    }
-
-    #[test]
-    fn host_config_defaults_the_remote_cli_but_keeps_an_override() {
-        let parsed: HostConfig =
-            serde_json::from_str(r#"{"ssh":"devbox"}"#).expect("minimal config parses");
-        assert_eq!(parsed.qmux_cli, "qmux-cli");
-        assert_eq!(parsed.workspace_root, None);
-
-        let parsed: HostConfig = serde_json::from_str(
-            r#"{"ssh":"devbox","qmuxCli":"/opt/qmux-cli","workspaceRoot":"/srv"}"#,
-        )
-        .expect("full config parses");
-        assert_eq!(parsed.qmux_cli, "/opt/qmux-cli");
-        assert_eq!(parsed.workspace_root.as_deref(), Some("/srv"));
+    fn a_remote_that_names_no_cli_gets_the_default() {
+        let host = for_group(Some(&remote_ref(None, None)));
+        assert_eq!(host.remote().unwrap().qmux_cli, DEFAULT_REMOTE_CLI);
     }
 
     #[test]
@@ -576,13 +523,7 @@ mod tests {
             Some("/srv/work")
         );
 
-        let bare = Host::Remote {
-            name: "b".to_string(),
-            config: HostConfig {
-                ssh: "b".to_string(),
-                ..Default::default()
-            },
-        };
+        let bare = for_group(Some(&remote_ref(None, None)));
         assert_eq!(
             bare.remote_workspace_root().as_deref(),
             Some(DEFAULT_REMOTE_WORKSPACE_ROOT)

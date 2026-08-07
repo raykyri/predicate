@@ -149,6 +149,20 @@ impl AcpAdapter {
         host.is_local().then_some(transcript)
     }
 
+    /// The host a launch runs on, taken from its group's remote binding.
+    ///
+    /// A launch with no group is creating one, which is always local — a remote
+    /// group has to be created deliberately.
+    fn group_host(state: &AppState, group_id: Option<&str>) -> Result<Host, String> {
+        let Some(group_id) = group_id else {
+            return Ok(Host::Local);
+        };
+        let group = state
+            .group(group_id)?
+            .ok_or_else(|| format!("group {group_id} was not found"))?;
+        Ok(crate::host::for_group(group.remote.as_ref()))
+    }
+
     /// Builds the command that puts a bridge in the pane, for whichever host
     /// the agent runs on.
     ///
@@ -170,7 +184,7 @@ impl AcpAdapter {
         local_cwd: PathBuf,
         envs: Vec<(String, String)>,
     ) -> Result<PaneLaunch, String> {
-        let Host::Remote { config, .. } = host else {
+        let Host::Remote(target) = host else {
             let bridge = crate::launch_path::qmux_cli_path()?;
             return Ok(PaneLaunch {
                 program: bridge.display().to_string(),
@@ -187,7 +201,7 @@ impl AcpAdapter {
             .map(|(key, value)| match key.as_str() {
                 // These name local paths that mean nothing on the far side.
                 "QMUX_SOCK" => (key, remote_socket.clone()),
-                "QMUX_CLI" => (key, config.qmux_cli.clone()),
+                "QMUX_CLI" => (key, target.qmux_cli.clone()),
                 _ => (key, value),
             })
             .collect();
@@ -197,7 +211,7 @@ impl AcpAdapter {
         let argv = host
             .ssh_argv(
                 &RemoteCommand {
-                    program: &config.qmux_cli,
+                    program: &target.qmux_cli,
                     args: vec!["acp".to_string()],
                     envs: remote_envs,
                     forwards: vec![SocketForward {
@@ -253,14 +267,13 @@ impl AcpAdapter {
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
         let options = AcpLaunchOptions::from_value(request.options)?;
-        let host = crate::host::resolve(&state.config().hosts, request.host.as_deref())?;
+        let host = Self::group_host(state, request.group_id.as_deref())?;
         let (agent_key, acp_agent, binary) =
             self.resolve(state, &host, options.agent.as_deref())?;
 
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
-                host: request.host.clone(),
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,
@@ -341,7 +354,7 @@ impl AcpAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
-        let host = crate::host::resolve(&state.config().hosts, agent.host.as_deref())?;
+        let host = Self::group_host(state, Some(&agent.group_id))?;
         let (agent_key, acp_agent, binary) =
             self.resolve(state, &host, agent.acp_agent.as_deref())?;
         // A worktree on another machine cannot be stat'd from here. Recovery
@@ -1289,9 +1302,19 @@ mod tests {
         assert!(AcpLaunchOptions::from_value(json!({ "agnet": "goose" })).is_err());
     }
 
-    fn state_with_host(host: Option<(&str, &str)>) -> AppState {
-        let mut config = crate::config::QmuxConfig {
-            hosts: Default::default(),
+    fn remote_host(ssh: &str) -> Host {
+        crate::host::for_group(Some(&crate::workspace::RemoteRef {
+            id: "saved-1".to_string(),
+            label: "devbox".to_string(),
+            host: ssh.to_string(),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+            qmux_cli: Some("/opt/qmux-cli".to_string()),
+            workspace_root: None,
+        }))
+    }
+
+    fn test_state() -> AppState {
+        let config = crate::config::QmuxConfig {
             workspace_root: PathBuf::from("/tmp/qmux-acp-host-tests"),
             socket_path: PathBuf::from("/tmp/qmux-acp-host-tests.sock"),
             adapters: Default::default(),
@@ -1299,16 +1322,6 @@ mod tests {
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
         };
-        if let Some((name, ssh)) = host {
-            config.hosts.insert(
-                name.to_string(),
-                crate::host::HostConfig {
-                    ssh: ssh.to_string(),
-                    qmux_cli: "/opt/qmux-cli".to_string(),
-                    ..Default::default()
-                },
-            );
-        }
         AppState::new(config)
     }
 
@@ -1320,15 +1333,8 @@ mod tests {
             Some(transcript)
         );
 
-        let remote = Host::Remote {
-            name: "devbox".to_string(),
-            config: crate::host::HostConfig {
-                ssh: "devbox".to_string(),
-                ..Default::default()
-            },
-        };
         assert_eq!(
-            AcpAdapter::transcript_sink(&remote, transcript),
+            AcpAdapter::transcript_sink(&remote_host("devbox"), transcript),
             None,
             "a remote bridge told this path would write where nothing reads"
         );
@@ -1336,8 +1342,8 @@ mod tests {
 
     #[test]
     fn a_remote_launch_runs_the_bridge_through_ssh_with_the_socket_forwarded() {
-        let state = state_with_host(Some(("devbox", "user@devbox")));
-        let host = crate::host::resolve(&state.config().hosts, Some("devbox")).expect("configured");
+        let state = test_state();
+        let host = remote_host("user@devbox");
 
         let launch = AcpAdapter::launch_plan(
             &state,
@@ -1391,7 +1397,7 @@ mod tests {
 
     #[test]
     fn a_local_launch_still_runs_the_bridge_directly() {
-        let state = state_with_host(None);
+        let state = test_state();
         let launch = AcpAdapter::launch_plan(
             &state,
             &Host::Local,

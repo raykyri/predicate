@@ -326,40 +326,22 @@ compatibility. If the config file is absent, qmux uses the platform data
 directory for workspace state and the platform runtime directory, or a `run/`
 subdirectory of the data directory, for the control socket.
 
-### Hosts
+### Remote groups
 
-Agents normally run on the machine qmux is running on. A `hosts` block declares
-others:
+A workspace can be bound to another machine. Remoteness belongs to the group
+rather than to an individual agent: the directory, its repository, and every
+pane opened against it are one machine's, so binding it at the group level is
+what stops an agent ending up somewhere other than the code it is editing.
 
-```json
-{
-  "hosts": {
-    "devbox": {
-      "ssh": "user@devbox",
-      "qmuxCli": "qmux-cli",
-      "workspaceRoot": "/srv/qmux/workspaces",
-      "sshOptions": ["-J", "bastion"]
-    }
-  }
-}
-```
+A group's `remote` names the ssh destination, a label, and which multiplexer
+manages its panes there. It may also carry `qmuxCli` (default `qmux-cli`) and
+`workspaceRoot`, since a group's `managedDir` is always local and a remote
+group needs somewhere on its own machine for worktrees.
 
-`ssh` is passed to `ssh` verbatim, so `~/.ssh/config` aliases work. `qmuxCli`
-(default `qmux-cli`) is how the CLI is invoked on that machine; `workspaceRoot`
-is where agent worktrees live there; `sshOptions` are extra flags for hosts
-needing a jump box, identity file, or port.
-
-ACP agents can run on a host: pass its name as the launch's `host` and the pane
-runs `ssh <host> qmux-cli acp` instead of a local bridge, with the worktree
-created on that machine too. The control socket is reverse-forwarded over the
-same ssh channel, so lifecycle hooks and transcript records reach qmux without
-the pane token ever becoming a network credential — the socket stays guarded by
-its filesystem permissions, reachable only by whoever already holds the ssh
-connection.
-
-A remote host needs `qmux-cli` installed and the ACP agent on its `PATH`. The
-other adapters are not remote yet: they get host-aware worktrees, but their
-processes still launch locally.
+Git worktree creation, status, removal, and every repository probe already run
+on the group's host. Spawning the panes themselves does not yet — both
+`prepare_agent_workspace` and `plan_to_spec` still refuse remote groups, so no
+group can currently be created with a remote.
 
 ### ACP agents
 

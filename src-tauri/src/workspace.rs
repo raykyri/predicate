@@ -100,6 +100,13 @@ pub struct RemoteRef {
     /// address resolution belong to the system `ssh` client, never to qmux.
     pub host: String,
     pub multiplexer: RemoteMultiplexer,
+    /// How to invoke the qmux CLI on that host; defaults to `qmux-cli`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qmux_cli: Option<String>,
+    /// Where agent worktrees live there. The group's `managed_dir` is always
+    /// local, so a remote group needs somewhere on its own machine to put them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -228,11 +235,6 @@ pub struct AgentInfo {
     /// remember which agent behind that protocol to start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acp_agent: Option<String>,
-    /// The `hosts` entry this agent's worktree and process live on. Absent for
-    /// local agents, which is every agent created before hosts existed — so the
-    /// absent case has to stay indistinguishable from "local".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub host: Option<String>,
     /// Session configuration an ACP agent exposes for itself — its model list,
     /// mode, reasoning level. Read-only for now: qmux renders it, and the agent
     /// remains the source of truth. Persisted so a restored pane shows the
@@ -306,9 +308,6 @@ pub struct PrepareAgentWorkspaceRequest {
     /// When false, the agent runs directly in the base repository / cwd with no
     /// isolated git worktree (the default).
     pub use_worktree: bool,
-    /// Which `hosts` entry the agent's work runs on. `None` is the local
-    /// machine, which is what every caller meant before hosts existed.
-    pub host: Option<String>,
 }
 
 pub fn create_group(state: &AppState, request: CreateGroupRequest) -> Result<GroupInfo, String> {
@@ -1064,9 +1063,9 @@ fn prepare_agent_workspace_locked(
         .or_else(|| group.base_ref.clone())
         .unwrap_or_else(|| "HEAD".to_string());
     let mut branch = None;
-    // Resolved before any directory is allocated so an unknown host name
-    // fails the launch cleanly rather than after side effects on disk.
-    let host = host::resolve(&state.config().hosts, request.host.as_deref())?;
+    // The group is already resolved above, so the host comes for free — and
+    // cannot disagree with the workspace the worktree is being cut from.
+    let host = host::for_group(group.remote.as_ref());
 
     let worktree_dir = if request.use_worktree {
         // Isolated git worktree in the configured global or project-local root
@@ -1110,7 +1109,6 @@ fn prepare_agent_workspace_locked(
         // Set by the ACP adapter immediately after this returns; the shared
         // workspace request has no reason to carry an adapter-specific field.
         acp_agent: None,
-        host: request.host.clone(),
         parent_id: None,
         fork_point: None,
         root_session_id: None,
@@ -1192,7 +1190,6 @@ pub fn recover_shell_agent_from_session_start(
         prepare_agent_workspace_locked(
             state,
             PrepareAgentWorkspaceRequest {
-                host: None,
                 group_id: Some(pane.group_id.clone()),
                 base_repo: Some(pane.cwd.clone()),
                 base_ref: Some("HEAD".to_string()),
@@ -1549,11 +1546,16 @@ pub struct CapturedWorktreeRemoval {
     host: Host,
 }
 
-/// Resolves an agent's recorded host. A name that is no longer in config is an
-/// error rather than a silent fallback to local: running a worktree command on
-/// the wrong machine is worse than refusing to run it.
-fn agent_host(state: &AppState, name: &Option<String>) -> Result<Host, String> {
-    host::resolve(&state.config().hosts, name.as_deref())
+/// The host an agent's work runs on, which is its group's.
+///
+/// Derived rather than stored: the workspace is what is bound to a machine, so
+/// reading it from the group is what makes it impossible for an agent to drift
+/// onto a different host from its own worktree.
+fn agent_host(state: &AppState, agent: &AgentInfo) -> Result<Host, String> {
+    let group = state
+        .group(&agent.group_id)?
+        .ok_or_else(|| format!("group {} was not found", agent.group_id))?;
+    Ok(host::for_group(group.remote.as_ref()))
 }
 
 /// Reports whether an agent's git worktree has uncommitted changes — staged,
@@ -1562,9 +1564,8 @@ pub fn agent_worktree_status(state: &AppState, agent_id: &str) -> Result<Worktre
     let agent = state
         .agent(agent_id)?
         .ok_or_else(|| format!("agent {agent_id} was not found"))?;
+    let host = agent_host(state, &agent)?;
     let dir = agent.worktree_dir;
-
-    let host = agent_host(state, &agent.host)?;
     let output = host
         .git(["-C", dir.as_str(), "status", "--porcelain"])
         .output()
@@ -1610,7 +1611,7 @@ pub fn capture_agent_worktree_removal(
         return Err(format!("agent {} is not in a git worktree", agent.id));
     };
     let worktree_dir = agent.worktree_dir.clone();
-    let removal_host = agent_host(state, &agent.host)?;
+    let removal_host = agent_host(state, agent)?;
 
     let run_dir = state
         .group(&agent.group_id)?
@@ -2172,6 +2173,8 @@ mod tests {
             label: "workbox".to_string(),
             host: "workbox".to_string(),
             multiplexer: RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: None,
         }
     }
 
@@ -2197,14 +2200,14 @@ mod tests {
     }
 
     fn remote_host(root: Option<&str>) -> Host {
-        Host::Remote {
-            name: "devbox".to_string(),
-            config: crate::host::HostConfig {
-                ssh: "user@devbox".to_string(),
-                workspace_root: root.map(str::to_string),
-                ..Default::default()
-            },
-        }
+        host::for_group(Some(&RemoteRef {
+            id: "saved-1".to_string(),
+            label: "devbox".to_string(),
+            host: "user@devbox".to_string(),
+            multiplexer: RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: root.map(str::to_string),
+        }))
     }
 
     #[test]
@@ -2251,7 +2254,6 @@ mod tests {
         std::fs::create_dir_all(&workspace_root).unwrap();
         let socket_path = workspace_root.join("qmux.sock");
         AppState::new(QmuxConfig {
-            hosts: Default::default(),
             workspace_root,
             socket_path,
             adapters: AdapterConfigs {
@@ -2382,7 +2384,6 @@ mod tests {
 
     fn sample_agent(id: &str, pane_id: Option<&str>, status: AgentStatus) -> AgentInfo {
         AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),

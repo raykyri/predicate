@@ -137,6 +137,11 @@ export interface RemoteRef {
   label: string;
   host: string;
   multiplexer: RemoteMultiplexer;
+  /** How to invoke the qmux CLI on that host; defaults to `qmux-cli`. */
+  qmuxCli?: string | null;
+  /** Where agent worktrees live there. A group's `managedDir` is always local,
+   * so a remote group needs somewhere on its own machine to put them. */
+  workspaceRoot?: string | null;
 }
 
 export interface GroupInfo {

@@ -1,5 +1,4 @@
 use crate::adapters::{AdapterMetadata, adapter_registry};
-use crate::host::HostConfigs;
 use crate::title_generation;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,11 +13,6 @@ pub struct QmuxConfig {
     pub socket_path: PathBuf,
     #[serde(default)]
     pub adapters: AdapterConfigs,
-    /// Machines qmux can run agents on, keyed by the short name a launch
-    /// refers to. Absent means everything runs locally, which is the only
-    /// behaviour qmux had before hosts existed.
-    #[serde(default, skip_serializing_if = "HostConfigs::is_empty")]
-    pub hosts: HostConfigs,
     #[serde(
         default,
         rename = "claudeBinary",
@@ -415,7 +409,6 @@ impl QmuxConfig {
                 },
                 acp: AcpAdapterConfig::default(),
             },
-            hosts: HostConfigs::new(),
             legacy_claude_binary: None,
             // Overwritten by load() once the cwd is known; this default is only a
             // placeholder for the no-config-file path.

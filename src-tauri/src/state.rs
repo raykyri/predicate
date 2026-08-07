@@ -9839,7 +9839,6 @@ mod tests {
 
     fn test_config(workspace_root: PathBuf) -> QmuxConfig {
         QmuxConfig {
-            hosts: Default::default(),
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux-test.sock"),
             adapters: AdapterConfigs {
@@ -9865,7 +9864,6 @@ mod tests {
 
     fn sample_agent(id: &str) -> AgentInfo {
         AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: id.to_string(),
@@ -15868,7 +15866,6 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let mut agent = AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
@@ -15923,7 +15920,6 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
@@ -16037,7 +16033,6 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),

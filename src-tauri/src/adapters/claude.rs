@@ -278,7 +278,6 @@ impl ClaudeAdapter {
         let agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
-                host: None,
                 group_id: request.group_id,
                 base_repo: request.base_repo,
                 base_ref: request.base_ref,
@@ -403,7 +402,6 @@ impl ClaudeAdapter {
         let mut agent = prepare_agent_workspace(
             state,
             PrepareAgentWorkspaceRequest {
-                host: None,
                 group_id: Some(source.group_id.clone()),
                 // Worktree forks branch off the group's base repo; in-place forks run
                 // in the source's own directory so they see the same files.
@@ -674,7 +672,6 @@ impl ClaudeAdapter {
                 None => prepare_agent_workspace(
                     state,
                     PrepareAgentWorkspaceRequest {
-                        host: None,
                         group_id: Some(pane_group_id),
                         base_repo: Some(cwd_str.clone()),
                         base_ref: Some("HEAD".to_string()),
@@ -1450,7 +1447,6 @@ impl SpawnClaudeRequest {
         };
 
         SpawnAgentRequest {
-            host: None,
             adapter_id: "claude".to_string(),
             prompt: self.prompt,
             group_id: self.group_id,
@@ -2641,7 +2637,6 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
-            hosts: Default::default(),
             workspace_root: PathBuf::from("/tmp/qmux-hooks-test"),
             socket_path: PathBuf::from("/tmp/qmux-hooks-test.sock"),
             adapters: AdapterConfigs {
@@ -2667,7 +2662,6 @@ mod tests {
 
     fn test_state_with_claude_binary(binary: &Path) -> AppState {
         AppState::new(QmuxConfig {
-            hosts: Default::default(),
             workspace_root: unique_test_dir("qmux-claude-workspace"),
             socket_path: unique_test_dir("qmux-claude-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
@@ -2696,7 +2690,6 @@ mod tests {
         let workspace_root = unique_test_dir("qmux-claude-global-hooks");
         let project_dir = unique_test_dir("qmux-claude-project");
         let config = QmuxConfig {
-            hosts: Default::default(),
             workspace_root: workspace_root.clone(),
             socket_path: unique_test_dir("qmux-claude-hooks-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
@@ -2790,7 +2783,6 @@ mod tests {
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
-            host: None,
             acp_config_options: Vec::new(),
             acp_agent: None,
             id: "agent-1".to_string(),
@@ -4235,7 +4227,6 @@ mod tests {
         .unwrap();
 
         let config = QmuxConfig {
-            hosts: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-list.sock"),
             adapters: AdapterConfigs {
@@ -4275,7 +4266,6 @@ mod tests {
         };
 
         let config = QmuxConfig {
-            hosts: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-empty.sock"),
             adapters: AdapterConfigs {
@@ -4327,7 +4317,6 @@ mod tests {
         }
 
         let config = QmuxConfig {
-            hosts: Default::default(),
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-dup.sock"),
             adapters: AdapterConfigs {
