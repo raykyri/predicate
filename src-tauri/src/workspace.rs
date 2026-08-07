@@ -170,6 +170,12 @@ pub struct AgentInfo {
     /// effort. Absent when the adapter default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Which `adapters.acp.agents` entry an `acp` agent was launched with.
+    /// Only the ACP adapter sets this: unlike the vendor adapters, its
+    /// registry id names a protocol rather than a program, so a respawn has to
+    /// remember which agent behind that protocol to start again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_agent: Option<String>,
     pub parent_id: Option<String>,
     pub fork_point: Option<String>,
     pub root_session_id: Option<String>,
@@ -1030,6 +1036,9 @@ fn prepare_agent_workspace_locked(
         status: AgentStatus::Starting,
         model: request.model,
         effort: request.effort,
+        // Set by the ACP adapter immediately after this returns; the shared
+        // workspace request has no reason to carry an adapter-specific field.
+        acp_agent: None,
         parent_id: None,
         fork_point: None,
         root_session_id: None,
@@ -2103,6 +2112,7 @@ mod tests {
             workspace_root,
             socket_path,
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2229,6 +2239,7 @@ mod tests {
 
     fn sample_agent(id: &str, pane_id: Option<&str>, status: AgentStatus) -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),

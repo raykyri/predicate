@@ -1,6 +1,7 @@
 use crate::adapters::{AdapterMetadata, adapter_registry};
 use crate::title_generation;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -43,6 +44,8 @@ pub struct AdapterConfigs {
     pub opencode: OpencodeAdapterConfig,
     #[serde(default)]
     pub grok: GrokAdapterConfig,
+    #[serde(default)]
+    pub acp: AcpAdapterConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -71,6 +74,76 @@ pub struct OpencodeAdapterConfig {
 pub struct GrokAdapterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
+}
+
+/// Agents reached over the Agent Client Protocol. Unlike the built-in adapters
+/// these are declared entirely in config: ACP is a wire protocol, so a new agent
+/// is a command line rather than Rust. `agents` is keyed by the short id the UI
+/// and `qmux acp --agent` use; `defaultAgent` picks the one a launch without an
+/// explicit choice gets.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAdapterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub agents: BTreeMap<String, AcpAgentConfig>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcpAgentConfig {
+    /// Human-readable label; falls back to the map key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The ACP agent binary. Resolved against PATH the same way adapter binaries are.
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+impl AcpAdapterConfig {
+    /// The agent a launch resolves to, given an optional explicit choice.
+    /// Falls back to `defaultAgent`, then to the sole configured agent when
+    /// there is exactly one — a single-agent setup shouldn't need to name it.
+    pub fn resolve(&self, requested: Option<&str>) -> Result<(String, AcpAgentConfig), String> {
+        if self.agents.is_empty() {
+            return Err(
+                "no ACP agents are configured; add adapters.acp.agents to qmux.config.json"
+                    .to_string(),
+            );
+        }
+        let id = match requested.map(str::trim).filter(|id| !id.is_empty()) {
+            Some(id) => id.to_string(),
+            None => match self.default_agent.as_deref().map(str::trim) {
+                Some(id) if !id.is_empty() => id.to_string(),
+                _ if self.agents.len() == 1 => self
+                    .agents
+                    .keys()
+                    .next()
+                    .expect("len checked above")
+                    .clone(),
+                _ => {
+                    return Err(format!(
+                        "no ACP agent selected and adapters.acp.defaultAgent is unset; configured agents: {}",
+                        self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+                    ));
+                }
+            },
+        };
+        let agent = self.agents.get(&id).cloned().ok_or_else(|| {
+            format!(
+                "unknown ACP agent '{id}'; configured agents: {}",
+                self.agents.keys().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })?;
+        if agent.command.trim().is_empty() {
+            return Err(format!("ACP agent '{id}' has an empty command"));
+        }
+        Ok((id, agent))
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -283,6 +356,7 @@ impl QmuxConfig {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                acp: AcpAdapterConfig::default(),
             },
             legacy_claude_binary: None,
             // Overwritten by load() once the cwd is known; this default is only a

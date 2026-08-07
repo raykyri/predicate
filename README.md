@@ -15,6 +15,12 @@ hooks, native transcripts, session resumes, and native forks. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
+There is also an adapter for the [Agent Client
+Protocol](https://agentclientprotocol.com) (ACP), which is a wire protocol
+rather than a specific CLI: any ACP agent — Gemini CLI, Cline, Goose,
+OpenHands, Qwen Code, Cursor, and others — is a config entry rather than new
+Rust. See [ACP agents](#acp-agents).
+
 ## Features
 
 - Native Ghostty terminals: each pane hosts a Metal-rendered Ghostty
@@ -22,6 +28,8 @@ matching UI adapter on the frontend.
   non-macOS platforms.
 - Agent panes for Claude Code, Codex, OpenCode, and Grok, launched from the app
   or by running `claude` / `codex` / `opencode` / `grok` inside a shell pane.
+- Agent panes for any ACP agent, configured under `adapters.acp` and launched
+  from the app.
 - Transcript JSONL tailing and a native follow-up composer: send, queue,
   steer, edit/reorder queued turns, and approve/deny permission prompts where
   supported.
@@ -317,6 +325,54 @@ used as given. A top-level `claudeBinary` is still honored for backward
 compatibility. If the config file is absent, qmux uses the platform data
 directory for workspace state and the platform runtime directory, or a `run/`
 subdirectory of the data directory, for the control socket.
+
+### ACP agents
+
+The `acp` adapter speaks the [Agent Client
+Protocol](https://agentclientprotocol.com) instead of driving one vendor's
+TUI, so agents are declared in config rather than compiled in:
+
+```json
+{
+  "adapters": {
+    "acp": {
+      "defaultAgent": "gemini",
+      "agents": {
+        "gemini": { "name": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"] },
+        "goose":  { "name": "Goose", "command": "goose", "args": ["acp"] }
+      }
+    }
+  }
+}
+```
+
+Each entry needs a `command` (looked up on `PATH`, or an absolute/`~/…` path);
+`name`, `args`, and `env` are optional. `defaultAgent` picks the one a launch
+without an explicit choice gets, and is unnecessary when only one agent is
+configured. Consult your agent's own docs for the flag that puts it in ACP
+mode — it is not standardized.
+
+The process qmux runs in the pane is `qmux acp`, a bridge that is an ACP client
+on one side and an ordinary qmux agent on the other. ACP agents have no TUI —
+the protocol makes the *client* responsible for rendering, the filesystem,
+permissions, and terminals — so the bridge supplies all four: it renders the
+session as text, takes prompts on stdin (which is how the follow-up composer
+delivers turns), writes the transcript the sidebar tails, and reports status
+through the usual lifecycle hooks. Ctrl-C sends `session/cancel`.
+
+Notable properties and limits:
+
+- `terminal/create` runs commands on a real pty, so anything checking `isatty`
+  behaves the way it does for a human rather than taking its piped-output
+  branch.
+- Follow-ups queue rather than steer. ACP has one `session/prompt` per turn and
+  no mid-turn steering; `session/cancel` is the only in-flight control.
+- Resume is best-effort: `session/load` is an optional agent capability, and
+  the bridge starts a fresh session (saying so in the pane) when it is refused.
+- No shell-command integration — ACP agents are launched from qmux, not by
+  typing their name in a shell pane.
+- No fork. The protocol has no branch operation, so `/fork` and per-message
+  forking are hidden for ACP sessions.
 
 ## License
 

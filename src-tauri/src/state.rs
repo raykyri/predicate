@@ -9842,6 +9842,7 @@ mod tests {
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux-test.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -9863,6 +9864,7 @@ mod tests {
 
     fn sample_agent(id: &str) -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
@@ -15863,6 +15865,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let mut agent = AgentInfo {
+            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
@@ -15915,6 +15918,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
+            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
@@ -16026,6 +16030,7 @@ mod tests {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         let agent = AgentInfo {
+            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),

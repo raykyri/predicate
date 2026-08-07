@@ -954,6 +954,7 @@ mod tests {
             workspace_root: base.join("state"),
             socket_path: base.join("x.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },

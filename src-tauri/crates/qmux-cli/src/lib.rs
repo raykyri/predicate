@@ -5,6 +5,8 @@
 //! the app — a remote box reached over ssh — can still service hooks, cwd
 //! reporting, and forks once a transport exists.
 
+mod acp;
+
 use qmux_proto::{ControlRequest, ControlResponse};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -121,6 +123,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             run_agent_exec("grok".to_string(), args.collect())?;
             Ok(true)
         }
+        "acp" => {
+            acp::run(args.collect())?;
+            Ok(true)
+        }
         "fork" => {
             let mut use_worktree = false;
             let mut prompt_parts = Vec::new();
@@ -179,7 +185,7 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "usage: qmux [ping|notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|fork|open]"
+                "usage: qmux [ping|notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|acp|fork|open]"
             );
             Ok(true)
         }
@@ -280,7 +286,7 @@ fn exit_code_for_status(status: std::process::ExitStatus) -> i32 {
         .unwrap_or_else(|| status.signal().map(|signal| 128 + signal).unwrap_or(1))
 }
 
-fn request_silent(command: &str, payload: Value) -> Result<(), String> {
+pub(crate) fn request_silent(command: &str, payload: Value) -> Result<(), String> {
     request(command, payload).map(|_| ())
 }
 

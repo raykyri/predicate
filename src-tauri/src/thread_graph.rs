@@ -1399,6 +1399,7 @@ mod tests {
         worktree_dir: String,
     ) -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
             adapter: adapter.to_string(),

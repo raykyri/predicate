@@ -1,3 +1,4 @@
+pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod grok;
@@ -17,6 +18,7 @@ use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_spawn_failed, prepare_agent_workspace,
 };
+use acp::AcpAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
 use grok::GrokAdapter;
@@ -182,7 +184,10 @@ pub(crate) fn normalize_agent_model(raw: &str) -> Option<String> {
         return None;
     }
     const CLAUDE_FAMILIES: &[&str] = &["fable", "opus", "sonnet", "haiku"];
-    if CLAUDE_FAMILIES.iter().any(|family| raw.eq_ignore_ascii_case(family)) {
+    if CLAUDE_FAMILIES
+        .iter()
+        .any(|family| raw.eq_ignore_ascii_case(family))
+    {
         return Some(raw.to_ascii_lowercase());
     }
     if let Some(rest) = raw
@@ -856,6 +861,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(CodexAdapter::new(config)),
         Box::new(OpencodeAdapter::new(config)),
         Box::new(GrokAdapter::new(config)),
+        Box::new(AcpAdapter::new(config)),
     ])
 }
 
@@ -1409,6 +1415,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-adapter-tests"),
             socket_path: PathBuf::from("/tmp/qmux-adapter-tests.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -1445,7 +1452,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 4);
+        assert_eq!(metadata.len(), 5);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1454,8 +1461,14 @@ mod tests {
         assert!(!metadata[2].default);
         assert_eq!(metadata[3].id, "grok");
         assert!(!metadata[3].default);
+        assert_eq!(metadata[4].id, "acp");
+        assert!(!metadata[4].default);
         assert!(adapter_supports_fork("grok"));
         assert!(adapter_supports_fork("opencode"));
+        // ACP has no native fork command: the protocol has no such method, and
+        // `session/load` resumes rather than branches.
+        assert!(!adapter_supports_fork("acp"));
+        assert!(!adapter_supports_fork_at_message("acp"));
     }
 
     #[test]
@@ -1469,6 +1482,7 @@ mod tests {
         // An adapter without a native fork command is rejected before any spawn is attempted.
         state
             .insert_agent(AgentInfo {
+                acp_agent: None,
                 id: "agent-1".to_string(),
                 group_id: "group-1".to_string(),
                 adapter: "unsupported".to_string(),
@@ -1496,6 +1510,7 @@ mod tests {
 
     fn session_agent(id: &str, pane_id: Option<&str>, dir: &str, session: &str) -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
@@ -1715,7 +1730,8 @@ mod tests {
             model_from_claude_native_transcript_line(assistant).as_deref(),
             Some("claude-fable-5")
         );
-        let user = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
+        let user =
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"hi"}]}}"#;
         assert_eq!(model_from_claude_native_transcript_line(user), None);
         let synthetic = r#"{"type":"assistant","message":{"role":"assistant","model":"<synthetic>","content":[]}}"#;
         assert_eq!(
@@ -1726,7 +1742,8 @@ mod tests {
 
     #[test]
     fn codex_transcript_line_exposes_turn_context_model() {
-        let turn_context = r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","turn_id":"t1"}}"#;
+        let turn_context =
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-sol","turn_id":"t1"}}"#;
         assert_eq!(
             model_from_codex_transcript_line(turn_context).as_deref(),
             Some("gpt-5.6-sol")

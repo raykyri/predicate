@@ -2895,6 +2895,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-workspaces"),
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2919,6 +2920,7 @@ mod tests {
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -3943,6 +3945,7 @@ mod tests {
         );
         state
             .insert_agent(AgentInfo {
+                acp_agent: None,
                 id: "agent-1".to_string(),
                 group_id: "group-1".to_string(),
                 adapter: "claude".to_string(),

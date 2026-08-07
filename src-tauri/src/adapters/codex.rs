@@ -3830,6 +3830,7 @@ trusted_hash = "sha256:trusted"
             workspace_root: temp_dir(),
             socket_path: PathBuf::from("/tmp/qmux-codex-test.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -3881,6 +3882,7 @@ trusted_hash = "sha256:trusted"
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "codex".to_string(),

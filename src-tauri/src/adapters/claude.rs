@@ -2640,6 +2640,7 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-hooks-test"),
             socket_path: PathBuf::from("/tmp/qmux-hooks-test.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2664,6 +2665,7 @@ mod tests {
             workspace_root: unique_test_dir("qmux-claude-workspace"),
             socket_path: unique_test_dir("qmux-claude-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some(binary.display().to_string()),
                 },
@@ -2691,6 +2693,7 @@ mod tests {
             workspace_root: workspace_root.clone(),
             socket_path: unique_test_dir("qmux-claude-hooks-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2780,6 +2783,7 @@ mod tests {
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
+            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
@@ -4225,6 +4229,7 @@ mod tests {
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-list.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4263,6 +4268,7 @@ mod tests {
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-empty.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4313,6 +4319,7 @@ mod tests {
             workspace_root: env::temp_dir(),
             socket_path: env::temp_dir().join("qmux-dup.sock"),
             adapters: AdapterConfigs {
+                acp: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },

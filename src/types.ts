@@ -144,6 +144,10 @@ export interface AgentInfo {
   model?: string | null;
   /** Reasoning effort the session was launched with; absent for the default. */
   effort?: string | null;
+  /** For `adapter: "acp"`, which `adapters.acp.agents` entry is running. The
+   * ACP adapter's id names a protocol rather than a program, so this is what
+   * identifies the actual agent. Absent for every other adapter. */
+  acpAgent?: string | null;
   // True when the queue has paused after a pause-after turn finished.
   paused?: boolean;
   createdAt: number;

@@ -1322,6 +1322,7 @@ fn launch_research_child_run(
                 status: AgentStatus::Done,
                 model: parent.model.clone(),
                 effort: parent.effort.clone(),
+                acp_agent: None,
                 parent_id: None,
                 fork_point: None,
                 root_session_id: Some(session_id),

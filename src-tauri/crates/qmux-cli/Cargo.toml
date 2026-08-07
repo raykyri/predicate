@@ -9,8 +9,21 @@ edition = "2024"
 name = "qmux-cli"
 path = "src/bin/qmux-cli.rs"
 
+# `harness = false` so the test binary can re-exec itself as a scripted ACP
+# agent (see the module docs). The stock libtest harness would swallow the
+# argument that selects that mode.
+[[test]]
+name = "acp_bridge"
+harness = false
+
 [dependencies]
 libc = "0.2"
+# The ACP bridge hosts `terminal/create` on a real pty rather than pipes, so
+# commands an ACP agent runs see a tty and behave the way they do for a human.
+portable-pty = "0.9"
 qmux-proto = { path = "../qmux-proto" }
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
 serde_json = "1"
