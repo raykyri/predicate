@@ -58,7 +58,12 @@ struct BridgeConfig {
     args: Vec<String>,
     env: Vec<(String, String)>,
     cwd: PathBuf,
-    transcript: PathBuf,
+    /// Where to record turns. A path when the sidebar can see this filesystem;
+    /// `None` when it cannot and records must be streamed to qmux instead.
+    transcript: Option<PathBuf>,
+    /// Where the agent's stderr goes. Derived from the transcript locally, but
+    /// a streaming bridge has no local transcript to hang it off.
+    log: PathBuf,
     initial_prompt: Option<String>,
     load_session: Option<String>,
 }
@@ -81,10 +86,31 @@ impl BridgeConfig {
             args: json_env_array("QMUX_ACP_ARGS")?,
             env: json_env_object("QMUX_ACP_ENV")?,
             cwd,
-            transcript: PathBuf::from(required_env("QMUX_ACP_TRANSCRIPT")?),
+            // Streaming is what a remote bridge uses: it has no access to the
+            // filesystem the sidebar tails, so a path here would be a file
+            // nobody reads.
+            transcript: optional_env("QMUX_ACP_TRANSCRIPT")
+                .filter(|_| optional_env("QMUX_ACP_TRANSCRIPT_STREAM").is_none())
+                .map(PathBuf::from),
+            log: log_path(),
             initial_prompt: optional_env("QMUX_ACP_PROMPT"),
             load_session: optional_env("QMUX_ACP_LOAD_SESSION"),
         })
+    }
+}
+
+/// Where the agent's stderr is parked. Beside the transcript when there is
+/// one, otherwise a temp file — the log must land somewhere writable on
+/// *this* machine, which a streamed transcript's path is not.
+fn log_path() -> PathBuf {
+    if let Some(explicit) = optional_env("QMUX_ACP_LOG") {
+        return PathBuf::from(explicit);
+    }
+    match optional_env("QMUX_ACP_TRANSCRIPT")
+        .filter(|_| optional_env("QMUX_ACP_TRANSCRIPT_STREAM").is_none())
+    {
+        Some(transcript) => PathBuf::from(transcript).with_extension("agent.log"),
+        None => env::temp_dir().join(format!("qmux-acp-{}.log", std::process::id())),
     }
 }
 
@@ -236,8 +262,17 @@ impl Connection {
 /// Appends the qmux-format JSONL the sidebar tails. The format is qmux's own —
 /// ACP has no transcript-on-disk concept — so the shape here is exactly what
 /// `AcpAdapter::parse_transcript_line` reads back.
-struct Transcript {
-    file: Mutex<Option<File>>,
+enum Transcript {
+    /// The bridge and the sidebar share a filesystem, so write straight to the
+    /// file the tailer watches.
+    File(Mutex<Option<File>>),
+    /// The bridge is on another machine. Records go to qmux over the control
+    /// socket, which appends them to the *local* transcript and reads them back
+    /// through the same tail — nothing downstream learns where the agent ran.
+    ///
+    /// The path is never sent: qmux resolves it from the authenticated pane, so
+    /// this side cannot aim writes anywhere.
+    Stream,
 }
 
 impl Transcript {
@@ -246,21 +281,29 @@ impl Transcript {
             let _ = std::fs::create_dir_all(parent);
         }
         let file = OpenOptions::new().create(true).append(true).open(path).ok();
-        Self {
-            file: Mutex::new(file),
-        }
+        Transcript::File(Mutex::new(file))
     }
 
     fn write(&self, value: Value) {
-        let mut guard = self.file.lock().unwrap_or_else(|err| err.into_inner());
-        let Some(file) = guard.as_mut() else {
+        // A transcript that can't be recorded is a degraded sidebar, not a
+        // broken session: the pane still shows everything either way.
+        let Ok(line) = serde_json::to_string(&value) else {
             return;
         };
-        // A transcript that can't be written is a degraded sidebar, not a
-        // broken session: the pane still shows everything.
-        let _ = serde_json::to_writer(&mut *file, &value);
-        let _ = file.write_all(b"\n");
-        let _ = file.flush();
+        match self {
+            Transcript::File(file) => {
+                let mut guard = file.lock().unwrap_or_else(|err| err.into_inner());
+                let Some(file) = guard.as_mut() else {
+                    return;
+                };
+                let _ = file.write_all(line.as_bytes());
+                let _ = file.write_all(b"\n");
+                let _ = file.flush();
+            }
+            Transcript::Stream => {
+                let _ = request_silent("transcript.append", json!({ "lines": [line] }));
+            }
+        }
     }
 
     fn turn(&self, session_id: Option<&str>, role: &str, native_id: Option<&str>, blocks: Value) {
@@ -470,7 +513,10 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 
     let config = BridgeConfig::from_env()?;
-    let transcript = Transcript::open(&config.transcript);
+    let transcript = match &config.transcript {
+        Some(path) => Transcript::open(path),
+        None => Transcript::Stream,
+    };
 
     // ACP reserves the agent's stdout for protocol traffic and allows stderr for
     // logging. Sending that log to the pane would corrupt the rendered session,
@@ -478,7 +524,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(config.transcript.with_extension("agent.log"))
+        .open(&config.log)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null());
 

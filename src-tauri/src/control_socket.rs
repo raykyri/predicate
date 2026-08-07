@@ -17,6 +17,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::Path;
 use std::thread;
 use std::time::Duration;
 
@@ -313,6 +314,43 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
                 state.emit(event);
             }
             Ok(json!({ "notified": true }))
+        }
+        "transcript.append" => {
+            #[derive(Debug, Deserialize)]
+            struct AppendPayload {
+                #[serde(default)]
+                lines: Vec<String>,
+            }
+            let payload = serde_json::from_value::<AppendPayload>(request.payload)
+                .map_err(|err| format!("invalid transcript.append payload: {err}"))?;
+
+            // The destination is qmux's own record for the agent bound to the
+            // authenticated pane. The caller never names a path, so a forged
+            // request cannot aim writes at another agent's transcript — or
+            // anywhere else on disk.
+            let agent = state
+                .agent_by_pane(&authed_pane)?
+                .ok_or_else(|| format!("no agent is bound to pane {authed_pane}"))?;
+            let path = agent
+                .transcript_path
+                .clone()
+                .ok_or_else(|| format!("agent {} has no transcript to append to", agent.id))?;
+            let appended =
+                crate::transcript::append_transcript_lines(Path::new(&path), &payload.lines)?;
+
+            // The tail may not be running yet on a recovered pane, and starting
+            // it is what turns these lines into turns. It is idempotent, but it
+            // also rebuilds the adapter registry to validate, so only pay for
+            // that when a line actually landed.
+            if appended > 0 {
+                crate::transcript::start_transcript_tail(
+                    state.clone(),
+                    agent.id.clone(),
+                    path,
+                    agent.adapter.clone(),
+                );
+            }
+            Ok(json!({ "appended": appended }))
         }
         "agent.fork" => {
             #[derive(Debug, Deserialize)]

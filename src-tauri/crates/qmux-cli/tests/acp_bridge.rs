@@ -107,6 +107,10 @@ fn main() {
             "initialize_advertises_both_elicitation_modes",
             initialize_advertises_both_elicitation_modes,
         ),
+        (
+            "a_streaming_bridge_writes_no_local_transcript",
+            a_streaming_bridge_writes_no_local_transcript,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -177,6 +181,15 @@ impl Session {
 
 /// Runs the bridge against `scenario`, feeding `input` on stdin.
 fn run_bridge(scenario: &str, input: &str) -> Session {
+    run_bridge_inner(scenario, input, false)
+}
+
+/// As `run_bridge`, but with the bridge in streaming mode.
+fn run_bridge_streaming(scenario: &str, input: &str) -> Session {
+    run_bridge_inner(scenario, input, true)
+}
+
+fn run_bridge_inner(scenario: &str, input: &str, stream: bool) -> Session {
     let dir = scratch_dir(scenario);
     let transcript = dir.join("session.jsonl");
     let frames = dir.join("frames.ndjson");
@@ -209,6 +222,12 @@ fn run_bridge(scenario: &str, input: &str) -> Session {
     if scenario == "resume" {
         command.env("QMUX_ACP_LOAD_SESSION", "sess_previous");
     }
+    if stream {
+        // What a remote bridge runs as: no access to the filesystem the
+        // sidebar tails, so records go to qmux instead of to a file.
+        command.env("QMUX_ACP_TRANSCRIPT_STREAM", "1");
+        command.env("QMUX_ACP_LOG", dir.join("agent.log"));
+    }
 
     let mut child = command.spawn().expect("the bridge binary runs");
     child
@@ -229,7 +248,12 @@ fn run_bridge(scenario: &str, input: &str) -> Session {
             .map(str::to_string)
             .collect(),
         notes: read_ndjson(&notes),
-        agent_log: fs::read_to_string(transcript.with_extension("agent.log")).unwrap_or_default(),
+        agent_log: fs::read_to_string(if stream {
+            dir.join("agent.log")
+        } else {
+            transcript.with_extension("agent.log")
+        })
+        .unwrap_or_default(),
     }
 }
 
@@ -1065,4 +1089,31 @@ fn initialize_advertises_both_elicitation_modes() {
     let elicitation = &initialize["params"]["clientCapabilities"]["elicitation"];
     assert_eq!(elicitation["form"], json!({}), "{initialize}");
     assert_eq!(elicitation["url"], json!({}), "{initialize}");
+}
+
+fn a_streaming_bridge_writes_no_local_transcript() {
+    // A remote bridge cannot see the filesystem the sidebar tails, so it must
+    // not write a transcript there — the records go to qmux over the control
+    // socket, which appends them to the local file itself.
+    let session = run_bridge_streaming("chunks", "hello\n");
+
+    assert!(
+        session.transcript.is_empty(),
+        "streaming must not write a local transcript: {:#?}",
+        session.transcript
+    );
+    // The session itself is unaffected — the pane still renders everything.
+    assert!(
+        session.pane.contains("alpha beta gamma"),
+        "the pane should still stream: {}",
+        session.pane
+    );
+    // stderr still lands in a log, just one chosen for this machine.
+    assert!(
+        session
+            .frames
+            .iter()
+            .any(|frame| frame.contains("initialize")),
+        "the protocol still runs normally"
+    );
 }
