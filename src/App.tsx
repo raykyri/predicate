@@ -15151,13 +15151,16 @@ function MainApp() {
           {renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
         </aside>
       ) : null}
-      {/* Text-mode terminal peek while the transcript covers the stage: polls
-          Ghostty viewport text and themed-monospace paints it. Click restores. */}
+      {/* Text-mode terminal mini-map while the transcript covers the stage:
+          polls Ghostty viewport text and paints it at the pane's grid shape.
+          Click restores. */}
       {activeTranscriptVisibleExpanded && activePane && IS_MAC ? (
         <TerminalPip
           paneId={activePane.id}
           title={displayPaneTitle(activePane, agentByPaneId.get(activePane.id))}
           hasPaneHeader={activePaneHasTurnPaneHeader}
+          columns={activePane.cols}
+          rows={activePane.rows}
           theme={
             themeCatalog?.find((theme) => theme.name === terminalThemeName) ??
             effectiveTheme

@@ -891,8 +891,11 @@
   gap: 6px;
 }
 
-/* Scrollback-text picture-in-picture over the expanded transcript. Sits above
-   the expanded pane (z-index 7) and below stage-level restore chrome (9). */
+/* Viewport-text picture-in-picture over the expanded transcript: a mini-map
+   of the live terminal. The body is sized to the pane's grid (the
+   --terminal-pip-grid-* vars are set inline from PaneInfo) at a font fitted
+   to keep the whole screen visible. Sits above the expanded pane (z-index 7)
+   and below stage-level restore chrome (9). */
 .terminal-pip {
   position: absolute;
   top: 14px;
@@ -900,8 +903,9 @@
   z-index: 8;
   display: flex;
   flex-direction: column;
-  width: min(90px, calc(100% - var(--sidebar-width, 268px) - 28px));
-  max-height: min(60px, 21vh);
+  width: fit-content;
+  max-width: min(480px, calc(100% - var(--sidebar-width, 268px) - 28px));
+  max-height: min(70vh, 460px);
   margin: 0;
   padding: 0;
   overflow: hidden;
@@ -1014,15 +1018,19 @@
 
 .terminal-pip-body {
   flex: 1 1 auto;
-  min-height: 0;
   margin: 0;
   padding: 8px 10px 10px;
   overflow: hidden;
+  /* Grid-shaped frame (border-box, so padding is folded in): exactly the
+     pane's columns wide and at least its rows tall, keeping TUI layouts
+     aligned and blank screen space visible. */
+  width: calc(var(--terminal-pip-grid-columns, 80) * 1ch + 20px);
+  min-height: calc(var(--terminal-pip-grid-rows, 24) * 1.2em + 18px);
   color: var(--terminal-pip-fg, #e7e7e2);
   font-family: var(--terminal-pip-font-family, var(--font-mono));
   font-size: var(--terminal-pip-font-size, 10px);
   font-variant-ligatures: none;
-  line-height: 1.35;
+  line-height: 1.2;
   letter-spacing: 0;
   white-space: pre;
   word-break: normal;

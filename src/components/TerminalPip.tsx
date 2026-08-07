@@ -1,13 +1,43 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { CSSProperties } from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
 import {
   readNativeTerminalViewportText,
   type NativeTerminalTheme,
 } from "../lib/api";
-import { formatTerminalPipText } from "../lib/terminalPip";
+import { fitTerminalPipFontSize, formatTerminalPipText } from "../lib/terminalPip";
 
 const POLL_MS = 450;
+/** Content-box budget for the mini-map body (px). The fit also honors the
+ *  window height — see the useMemo below. */
+const PIP_MAX_BODY_WIDTH = 420;
+const PIP_MAX_BODY_HEIGHT = 360;
+const PIP_VIEWPORT_HEIGHT_FRACTION = 0.45;
+/** Must match .terminal-pip-body's line-height so the fit math agrees with
+ *  the rendered layout. */
+const PIP_LINE_HEIGHT = 1.2;
+const MONO_FALLBACK_ADVANCE_PER_PX = 0.6;
+
+let pipMeasureContext: CanvasRenderingContext2D | null | undefined;
+
+/** One monospace glyph's advance at 1px font size, canvas-measured once. */
+function monoAdvancePerPx(fontFamily: string): number {
+  try {
+    if (pipMeasureContext === undefined) {
+      pipMeasureContext = document.createElement("canvas").getContext("2d");
+    }
+    const context = pipMeasureContext;
+    if (!context) {
+      return MONO_FALLBACK_ADVANCE_PER_PX;
+    }
+    const reference = 10;
+    context.font = `${reference}px ${fontFamily}`;
+    const advance = context.measureText("0".repeat(100)).width / 100;
+    return advance > 0 ? advance / reference : MONO_FALLBACK_ADVANCE_PER_PX;
+  } catch {
+    return MONO_FALLBACK_ADVANCE_PER_PX;
+  }
+}
 
 function themeCssColor(hex: string): string | null {
   if (!/^#?[0-9a-fA-F]{6}$/.test(hex)) {
@@ -22,6 +52,9 @@ export interface TerminalPipProps {
   title: string;
   /** Offset the preview below the expanded transcript's header. */
   hasPaneHeader: boolean;
+  /** The pane's live grid; the mini-map frame and font fit derive from it. */
+  columns: number;
+  rows: number;
   theme: NativeTerminalTheme | null;
   fontFamily: string;
   fontSize: number;
@@ -29,16 +62,19 @@ export interface TerminalPipProps {
 }
 
 /**
- * Floating monospaced preview of a native terminal's live viewport, used while
- * the right-pane transcript is expanded. Clicking the preview restores the
- * terminal stage; its chrome can collapse the card to the title bar. Text only
- * (no SGR colors) — good enough to see agent progress without a Metal capture
- * path.
+ * Floating mini-map of a native terminal's live viewport, used while the
+ * right-pane transcript is expanded. The card is sized to the pane's grid so
+ * the whole screen stays visible — TUI layouts keep their alignment and blank
+ * space stays on screen. Clicking the preview restores the terminal stage;
+ * its chrome can collapse the card to the title bar. Text only (no SGR
+ * colors) — good enough to see agent progress without a Metal capture path.
  */
 export default function TerminalPip({
   paneId,
   title,
   hasPaneHeader,
+  columns,
+  rows,
   theme,
   fontFamily,
   fontSize,
@@ -81,17 +117,43 @@ export default function TerminalPip({
     };
   }, [paneId]);
 
+  const gridColumns = columns > 0 ? Math.max(1, Math.min(500, Math.floor(columns))) : 80;
+  const gridRows = rows > 0 ? Math.max(1, Math.min(300, Math.floor(rows))) : 24;
+
+  const fittedFontSize = useMemo(() => {
+    const maxHeight = Math.min(
+      PIP_MAX_BODY_HEIGHT,
+      Math.max(160, window.innerHeight * PIP_VIEWPORT_HEIGHT_FRACTION),
+    );
+    const fitted = fitTerminalPipFontSize(
+      gridColumns,
+      gridRows,
+      monoAdvancePerPx(fontFamily),
+      PIP_MAX_BODY_WIDTH,
+      maxHeight,
+      PIP_LINE_HEIGHT,
+    );
+    // Never larger than the previous fixed preview size.
+    return Math.min(fitted, Math.max(9, Math.round(fontSize * 0.62)));
+  }, [fontFamily, fontSize, gridColumns, gridRows]);
+
   const background = theme ? themeCssColor(theme.background) : null;
   const foreground = theme ? themeCssColor(theme.foreground) : null;
   const style = {
     ...(background ? { "--terminal-pip-bg": background } : null),
     ...(foreground ? { "--terminal-pip-fg": foreground } : null),
     "--terminal-pip-font-family": fontFamily,
-    "--terminal-pip-font-size": `${Math.max(9, Math.round(fontSize * 0.62))}px`,
+    "--terminal-pip-font-size": `${fittedFontSize.toFixed(2)}px`,
+    "--terminal-pip-grid-columns": String(gridColumns),
+    "--terminal-pip-grid-rows": String(gridRows),
   } as CSSProperties;
 
   const displayTitle = title.trim() || "Terminal";
-  const body = text.trim().length > 0 ? text : "Waiting for terminal output…";
+  // A dump can carry one extra trailing line from its final newline; keep the
+  // frame at exactly the grid's rows.
+  const lines = text === "" ? [] : text.split("\n");
+  const gridText = lines.length > gridRows ? lines.slice(0, gridRows).join("\n") : text;
+  const body = gridText.trim().length > 0 ? gridText : "Waiting for terminal output…";
 
   return (
     <section
