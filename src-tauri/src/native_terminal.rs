@@ -114,6 +114,10 @@ pub struct NativeTerminalLayout {
     /// transient focus state.
     pub accepts_keyboard_claim: bool,
     pub defer_geometry: bool,
+    /// Monotonic frontend revision. Stale invokes (revision ≤ last applied for
+    /// this pane) are successful no-ops so out-of-order Tauri completions cannot
+    /// shrink a surface after a newer layout already landed.
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -441,6 +445,7 @@ mod imp {
             accepts_pointer_input: i32,
             accepts_keyboard_claim: i32,
             defer_geometry: i32,
+            revision: u64,
         ) -> i32;
         fn qmux_native_terminal_set_keyboard_owner(pane_id: *const c_char, revision: u64) -> i32;
         fn qmux_native_terminal_set_web_pointer_claimed(claimed: i32) -> i32;
@@ -709,6 +714,7 @@ mod imp {
                 i32::from(layout.accepts_pointer_input),
                 i32::from(layout.accepts_keyboard_claim),
                 i32::from(layout.defer_geometry),
+                layout.revision,
             )
         };
         if success == 1 {
@@ -1706,6 +1712,7 @@ mod tests {
             accepts_pointer_input: true,
             accepts_keyboard_claim: true,
             defer_geometry: false,
+            revision: 1,
         });
         assert_eq!(
             result.unwrap_err(),

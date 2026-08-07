@@ -54,6 +54,9 @@ final class NativeTerminalHost {
     /// different owner.
     private var desiredKeyboardOwnerPaneID: String?
     private var desiredKeyboardOwnerRevision: UInt64 = 0
+    /// Newest layout revision applied (or accepted as deferred) per pane. Stale
+    /// fire-and-forget invokes from React must not overwrite a newer frame.
+    private var layoutRevisionByPaneID: [String: UInt64] = [:]
     private weak var keyboardOwnerPane: NativeTerminalPane?
     private weak var pointerCapturePane: NativeTerminalPane?
     /// Cancels a deferred release handoff (see setKeyboardOwner) when
@@ -230,6 +233,7 @@ final class NativeTerminalHost {
         clientDeferredGeometryPaneIDs.remove(id)
         pendingPaneFrames.removeValue(forKey: id)
         pendingFitPaneIDs.remove(id)
+        layoutRevisionByPaneID.removeValue(forKey: id)
         pane.view.removeFromSuperview()
     }
 
@@ -239,15 +243,24 @@ final class NativeTerminalHost {
         }
     }
 
+    /// Applies a complete, revisioned layout from React. Stale invokes
+    /// (revision ≤ last applied for this pane) are successful no-ops so an
+    /// out-of-order Tauri completion cannot shrink the surface after a newer
+    /// split-close / right-pane frame already landed.
     func setLayout(
         id: String,
         frame: CGRect,
         visible: Bool,
         acceptsPointerInput: Bool,
         acceptsKeyboardClaim: Bool,
-        deferGeometry: Bool
+        deferGeometry: Bool,
+        revision: UInt64
     ) -> Bool {
         guard let pane = panes[id] else { return false }
+        if let lastRevision = layoutRevisionByPaneID[id], revision <= lastRevision {
+            return true
+        }
+        layoutRevisionByPaneID[id] = revision
         let keyboardClaimChanged = pane.acceptsKeyboardClaim != acceptsKeyboardClaim
         pane.acceptsPointerInput = acceptsPointerInput
         pane.acceptsKeyboardClaim = acceptsKeyboardClaim
@@ -635,6 +648,7 @@ final class NativeTerminalHost {
         clientDeferredGeometryPaneIDs.removeAll()
         pendingPaneFrames.removeAll()
         pendingFitPaneIDs.removeAll()
+        layoutRevisionByPaneID.removeAll()
         windowLiveResizeActive = false
         backstop?.removeFromSuperview()
         backstop = nil

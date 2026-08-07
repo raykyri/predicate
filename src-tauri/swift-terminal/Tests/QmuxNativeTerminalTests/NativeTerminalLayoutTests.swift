@@ -98,6 +98,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
             let frame = CGRect(x: 24, y: 18, width: 720, height: 360)
             NativeTerminalHost.shared.shutdown()
             NativeTerminalCallbackRecorder.shared.reset()
+            layoutRevisionCounter = 0
             let root = NSView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
             let window = NSWindow(
                 contentRect: root.bounds,
@@ -147,7 +148,8 @@ final class NativeTerminalLayoutTests: XCTestCase {
                     visible: true,
                     acceptsPointerInput: false,
                     acceptsKeyboardClaim: false,
-                    deferGeometry: true
+                    deferGeometry: true,
+                    revision: Self.nextLayoutRevision()
                 )
             )
             XCTAssertTrue(Self.setLayout(paneID: paneID, frame: frame, visible: true))
@@ -161,6 +163,63 @@ final class NativeTerminalLayoutTests: XCTestCase {
         }
     }
 
+    func testStaleLayoutRevisionDoesNotOverwriteNewerFrame() async throws {
+        try await MainActor.run {
+            try Self.withPane { paneID, frame in
+                let wider = CGRect(
+                    x: frame.minX,
+                    y: frame.minY,
+                    width: frame.width + 200,
+                    height: frame.height
+                )
+                let newerRevision = Self.nextLayoutRevision()
+                let olderRevision = newerRevision - 1
+                XCTAssertTrue(
+                    NativeTerminalHost.shared.setLayout(
+                        id: paneID,
+                        frame: wider,
+                        visible: true,
+                        acceptsPointerInput: true,
+                        acceptsKeyboardClaim: true,
+                        deferGeometry: false,
+                        revision: newerRevision
+                    )
+                )
+                NativeTerminalCallbackRecorder.shared.reset()
+                // An older revision carrying the previous, smaller frame must
+                // be ignored even though it arrives later on the main actor.
+                XCTAssertTrue(
+                    NativeTerminalHost.shared.setLayout(
+                        id: paneID,
+                        frame: frame,
+                        visible: true,
+                        acceptsPointerInput: true,
+                        acceptsKeyboardClaim: true,
+                        deferGeometry: false,
+                        revision: olderRevision
+                    )
+                )
+                XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
+
+                // Re-applying the wider frame under a fresh revision must also
+                // be a no-op: the stale path did not shrink the surface.
+                NativeTerminalCallbackRecorder.shared.reset()
+                XCTAssertTrue(
+                    NativeTerminalHost.shared.setLayout(
+                        id: paneID,
+                        frame: wider,
+                        visible: true,
+                        acceptsPointerInput: true,
+                        acceptsKeyboardClaim: true,
+                        deferGeometry: false,
+                        revision: Self.nextLayoutRevision()
+                    )
+                )
+                XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
+            }
+        }
+    }
+
     @MainActor
     private static func withPane(
         _ body: (_ paneID: String, _ frame: CGRect) throws -> Void
@@ -169,6 +228,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
         let frame = CGRect(x: 24, y: 18, width: 720, height: 360)
         NativeTerminalHost.shared.shutdown()
         NativeTerminalCallbackRecorder.shared.reset()
+        layoutRevisionCounter = 0
         let root = NSView(frame: CGRect(x: 0, y: 0, width: 1200, height: 800))
         XCTAssertTrue(NativeTerminalHost.shared.attach(to: root))
         NativeTerminalHost.shared.seedSettings(Self.settings)
@@ -189,6 +249,15 @@ final class NativeTerminalLayoutTests: XCTestCase {
     }
 
     @MainActor
+    private static var layoutRevisionCounter: UInt64 = 0
+
+    @MainActor
+    private static func nextLayoutRevision() -> UInt64 {
+        layoutRevisionCounter += 1
+        return layoutRevisionCounter
+    }
+
+    @MainActor
     private static func setLayout(
         paneID: String,
         frame: CGRect,
@@ -200,7 +269,8 @@ final class NativeTerminalLayoutTests: XCTestCase {
             visible: visible,
             acceptsPointerInput: visible,
             acceptsKeyboardClaim: true,
-            deferGeometry: false
+            deferGeometry: false,
+            revision: nextLayoutRevision()
         )
     }
 

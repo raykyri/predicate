@@ -152,7 +152,8 @@ public func qmuxNativeTerminalSetLayout(
     _ visible: Int32,
     _ acceptsPointerInput: Int32,
     _ acceptsKeyboardClaim: Int32,
-    _ deferGeometry: Int32
+    _ deferGeometry: Int32,
+    _ revision: UInt64
 ) -> Int32 {
     guard let paneID = terminalString(paneID) else { return 0 }
     return onTerminalMain {
@@ -162,7 +163,8 @@ public func qmuxNativeTerminalSetLayout(
             visible: visible == 1,
             acceptsPointerInput: acceptsPointerInput == 1,
             acceptsKeyboardClaim: acceptsKeyboardClaim == 1,
-            deferGeometry: deferGeometry == 1
+            deferGeometry: deferGeometry == 1,
+            revision: revision
         ) ? 1 : 0
     }
 }

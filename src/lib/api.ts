@@ -1064,8 +1064,27 @@ export interface NativeTerminalLayout {
   deferGeometry: boolean;
 }
 
+// Seed from wall time so a webview/module reload cannot restart revisions below
+// the native host's last applied value. Multiplying by 1,000 leaves room for
+// bursts within one millisecond while remaining below Number.MAX_SAFE_INTEGER.
+let nativeTerminalLayoutRevision = Date.now() * 1_000;
+
+/**
+ * Publishes a pane's native geometry. Layout updates are revisioned so an
+ * older fire-and-forget invoke (common around split close / right-pane
+ * toggles) can never overwrite a newer frame that already reached AppKit.
+ */
 export function setNativeTerminalLayout(layout: NativeTerminalLayout) {
-  return invoke<void>("native_terminal_set_layout", { layout });
+  nativeTerminalLayoutRevision = Math.max(
+    nativeTerminalLayoutRevision + 1,
+    Date.now() * 1_000,
+  );
+  return invoke<void>("native_terminal_set_layout", {
+    layout: {
+      ...layout,
+      revision: nativeTerminalLayoutRevision,
+    },
+  });
 }
 
 // Seed from wall time so a webview/module reload cannot restart revisions below
