@@ -9,7 +9,6 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1072,8 +1071,9 @@ fn prepare_agent_workspace_locked(
     let worktree_dir = if request.use_worktree {
         // Isolated git worktree in the configured global or project-local root
         // (or a plain directory when the base is not a git repo).
-        let dir = allocate_agent_worktree_dir(state, base_repo.as_deref(), &group, &agent_name)?;
-        match base_repo.as_deref().filter(|repo| is_git_repo(repo)) {
+        let dir =
+            allocate_agent_worktree_dir(state, &host, base_repo.as_deref(), &group, &agent_name)?;
+        match base_repo.as_deref().filter(|repo| is_git_repo(&host, repo)) {
             Some(base_repo) => {
                 let branch_name =
                     format!("qmux/{}/{}", sanitize_ref_segment(&group.id), agent_name);
@@ -1610,18 +1610,19 @@ pub fn capture_agent_worktree_removal(
         return Err(format!("agent {} is not in a git worktree", agent.id));
     };
     let worktree_dir = agent.worktree_dir.clone();
+    let removal_host = agent_host(state, &agent.host)?;
 
     let run_dir = state
         .group(&agent.group_id)?
         .and_then(|group| group.base_repo)
-        .filter(|repo| is_git_repo(repo))
+        .filter(|repo| is_git_repo(&removal_host, repo))
         .unwrap_or_else(|| worktree_dir.clone());
 
     Ok(CapturedWorktreeRemoval {
         run_dir,
         worktree_dir,
         branch,
-        host: agent_host(state, &agent.host)?,
+        host: removal_host,
     })
 }
 
@@ -1774,10 +1775,19 @@ fn unique_dir(root: &Path, requested_name: &str, kind: &str) -> Result<PathBuf, 
 
 fn allocate_agent_worktree_dir(
     state: &AppState,
+    host: &Host,
     base_repo: Option<&str>,
     group: &GroupInfo,
     agent_name: &str,
 ) -> Result<PathBuf, String> {
+    // A remote worktree has to live under the *host's* root. The group's
+    // managed directory and the project-local placements below are all resolved
+    // against this filesystem — canonicalizing a remote path here would silently
+    // produce a local directory and the agent would edit the wrong tree.
+    if let Some(root) = host.remote_workspace_root() {
+        return Ok(PathBuf::from(root).join(&group.id).join(agent_name));
+    }
+
     let location = persistence::load_preferences(&state.config().workspace_root)?
         .worktree_location
         .unwrap_or_default();
@@ -1788,9 +1798,9 @@ fn allocate_agent_worktree_dir(
     let base_repo = base_repo.ok_or_else(|| {
         "cannot resolve a project-local worktree location without a project directory".to_string()
     })?;
-    let is_git = is_git_repo(base_repo);
+    let is_git = is_git_repo(host, base_repo);
     let project_root = if is_git {
-        git_project_root(base_repo)?
+        git_project_root(host, base_repo)?
     } else {
         fs::canonicalize(base_repo)
             .map_err(|err| format!("failed to resolve project directory {base_repo}: {err}"))?
@@ -1802,7 +1812,7 @@ fn allocate_agent_worktree_dir(
     };
 
     if is_git {
-        ensure_git_local_exclude(base_repo, exclude_pattern)?;
+        ensure_git_local_exclude(host, base_repo, exclude_pattern)?;
     }
     let root = project_root.join(relative_root);
     fs::create_dir_all(&root)
@@ -1811,12 +1821,9 @@ fn allocate_agent_worktree_dir(
     unique_worktree_dir(&root, &format!("{display_name}-{agent_name}"))
 }
 
-fn git_project_root(base_repo: &str) -> Result<PathBuf, String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(base_repo)
-        .arg("rev-parse")
-        .arg("--show-toplevel")
+fn git_project_root(host: &Host, base_repo: &str) -> Result<PathBuf, String> {
+    let output = host
+        .git(["-C", base_repo, "rev-parse", "--show-toplevel"])
         .output()
         .map_err(|err| format!("failed to resolve git project root: {err}"))?;
     if !output.status.success() {
@@ -1833,13 +1840,9 @@ fn git_project_root(base_repo: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(root))
 }
 
-fn ensure_git_local_exclude(base_repo: &str, pattern: &str) -> Result<(), String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(base_repo)
-        .arg("rev-parse")
-        .arg("--git-path")
-        .arg("info/exclude")
+fn ensure_git_local_exclude(host: &Host, base_repo: &str, pattern: &str) -> Result<(), String> {
+    let output = host
+        .git(["-C", base_repo, "rev-parse", "--git-path", "info/exclude"])
         .output()
         .map_err(|err| format!("failed to resolve git exclude path: {err}"))?;
     if !output.status.success() {
@@ -1931,12 +1934,8 @@ fn sanitize_ref_segment(value: &str) -> String {
     sanitize_path_segment(value)
 }
 
-fn is_git_repo(path: &str) -> bool {
-    Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .arg("rev-parse")
-        .arg("--is-inside-work-tree")
+fn is_git_repo(host: &Host, path: &str) -> bool {
+    host.git(["-C", path, "rev-parse", "--is-inside-work-tree"])
         .output()
         .map(|output| output.status.success())
         .unwrap_or(false)
@@ -2165,6 +2164,7 @@ mod tests {
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
         OpencodeAdapterConfig, QmuxConfig,
     };
+    use std::process::Command;
 
     fn test_remote() -> RemoteRef {
         RemoteRef {
@@ -2194,6 +2194,57 @@ mod tests {
             Some(PathBuf::from(missing))
         );
         assert_eq!(group_recoverable_dir(None, missing), None);
+    }
+
+    fn remote_host(root: Option<&str>) -> Host {
+        Host::Remote {
+            name: "devbox".to_string(),
+            config: crate::host::HostConfig {
+                ssh: "user@devbox".to_string(),
+                workspace_root: root.map(str::to_string),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn a_remote_worktree_is_allocated_under_the_host_root() {
+        let root = std::env::temp_dir().join("qmux-remote-alloc");
+        let state = test_state_with_workspace(root);
+        let mut group =
+            allocation_group(Path::new("/srv/code/project"), Path::new("/local/managed"));
+        group.id = "group-9".to_string();
+        group.managed_dir = "/local/managed/group-9".to_string();
+
+        let dir = allocate_agent_worktree_dir(
+            &state,
+            &remote_host(Some("/srv/qmux")),
+            Some("/srv/code/project"),
+            &group,
+            "agent-1",
+        )
+        .expect("allocates");
+
+        // The group's managed directory is a path on *this* machine. Using it
+        // would put the worktree where the remote agent cannot reach it — which
+        // is exactly what happened before the host was threaded through here.
+        assert_eq!(dir, PathBuf::from("/srv/qmux/group-9/agent-1"));
+        assert!(!dir.starts_with("/local"), "must not land locally: {dir:?}");
+    }
+
+    #[test]
+    fn a_remote_host_without_a_root_still_lands_remotely() {
+        let root = std::env::temp_dir().join("qmux-remote-alloc-default");
+        let state = test_state_with_workspace(root);
+        let dir = allocate_agent_worktree_dir(
+            &state,
+            &remote_host(None),
+            Some("/srv/x"),
+            &allocation_group(Path::new("/srv/x"), Path::new("/local/managed")),
+            "a",
+        )
+        .expect("allocates");
+        assert!(dir.starts_with("~/.qmux/workspaces"), "{dir:?}");
     }
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
@@ -3668,17 +3719,27 @@ mod tests {
         let group = allocation_group(&project, &managed);
         let canonical_project = fs::canonicalize(&project).unwrap();
 
-        let first =
-            allocate_agent_worktree_dir(&state, Some(project.to_str().unwrap()), &group, "agent-1")
-                .unwrap();
+        let first = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(project.to_str().unwrap()),
+            &group,
+            "agent-1",
+        )
+        .unwrap();
         assert_eq!(
             first,
             canonical_project.join(".qmux/worktrees/brave-otter-agent-1")
         );
         fs::create_dir_all(&first).unwrap();
-        let collision =
-            allocate_agent_worktree_dir(&state, Some(project.to_str().unwrap()), &group, "agent-1")
-                .unwrap();
+        let collision = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(project.to_str().unwrap()),
+            &group,
+            "agent-1",
+        )
+        .unwrap();
         assert_eq!(
             collision,
             canonical_project.join(".qmux/worktrees/brave-otter-agent-1-1")
@@ -3705,9 +3766,14 @@ mod tests {
         let mut group = allocation_group(&project, &managed);
         group.name_override = Some("a".repeat(400));
 
-        let dir =
-            allocate_agent_worktree_dir(&state, Some(project.to_str().unwrap()), &group, "agent-1")
-                .unwrap();
+        let dir = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(project.to_str().unwrap()),
+            &group,
+            "agent-1",
+        )
+        .unwrap();
         let name = dir.file_name().unwrap().to_str().unwrap();
         assert!(
             name.len() <= 240,
@@ -3719,9 +3785,14 @@ mod tests {
 
         let mut other = group;
         other.name_override = Some(format!("{}b", "a".repeat(399)));
-        let other_dir =
-            allocate_agent_worktree_dir(&state, Some(project.to_str().unwrap()), &other, "agent-1")
-                .unwrap();
+        let other_dir = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(project.to_str().unwrap()),
+            &other,
+            "agent-1",
+        )
+        .unwrap();
         assert_ne!(
             dir, other_dir,
             "the hash should distinguish truncated names"
@@ -3763,12 +3834,22 @@ mod tests {
         .unwrap();
         let group = allocation_group(&nested, &managed);
 
-        let first =
-            allocate_agent_worktree_dir(&state, Some(nested.to_str().unwrap()), &group, "agent-1")
-                .unwrap();
-        let second =
-            allocate_agent_worktree_dir(&state, Some(nested.to_str().unwrap()), &group, "agent-2")
-                .unwrap();
+        let first = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(nested.to_str().unwrap()),
+            &group,
+            "agent-1",
+        )
+        .unwrap();
+        let second = allocate_agent_worktree_dir(
+            &state,
+            &Host::Local,
+            Some(nested.to_str().unwrap()),
+            &group,
+            "agent-2",
+        )
+        .unwrap();
 
         assert_eq!(
             first,

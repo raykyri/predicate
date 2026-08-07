@@ -29,6 +29,8 @@ use std::process::Command;
 /// Refuse to sit on a dead connection: a worktree call is on the path to
 /// opening a pane, so failing fast beats hanging the launch.
 const CONNECT_TIMEOUT_SECONDS: u32 = 10;
+/// Where worktrees land on a host that does not name a `workspaceRoot`.
+const DEFAULT_REMOTE_WORKSPACE_ROOT: &str = "~/.qmux/workspaces";
 
 /// A machine qmux can run agents on, as declared in `qmux.config.json`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -122,7 +124,6 @@ impl Host {
         }
     }
 
-    #[allow(dead_code)]
     pub fn config(&self) -> Option<&HostConfig> {
         match self {
             Host::Local => None,
@@ -219,17 +220,20 @@ impl Host {
         Some(argv)
     }
 
-    /// Resolves a path on this host. Remote paths are returned verbatim: they
-    /// are the far side's, and the local filesystem has no opinion about them.
-    #[allow(dead_code)]
-    pub fn workspace_root(&self, local_default: &str) -> String {
-        match self {
-            Host::Local => local_default.to_string(),
-            Host::Remote { config, .. } => config
+    /// Where agent worktrees live on a remote host, or `None` locally.
+    ///
+    /// `None` is the signal that the caller's own local placement logic
+    /// applies. A remote path must never be run through it — canonicalizing or
+    /// stat'ing the far side's path here resolves against *this* filesystem and
+    /// silently produces a local directory.
+    pub fn remote_workspace_root(&self) -> Option<String> {
+        let config = self.config()?;
+        Some(
+            config
                 .workspace_root
                 .clone()
-                .unwrap_or_else(|| "~/.qmux/workspaces".to_string()),
-        }
+                .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string()),
+        )
     }
 }
 
@@ -563,9 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn the_workspace_root_follows_the_host() {
-        assert_eq!(Host::Local.workspace_root("/local/root"), "/local/root");
-        assert_eq!(remote_host().workspace_root("/local/root"), "/srv/work");
+    fn only_a_remote_host_overrides_where_worktrees_live() {
+        // `None` locally is what keeps the existing placement logic — global
+        // vs project-local — in charge on this machine.
+        assert_eq!(Host::Local.remote_workspace_root(), None);
+        assert_eq!(
+            remote_host().remote_workspace_root().as_deref(),
+            Some("/srv/work")
+        );
 
         let bare = Host::Remote {
             name: "b".to_string(),
@@ -574,6 +583,9 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(bare.workspace_root("/local/root"), "~/.qmux/workspaces");
+        assert_eq!(
+            bare.remote_workspace_root().as_deref(),
+            Some(DEFAULT_REMOTE_WORKSPACE_ROOT)
+        );
     }
 }
