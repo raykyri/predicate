@@ -242,6 +242,8 @@ function adapterLabel(adapter: string) {
       return "OpenCode";
     case "grok":
       return "Grok";
+    case "muse":
+      return "Muse";
     default:
       return "Agent";
   }

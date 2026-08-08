@@ -2,6 +2,7 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod grok;
+pub mod muse;
 pub mod opencode;
 
 use crate::config::QmuxConfig;
@@ -22,6 +23,7 @@ use acp::AcpAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
 use grok::GrokAdapter;
+use muse::MuseAdapter;
 use opencode::OpencodeAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -873,6 +875,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(CodexAdapter::new(config)),
         Box::new(OpencodeAdapter::new(config)),
         Box::new(GrokAdapter::new(config)),
+        Box::new(MuseAdapter::new(config)),
         Box::new(AcpAdapter::new(config)),
     ])
 }
@@ -1418,7 +1421,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
     use std::path::PathBuf;
 
@@ -1440,6 +1443,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -1465,7 +1471,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 5);
+        assert_eq!(metadata.len(), 6);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1474,14 +1480,20 @@ mod tests {
         assert!(!metadata[2].default);
         assert_eq!(metadata[3].id, "grok");
         assert!(!metadata[3].default);
-        assert_eq!(metadata[4].id, "acp");
+        assert_eq!(metadata[4].id, "muse");
         assert!(!metadata[4].default);
+        assert_eq!(metadata[5].id, "acp");
+        assert!(!metadata[5].default);
         assert!(adapter_supports_fork("grok"));
         assert!(adapter_supports_fork("opencode"));
         // ACP has no native fork command: the protocol has no such method, and
         // `session/load` resumes rather than branches.
         assert!(!adapter_supports_fork("acp"));
         assert!(!adapter_supports_fork_at_message("acp"));
+        // Muse has no fork command either — no `--fork-session` flag and no
+        // `fork` subcommand — so branching a session is not offered.
+        assert!(!adapter_supports_fork("muse"));
+        assert!(!adapter_supports_fork_at_message("muse"));
     }
 
     #[test]
@@ -1509,6 +1521,7 @@ mod tests {
                 status: AgentStatus::Running,
                 model: None,
                 effort: None,
+                approval_mode: None,
                 parent_id: None,
                 fork_point: None,
                 root_session_id: None,
@@ -1538,6 +1551,7 @@ mod tests {
             status: AgentStatus::Idle,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

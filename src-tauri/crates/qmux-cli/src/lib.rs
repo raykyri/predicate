@@ -6,6 +6,7 @@
 //! reporting, and forks once a transport exists.
 
 mod acp;
+mod muse;
 
 use qmux_proto::{ControlRequest, ControlResponse};
 use serde::Deserialize;
@@ -59,6 +60,18 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
                     "payload": payload,
                 }),
             )?;
+            Ok(true)
+        }
+        "muse-notify" => {
+            // Muse's hook environment has no QMUX_* variables to identify the
+            // pane with, so this command resolves it from the payload instead.
+            // See the `muse` module.
+            let event = args
+                .next()
+                .ok_or_else(|| "usage: qmux muse-notify <event> [bindings-dir]".to_string())?;
+            // The generated shim always supplies the directory, because Muse
+            // strips every variable it could otherwise be derived from.
+            muse::notify(event, args.next())?;
             Ok(true)
         }
         "cwd" => {
@@ -123,6 +136,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             run_agent_exec("grok".to_string(), args.collect())?;
             Ok(true)
         }
+        "muse" => {
+            run_agent_exec("muse".to_string(), args.collect())?;
+            Ok(true)
+        }
         "acp" => {
             acp::run(args.collect())?;
             Ok(true)
@@ -185,7 +202,7 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "usage: qmux [ping|notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|acp|fork|open]"
+                "usage: qmux [ping|notify|muse-notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|muse|acp|fork|open]"
             );
             Ok(true)
         }
@@ -290,6 +307,19 @@ pub(crate) fn request_silent(command: &str, payload: Value) -> Result<(), String
     request(command, payload).map(|_| ())
 }
 
+/// As [`request_silent`], but with the socket and token supplied by the caller
+/// rather than read from the environment. The Muse hook path needs this: its
+/// shim runs with `QMUX_*` stripped and recovers both values from the pane
+/// binding file instead.
+pub(crate) fn request_silent_with(
+    socket_path: &str,
+    token: &str,
+    command: &str,
+    payload: Value,
+) -> Result<(), String> {
+    send_request(socket_path, token, command, payload).map(|_| ())
+}
+
 fn request_and_print(command: &str, payload: Value) -> Result<(), String> {
     let response = request(command, payload)?;
     println!("{response}");
@@ -312,7 +342,17 @@ fn request_value(command: &str, payload: Value) -> Result<Value, String> {
 fn request(command: &str, payload: Value) -> Result<String, String> {
     let socket_path = env::var("QMUX_SOCK").map_err(|_| "QMUX_SOCK is not set".to_string())?;
     let token = env::var("QMUX_TOKEN").map_err(|_| "QMUX_TOKEN is not set".to_string())?;
-    let mut stream = UnixStream::connect(&socket_path)
+    send_request(&socket_path, &token, command, payload)
+}
+
+fn send_request(
+    socket_path: &str,
+    token: &str,
+    command: &str,
+    payload: Value,
+) -> Result<String, String> {
+    let token = token.to_string();
+    let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| format!("failed to connect to {socket_path}: {err}"))?;
     let timeout = Some(Duration::from_secs(2));
     let _ = stream.set_read_timeout(timeout);

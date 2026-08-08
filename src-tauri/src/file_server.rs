@@ -948,7 +948,7 @@ mod tests {
     fn test_state(root: &Path, base: &Path, pane_id: &str) -> AppState {
         use crate::config::{
             AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-            OpencodeAdapterConfig, QmuxConfig,
+            MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
         };
         let config = QmuxConfig {
             remotes: Default::default(),
@@ -967,6 +967,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,

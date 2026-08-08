@@ -1431,6 +1431,7 @@ fn launch_research_child_run(
                 status: AgentStatus::Done,
                 model: parent.model.clone(),
                 effort: parent.effort.clone(),
+                approval_mode: None,
                 acp_agent: None,
                 parent_id: None,
                 fork_point: None,
@@ -2813,6 +2814,12 @@ fn main() {
                 if let Some(warning) = state.take_recovery_warning() {
                     notify_startup_warning(app.handle(), &warning);
                 }
+                // Muse pane bindings hand a hook the pane's control-socket
+                // token, and tokens are minted per process. Every binding left
+                // on disk by the previous run is therefore already useless —
+                // drop them before recovery writes fresh ones for the Muse
+                // panes that do come back.
+                adapters::muse::clear_muse_bindings();
                 recovery::respawn_session(&state, recovered_panes);
                 // Re-level persisted nesting now that we know which panes actually
                 // came back (exited panes are not respawned).

@@ -65,8 +65,59 @@ present, the same way the Codex shim does. Other files in
 `~/.grok/hooks/` are left alone. For exact hooks,
 see src-tauri/src/adapters/grok.rs:24.
 
-All three hook systems call back into qmux via qmux notify <event>,
-which sends a token-scoped hook.notify request back to the app.
+For Muse (Meta's Muse Code), hooks are neither a settings file nor a
+hooks directory — they are capabilities of a *plugin*. qmux generates
+one and installs it:
+
+```
+$QMUX_MUSE_HOME/qmux-muse-hook       (default $QMUX_MUSE_HOME =
+$QMUX_MUSE_HOME/plugin/               $XDG_DATA_HOME/qmux/muse)
+$QMUX_MUSE_HOME/bindings/<pane>.json
+$QMUX_MUSE_HOME/installed.stamp
+```
+
+Every alternative was probed and does not fire: `settings.json` hooks,
+`settings.managed_hooks_path`, the `TBH_MANAGED_HOOKS_PATH` env var, and
+a project `.musehooks.json`. Only a native plugin works, it requires
+`MUSE_EXPERIMENTAL_PLUGINS=1` (which qmux sets on the pane), and its
+capabilities must be approved once — so launching runs `muse plugins
+install` + `muse plugins approve`, gated on a fingerprint stamp so it
+happens only when the generated sources change. Muse also rejects a
+plugin whose hooks share one script file, hence one script per event.
+For exact hooks, see src-tauri/src/adapters/muse.rs:32.
+
+The Claude, Codex, and Grok shims call back into qmux via
+`qmux notify <event>`, which sends a token-scoped hook.notify request
+back to the app.
+
+Muse cannot use that path. It runs hooks with a sanitized environment
+that strips every `QMUX_*` variable, so its shim can never see which
+pane it belongs to — the "no-op unless the qmux env is set" guard the
+other shims rely on would disable every hook instead. Its shim calls
+`qmux muse-notify <event>` instead, which resolves the pane from a
+binding file qmux writes before launch, keyed on the two identifiers
+every Muse payload carries: `session_id` first (exact), then `cwd`. A
+payload matching no binding exits quietly, which is what keeps a
+standalone `muse` run — which still inherits the globally installed
+plugin — unaffected.
+
+The `cwd` fallback only matches a binding no session has claimed yet.
+Once a pane's own `SessionStart` stamps its session id onto its binding,
+the directory stops being a way in, and the app additionally refuses to
+re-point an agent that already has a session id. Together those keep a
+`muse` started outside qmux, in a directory a qmux pane is already
+working in, from posting hooks to that pane. One residual race has no
+fix while the environment is stripped: if the outside process starts
+first and claims the unclaimed binding, the qmux pane's own session is
+the one that then looks foreign.
+
+Because a binding carries the pane's control-socket token, the bindings
+directory is `0700` and each file `0600`. All bindings are dropped at
+app startup — tokens are minted per process and never persisted, so
+every binding from a previous run is already useless — and pruned again
+on each Muse launch, with a grace period so a launch in flight (the
+binding is written before the pane exists, because `SessionStart` fires
+that early) is not swept by a concurrent one.
 
 
 ## Claude
@@ -149,3 +200,71 @@ which sends a token-scoped hook.notify request back to the app.
   a hook for it.
 - Unknown Grok hook events: forwarded as `agent.hook.<event>` with the
   raw hook payload.
+
+
+## Muse
+
+Muse's payloads are Claude-shaped, but two of its behaviours change how
+they are read.
+
+First, **every hook fired inside a subagent reports the child's
+`session_id`** and carries no pointer back to the parent. Muse's
+built-in `tbh-reminders` plugin runs subagents on *every* turn — and
+keeps running them after the main `Stop` — so a pane that let them drive
+its status would never settle.
+
+In practice they stop at the shim: once a binding is claimed by the main
+session, a payload carrying a child's session id matches nothing and
+exits quietly. The adapter still compares each payload's `session_id`
+against the agent's recorded main session and forwards a mismatch as a
+passive `agent.subagent_activity` event, but that is now a backstop for
+the window before the claim rather than the usual route.
+
+That comparison needs a main session to compare against, which a pane
+does not have before its first hook. Two rules cover the gap. Muse
+reports `SubagentStart` / `SubagentStop` from the child's point of view —
+`session_id` equals `child_session_id`, and `subagent_id` names the agent
+— so those are recognized on their own terms. And only the events a
+subagent cannot produce (`UserPromptSubmit`, `Stop`; `SessionStart` binds
+in its own arm) are allowed to name an unbound pane's session, so a
+subagent's tool hook can never bind the pane to a child. Either way, only
+main-session hooks move the pane's status.
+
+Second, **a resumed session fires no `SessionStart`**. `muse resume
+<id>` emits only `UserPromptSubmit` and `Stop`, so a resumed pane's
+session identity can never arrive from a hook. qmux writes it into the
+binding at launch (it knows the id it is resuming), and the first
+main-session hook adopts it for an agent that somehow has none.
+
+- `SessionStart`: records `session_id`, stamps it onto the pane binding
+  so later hooks resolve by session rather than by directory, and starts
+  discovering the transcript. This does not mark the agent as running.
+  The first `SessionStart` wins — a Muse session id never changes, so a
+  second one belongs to some other process that matched by directory.
+- `UserPromptSubmit`: marks the agent `Running`, matches the payload's
+  `prompt` against outstanding send tracking, and emits
+  `agent.prompt_submitted`.
+- `PreToolUse`: marks the agent `Running` and emits `agent.tool_use`.
+- `PostToolUse`: marks the agent `Running` and emits
+  `agent.tool_result`.
+- `PermissionRequest`: marks the agent `Running` and emits
+  `agent.permission_request` — deliberately *not* `AwaitingPermission`.
+  Muse has no matching resolution event, so nothing would ever clear
+  that state, and in practice its policy layer and approval judge allow
+  most calls without ever showing a dialog.
+- `SubagentStart` / `SubagentStop`: passive. Emitted for visibility but
+  never gate idle, for the reminder-agent reason above.
+- `Stop`: treats the agent as idle. qmux clears outstanding send
+  tracking, respects pause and typing state, drains the next queued turn
+  if allowed, and emits either `agent.running` or `agent.done`. It does
+  not wait for subagent quiescence.
+- Unknown Muse hook events: forwarded as `agent.hook.<event>` with the
+  raw hook payload.
+
+Muse always reports `transcript_path: null`, so qmux discovers the log
+itself by scanning
+`$XDG_DATA_HOME/muse/sessions/<year>/<month>/<day>/<session-id>/session.jsonl`
+newest-first, on a background thread that retries — `SessionStart` can
+beat the directory into existence. Subagents write their own nested logs
+under `<session-id>/subagent/<child-id>/`, so the main log needs no
+filtering.

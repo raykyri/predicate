@@ -1225,6 +1225,7 @@ fn adapter_label(adapter: &str) -> &str {
         "codex" => "Codex",
         "opencode" => "OpenCode",
         "grok" => "Grok",
+        "muse" => "Muse",
         _ => "Agent",
     }
 }
@@ -1413,6 +1414,7 @@ mod tests {
             status: AgentStatus::Done,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

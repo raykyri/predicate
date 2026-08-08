@@ -542,7 +542,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig, QmuxConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
 
     use crate::workspace::{AgentInfo, AgentStatus};
@@ -572,6 +572,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -607,6 +610,7 @@ mod tests {
             status: AgentStatus::Running,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

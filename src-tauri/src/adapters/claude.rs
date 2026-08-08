@@ -2420,7 +2420,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
     use crate::state::{AgentSendSource, PaneInfo, PaneRuntime, PaneStatus};
     use crate::transcript::TurnBlock;
@@ -2654,6 +2654,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
@@ -2679,6 +2682,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -2708,6 +2714,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -2800,6 +2809,7 @@ mod tests {
             status: AgentStatus::Running,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -4201,7 +4211,7 @@ mod tests {
     fn list_skills_enumerates_named_namespaced_skills() {
         use crate::config::{
             AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-            OpencodeAdapterConfig,
+            MuseAdapterConfig, OpencodeAdapterConfig,
         };
 
         let plugin_dir =
@@ -4247,6 +4257,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: plugin_dir.clone(),
@@ -4266,7 +4279,7 @@ mod tests {
     fn list_skills_is_empty_without_a_plugin_dir() {
         use crate::config::{
             AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-            OpencodeAdapterConfig,
+            MuseAdapterConfig, OpencodeAdapterConfig,
         };
 
         let config = QmuxConfig {
@@ -4287,6 +4300,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: env::temp_dir().join("qmux-nonexistent-claude-plugin-dir"),
@@ -4300,7 +4316,7 @@ mod tests {
     fn list_skills_keeps_ids_unique_when_frontmatter_names_collide() {
         use crate::config::{
             AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-            OpencodeAdapterConfig,
+            MuseAdapterConfig, OpencodeAdapterConfig,
         };
 
         let plugin_dir =
@@ -4338,6 +4354,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,

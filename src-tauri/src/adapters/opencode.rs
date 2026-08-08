@@ -1281,7 +1281,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
     use crate::state::AppState;
     use std::fs;
@@ -1305,6 +1305,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -1333,6 +1336,7 @@ mod tests {
             status: AgentStatus::Starting,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

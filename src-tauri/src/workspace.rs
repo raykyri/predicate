@@ -233,6 +233,13 @@ pub struct AgentInfo {
     /// effort. Absent when the adapter default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// Tool-approval policy the session was launched with, persisted like
+    /// `effort` so a respawn does not silently fall back to the CLI's default —
+    /// which would be a quieter, more permissive session than the user chose.
+    /// Only the Muse adapter sets this today. Absent when the adapter default
+    /// applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_mode: Option<String>,
     /// Which `adapters.acp.agents` entry an `acp` agent was launched with.
     /// Only the ACP adapter sets this: unlike the vendor adapters, its
     /// registry id names a protocol rather than a program, so a respawn has to
@@ -1119,6 +1126,7 @@ fn prepare_agent_workspace_locked(
         status: AgentStatus::Starting,
         model: request.model,
         effort: request.effort,
+        approval_mode: None,
         // Set by the ACP adapter immediately after this returns; the shared
         // workspace request has no reason to carry an adapter-specific field.
         acp_agent: None,
@@ -2176,7 +2184,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig, QmuxConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
     use std::process::Command;
 
@@ -2359,6 +2367,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
@@ -2490,6 +2501,7 @@ mod tests {
             status,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

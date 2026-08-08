@@ -1835,7 +1835,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig, QmuxConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
     use std::time::UNIX_EPOCH;
 
@@ -2742,6 +2742,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
@@ -2765,6 +2768,7 @@ mod tests {
             status,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

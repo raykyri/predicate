@@ -10,8 +10,9 @@ It has a native UI for launching agents, queueing follow-ups,
 tracking agent status, and driving TUI-based agents.
 
 Agents are integrated through a pluggable adapter layer. Claude Code,
-Codex, OpenCode, and Grok are included as adapters, each with lifecycle
-hooks, native transcripts, session resumes, and native forks. New agents
+Codex, OpenCode, Grok, and Muse are included as adapters, each with
+lifecycle hooks, native transcripts, and session resumes; all but Muse
+also support native forks, which its CLI has no command for. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
@@ -27,7 +28,8 @@ Rust. See [ACP agents](#acp-agents).
   surface on macOS, with a portable Rust PTY backend for tests and
   non-macOS platforms.
 - Agent panes for Claude Code, Codex, OpenCode, and Grok, launched from the app
-  or by running `claude` / `codex` / `opencode` / `grok` inside a shell pane.
+  or by running `claude` / `codex` / `opencode` / `grok` / `muse` inside a shell
+  pane.
 - Agent panes for any ACP agent, configured under `adapters.acp` and launched
   from the app.
 - Transcript JSONL tailing and a native follow-up composer: send, queue,
@@ -73,7 +75,7 @@ natively on Apple Silicon and Intel Macs.
    [releases page](https://github.com/raykyri/qmux/releases).
 2. Open it and drag **qmux** into **Applications**.
 3. You'll want the agent CLIs you use on your `PATH`: `claude`, `codex`,
-   `opencode`, and/or `grok`.
+   `opencode`, `grok`, and/or `muse`.
 
 If macOS reports the app is damaged or can't be opened, clear the download
 quarantine flag and launch it again:
@@ -92,7 +94,8 @@ Prerequisites:
 - macOS.
 - Rust toolchain.
 - Node.js and npm.
-- The agent CLIs you want to use on `PATH`: `claude`, `codex`, `opencode`, and/or `grok`.
+- The agent CLIs you want to use on `PATH`: `claude`, `codex`, `opencode`, `grok`,
+  and/or `muse`.
 
 Install dependencies:
 
@@ -264,7 +267,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Shell panes spawn `$SHELL`.
 - Agent panes spawn the adapter's configured agent binary, either in the current
   repo/directory or in a qmux-created agent worktree. Shell functions can route
-  `claude`, `codex`, `opencode`, and `grok` through qmux from shell panes, but the
+  `claude`, `codex`, `opencode`, `grok`, and `muse` through qmux from shell panes, but the
   adapter binary still needs to be installed or configured.
 - Each pane receives:
   - `QMUX_PANE_ID`
@@ -310,7 +313,8 @@ hosted view can show proposal status without a separate collaboration database.
     "claude": { "binary": "claude" },
     "codex": { "binary": "codex" },
     "opencode": { "binary": "opencode" },
-    "grok": { "binary": "grok" }
+    "grok": { "binary": "grok" },
+    "muse": { "binary": "muse" }
   }
 }
 ```
@@ -319,7 +323,7 @@ hosted view can show proposal status without a separate collaboration database.
 Relative paths (for `workspaceRoot`/`socketPath`) are resolved from the config
 file's directory when that directory is under `$HOME`; otherwise they fall back to
 the platform data/runtime locations. Each adapter's `binary` is optional and
-defaults to the command name (`claude`, `codex`, `opencode`, `grok`), which is
+defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`), which is
 looked up on `PATH`; an absolute path or a `~/…` path (expanded against `$HOME`) is
 used as given. A top-level `claudeBinary` is still honored for backward
 compatibility. If the config file is absent, qmux uses the platform data

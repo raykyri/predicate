@@ -9814,7 +9814,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
     use crate::persistence::PersistedState;
     use crate::scrollback::{append_pane_scrollback, read_pane_scrollback};
@@ -9856,6 +9856,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
@@ -9879,6 +9882,7 @@ mod tests {
             status: AgentStatus::Running,
             model: Some("opus".to_string()),
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -15881,6 +15885,7 @@ mod tests {
             status: AgentStatus::Starting,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: Some("agent-0".to_string()),
             fork_point: Some("sess-src".to_string()),
             root_session_id: Some("sess-src".to_string()),
@@ -15935,6 +15940,7 @@ mod tests {
             status: AgentStatus::Running,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -16048,6 +16054,7 @@ mod tests {
             status: AgentStatus::Starting,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

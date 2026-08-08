@@ -3,6 +3,7 @@ import { acpUiAdapter } from "./acp";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
 import { grokUiAdapter } from "./grok";
+import { museUiAdapter } from "./muse";
 import { opencodeUiAdapter } from "./opencode";
 import type { AgentInfo, PaneInfo, RuntimeConfig, Turn, TurnBlock } from "../types";
 
@@ -44,6 +45,7 @@ export const agentUiAdapters = [
   codexUiAdapter,
   opencodeUiAdapter,
   grokUiAdapter,
+  museUiAdapter,
   acpUiAdapter,
 ];
 

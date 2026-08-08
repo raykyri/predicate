@@ -2371,7 +2371,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
     use crate::state::{AppState, PaneInfo, PaneRuntime, PaneStatus};
     use portable_pty::{Child, ChildKiller, ExitStatus, PtySize, native_pty_system};
@@ -3844,6 +3844,9 @@ trusted_hash = "sha256:trusted"
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
@@ -3897,6 +3900,7 @@ trusted_hash = "sha256:trusted"
             status: AgentStatus::Running,
             model: None,
             effort: None,
+            approval_mode: None,
             parent_id: None,
             fork_point: None,
             root_session_id: None,

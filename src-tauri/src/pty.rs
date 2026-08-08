@@ -2750,7 +2750,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
-        OpencodeAdapterConfig, QmuxConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
     use crate::scrollback::read_pane_scrollback;
     use crate::workspace::{AgentInfo, AgentStatus, GroupInfo, WorkspaceScope};
@@ -2946,6 +2946,9 @@ mod tests {
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
                 },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
@@ -2971,6 +2974,9 @@ mod tests {
                 },
                 grok: GrokAdapterConfig {
                     binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
                 },
             },
             legacy_claude_binary: None,
@@ -3008,6 +3014,7 @@ mod tests {
             status: crate::workspace::AgentStatus::Starting,
             model: None,
             effort: None,
+            approval_mode: None,
             acp_agent: None,
             acp_config_options: Vec::new(),
             parent_id: None,
@@ -4143,6 +4150,7 @@ mod tests {
                 status: AgentStatus::Running,
                 model: None,
                 effort: None,
+                approval_mode: None,
                 parent_id: None,
                 fork_point: None,
                 root_session_id: None,

@@ -5,6 +5,7 @@
     "claude": { "binary": "claude" },
     "codex": { "binary": "codex" },
     "opencode": { "binary": "opencode" },
-    "grok": { "binary": "grok" }
+    "grok": { "binary": "grok" },
+    "muse": { "binary": "muse" }
   }
 }
