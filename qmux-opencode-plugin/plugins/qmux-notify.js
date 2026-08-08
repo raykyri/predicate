@@ -40,16 +40,20 @@ async function notify(event, payload) {
       QMUX_PANE_ID: PANE_ID,
       QMUX_AGENT_ID: AGENT_ID,
     };
-    if (payload && Object.keys(payload).length) {
-      args.push(JSON.stringify(payload));
-    }
     await new Promise((resolve) => {
       const child = spawn(CLI, args, {
         env,
-        stdio: "ignore",
+        // `qmux notify` reads its payload from stdin. Keep the command line
+        // limited to the event so JSON cannot be silently discarded as an
+        // unparsed trailing argument.
+        stdio: ["pipe", "ignore", "ignore"],
       });
       child.on("error", resolve);
       child.on("close", resolve);
+      // If qmux exits before consuming the payload, EPIPE is still best-effort
+      // rather than an unhandled plugin error.
+      child.stdin.on("error", resolve);
+      child.stdin.end(payload && Object.keys(payload).length ? JSON.stringify(payload) : "");
     });
   } catch {
     // Swallow: qmux is best-effort and must never break the agent.
@@ -96,8 +100,8 @@ function transcriptSessionName(sessionId) {
     : "pending";
 }
 
-async function writeTranscriptMessage(sessionId, role, content) {
-  await writeTranscriptItem(sessionId, { type: "message", role, content });
+async function writeTranscriptMessage(sessionId, role, content, metadata = {}) {
+  await writeTranscriptItem(sessionId, { type: "message", role, content, ...metadata });
 }
 
 // Map opencode content parts to the shape OpenCodeAdapter::parse_transcript_line
@@ -168,7 +172,7 @@ export const QmuxNotifyPlugin = async () => {
   const messageRoles = new Map();
   const writtenToolUses = new Set();
   const writtenToolResults = new Set();
-  const writtenTextParts = new Set();
+  const finalizedTextParts = new Set();
   const stopNotifiedAt = new Map();
 
   function reserveStopNotification(sessionId) {
@@ -322,10 +326,21 @@ export const QmuxNotifyPlugin = async () => {
       if (role === "user") return;
 
       if (part.type === "text") {
-        if (!part.time?.end || (part.id && writtenTextParts.has(part.id))) return;
-        if (part.id) writtenTextParts.add(part.id);
         const content = normalizeContent([part]);
-        if (content.length) {
+        if (!content.length) return;
+
+        // OpenCode repeatedly updates a text part while it streams. Record each
+        // snapshot under the stable part id; the Rust adapter coalesces those
+        // snapshots into one live-updating turn. Parts without an id cannot be
+        // safely coalesced, so retain the previous final-only behavior for them.
+        if (part.id) {
+          if (finalizedTextParts.has(part.id)) return;
+          await writeTranscriptMessage(partSessionId, role, content, {
+            id: part.id,
+            opencode_text_snapshot: true,
+          });
+          if (part.time?.end) finalizedTextParts.add(part.id);
+        } else if (part.time?.end) {
           await writeTranscriptMessage(partSessionId, role, content);
         }
         return;

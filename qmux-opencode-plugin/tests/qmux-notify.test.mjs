@@ -78,6 +78,103 @@ test("scopes transcript events to the root session and deduplicates final text p
   await rm(workspace, { recursive: true, force: true });
 });
 
+test("sends lifecycle payloads to qmux over stdin", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "qmux-opencode-notify-"));
+  const cli = join(workspace, "qmux-test-cli");
+  const notifications = join(workspace, "notifications.txt");
+  await writeFile(
+    cli,
+    '#!/bin/sh\npayload=$(cat)\nprintf "%s\\t%s\\n" "$*" "$payload" >> "$QMUX_NOTIFY_LOG"\n',
+    "utf8",
+  );
+  await chmod(cli, 0o755);
+  Object.assign(process.env, {
+    QMUX_SOCK: join(workspace, "qmux.sock"),
+    QMUX_TOKEN: "test-token",
+    QMUX_PANE_ID: "pane-notify",
+    QMUX_AGENT_ID: "agent-notify",
+    QMUX_CLI: cli,
+    QMUX_WORKSPACE_ROOT: workspace,
+    QMUX_NOTIFY_LOG: notifications,
+  });
+  delete process.env.QMUX_FORK_POINT;
+  delete process.env.QMUX_ROOT_SESSION_ID;
+
+  const { QmuxNotifyPlugin } = await import(`../plugins/qmux-notify.js?stdin=${Date.now()}`);
+  const hooks = await QmuxNotifyPlugin();
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "session-stdin" } } },
+  });
+
+  const [line] = (await readFile(notifications, "utf8")).trim().split("\n");
+  const separator = line.indexOf("\t");
+  assert.equal(line.slice(0, separator), "notify SessionStart");
+  assert.deepEqual(JSON.parse(line.slice(separator + 1)), { session_id: "session-stdin" });
+
+  await rm(workspace, { recursive: true, force: true });
+});
+
+test("writes successive text-part snapshots for live transcript updates", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "qmux-opencode-stream-"));
+  Object.assign(process.env, {
+    QMUX_SOCK: join(workspace, "qmux.sock"),
+    QMUX_TOKEN: "test-token",
+    QMUX_PANE_ID: "pane-stream",
+    QMUX_AGENT_ID: "agent-stream",
+    QMUX_CLI: "/usr/bin/true",
+    QMUX_WORKSPACE_ROOT: workspace,
+  });
+  delete process.env.QMUX_FORK_POINT;
+  delete process.env.QMUX_ROOT_SESSION_ID;
+
+  const { QmuxNotifyPlugin } = await import(`../plugins/qmux-notify.js?stream=${Date.now()}`);
+  const hooks = await QmuxNotifyPlugin();
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "stream-session" } } },
+  });
+  await hooks.event({
+    event: {
+      type: "message.updated",
+      properties: { info: { id: "assistant-message", role: "assistant" } },
+    },
+  });
+
+  for (const part of [
+    { text: "hel", time: {} },
+    { text: "hello", time: {} },
+    { text: "hello!", time: { end: Date.now() } },
+  ]) {
+    await hooks.event({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "text-part",
+            type: "text",
+            messageID: "assistant-message",
+            sessionID: "stream-session",
+            ...part,
+          },
+        },
+      },
+    });
+  }
+
+  const transcript = await readFile(
+    join(workspace, ".qmux", "opencode", "agent-stream", "stream-session.jsonl"),
+    "utf8",
+  );
+  const lines = transcript.trim().split("\n").map(JSON.parse);
+  assert.deepEqual(
+    lines.map((line) => line.payload.content[0].text),
+    ["hel", "hello", "hello!"],
+  );
+  assert(lines.every((line) => line.payload.id === "text-part"));
+  assert(lines.every((line) => line.payload.opencode_text_snapshot));
+
+  await rm(workspace, { recursive: true, force: true });
+});
+
 test("treats the native fork child as root while excluding its subagents", async () => {
   const workspace = await mkdtemp(join(tmpdir(), "qmux-opencode-fork-plugin-"));
   Object.assign(process.env, {

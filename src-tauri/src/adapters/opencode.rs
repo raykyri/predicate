@@ -20,6 +20,7 @@ use crate::workspace::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug)]
@@ -146,6 +147,48 @@ impl AgentAdapter for OpencodeAdapter {
         line: &str,
     ) -> Option<Turn> {
         parse_transcript_line(agent_id, source_index, line)
+    }
+
+    fn resolve_transcript_turns(
+        &self,
+        agent_id: &str,
+        source_index_offset: usize,
+        lines: &[String],
+    ) -> Vec<Turn> {
+        let mut turns: Vec<Turn> = Vec::new();
+        let mut text_snapshot_indexes: HashMap<String, usize> = HashMap::new();
+
+        for (index, line) in lines.iter().enumerate() {
+            let Some(mut turn) = parse_transcript_line(agent_id, source_index_offset + index, line)
+            else {
+                continue;
+            };
+
+            let Some(snapshot_id) = opencode_text_snapshot_id(line) else {
+                turns.push(turn);
+                continue;
+            };
+
+            if let Some(existing_index) = text_snapshot_indexes.get(&snapshot_id).copied() {
+                // Retain the first line's source identity while replacing its content.
+                // The frontend can then update one live turn rather than animate a
+                // new turn for every streamed OpenCode text snapshot.
+                turn.id = turns[existing_index].id.clone();
+                turn.source_index = turns[existing_index].source_index;
+                turns[existing_index] = turn;
+            } else {
+                text_snapshot_indexes.insert(snapshot_id, turns.len());
+                turns.push(turn);
+            }
+        }
+
+        turns
+    }
+
+    fn transcript_line_can_update_turn_status(&self, line: &str) -> bool {
+        // The tailer's refresh path is also the mechanism for replacing a
+        // streamed turn's content, despite this trait method's historic name.
+        opencode_text_snapshot_id(line).is_some()
     }
 
     fn parse_transcript_lifecycle_event(&self, line: &str) -> Option<TranscriptLifecycleEvent> {
@@ -1154,6 +1197,23 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
     })
 }
 
+/// The plugin appends a new line every time OpenCode revises one streaming text
+/// part. The id is stable across those revisions and lets the resolver replace
+/// the prior snapshot instead of producing duplicate turns.
+fn opencode_text_snapshot_id(line: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("response_item")
+        || value
+            .get("payload")
+            .and_then(|payload| payload.get("opencode_text_snapshot"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return None;
+    }
+    string_field(value.get("payload")?, "id")
+}
+
 fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEvent> {
     let value = serde_json::from_str::<Value>(line).ok()?;
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
@@ -1823,6 +1883,29 @@ mod tests {
                 assert_eq!(input["command"], "ls");
             }
             other => panic!("expected tool use block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn streamed_text_snapshots_coalesce_into_one_live_turn() {
+        let adapter = OpencodeAdapter {
+            binary: "opencode".to_string(),
+            plugin_dir: PathBuf::new(),
+        };
+        let lines = vec![
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","id":"part-1","opencode_text_snapshot":true,"content":[{"type":"text","text":"hel"}]},"session_id":"sess-1"}"#.to_string(),
+            r#"{"type":"response_item","payload":{"type":"message","role":"assistant","id":"part-1","opencode_text_snapshot":true,"content":[{"type":"text","text":"hello"}]},"session_id":"sess-1"}"#.to_string(),
+        ];
+
+        assert!(adapter.transcript_line_can_update_turn_status(&lines[0]));
+        let turns = adapter.resolve_transcript_turns("agent-1", 12, &lines);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].id, "agent-1-12");
+        assert_eq!(turns[0].source_index, 12);
+        match &turns[0].blocks[0] {
+            TurnBlock::Text { text } => assert_eq!(text, "hello"),
+            other => panic!("expected text block, got {other:?}"),
         }
     }
 
