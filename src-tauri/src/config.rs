@@ -354,17 +354,37 @@ impl QmuxConfig {
     pub fn acp_agent_choices(&self) -> Vec<AcpAgentChoice> {
         let installed =
             crate::acp_registry::installed_configs(&self.workspace_root).unwrap_or_default();
+        let preferred = crate::persistence::load_preferences(&self.workspace_root)
+            .ok()
+            .and_then(|prefs| prefs.acp_default_agent);
+        let config_default = self.adapters.acp.default_agent.as_deref();
         self.adapters
             .acp
             .merged_agents(&installed)
             .into_iter()
-            .map(|(id, agent)| AcpAgentChoice {
-                label: agent.name.unwrap_or_else(|| id.clone()),
-                default: self.adapters.acp.default_agent.as_deref() == Some(id.as_str()),
-                from_registry: !self.adapters.acp.agents.contains_key(&id),
-                id,
+            .map(|(id, agent)| {
+                // Config's `defaultAgent` wins; the preferences pin is only the
+                // default when config has not named one (settings must not
+                // rewrite qmux.config.json).
+                let default = config_default == Some(id.as_str())
+                    || (config_default.is_none() && preferred.as_deref() == Some(id.as_str()));
+                AcpAgentChoice {
+                    label: agent.name.unwrap_or_else(|| id.clone()),
+                    default,
+                    from_registry: !self.adapters.acp.agents.contains_key(&id),
+                    id,
+                }
             })
             .collect()
+    }
+
+    /// Effective default for ACP launches: config first, then the settings pin.
+    pub fn acp_preferred_default_agent(&self) -> Option<String> {
+        self.adapters.acp.default_agent.clone().or_else(|| {
+            crate::persistence::load_preferences(&self.workspace_root)
+                .ok()
+                .and_then(|prefs| prefs.acp_default_agent)
+        })
     }
 
     /// The declared remotes, for a picker.

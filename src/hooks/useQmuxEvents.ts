@@ -114,6 +114,8 @@ export interface UseQmuxEventsHandlers {
     panes: PaneInfo[],
   ) => void;
   onAgentPromptSubmitted?: (agentId: string, prompt: string) => void;
+  /** ACP first-run auth: show methods, update error, or clear the prompt. */
+  onAcpAuthEvent?: (event: QmuxEvent) => void;
   onTerminalSearchRequested?: (paneId: string) => void;
   onTerminalPasteRequested?: (paneId: string, text: string | null) => void;
   onTerminalUserInput?: (paneId: string) => void;
@@ -170,6 +172,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onAgentSpawned,
     onQueuedBtwForked,
     onAgentPromptSubmitted,
+    onAcpAuthEvent,
     onTerminalSearchRequested,
     onTerminalPasteRequested,
     onTerminalUserInput,
@@ -395,6 +398,14 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         if (prompt) {
           onAgentPromptSubmitted?.(event.agentId, prompt);
         }
+      }
+      if (
+        event.type === "agent.auth_required" ||
+        event.type === "agent.auth_failed" ||
+        event.type === "agent.auth_succeeded" ||
+        event.type === "agent.session_start"
+      ) {
+        onAcpAuthEvent?.(event);
       }
       if (event.type === "browser.open" && event.paneId) {
         const url = event.payload.url;

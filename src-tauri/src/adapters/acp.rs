@@ -77,6 +77,7 @@ impl AcpAdapter {
         transcript: Option<&Path>,
         prompt: Option<&str>,
         load_session: Option<&str>,
+        auth_method: Option<&str>,
     ) -> Result<Vec<(String, String)>, String> {
         let mut envs = vec![
             ("QMUX_ACP_AGENT".to_string(), agent_key.to_string()),
@@ -123,7 +124,39 @@ impl AcpAdapter {
         {
             envs.push(("QMUX_ACP_LOAD_SESSION".to_string(), session_id.to_string()));
         }
+        if let Some(method) = auth_method
+            .map(str::trim)
+            .filter(|method| !method.is_empty())
+        {
+            envs.push(("QMUX_ACP_AUTH_METHOD".to_string(), method.to_string()));
+        }
         Ok(envs)
+    }
+
+    /// Last successful auth method for this agent key, if any — the bridge
+    /// tries it silently before prompting so a signed-in agent is not re-asked.
+    fn preferred_auth_method(state: &AppState, agent_key: &str) -> Option<String> {
+        crate::persistence::load_preferences(&state.config().workspace_root)
+            .ok()?
+            .acp_auth_method_by_agent
+            .get(agent_key)
+            .map(|method| method.trim().to_string())
+            .filter(|method| !method.is_empty())
+    }
+
+    fn remember_auth_method(state: &AppState, agent_key: &str, method_id: &str) {
+        let method_id = method_id.trim();
+        if agent_key.is_empty() || method_id.is_empty() {
+            return;
+        }
+        let root = state.config().workspace_root.clone();
+        let agent_key = agent_key.to_string();
+        let method_id = method_id.to_string();
+        let _ = crate::persistence::update_preferences(&root, |preferences| {
+            preferences
+                .acp_auth_method_by_agent
+                .insert(agent_key, method_id);
+        });
     }
 
     /// Where the bridge should record turns, given where it will run.
@@ -161,7 +194,16 @@ impl AcpAdapter {
         requested: Option<&str>,
     ) -> Result<(String, AcpAgentConfig, String), String> {
         let installed = crate::acp_registry::installed_configs(&state.config().workspace_root)?;
-        let (key, agent) = self.config.resolve_with(&installed, requested)?;
+        // Prefer the explicit launch choice, then config's defaultAgent, then
+        // the settings pin — never write either back into the other.
+        let effective = {
+            let mut config = self.config.clone();
+            if config.default_agent.is_none() {
+                config.default_agent = state.config().acp_preferred_default_agent();
+            }
+            config
+        };
+        let (key, agent) = effective.resolve_with(&installed, requested)?;
         // Only a local agent's binary can be checked here. A remote one is
         // resolved by the remote shell's PATH, and probing it over ssh would
         // cost a round trip to produce an error the launch reports anyway.
@@ -217,6 +259,7 @@ impl AcpAdapter {
 
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
+        let preferred_auth = Self::preferred_auth_method(state, &agent_key);
         envs.extend(Self::bridge_envs(
             &agent_key,
             &acp_agent,
@@ -225,6 +268,7 @@ impl AcpAdapter {
             Self::transcript_sink(&host, &transcript),
             has_initial_prompt.then_some(request.prompt.as_str()),
             None,
+            preferred_auth.as_deref(),
         )?);
 
         let agent = attach_acp_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
@@ -291,6 +335,7 @@ impl AcpAdapter {
 
         let transcript = Self::transcript_path_for(state, &agent.id);
         let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
+        let preferred_auth = Self::preferred_auth_method(state, &agent_key);
         envs.extend(Self::bridge_envs(
             &agent_key,
             &acp_agent,
@@ -299,6 +344,7 @@ impl AcpAdapter {
             Self::transcript_sink(&host, &transcript),
             None,
             agent.session_id.as_deref(),
+            preferred_auth.as_deref(),
         )?);
 
         let spec = plan_to_spec(
@@ -443,6 +489,40 @@ impl AcpAdapter {
                     state.set_agent_status(&agent.id, agent.status)?;
                 }
                 "agent.running"
+            }
+            // First-run / re-auth: the bridge is between initialize and
+            // session/new. Stay on AwaitingPermission so the composer queues
+            // rather than sending into the auth prompt; the UI card reads the
+            // method list from the event payload.
+            "AuthRequired" => {
+                if let Some(agent) = agent.as_mut() {
+                    agent.status = AgentStatus::AwaitingPermission;
+                    state.set_agent_status(&agent.id, agent.status)?;
+                }
+                "agent.auth_required"
+            }
+            "AuthSucceeded" => {
+                if let Some(current) = agent.as_ref() {
+                    let method_id = string_field(&notification.payload, "methodId")
+                        .or_else(|| string_field(&notification.payload, "method_id"));
+                    let agent_key = current
+                        .acp_agent
+                        .clone()
+                        .or_else(|| string_field(&notification.payload, "agent"));
+                    if let (Some(agent_key), Some(method_id)) = (agent_key, method_id) {
+                        Self::remember_auth_method(state, &agent_key, &method_id);
+                    }
+                    // Auth is pre-session; Starting is honest until SessionStart.
+                    state.set_agent_status(&current.id, AgentStatus::Starting)?;
+                }
+                "agent.auth_succeeded"
+            }
+            "AuthFailed" => {
+                if let Some(agent) = agent.as_mut() {
+                    agent.status = AgentStatus::AwaitingPermission;
+                    state.set_agent_status(&agent.id, agent.status)?;
+                }
+                "agent.auth_failed"
             }
             "Stop" | "StopFailure" => {
                 let drained = if let Some(agent) = agent.as_mut() {
@@ -1260,6 +1340,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("encodes");
         let envs: BTreeMap<String, String> = envs.into_iter().collect();
@@ -1286,6 +1367,7 @@ mod tests {
             Some(Path::new("/data/session.jsonl")),
             None,
             None,
+            None,
         )
         .expect("encodes");
         let envs: BTreeMap<String, String> = envs.into_iter().collect();
@@ -1309,6 +1391,7 @@ mod tests {
             Some(Path::new("/data/session.jsonl")),
             Some("  hi  "),
             Some("sess_9"),
+            Some("oauth-personal"),
         )
         .expect("encodes");
         let envs: BTreeMap<String, String> = envs.into_iter().collect();
@@ -1321,6 +1404,7 @@ mod tests {
         assert_eq!(envs["QMUX_ACP_NAME"], "gemini");
         assert_eq!(envs["QMUX_ACP_PROMPT"], "hi");
         assert_eq!(envs["QMUX_ACP_LOAD_SESSION"], "sess_9");
+        assert_eq!(envs["QMUX_ACP_AUTH_METHOD"], "oauth-personal");
     }
 
     #[test]
@@ -1333,11 +1417,13 @@ mod tests {
             Some(Path::new("/data/session.jsonl")),
             Some("   "),
             Some(""),
+            Some("  "),
         )
         .expect("encodes");
         let keys: Vec<&str> = envs.iter().map(|(key, _)| key.as_str()).collect();
 
         assert!(!keys.contains(&"QMUX_ACP_PROMPT"));
+        assert!(!keys.contains(&"QMUX_ACP_AUTH_METHOD"));
         assert!(!keys.contains(&"QMUX_ACP_LOAD_SESSION"));
         assert!(!keys.contains(&"QMUX_ACP_ENV"));
         // An agent with no args still gets the variable, as an empty JSON array.

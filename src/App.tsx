@@ -57,6 +57,8 @@ import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
 import CommandPalette, { type PaletteCommand } from "./components/CommandPalette";
 import GlobalTaskLauncher from "./components/GlobalTaskLauncher";
+import AcpAgentsSettings from "./components/AcpAgentsSettings";
+import AcpAuthCard from "./components/AcpAuthCard";
 import NativeInput from "./components/NativeInput";
 import {
   ComposerSubmitShortcutGlyph,
@@ -466,11 +468,14 @@ import {
   sendNextQueuedAgentTurn,
   setQueuedTurnPause,
   submitAgentTurn,
+  submitPaneInput,
   unpauseAgent,
   updateMenuBar,
   worktreeStatus,
 } from "./lib/api";
 import type {
+  AcpAuthMethod,
+  AcpAuthPrompt,
   AgentInfo,
   ClaudeSkill,
   GlobalTaskLauncherHotkey,
@@ -505,6 +510,34 @@ const LEFT_SIDEBAR_MAX_WIDTH = 420;
 // Below this width the New shell/New agent buttons drop their icons to keep the
 // labels readable. (The icon-only Settings cog always keeps its icon.)
 const LEFT_SIDEBAR_COMPACT_WIDTH = 270;
+
+function parseAcpAuthMethods(value: unknown): AcpAuthMethod[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const methods: AcpAuthMethod[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    if (!id) {
+      continue;
+    }
+    const name =
+      typeof record.name === "string" && record.name.trim()
+        ? record.name.trim()
+        : id;
+    const description =
+      typeof record.description === "string" && record.description.trim()
+        ? record.description.trim()
+        : null;
+    methods.push({ id, name, description });
+  }
+  return methods;
+}
+
 const PANE_TAB_DRAG_START_THRESHOLD = 4;
 const PANE_TAB_DRAG_CLICK_SUPPRESS_MS = 100;
 type ResearchViewedAckOptions = {
@@ -2107,8 +2140,12 @@ function MainApp() {
     () => lastUserInputSeqRef.current > lastWindowFocusSeqRef.current,
     [],
   );
-  const [settingsTab, setSettingsTab] = useState<"basic" | "theme" | "mouseCursor">(
-    "basic",
+  const [settingsTab, setSettingsTab] = useState<
+    "basic" | "theme" | "mouseCursor" | "agents"
+  >("basic");
+  /** ACP first-run auth prompts keyed by agent id (desktop card + pane prompt). */
+  const [acpAuthByAgent, setAcpAuthByAgent] = useState<Record<string, AcpAuthPrompt>>(
+    {},
   );
   const [openRouterKeyVisible, setOpenRouterKeyVisible] = useState(false);
   const [showHideShortcutSetting, setShowHideShortcutSetting] =
@@ -3922,6 +3959,79 @@ function MainApp() {
 
   function handleAgentPromptSubmitted(agentId: string, prompt: string) {
     applyPendingFirstMessageTitle(agentId, prompt);
+  }
+
+  function handleAcpAuthEvent(event: QmuxEvent) {
+    const agentId = event.agentId;
+    if (!agentId) {
+      return;
+    }
+    if (event.type === "agent.auth_succeeded" || event.type === "agent.session_start") {
+      setAcpAuthByAgent((current) => {
+        if (!(agentId in current)) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[agentId];
+        return next;
+      });
+      return;
+    }
+
+    const hookPayload =
+      typeof event.payload.payload === "object" && event.payload.payload !== null
+        ? (event.payload.payload as Record<string, unknown>)
+        : event.payload;
+
+    if (event.type === "agent.auth_required") {
+      const methods = parseAcpAuthMethods(hookPayload.authMethods);
+      if (methods.length === 0) {
+        return;
+      }
+      setAcpAuthByAgent((current) => ({
+        ...current,
+        [agentId]: {
+          agentId,
+          paneId: event.paneId ?? null,
+          methods,
+          error: null,
+        },
+      }));
+      return;
+    }
+
+    if (event.type === "agent.auth_failed") {
+      const error =
+        typeof hookPayload.error === "string" ? hookPayload.error : "Sign-in failed";
+      setAcpAuthByAgent((current) => {
+        const existing = current[agentId];
+        if (!existing) {
+          return current;
+        }
+        return {
+          ...current,
+          [agentId]: { ...existing, error },
+        };
+      });
+    }
+  }
+
+  function selectAcpAuthMethod(prompt: AcpAuthPrompt, methodId: string, index: number) {
+    const paneId =
+      prompt.paneId ??
+      agents.find((agent) => agent.id === prompt.agentId)?.paneId ??
+      null;
+    if (!paneId) {
+      setError("No terminal pane is attached to answer the sign-in prompt.");
+      return;
+    }
+    // The bridge always reads the pane for the choice (and also accepts a raw
+    // method id). Prefer the numbered choice so it stays aligned with the
+    // pane's printed list.
+    void submitPaneInput(paneId, String(index)).catch((err) => {
+      setError(err instanceof Error ? err.message : String(err));
+    });
+    void methodId;
   }
 
   // Drop browser/UI state only when its real owner disappears. Browser owners
@@ -8571,6 +8681,7 @@ function MainApp() {
     onAgentSpawned: handleAgentSpawned,
     onQueuedBtwForked: handleQueuedBtwForked,
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
+    onAcpAuthEvent: handleAcpAuthEvent,
     onTerminalSearchRequested: openNativeTerminalSearch,
     onTerminalPasteRequested: requestNativeTerminalPaste,
     onTerminalUserInput: reportNativeTerminalInput,
@@ -12517,6 +12628,14 @@ function MainApp() {
                 (follow-ups branch from the research document instead). Keyed
                 off group scope so the composer never flashes in the debounce
                 window before the node index catches up. */}
+            {agent && acpAuthByAgent[agent.id] ? (
+              <AcpAuthCard
+                prompt={acpAuthByAgent[agent.id]}
+                onSelectMethod={(methodId, index) =>
+                  selectAcpAuthMethod(acpAuthByAgent[agent.id], methodId, index)
+                }
+              />
+            ) : null}
             {agent && groupById.get(surface.pane.groupId)?.scope !== "research" ? (
               <NativeInput
                 pane={surface.pane}
@@ -13599,7 +13718,7 @@ function MainApp() {
           }}
         >
           <div
-            className="settings-panel"
+            className={`settings-panel${settingsTab === "agents" ? " settings-panel--wide" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-title"
@@ -13616,7 +13735,11 @@ function MainApp() {
               </button>
             </div>
 
-            <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+            <div
+              className="settings-tabs settings-tabs--four"
+              role="tablist"
+              aria-label="Settings sections"
+            >
               <button
                 type="button"
                 role="tab"
@@ -13644,9 +13767,27 @@ function MainApp() {
               >
                 Mouse &amp; Cursor
               </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={settingsTab === "agents"}
+                className={`control-button${settingsTab === "agents" ? " is-active" : ""}`}
+                onClick={() => setSettingsTab("agents")}
+              >
+                Agents
+              </button>
             </div>
 
-            {settingsTab !== "mouseCursor" ? (
+            {settingsTab === "agents" ? (
+              <div className="settings-content" role="tabpanel">
+                <AcpAgentsSettings
+                  config={config}
+                  onConfigChange={setConfig}
+                />
+              </div>
+            ) : null}
+
+            {settingsTab === "basic" || settingsTab === "theme" ? (
               <div className="settings-content" role="tabpanel">
             {settingsTab === "theme" ? (
               <>
@@ -14303,7 +14444,7 @@ function MainApp() {
               </>
             )}
               </div>
-            ) : (
+            ) : settingsTab === "mouseCursor" ? (
               <div className="settings-content" role="tabpanel">
                 <label className="settings-row settings-toggle">
                   <span className="settings-label">Use login shell</span>
@@ -14508,7 +14649,7 @@ function MainApp() {
                 </div>
 
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       ) : null}

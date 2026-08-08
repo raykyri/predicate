@@ -890,18 +890,7 @@ fn session_loop(
             ))
         );
     }
-    if init
-        .get("authMethods")
-        .and_then(Value::as_array)
-        .is_some_and(|methods| !methods.is_empty())
-    {
-        println!(
-            "{}",
-            dim(
-                "note: this agent advertises auth methods; qmux assumes you are already signed in via its CLI"
-            )
-        );
-    }
+    ensure_authenticated(bridge, &mut console, &init)?;
 
     let session = start_session(bridge, &mut console, config)?;
     *bridge
@@ -932,6 +921,217 @@ fn session_loop(
         }
         run_turn(bridge, &mut console, &prompt)?;
     }
+}
+
+/// One entry from `initialize.authMethods`. Kept minimal: the protocol may
+/// grow fields, and unknown ones must not break the picker.
+#[derive(Clone, Debug)]
+struct AuthMethod {
+    id: String,
+    name: String,
+    description: Option<String>,
+}
+
+fn parse_auth_methods(init: &Value) -> Vec<AuthMethod> {
+    init.get("authMethods")
+        .and_then(Value::as_array)
+        .map(|methods| {
+            methods
+                .iter()
+                .filter_map(|method| {
+                    let id = method.get("id").and_then(Value::as_str)?.trim();
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let name = method
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id)
+                        .to_string();
+                    let description = method
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|description| !description.is_empty())
+                        .map(str::to_string);
+                    Some(AuthMethod {
+                        id: id.to_string(),
+                        name,
+                        description,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Protocol order is initialize → authenticate (if required) → session/new.
+///
+/// Hybrid first-run path:
+/// 1. Prefer a silent try of `QMUX_ACP_AUTH_METHOD` (last successful method).
+/// 2. On failure or no preferred method, prompt in the pane (always available)
+///    and raise `AuthRequired` so the desktop UI can show a method card that
+///    answers by writing the choice into the pane.
+fn ensure_authenticated(
+    bridge: &Arc<Bridge>,
+    console: &mut Console,
+    init: &Value,
+) -> Result<(), String> {
+    let methods = parse_auth_methods(init);
+    if methods.is_empty() {
+        return Ok(());
+    }
+
+    if let Some(preferred) = optional_env("QMUX_ACP_AUTH_METHOD") {
+        if methods.iter().any(|method| method.id == preferred) {
+            println!(
+                "{}",
+                dim(&format!("signing in with saved method '{preferred}'…"))
+            );
+            match authenticate(bridge, console, &preferred) {
+                Ok(()) => {
+                    report_auth_succeeded(&preferred);
+                    return Ok(());
+                }
+                Err(err) => {
+                    println!(
+                        "{}",
+                        dim(&format!(
+                            "saved sign-in did not work ({err}); pick a method"
+                        ))
+                    );
+                    let _ = request_silent(
+                        "hook.notify",
+                        hook_payload(
+                            "AuthFailed",
+                            json!({ "methodId": preferred, "error": err, "silent": true }),
+                        ),
+                    );
+                }
+            }
+        } else {
+            println!(
+                "{}",
+                dim(&format!(
+                    "saved sign-in method '{preferred}' is not offered; pick a method"
+                ))
+            );
+        }
+    }
+
+    interactive_authenticate(bridge, console, &methods)
+}
+
+fn interactive_authenticate(
+    bridge: &Arc<Bridge>,
+    console: &mut Console,
+    methods: &[AuthMethod],
+) -> Result<(), String> {
+    let methods_payload: Vec<Value> = methods
+        .iter()
+        .map(|method| {
+            json!({
+                "id": method.id,
+                "name": method.name,
+                "description": method.description,
+            })
+        })
+        .collect();
+    let _ = request_silent(
+        "hook.notify",
+        hook_payload(
+            "AuthRequired",
+            json!({ "authMethods": methods_payload }),
+        ),
+    );
+
+    println!("\n{}", bold("Sign in required"));
+    println!(
+        "{}",
+        dim("Choose a method (or use the card in the qmux UI).")
+    );
+    for (index, method) in methods.iter().enumerate() {
+        match &method.description {
+            Some(description) => println!("  {}. {} — {}", index + 1, method.name, description),
+            None => println!("  {}. {}", index + 1, method.name),
+        }
+    }
+
+    loop {
+        let Some(choice) = console.ask("sign in › ") else {
+            return Err("sign-in was cancelled".to_string());
+        };
+        if choice.is_empty() {
+            continue;
+        }
+        let method = match choice.parse::<usize>() {
+            Ok(index) if index >= 1 && index <= methods.len() => &methods[index - 1],
+            _ => {
+                // Also accept a raw method id so a UI that knows the id (or a
+                // pasted command) does not have to re-number after a refresh.
+                if let Some(method) = methods.iter().find(|method| method.id == choice) {
+                    method
+                } else {
+                    println!("{}", dim(&format!("enter 1-{} or a method id", methods.len())));
+                    continue;
+                }
+            }
+        };
+
+        println!("{}", dim(&format!("signing in with '{}'…", method.name)));
+        match authenticate(bridge, console, &method.id) {
+            Ok(()) => {
+                report_auth_succeeded(&method.id);
+                return Ok(());
+            }
+            Err(err) => {
+                println!("{}", dim(&format!("sign-in failed: {err}")));
+                let _ = request_silent(
+                    "hook.notify",
+                    hook_payload(
+                        "AuthFailed",
+                        json!({ "methodId": method.id, "error": err, "silent": false }),
+                    ),
+                );
+                println!("{}", dim("try another method"));
+            }
+        }
+    }
+}
+
+fn authenticate(
+    bridge: &Arc<Bridge>,
+    console: &mut Console,
+    method_id: &str,
+) -> Result<(), String> {
+    // No timeout: OAuth and form elicitation raised mid-authenticate are
+    // questions for a human, and the console services them while we wait.
+    let _ = request_serviced(
+        bridge,
+        console,
+        "authenticate",
+        json!({ "methodId": method_id }),
+        None,
+    )?;
+    Ok(())
+}
+
+fn report_auth_succeeded(method_id: &str) {
+    println!("{}", dim("signed in"));
+    let _ = request_silent(
+        "hook.notify",
+        hook_payload(
+            "AuthSucceeded",
+            json!({
+                "methodId": method_id,
+                // Adapter key so a successful sign-in is remembered even if the
+                // agent snapshot on the hook path is momentarily incomplete.
+                "agent": optional_env("QMUX_ACP_AGENT"),
+            }),
+        ),
+    );
 }
 
 /// A session that is open and ready for prompts, plus whatever configuration

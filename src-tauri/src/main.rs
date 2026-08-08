@@ -244,6 +244,31 @@ async fn acp_registry_uninstall(
     Ok(config.acp_agent_choices())
 }
 
+/// Pins the preferred ACP agent for launches when `adapters.acp.defaultAgent`
+/// is unset. Lives in preferences so `qmux.config.json` is never rewritten.
+#[tauri::command(async)]
+fn acp_default_agent_set(
+    state: tauri::State<'_, AppState>,
+    id: Option<String>,
+) -> Result<Vec<config::AcpAgentChoice>, String> {
+    let config = state.config().clone();
+    let choices = config.acp_agent_choices();
+    let next = id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    if let Some(ref agent_id) = next
+        && !choices.iter().any(|choice| choice.id == *agent_id)
+    {
+        return Err(format!(
+            "unknown ACP agent '{agent_id}'; install it from the registry or add it under adapters.acp.agents"
+        ));
+    }
+    persistence::update_preferences(&config.workspace_root, |preferences| {
+        preferences.acp_default_agent = next;
+    })?;
+    Ok(config.acp_agent_choices())
+}
+
 #[tauri::command]
 fn get_runtime_config(state: tauri::State<'_, AppState>) -> RuntimeConfig {
     let mut runtime = state.config().runtime();
@@ -584,8 +609,7 @@ fn browser_open_local_path(
             "refusing to open relative path '{trimmed}'; use an absolute path or `qmux open`"
         ));
     }
-    let (url, sandbox) =
-        control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
+    let (url, sandbox) = control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
     state.emit(events::QmuxEvent::new(
         "browser.open",
         Some(pane_id),
@@ -2837,6 +2861,7 @@ fn main() {
             acp_registry_list,
             acp_registry_install,
             acp_registry_uninstall,
+            acp_default_agent_set,
             launcher_adapter_preference_get,
             launcher_adapter_preference_set,
             openrouter_key_get,

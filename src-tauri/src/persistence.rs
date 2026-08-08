@@ -192,6 +192,16 @@ pub struct AppPreferences {
     /// user's prompt unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research_launch_instruction: Option<String>,
+    /// Preferred ACP agent id when `adapters.acp.defaultAgent` is unset. Written
+    /// by the settings "Set default" action so the registry store stays the
+    /// only qmux-managed agent pin and `qmux.config.json` is never rewritten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acp_default_agent: Option<String>,
+    /// Last successful ACP `authenticate` method id per configured agent key.
+    /// The bridge tries this silently before prompting, so a previously signed-in
+    /// agent does not re-ask on every launch.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub acp_auth_method_by_agent: HashMap<String, String>,
 }
 
 pub fn preferences_path(workspace_root: &Path) -> PathBuf {

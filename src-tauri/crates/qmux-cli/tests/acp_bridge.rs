@@ -119,6 +119,14 @@ fn main() {
             "the_filesystem_is_confined_to_the_session_directory",
             the_filesystem_is_confined_to_the_session_directory,
         ),
+        (
+            "authenticate_is_prompted_when_auth_methods_are_advertised",
+            authenticate_is_prompted_when_auth_methods_are_advertised,
+        ),
+        (
+            "a_saved_auth_method_is_tried_silently_before_prompting",
+            a_saved_auth_method_is_tried_silently_before_prompting,
+        ),
     ];
 
     let mut failures = Vec::new();
@@ -229,6 +237,10 @@ fn run_bridge_inner(scenario: &str, input: &str, stream: bool) -> Session {
         .stderr(Stdio::piped());
     if scenario == "resume" {
         command.env("QMUX_ACP_LOAD_SESSION", "sess_previous");
+    }
+    if scenario == "auth_silent" {
+        // Prefer a previously successful method so the bridge skips the prompt.
+        command.env("QMUX_ACP_AUTH_METHOD", "oauth-personal");
     }
     if stream {
         // What a remote bridge runs as: no access to the filesystem the
@@ -570,6 +582,64 @@ fn a_refused_resume_falls_back_to_a_new_session() {
     );
 }
 
+fn authenticate_is_prompted_when_auth_methods_are_advertised() {
+    // "1" picks the first method; a bare prompt line is then the first turn.
+    let session = run_bridge("auth", "1\nhello\n");
+    assert!(
+        session.pane.contains("Sign in required"),
+        "the pane should show the auth prompt: {}",
+        session.pane
+    );
+    assert!(
+        session.pane.contains("1. Log in with Google"),
+        "methods should be numbered: {}",
+        session.pane
+    );
+    assert_eq!(
+        session.note("authenticate")["methodId"],
+        "oauth-personal",
+        "the chosen method should be sent as authenticate: {:#?}",
+        session.notes
+    );
+    assert!(
+        session
+            .turns()
+            .iter()
+            .any(|turn| turn["role"] == "user" && text_of(turn).contains("hello")),
+        "auth should complete before the first turn: {:#?}",
+        session.transcript
+    );
+}
+
+fn a_saved_auth_method_is_tried_silently_before_prompting() {
+    // QMUX_ACP_AUTH_METHOD=oauth-personal is set for this scenario.
+    let session = run_bridge("auth_silent", "hello\n");
+    assert!(
+        !session.pane.contains("Sign in required"),
+        "a saved method should not re-prompt: {}",
+        session.pane
+    );
+    assert!(
+        session.pane.contains("signing in with saved method"),
+        "the silent try should be visible: {}",
+        session.pane
+    );
+    assert_eq!(
+        session.note("authenticate")["methodId"],
+        "oauth-personal",
+        "the saved method should be used: {:#?}",
+        session.notes
+    );
+    assert!(
+        session
+            .turns()
+            .iter()
+            .any(|turn| turn["role"] == "user" && text_of(turn).contains("hello")),
+        "the session should open after silent auth: {:#?}",
+        session.transcript
+    );
+}
+
 // ===========================================================================
 // The fake agent
 // ===========================================================================
@@ -687,18 +757,50 @@ fn fake_agent(scenario: &str) {
 
         let id = message.get("id").cloned();
         match message["method"].as_str().unwrap_or_default() {
-            "initialize" => agent.send(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": 1,
-                    // Every scenario here declines `session/load`, including
-                    // the resume one — that is the fallback under test.
-                    "agentCapabilities": { "loadSession": false, "promptCapabilities": {} },
-                    "agentInfo": { "name": "acp-fixture", "version": "0.0.1" },
-                    "authMethods": [],
-                },
-            })),
+            "initialize" => {
+                let auth_methods = if matches!(scenario, "auth" | "auth_silent") {
+                    json!([
+                        {
+                            "id": "oauth-personal",
+                            "name": "Log in with Google",
+                            "description": "OAuth for personal accounts",
+                        },
+                        {
+                            "id": "api-key",
+                            "name": "API key",
+                            "description": "Use a developer API key",
+                        },
+                    ])
+                } else {
+                    json!([])
+                };
+                agent.send(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "protocolVersion": 1,
+                        // Every scenario here declines `session/load`, including
+                        // the resume one — that is the fallback under test.
+                        "agentCapabilities": { "loadSession": false, "promptCapabilities": {} },
+                        "agentInfo": { "name": "acp-fixture", "version": "0.0.1" },
+                        "authMethods": auth_methods,
+                    },
+                }));
+            }
+            "authenticate" => {
+                let method = message
+                    .get("params")
+                    .and_then(|params| params.get("methodId"))
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                agent.note("authenticate", json!({ "methodId": method }));
+                agent.send(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {},
+                }));
+            }
             "session/load" => agent.send(json!({
                 "jsonrpc": "2.0",
                 "id": id,

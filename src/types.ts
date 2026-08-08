@@ -46,9 +46,24 @@ export interface AcpRegistryEntry {
   /** `available` for agents distributed via npx/uvx; `unavailable` carries the
    * reason, most often that the agent ships only as a prebuilt binary. */
   availability:
-    | { available: { channel: "npx" | "uvx" } }
+    | { available: { channel: string } }
     | { unavailable: { reason: string } };
   installed: boolean;
+}
+
+/** One `initialize.authMethods` entry, as raised by the ACP bridge. */
+export interface AcpAuthMethod {
+  id: string;
+  name: string;
+  description?: string | null;
+}
+
+/** Prompt shown while an ACP agent needs first-run sign-in. */
+export interface AcpAuthPrompt {
+  agentId: string;
+  paneId: string | null;
+  methods: AcpAuthMethod[];
+  error?: string | null;
 }
 
 export interface TabTitleGenerationRuntimeConfig {

@@ -416,10 +416,11 @@ mode — it is not standardized.
 
 Agents can also be added from the published [ACP
 registry](https://agentclientprotocol.com/get-started/registry) instead of being
-written out by hand. qmux reads the registry index, shows what it can run, and
-pins the resolved command line into its own store (`.qmux/acp-agents.json`) —
-`qmux.config.json` is yours and qmux never writes to it. A hand-written entry
-always wins over a registry one with the same id.
+written out by hand. Open **Settings → Agents** to browse the registry, add or
+remove agents, and pin a default. qmux reads the registry index, shows what it
+can run, and pins the resolved command line into its own store
+(`.qmux/acp-agents.json`) — `qmux.config.json` is yours and qmux never writes to
+it. A hand-written entry always wins over a registry one with the same id.
 
 Only the `npx` and `uvx` distribution channels are supported, which is 23 of the
 38 agents currently listed; those need no install because the package manager
@@ -463,6 +464,11 @@ Notable properties and limits:
   no mid-turn steering; `session/cancel` is the only in-flight control.
 - Resume is best-effort: `session/load` is an optional agent capability, and
   the bridge starts a fresh session (saying so in the pane) when it is refused.
+- First-run authentication follows ACP order (`initialize` → `authenticate` →
+  `session/new`). A previously successful method is tried silently; otherwise
+  the pane lists methods and the desktop UI shows a sign-in card that answers
+  into the same prompt. URL/OAuth flows reuse elicitation and the browser
+  overlay.
 - No shell-command integration — ACP agents are launched from qmux, not by
   typing their name in a shell pane.
 - No fork. The protocol has no branch operation, so `/fork` and per-message

@@ -620,7 +620,8 @@ export function agentStatusLabel(status: AgentInfo["status"]) {
     case "awaitingInput":
       return "Awaiting input";
     case "awaitingPermission":
-      return "Requesting approval";
+      // Also used for ACP first-run auth (method picker in the pane/UI card).
+      return "Waiting for you";
     case "done":
       return "Done";
     case "idle":
