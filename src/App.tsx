@@ -283,7 +283,11 @@ import {
   TERMINAL_FONT_SIZE_MAX,
   TERMINAL_FONT_SIZE_MIN,
 } from "./lib/terminalFont";
-import { canRenderInInternalBrowser, isFileServerUrl } from "./lib/links";
+import {
+  canRenderInInternalBrowser,
+  isFileServerUrl,
+  pathFromQmuxFileHref,
+} from "./lib/links";
 import {
   isResearchTreeSelectionChange,
   pruneResearchNavigation,
@@ -427,6 +431,7 @@ import {
   reorderQueuedAgentTurn,
   movePaneToGroup,
   openExternalUrl,
+  browserOpenLocalPath,
   paneActivity,
   pickGroupDirectory,
   placePaneAfter,
@@ -4206,6 +4211,21 @@ function MainApp() {
 
   const openLinkForPane = useCallback(
     (paneId: string | null | undefined, url: string) => {
+      const localPath = pathFromQmuxFileHref(url);
+      if (localPath) {
+        if (!paneId) {
+          setError(`Cannot open local file without an active pane: ${localPath}`);
+          return;
+        }
+        // Absolute filesystem paths from transcript markdown (e.g. an agent
+        // linking `/Users/…/report.html`). Mint a token-scoped file-server URL
+        // and load it sandboxed — never as a fake https:// host or human-browser
+        // navigation, which both mishandle path-shaped hrefs.
+        void browserOpenLocalPath(paneId, localPath).catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+        return;
+      }
       if (paneId && canRenderInInternalBrowser(url)) {
         openBrowserOverlay(paneId, url);
       } else {
@@ -15224,13 +15244,21 @@ function MainApp() {
         <LinkContextMenu
           x={linkMenu.x}
           y={linkMenu.y}
-          canOpenInternal={linkMenu.paneId !== null && canRenderInInternalBrowser(linkMenu.url)}
+          canOpenInternal={
+            linkMenu.paneId !== null &&
+            (canRenderInInternalBrowser(linkMenu.url) ||
+              pathFromQmuxFileHref(linkMenu.url) !== undefined)
+          }
           onOpenInternal={() => {
             openLinkForPane(linkMenu.paneId, linkMenu.url);
             setLinkMenu(null);
           }}
           onOpenExternal={() => {
-            void openExternalUrl(linkMenu.url);
+            // Local file previews have no public URL; refuse rather than sending
+            // a qmux-file: sentinel (or a file-server token URL) to the OS.
+            if (pathFromQmuxFileHref(linkMenu.url) === undefined) {
+              void openExternalUrl(linkMenu.url);
+            }
             setLinkMenu(null);
           }}
           onClose={() => setLinkMenu(null)}

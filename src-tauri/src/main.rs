@@ -559,6 +559,42 @@ fn open_external_url(state: tauri::State<'_, AppState>, url: String) -> Result<(
     open_in_os_browser(&url)
 }
 
+/// Mint a token-scoped file-server URL for an absolute local path under the
+/// pane's roots and open it in that pane's browser overlay (sandboxed). Used
+/// when transcript markdown links to a filesystem path such as
+/// `/Users/…/report.html` instead of a loopback http URL.
+#[tauri::command(async)]
+fn browser_open_local_path(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    if !state.pane_exists(&pane_id)? {
+        return Err(format!("pane {pane_id} was not found"));
+    }
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("nothing to open".to_string());
+    }
+    // Absolute paths only — relative ones need a cwd the GUI does not have for
+    // arbitrary markdown links. Agents and the CLI already resolve relative
+    // targets against the pane cwd via `qmux open`.
+    if !std::path::Path::new(trimmed).is_absolute() {
+        return Err(format!(
+            "refusing to open relative path '{trimmed}'; use an absolute path or `qmux open`"
+        ));
+    }
+    let (url, sandbox) =
+        control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
+    state.emit(events::QmuxEvent::new(
+        "browser.open",
+        Some(pane_id),
+        None,
+        serde_json::json!({ "url": url, "sandbox": sandbox }),
+    ));
+    Ok(serde_json::json!({ "url": url, "sandbox": sandbox }))
+}
+
 fn is_file_server_url(url: &str, port: u16) -> bool {
     url.starts_with(&format!("http://127.0.0.1:{port}/"))
         || url.starts_with(&format!("http://localhost:{port}/"))
@@ -2702,6 +2738,15 @@ fn main() {
                         eprintln!("qmux: failed to apply window vibrancy: {err}");
                     }
                 }
+                // Loopback static server for the browser overlay. Start before the
+                // control socket so an early `qmux open` (or a transcript file link)
+                // that races startup cannot hit "the file server is not running".
+                // Best-effort: if it can't bind, the app still runs (file previews
+                // just won't work until relaunch).
+                match file_server::start_file_server(state.clone()) {
+                    Ok(info) => state.set_file_server(info.port),
+                    Err(err) => eprintln!("qmux: failed to start file server: {err}"),
+                }
                 start_control_socket(state.clone()).map_err(std::io::Error::other)?;
                 match browser_backend::start_browser_discovery(Some(state.clone())) {
                     Ok(socket) => {
@@ -2712,12 +2757,6 @@ fn main() {
                         app.manage(socket);
                     }
                     Err(err) => eprintln!("qmux: failed to start Codex browser discovery: {err}"),
-                }
-                // Loopback static server for the browser overlay. Best-effort: if it
-                // can't bind, the app still runs (file:// opens just won't work).
-                match file_server::start_file_server(state.clone()) {
-                    Ok(info) => state.set_file_server(info.port),
-                    Err(err) => eprintln!("qmux: failed to start file server: {err}"),
                 }
                 // Refuse to continue if the saved session exists but can't be read:
                 // starting empty here would let the first save overwrite it with
@@ -2828,6 +2867,7 @@ fn main() {
             human_browser::human_browser_snapshot,
             human_browser::human_browser_reload,
             open_external_url,
+            browser_open_local_path,
             prompt_library_list,
             prompt_library_save,
             prompt_library_delete,

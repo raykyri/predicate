@@ -1,10 +1,23 @@
+// Sentinel scheme used for absolute local file paths in transcript markdown.
+// Agents often write `[preview](/Users/.../report.html)`; resolving that against
+// a base URL would turn it into `https://qmux.invalid/Users/...` and send the
+// human browser at a non-existent host (or worse, load a custom-protocol path
+// that panics). Instead we keep the path as a qmux-file: URL that openLink
+// recognizes and routes through the token-scoped file server.
+export const QMUX_FILE_HREF_PREFIX = "qmux-file:";
+
 // Only let links through that the webview can safely open. Transcript markdown and
 // terminal output can contain arbitrary agent/process text; a javascript:/file:/tauri:
 // URL clicked inside the Tauri webview reaches a JS context with native IPC access.
-// Anything that isn't http/https/mailto is rendered or treated as non-navigable text.
+// Anything that isn't http/https/mailto (or a recognized absolute local path) is
+// rendered or treated as non-navigable text.
 export function safeHref(href: unknown): string | undefined {
   if (typeof href !== "string") {
     return undefined;
+  }
+  const localPath = absoluteLocalFilePath(href);
+  if (localPath) {
+    return `${QMUX_FILE_HREF_PREFIX}${localPath}`;
   }
   let url: URL;
   try {
@@ -12,14 +25,82 @@ export function safeHref(href: unknown): string | undefined {
   } catch {
     return undefined;
   }
+  // Reject resolutions that only "look" like https because an absolute Unix path
+  // was joined onto the dummy base (handled above) — keep this as a belt-and-
+  // braces check for any path-shaped input absoluteLocalFilePath missed.
+  if (
+    url.hostname === "qmux.invalid" &&
+    absoluteLocalFilePath(url.pathname) !== undefined
+  ) {
+    return `${QMUX_FILE_HREF_PREFIX}${url.pathname}`;
+  }
   // Return the resolved absolute URL, not the raw href: a relative ("/path") or
   // protocol-relative ("//host") href passes the protocol check once resolved
   // against the base, but handing the raw string downstream would let it resolve
   // unpredictably. Normalizing here means openLink always receives a fully
-  // qualified http(s)/mailto URL.
+  // qualified http(s)/mailto URL (or a qmux-file: local path).
   return url.protocol === "http:" || url.protocol === "https:" || url.protocol === "mailto:"
     ? url.href
     : undefined;
+}
+
+/** Absolute local filesystem path from a markdown href, or undefined. */
+export function absoluteLocalFilePath(href: string): string | undefined {
+  const trimmed = href.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  if (trimmed.startsWith(QMUX_FILE_HREF_PREFIX)) {
+    const path = trimmed.slice(QMUX_FILE_HREF_PREFIX.length);
+    return path.startsWith("/") ? path : undefined;
+  }
+  if (trimmed.startsWith("file:")) {
+    try {
+      const url = new URL(trimmed);
+      // file:///abs/path → hostname empty; file://localhost/abs/path also ok.
+      if (url.hostname !== "" && url.hostname !== "localhost") {
+        return undefined;
+      }
+      // URL pathname is percent-decoded for file URLs on modern engines, but
+      // decode explicitly so `%20` survives older resolvers.
+      const path = decodeURIComponent(url.pathname);
+      return path.startsWith("/") ? path : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  // Unix absolute path (not protocol-relative //host/...). Site-relative links
+  // like `/docs/intro` are deliberately excluded: they lack a known filesystem
+  // root prefix and would otherwise steal ordinary in-repo markdown links.
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+    if (
+      /^\/(Users|home|tmp|var|private|opt|Volumes|mnt|root)\//.test(trimmed) ||
+      // Multi-segment absolute path ending in a file-looking last segment
+      // (has an extension). Covers e.g. /workspace/out/report.html in containers.
+      (/^\/[^/]+\/.+\.[A-Za-z0-9]{1,16}$/.test(trimmed) &&
+        !trimmed.includes("?") &&
+        !trimmed.includes("#"))
+    ) {
+      return trimmed;
+    }
+  }
+  // Windows drive path.
+  if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
+    return trimmed;
+  }
+  return undefined;
+}
+
+export function isQmuxFileHref(url: string): boolean {
+  return url.startsWith(QMUX_FILE_HREF_PREFIX);
+}
+
+export function pathFromQmuxFileHref(url: string): string | undefined {
+  if (!isQmuxFileHref(url)) {
+    return undefined;
+  }
+  const path = url.slice(QMUX_FILE_HREF_PREFIX.length);
+  return path.length > 0 ? path : undefined;
 }
 
 // Normal http(s) links render through qmux's isolated Chromium automation profile.

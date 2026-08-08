@@ -451,7 +451,12 @@ fn is_loopback_http_url(url: &str) -> bool {
     false
 }
 
-fn resolve_browser_target(
+/// Resolve a browser-overlay target for `pane_id`: either a loopback http(s)
+/// URL (returned as-is, unsandboxed) or a path under the pane's file roots
+/// (minted into a token-bearing file-server URL and sandboxed). Shared by the
+/// control-socket `browser.open` path and the trusted GUI command that opens
+/// local file links from transcript markdown.
+pub(crate) fn resolve_browser_target(
     state: &AppState,
     authed_pane: &str,
     target: &str,
@@ -625,6 +630,35 @@ mod tests {
         assert!(!is_loopback_http_url("http://127.0.0.1.evil.com/"));
         assert!(!is_loopback_http_url("http://127.0.0.1@evil.com/"));
         assert!(!is_loopback_http_url("http://evil.com\\@127.0.0.1/"));
+    }
+
+    #[test]
+    fn browser_target_rejects_absolute_paths_outside_the_pane_roots() {
+        let state = test_state();
+        // No pane has been inserted, so roots are empty and any absolute path
+        // is refused rather than minting a token URL that would 403 later.
+        let err = resolve_browser_target(
+            &state,
+            "missing-pane",
+            "/Users/raymond/Code/multitool/dev/menubar-design-variants.html",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("was not found under this pane's working directory"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn browser_target_rejects_relative_paths_without_a_cwd() {
+        let state = test_state();
+        let err =
+            resolve_browser_target(&state, "pane-1", "report.html", None).unwrap_err();
+        assert!(
+            err.contains("working directory"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

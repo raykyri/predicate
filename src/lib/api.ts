@@ -806,6 +806,14 @@ export function openExternalUrl(url: string) {
   return invoke<void>("open_external_url", { url });
 }
 
+/** Open an absolute local file path in the pane's browser overlay (sandboxed). */
+export function browserOpenLocalPath(paneId: string, path: string) {
+  return invoke<{ url: string; sandbox: boolean }>("browser_open_local_path", {
+    paneId,
+    path,
+  });
+}
+
 export type HumanBrowserSnapshot = {
   ownerId: string;
   url: string;
