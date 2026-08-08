@@ -2125,6 +2125,19 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 .settings-research-instructions-row {
   align-items: flex-start;
 }
+
+.settings-label-stack {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-label-stack .settings-hint {
+  margin: 0;
+}
+
 /* ── ACP agents (Settings → Agents) ─────────────────────────────────────── */
 
 .acp-agents-settings {

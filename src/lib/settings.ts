@@ -223,6 +223,14 @@ export const CONFIRM_PASTE_OVER_CHARS_MAX = 5_000_000;
 export const RESEARCH_LAUNCH_INSTRUCTION_MAX_BYTES = 4 * 1024;
 
 /**
+ * Suggested research launch instruction. Used as the settings textarea
+ * placeholder; the stored default remains empty (launches send prompts
+ * unchanged until the user sets something).
+ */
+export const DEFAULT_RESEARCH_LAUNCH_INSTRUCTION =
+  "Answer concisely, in a few short paragraphs.";
+
+/**
  * Trims a research launch instruction to the backend's byte cap at a code-point
  * boundary. The cap counts UTF-8 bytes — the unit the backend validates — not
  * UTF-16 length, so a multi-byte instruction cannot pass here yet be refused

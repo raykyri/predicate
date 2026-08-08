@@ -331,6 +331,7 @@ import {
   CONFIRM_PASTE_OVER_CHARS_MAX,
   CONFIRM_PASTE_OVER_CHARS_MIN,
   CURSOR_STYLE_OPTIONS,
+  DEFAULT_RESEARCH_LAUNCH_INSTRUCTION,
   DEFAULT_THEME_ID,
   DEFAULT_BODY_FONT_ID,
   detectAvailableBodyFonts,
@@ -537,7 +538,6 @@ function parseAcpAuthMethods(value: unknown): AcpAuthMethod[] {
   }
   return methods;
 }
-
 const PANE_TAB_DRAG_START_THRESHOLD = 4;
 const PANE_TAB_DRAG_CLICK_SUPPRESS_MS = 100;
 type ResearchViewedAckOptions = {
@@ -13756,7 +13756,7 @@ function MainApp() {
                 className={`control-button${settingsTab === "theme" ? " is-active" : ""}`}
                 onClick={() => setSettingsTab("theme")}
               >
-                Theme
+                Display
               </button>
               <button
                 type="button"
@@ -13765,7 +13765,7 @@ function MainApp() {
                 className={`control-button${settingsTab === "mouseCursor" ? " is-active" : ""}`}
                 onClick={() => setSettingsTab("mouseCursor")}
               >
-                Mouse &amp; Cursor
+                Cursor
               </button>
               <button
                 type="button"
@@ -13996,287 +13996,6 @@ function MainApp() {
                 </button>
               </div>
             </div>
-              </>
-            ) : (
-              <>
-            <label className="settings-row settings-toggle">
-              <span className="settings-label">
-                Code mode (enables worktrees, extra shell UI, etc.)
-              </span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.codeMode}
-                onChange={(event) => {
-                  const codeMode = event.currentTarget.checked;
-                  setSettings((current) => ({
-                    ...current,
-                    codeMode,
-                    showTabDirectories: codeMode,
-                    showToolCalls: codeMode,
-                    stickyUserMessages: codeMode,
-                    requireCmdEnterToSend: codeMode,
-                  }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label settings-label-indented">Show tab directories</span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.showTabDirectories}
-                onChange={(event) => {
-                  const showTabDirectories = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, showTabDirectories }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label settings-label-indented">Show tool calls</span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.showToolCalls}
-                onChange={(event) => {
-                  const showToolCalls = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, showToolCalls }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label settings-label-indented">
-                Require ⌘↵ to send
-              </span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.requireCmdEnterToSend}
-                onChange={(event) => {
-                  const requireCmdEnterToSend = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, requireCmdEnterToSend }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label settings-label-indented">
-                Pin latest user message on top of transcripts
-              </span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.stickyUserMessages}
-                onChange={(event) => {
-                  const stickyUserMessages = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, stickyUserMessages }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label">Show assistant message timestamps</span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.showAssistantTimestamps}
-                onChange={(event) => {
-                  const showAssistantTimestamps = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, showAssistantTimestamps }));
-                }}
-              />
-            </label>
-            <p className="settings-hint settings-hint-weak">
-              Places a time under each assistant reply, right before the next
-              user message or at the end of the transcript.
-            </p>
-
-            <div className="settings-row">
-              <label
-                htmlFor="settings-worktree-location"
-                className="settings-label settings-label-indented"
-              >
-                Worktree location
-              </label>
-              <select
-                id="settings-worktree-location"
-                className="settings-select"
-                value={settings.worktreeLocation}
-                onChange={(event) => {
-                  const worktreeLocation =
-                    event.currentTarget.value as AppSettings["worktreeLocation"];
-                  setSettings((current) => ({ ...current, worktreeLocation }));
-                }}
-              >
-                {WORKTREE_LOCATION_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <p className="settings-hint settings-hint-indented settings-hint-weak">
-              {settings.worktreeLocation === "localQmux"
-                ? "New worktrees stored in <project>/.qmux/worktrees/<name>."
-                : settings.worktreeLocation === "localClaude"
-                  ? "New worktrees stored in <project>/.claude/worktrees/<name>."
-                  : "New worktrees stored in qmux’s global workspace directory."}
-            </p>
-
-            <div className="settings-row settings-research-instructions-row">
-              <label htmlFor="settings-research-instructions" className="settings-label">
-                Research instructions
-              </label>
-              <textarea
-                id="settings-research-instructions"
-                className="form-field settings-input settings-textarea"
-                rows={3}
-                placeholder="e.g. Answer concisely, in a few short paragraphs."
-                value={settings.researchLaunchInstruction}
-                onChange={(event) => {
-                  const researchLaunchInstruction = clampResearchLaunchInstruction(
-                    event.currentTarget.value,
-                  );
-                  setSettings((current) => ({ ...current, researchLaunchInstruction }));
-                }}
-              />
-            </div>
-            <p className="settings-hint">
-              Sent with every research launch — fresh runs and follow-ups. Leave empty to send
-              research prompts unchanged.
-            </p>
-
-            <div className="settings-row settings-shortcut-row">
-              <label htmlFor="settings-global-task-launcher-hotkey" className="settings-label">
-                Global quick launch hotkey
-              </label>
-              <select
-                id="settings-global-task-launcher-hotkey"
-                className="settings-select"
-                value={globalTaskLauncherSetting.hotkey ?? ""}
-                disabled={globalTaskLauncherHotkeySaving}
-                aria-invalid={globalTaskLauncherHotkeyMessage ? true : undefined}
-                aria-describedby={
-                  globalTaskLauncherHotkeyMessage
-                    ? "settings-global-task-launcher-hotkey-message"
-                    : undefined
-                }
-                onChange={(event) =>
-                  void updateGlobalTaskLauncherHotkey(
-                    event.currentTarget.value
-                      ? (event.currentTarget.value as GlobalTaskLauncherHotkey)
-                      : null,
-                  )
-                }
-              >
-                <option value="">Disabled</option>
-                {GLOBAL_TASK_LAUNCHER_HOTKEY_OPTIONS.map((option) => (
-                  <option
-                    key={option.value}
-                    value={option.value}
-                    disabled={Boolean(
-                      option.accelerator && option.accelerator === showHideShortcutValue,
-                    )}
-                  >
-                    {option.label}
-                    {option.accelerator === showHideShortcutValue ? " (used by Show/hide)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-            {globalTaskLauncherHotkeyMessage || globalTaskLauncherHotkeySaving ? (
-              <p
-                id="settings-global-task-launcher-hotkey-message"
-                className={`settings-hint settings-shortcut-message${
-                  globalTaskLauncherHotkeyMessage ? " is-error" : ""
-                }`}
-              >
-                {globalTaskLauncherHotkeySaving
-                  ? "Saving hotkey..."
-                  : globalTaskLauncherHotkeyMessage}
-              </p>
-            ) : null}
-
-            <div className="settings-row settings-shortcut-row">
-              <div className="settings-label">
-                <label htmlFor="settings-show-hide-shortcut">Show/hide app shortcut</label>
-                {showHideShortcutValue ? (
-                  <>
-                    {" "}
-                    <button
-                      type="button"
-                      className="settings-link-button settings-inline-link-button"
-                      disabled={showHideShortcutSaving}
-                      onClick={clearShowHideShortcut}
-                    >
-                      Clear
-                    </button>
-                  </>
-                ) : null}
-              </div>
-              <input
-                id="settings-show-hide-shortcut"
-                className="form-field settings-input settings-shortcut-input"
-                data-shortcut-capture="show-hide"
-                value={showHideShortcutValue}
-                placeholder="e.g. Option+Space"
-                readOnly
-                aria-invalid={showHideShortcutMessage ? true : undefined}
-                aria-describedby={
-                  showHideShortcutMessage ? "settings-show-hide-shortcut-message" : undefined
-                }
-                onPointerDown={() => setShowHideShortcutCapturing(true)}
-                onFocus={() => setShowHideShortcutCapturing(true)}
-                onBlur={() => setShowHideShortcutCapturing(false)}
-                onKeyDown={captureShowHideShortcut}
-              />
-            </div>
-            {showHideShortcutMessage || showHideShortcutSaving ? (
-              <p
-                id="settings-show-hide-shortcut-message"
-                className={`settings-hint settings-shortcut-message${
-                  showHideShortcutMessage ? " is-error" : ""
-                }`}
-              >
-                {showHideShortcutSaving ? "Saving shortcut..." : showHideShortcutMessage}
-              </p>
-            ) : null}
-            {showHideShortcutConflictLabel ? (
-              <p className="settings-hint settings-shortcut-message">
-                {`qmux also uses this shortcut to ${showHideShortcutConflictLabel}; while registered system-wide, it will show/hide the app instead.`}
-              </p>
-            ) : null}
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label">Keep awake while agents run (&gt;10% battery)</span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.preventSleep}
-                onChange={(event) => {
-                  // See the font select above: capture before the updater, which
-                  // runs after currentTarget has been nulled out.
-                  const preventSleep = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, preventSleep }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label">Show menu bar icon</span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.showMenuBarIcon}
-                onChange={(event) => {
-                  const showMenuBarIcon = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, showMenuBarIcon }));
-                }}
-              />
-            </label>
 
             <label className="settings-row settings-toggle">
               <span className="settings-label">Show keyboard shortcut hints</span>
@@ -14441,6 +14160,283 @@ function MainApp() {
                 ) : null}
               </div>
             ) : null}
+              </>
+            ) : (
+              <>
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">
+                Code mode (enables worktrees, extra shell UI, etc.)
+              </span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.codeMode}
+                onChange={(event) => {
+                  const codeMode = event.currentTarget.checked;
+                  setSettings((current) => ({
+                    ...current,
+                    codeMode,
+                    showTabDirectories: codeMode,
+                    showToolCalls: codeMode,
+                    stickyUserMessages: codeMode,
+                    requireCmdEnterToSend: codeMode,
+                  }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label settings-label-indented">Show tab directories</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showTabDirectories}
+                onChange={(event) => {
+                  const showTabDirectories = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showTabDirectories }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label settings-label-indented">Show tool calls</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showToolCalls}
+                onChange={(event) => {
+                  const showToolCalls = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showToolCalls }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label settings-label-indented">
+                Show assistant message timestamps
+              </span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showAssistantTimestamps}
+                onChange={(event) => {
+                  const showAssistantTimestamps = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showAssistantTimestamps }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label settings-label-indented">
+                Require ⌘↵ to send
+              </span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.requireCmdEnterToSend}
+                onChange={(event) => {
+                  const requireCmdEnterToSend = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, requireCmdEnterToSend }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label settings-label-indented">
+                Pin latest user message on top of transcripts
+              </span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.stickyUserMessages}
+                onChange={(event) => {
+                  const stickyUserMessages = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, stickyUserMessages }));
+                }}
+              />
+            </label>
+
+            <div className="settings-row">
+              <label htmlFor="settings-worktree-location" className="settings-label">
+                Worktree location
+              </label>
+              <select
+                id="settings-worktree-location"
+                className="settings-select"
+                value={settings.worktreeLocation}
+                onChange={(event) => {
+                  const worktreeLocation =
+                    event.currentTarget.value as AppSettings["worktreeLocation"];
+                  setSettings((current) => ({ ...current, worktreeLocation }));
+                }}
+              >
+                {WORKTREE_LOCATION_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="settings-hint settings-hint-weak">
+              {settings.worktreeLocation === "localQmux"
+                ? "New worktrees stored in <project>/.qmux/worktrees/<name>."
+                : settings.worktreeLocation === "localClaude"
+                  ? "New worktrees stored in <project>/.claude/worktrees/<name>."
+                  : "New worktrees stored in qmux’s global workspace directory."}
+            </p>
+
+            <div className="settings-row settings-research-instructions-row">
+              <div className="settings-label-stack">
+                <label htmlFor="settings-research-instructions" className="settings-label">
+                  Research instructions
+                </label>
+                <p className="settings-hint settings-hint-weak">
+                  Sent with every research launch
+                </p>
+              </div>
+              <textarea
+                id="settings-research-instructions"
+                className="form-field settings-input settings-textarea"
+                rows={3}
+                placeholder={DEFAULT_RESEARCH_LAUNCH_INSTRUCTION}
+                value={settings.researchLaunchInstruction}
+                onChange={(event) => {
+                  const researchLaunchInstruction = clampResearchLaunchInstruction(
+                    event.currentTarget.value,
+                  );
+                  setSettings((current) => ({ ...current, researchLaunchInstruction }));
+                }}
+              />
+            </div>
+
+            <div className="settings-row settings-shortcut-row">
+              <label htmlFor="settings-global-task-launcher-hotkey" className="settings-label">
+                Global quick launch hotkey
+              </label>
+              <select
+                id="settings-global-task-launcher-hotkey"
+                className="settings-select"
+                value={globalTaskLauncherSetting.hotkey ?? ""}
+                disabled={globalTaskLauncherHotkeySaving}
+                aria-invalid={globalTaskLauncherHotkeyMessage ? true : undefined}
+                aria-describedby={
+                  globalTaskLauncherHotkeyMessage
+                    ? "settings-global-task-launcher-hotkey-message"
+                    : undefined
+                }
+                onChange={(event) =>
+                  void updateGlobalTaskLauncherHotkey(
+                    event.currentTarget.value
+                      ? (event.currentTarget.value as GlobalTaskLauncherHotkey)
+                      : null,
+                  )
+                }
+              >
+                <option value="">Disabled</option>
+                {GLOBAL_TASK_LAUNCHER_HOTKEY_OPTIONS.map((option) => (
+                  <option
+                    key={option.value}
+                    value={option.value}
+                    disabled={Boolean(
+                      option.accelerator && option.accelerator === showHideShortcutValue,
+                    )}
+                  >
+                    {option.label}
+                    {option.accelerator === showHideShortcutValue ? " (used by Show/hide)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {globalTaskLauncherHotkeyMessage || globalTaskLauncherHotkeySaving ? (
+              <p
+                id="settings-global-task-launcher-hotkey-message"
+                className={`settings-hint settings-shortcut-message${
+                  globalTaskLauncherHotkeyMessage ? " is-error" : ""
+                }`}
+              >
+                {globalTaskLauncherHotkeySaving
+                  ? "Saving hotkey..."
+                  : globalTaskLauncherHotkeyMessage}
+              </p>
+            ) : null}
+
+            <div className="settings-row settings-shortcut-row">
+              <div className="settings-label">
+                <label htmlFor="settings-show-hide-shortcut">Show/hide app shortcut</label>
+                {showHideShortcutValue ? (
+                  <>
+                    {" "}
+                    <button
+                      type="button"
+                      className="settings-link-button settings-inline-link-button"
+                      disabled={showHideShortcutSaving}
+                      onClick={clearShowHideShortcut}
+                    >
+                      Clear
+                    </button>
+                  </>
+                ) : null}
+              </div>
+              <input
+                id="settings-show-hide-shortcut"
+                className="form-field settings-input settings-shortcut-input"
+                data-shortcut-capture="show-hide"
+                value={showHideShortcutValue}
+                placeholder="e.g. Option+Space"
+                readOnly
+                aria-invalid={showHideShortcutMessage ? true : undefined}
+                aria-describedby={
+                  showHideShortcutMessage ? "settings-show-hide-shortcut-message" : undefined
+                }
+                onPointerDown={() => setShowHideShortcutCapturing(true)}
+                onFocus={() => setShowHideShortcutCapturing(true)}
+                onBlur={() => setShowHideShortcutCapturing(false)}
+                onKeyDown={captureShowHideShortcut}
+              />
+            </div>
+            {showHideShortcutMessage || showHideShortcutSaving ? (
+              <p
+                id="settings-show-hide-shortcut-message"
+                className={`settings-hint settings-shortcut-message${
+                  showHideShortcutMessage ? " is-error" : ""
+                }`}
+              >
+                {showHideShortcutSaving ? "Saving shortcut..." : showHideShortcutMessage}
+              </p>
+            ) : null}
+            {showHideShortcutConflictLabel ? (
+              <p className="settings-hint settings-shortcut-message">
+                {`qmux also uses this shortcut to ${showHideShortcutConflictLabel}; while registered system-wide, it will show/hide the app instead.`}
+              </p>
+            ) : null}
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Keep awake while agents run (&gt;10% battery)</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.preventSleep}
+                onChange={(event) => {
+                  // See the font select above: capture before the updater, which
+                  // runs after currentTarget has been nulled out.
+                  const preventSleep = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, preventSleep }));
+                }}
+              />
+            </label>
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Show menu bar icon</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showMenuBarIcon}
+                onChange={(event) => {
+                  const showMenuBarIcon = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showMenuBarIcon }));
+                }}
+              />
+            </label>
               </>
             )}
               </div>
