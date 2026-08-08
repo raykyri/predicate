@@ -839,6 +839,15 @@ export function browserOpenLocalPath(paneId: string, path: string) {
   });
 }
 
+/** Resolve a Codex inline-visualization basename within the pane's own session
+ * directory and open its fragment in the sandboxed browser overlay. */
+export function browserOpenCodexInlineVisualization(paneId: string, file: string) {
+  return invoke<{ url: string; sandbox: boolean }>(
+    "browser_open_codex_inline_visualization",
+    { paneId, file },
+  );
+}
+
 export type HumanBrowserSnapshot = {
   ownerId: string;
   url: string;

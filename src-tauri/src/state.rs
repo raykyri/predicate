@@ -144,6 +144,11 @@ struct AppStateInner {
     pane_tokens: Mutex<HashMap<String, String>>,
     // Separate read-only credentials used in file-preview URLs.
     file_tokens: Mutex<HashMap<String, String>>,
+    // Exact, canonical files outside a pane's normal project roots that the
+    // trusted UI explicitly granted to its preview. Codex inline visualizations
+    // live under qmux's private workspace metadata, so granting the whole root
+    // would expose unrelated panes and sessions to a leaked preview token.
+    file_preview_grants: Mutex<HashMap<String, HashSet<std::path::PathBuf>>>,
     model: Mutex<Model>,
     transcript_tails: Mutex<HashSet<String>>,
     next_id: AtomicU64,
@@ -1130,6 +1135,7 @@ impl AppState {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
+                file_preview_grants: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
                 transcript_tails: Mutex::new(HashSet::new()),
                 next_id: AtomicU64::new(1),
@@ -1426,6 +1432,46 @@ impl AppState {
         tokens
             .iter()
             .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
+    }
+
+    /// Add one exact file to a pane's read-only preview capability. The caller
+    /// must perform its own semantic authorization first (for example, proving
+    /// a Codex visualization belongs to this pane's session); canonicalizing
+    /// here makes the eventual file-server comparison resistant to `..` and
+    /// symlink swaps.
+    pub fn grant_pane_file_preview(
+        &self,
+        pane_id: &str,
+        path: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
+        if !self.pane_exists(pane_id)? {
+            return Err(format!("pane {pane_id} was not found"));
+        }
+        let canonical = std::fs::canonicalize(path)
+            .map_err(|err| format!("failed to resolve {}: {err}", path.display()))?;
+        if !canonical.is_file() {
+            return Err(format!("{} is not a file", canonical.display()));
+        }
+        let mut grants = self
+            .inner
+            .file_preview_grants
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        grants
+            .entry(pane_id.to_string())
+            .or_default()
+            .insert(canonical.clone());
+        Ok(canonical)
+    }
+
+    pub fn pane_file_preview_grants(&self, pane_id: &str) -> Vec<std::path::PathBuf> {
+        self.inner
+            .file_preview_grants
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .get(pane_id)
+            .map(|paths| paths.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Roots a preview from a pane may read. This deliberately excludes other
@@ -5904,6 +5950,9 @@ impl AppState {
         }
         if let Ok(mut tokens) = self.inner.file_tokens.lock() {
             tokens.remove(pane_id);
+        }
+        if let Ok(mut grants) = self.inner.file_preview_grants.lock() {
+            grants.remove(pane_id);
         }
         // Drop the pane's send lock so the map doesn't grow for the process lifetime.
         // Separate lock from `model`.

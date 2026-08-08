@@ -103,6 +103,33 @@ export function pathFromQmuxFileHref(url: string): string | undefined {
   return path.length > 0 ? path : undefined;
 }
 
+/**
+ * A loopback HTML document that qmux can offer as an explicit browser preview.
+ * Parse the URL instead of matching a prefix so lookalike hosts such as
+ * `localhost.example.com` never receive the local-preview affordance.
+ */
+export function loopbackHtmlUrl(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
+    return undefined;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return undefined;
+  }
+  if (parsed.username || parsed.password) {
+    return undefined;
+  }
+  if (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") {
+    return undefined;
+  }
+  return /\.html$/iu.test(parsed.pathname) ? parsed.href : undefined;
+}
+
 // Normal http(s) links render through qmux's isolated Chromium automation profile.
 // Token-bearing file previews are still detected separately and rendered in the
 // webview's sandboxed iframe. mailto and custom schemes remain OS-owned.

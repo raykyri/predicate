@@ -1457,7 +1457,13 @@ function MessageBlockView({ block, role }: { block: MessageBlock; role: string }
       }
       return <p className="turn-text">{block.text}</p>;
     }
-    return <TranscriptMarkdown text={block.text} oversizedContent={OVERSIZED_ASSISTANT_MARKDOWN} />;
+    return (
+      <TranscriptMarkdown
+        text={block.text}
+        oversizedContent={OVERSIZED_ASSISTANT_MARKDOWN}
+        artifactLinks
+      />
+    );
   }
   return <RawTranscriptDisclosure value={block.value} deferPayload />;
 }

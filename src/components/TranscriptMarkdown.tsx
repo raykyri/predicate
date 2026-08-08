@@ -16,14 +16,14 @@ import type {
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Ellipsis } from "lucide-react";
+import { Ellipsis, ExternalLink } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
-import { safeHref } from "../lib/links";
+import { loopbackHtmlUrl, safeHref } from "../lib/links";
 import DiagramBlock, { diagramLangFromClassName, nodeText } from "./DiagramBlock";
 
 // The TeX pipeline (remark-math + rehype-mathjax) weighs a couple of
@@ -36,12 +36,70 @@ import DiagramBlock, { diagramLangFromClassName, nodeText } from "./DiagramBlock
 // TeX stays visible as its literal source.
 type MarkdownPluginList = NonNullable<Options["remarkPlugins"]>;
 
+interface TranscriptHastNode {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+  children?: TranscriptHastNode[];
+}
+
+const LOCAL_HTML_DATA_KEY = "qmuxLocalHtmlUrl";
+const CODEX_INLINE_VIS_DATA_KEY = "qmuxCodexInlineVisFile";
+const CODEX_INLINE_VIS_PATTERN =
+  /^::codex-inline-vis\{file="([a-z0-9]+(?:-[a-z0-9]+)*\.html)"\}$/u;
+
+function exactTextChild(node: TranscriptHastNode): string | undefined {
+  if (node.children?.length !== 1 || node.children[0]?.type !== "text") {
+    return undefined;
+  }
+  return node.children[0].value;
+}
+
+/** Mark only the Markdown contexts that are allowed to grow a launch control.
+ * In particular, an inline `code` node is distinguishable from fenced output
+ * here because the latter is the child of `pre`; React's code component alone
+ * does not receive that parent information. */
+function rehypeTranscriptArtifacts() {
+  return (tree: TranscriptHastNode) => {
+    const visit = (node: TranscriptHastNode, parent?: TranscriptHastNode) => {
+      if (node.type === "element") {
+        const text = exactTextChild(node);
+        if (node.tagName === "a" && text) {
+          const href = node.properties?.href;
+          const labelUrl = loopbackHtmlUrl(text);
+          const hrefUrl = loopbackHtmlUrl(href);
+          if (labelUrl && hrefUrl && labelUrl === hrefUrl) {
+            (node.data ??= {})[LOCAL_HTML_DATA_KEY] = hrefUrl;
+          }
+        } else if (node.tagName === "code" && parent?.tagName !== "pre" && text) {
+          const url = loopbackHtmlUrl(text);
+          if (url) {
+            (node.data ??= {})[LOCAL_HTML_DATA_KEY] = url;
+          }
+        } else if (node.tagName === "p" && text) {
+          const directive = CODEX_INLINE_VIS_PATTERN.exec(text);
+          if (directive?.[1]) {
+            (node.data ??= {})[CODEX_INLINE_VIS_DATA_KEY] = directive[1];
+          }
+        }
+      }
+      for (const child of node.children ?? []) {
+        visit(child, node);
+      }
+    };
+    visit(tree);
+  };
+}
+
 interface MathPlugins {
   remark: MarkdownPluginList;
   rehype: MarkdownPluginList;
 }
 
 const baseRemarkPlugins: MarkdownPluginList = [remarkGfm, remarkBreaks];
+const baseRehypePlugins: MarkdownPluginList = [rehypeTranscriptArtifacts];
 
 let mathPlugins: MathPlugins | null = null;
 const mathPluginListeners = new Set<() => void>();
@@ -52,7 +110,7 @@ export const transcriptMathPluginsReady: Promise<void> = import("../lib/markdown
   .then((module) => {
     mathPlugins = {
       remark: module.transcriptRemarkPlugins,
-      rehype: module.transcriptRehypePlugins,
+      rehype: [...module.transcriptRehypePlugins, rehypeTranscriptArtifacts],
     };
     for (const listener of mathPluginListeners) {
       listener();
@@ -77,12 +135,15 @@ function readMathPlugins() {
 export interface LinkActions {
   openLink: (url: string) => void;
   openLinkMenu: (url: string, x: number, y: number) => void;
+  openCodexInlineVisualization?: (file: string) => void;
 }
 
 const LinkActionsContext = createContext<LinkActions>({
   openLink: () => undefined,
   openLinkMenu: () => undefined,
 });
+
+const TranscriptArtifactLinksContext = createContext(false);
 
 export function TranscriptLinkActionsProvider({
   actions,
@@ -94,13 +155,49 @@ export function TranscriptLinkActionsProvider({
   return <LinkActionsContext.Provider value={actions}>{children}</LinkActionsContext.Provider>;
 }
 
-function MarkdownLink({ href, ...props }: ComponentPropsWithoutRef<"a">) {
+function TranscriptArtifactOpenButton({
+  label,
+  onOpen,
+}: {
+  label: string;
+  onOpen: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      className="turn-markdown-artifact-open"
+      title={label}
+      aria-label={label}
+      draggable={false}
+      contentEditable={false}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onOpen();
+      }}
+    >
+      <ExternalLink aria-hidden="true" />
+    </button>
+  );
+}
+
+function markedValue(node: TranscriptHastNode | undefined, key: string) {
+  const value = node?.data?.[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function MarkdownLink({
+  href,
+  node,
+  ...props
+}: ComponentPropsWithoutRef<"a"> & { node?: TranscriptHastNode }) {
   const { openLink, openLinkMenu } = useContext(LinkActionsContext);
+  const artifactLinks = useContext(TranscriptArtifactLinksContext);
   const safe = safeHref(href);
   if (!safe) {
     return <span {...props} />;
   }
-  return (
+  const link = (
     <a
       {...props}
       href={safe}
@@ -124,6 +221,61 @@ function MarkdownLink({ href, ...props }: ComponentPropsWithoutRef<"a">) {
         openLinkMenu(safe, event.clientX, event.clientY);
       }}
     />
+  );
+  const localHtmlUrl = markedValue(node, LOCAL_HTML_DATA_KEY);
+  return artifactLinks && localHtmlUrl ? (
+    <span className="turn-markdown-artifact-link">
+      {link}
+      <TranscriptArtifactOpenButton
+        label="Open local HTML in browser"
+        onOpen={() => openLink(localHtmlUrl)}
+      />
+    </span>
+  ) : (
+    link
+  );
+}
+
+function MarkdownCode({
+  node,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"code"> & { node?: TranscriptHastNode }) {
+  const { openLink } = useContext(LinkActionsContext);
+  const artifactLinks = useContext(TranscriptArtifactLinksContext);
+  const localHtmlUrl = markedValue(node, LOCAL_HTML_DATA_KEY);
+  const code = <code {...props}>{children}</code>;
+  return artifactLinks && localHtmlUrl ? (
+    <span className="turn-markdown-artifact-link">
+      {code}
+      <TranscriptArtifactOpenButton
+        label="Open local HTML in browser"
+        onOpen={() => openLink(localHtmlUrl)}
+      />
+    </span>
+  ) : (
+    code
+  );
+}
+
+function MarkdownParagraph({
+  node,
+  children,
+  ...props
+}: ComponentPropsWithoutRef<"p"> & { node?: TranscriptHastNode }) {
+  const { openCodexInlineVisualization } = useContext(LinkActionsContext);
+  const artifactLinks = useContext(TranscriptArtifactLinksContext);
+  const file = markedValue(node, CODEX_INLINE_VIS_DATA_KEY);
+  return (
+    <p {...props}>
+      {children}
+      {artifactLinks && file && openCodexInlineVisualization ? (
+        <TranscriptArtifactOpenButton
+          label="Open Codex visualization in browser"
+          onOpen={() => openCodexInlineVisualization(file)}
+        />
+      ) : null}
+    </p>
   );
 }
 
@@ -350,7 +502,19 @@ function MarkdownCodeBlock({ children, ...props }: ComponentPropsWithoutRef<"pre
 }
 
 const markdownComponents: Components = {
-  a: ({ node: _node, href, ...props }) => <MarkdownLink href={href} {...props} />,
+  a: ({ node, href, ...props }) => (
+    <MarkdownLink node={node as TranscriptHastNode} href={href} {...props} />
+  ),
+  code: ({ node, children, ...props }) => (
+    <MarkdownCode node={node as TranscriptHastNode} {...props}>
+      {children}
+    </MarkdownCode>
+  ),
+  p: ({ node, children, ...props }) => (
+    <MarkdownParagraph node={node as TranscriptHastNode} {...props}>
+      {children}
+    </MarkdownParagraph>
+  ),
   table: ({ node: _node, ...props }) => (
     <div className="turn-markdown-table-wrap">
       <table {...props} />
@@ -437,6 +601,10 @@ interface TranscriptMarkdownProps {
    * text. For one-line contexts where promoted or code-styled content would
    * break the compact layout. */
   inline?: boolean;
+  /** Add explicit browser controls to launchable artifacts in transcript prose.
+   * Disabled by default because this renderer also serves research documents
+   * and compact labels that have no owning terminal pane. */
+  artifactLinks?: boolean;
 }
 
 // Memoized because ReactMarkdown re-parses on every render and callers rerender
@@ -451,6 +619,7 @@ export default memo(function TranscriptMarkdown({
   imageBehavior = "render",
   oversizedContent,
   inline = false,
+  artifactLinks = false,
 }: TranscriptMarkdownProps) {
   const math = useSyncExternalStore(subscribeToMathPlugins, readMathPlugins, readMathPlugins);
   if (oversizedContent && text.length > oversizedContent.maxCharacters) {
@@ -464,24 +633,26 @@ export default memo(function TranscriptMarkdown({
     );
   }
   return (
-    <div className={`turn-markdown${className ? ` ${className}` : ""}`}>
-      <ReactMarkdown
-        components={
-          inline
-            ? imageBehavior === "open"
-              ? inlineResearchMarkdownComponents
-              : inlineMarkdownComponents
-            : imageBehavior === "open"
-              ? researchMarkdownComponents
-              : markdownComponents
-        }
-        remarkPlugins={math ? math.remark : baseRemarkPlugins}
-        rehypePlugins={math ? math.rehype : undefined}
-        disallowedElements={inline ? INLINE_DISALLOWED_ELEMENTS : undefined}
-        unwrapDisallowed={inline}
-      >
-        {text}
-      </ReactMarkdown>
-    </div>
+    <TranscriptArtifactLinksContext.Provider value={artifactLinks}>
+      <div className={`turn-markdown${className ? ` ${className}` : ""}`}>
+        <ReactMarkdown
+          components={
+            inline
+              ? imageBehavior === "open"
+                ? inlineResearchMarkdownComponents
+                : inlineMarkdownComponents
+              : imageBehavior === "open"
+                ? researchMarkdownComponents
+                : markdownComponents
+          }
+          remarkPlugins={math ? math.remark : baseRemarkPlugins}
+          rehypePlugins={math ? math.rehype : baseRehypePlugins}
+          disallowedElements={inline ? INLINE_DISALLOWED_ELEMENTS : undefined}
+          unwrapDisallowed={inline}
+        >
+          {text}
+        </ReactMarkdown>
+      </div>
+    </TranscriptArtifactLinksContext.Provider>
   );
 });

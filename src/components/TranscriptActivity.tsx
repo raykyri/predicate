@@ -396,6 +396,7 @@ function ThinkingView({
                   <TranscriptMarkdown
                     text={prose}
                     oversizedContent={OVERSIZED_THINKING_MARKDOWN}
+                    artifactLinks
                   />
                 </div>
               );

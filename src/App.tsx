@@ -434,6 +434,7 @@ import {
   reorderQueuedAgentTurn,
   movePaneToGroup,
   openExternalUrl,
+  browserOpenCodexInlineVisualization,
   browserOpenLocalPath,
   paneActivity,
   pickGroupDirectory,
@@ -4675,6 +4676,11 @@ function MainApp() {
           openLinkForPaneRef.current(paneId, url);
         },
         openLinkMenu: (url, x, y) => setLinkMenu({ url, x, y, paneId }),
+        openCodexInlineVisualization: (file) => {
+          void browserOpenCodexInlineVisualization(paneId, file).catch((err) => {
+            setError(err instanceof Error ? err.message : String(err));
+          });
+        },
       };
       cache.set(paneId, actions);
     }

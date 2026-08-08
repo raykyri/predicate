@@ -5,9 +5,25 @@ import {
   absoluteLocalFilePath,
   isFileServerUrl,
   isQmuxFileHref,
+  loopbackHtmlUrl,
   pathFromQmuxFileHref,
   safeHref,
 } from "../src/lib/links";
+
+test("loopbackHtmlUrl recognizes only loopback HTML documents", () => {
+  assert.equal(
+    loopbackHtmlUrl("http://127.0.0.1:8631/mockup-1-unified.html"),
+    "http://127.0.0.1:8631/mockup-1-unified.html",
+  );
+  assert.equal(
+    loopbackHtmlUrl("https://localhost/mockup.HTML?mode=compact#result"),
+    "https://localhost/mockup.HTML?mode=compact#result",
+  );
+  assert.equal(loopbackHtmlUrl("http://localhost/app.js"), undefined);
+  assert.equal(loopbackHtmlUrl("http://localhost.example.com/mockup.html"), undefined);
+  assert.equal(loopbackHtmlUrl("http://user@localhost/mockup.html"), undefined);
+  assert.equal(loopbackHtmlUrl(" http://localhost/mockup.html"), undefined);
+});
 
 test("safeHref keeps real http(s)/mailto URLs", () => {
   assert.equal(safeHref("https://example.com/a"), "https://example.com/a");

@@ -15,7 +15,7 @@
 
 use crate::connection_limit::ConnectionLimiter;
 use crate::state::AppState;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -30,6 +30,10 @@ const MAX_REQUEST_HEAD_BYTES: u64 = 64 * 1024;
 /// Cap on a single full-file (non-range) response so a giant file can't balloon
 /// memory; browsers fetch large media via Range anyway.
 const MAX_INLINE_BYTES: u64 = 64 * 1024 * 1024;
+/// The Codex visualization contract caps fragments at 2 MB. Keeping that cap
+/// here prevents a malformed directive from turning the wrapper render into an
+/// unbounded allocation.
+const MAX_CODEX_INLINE_VIS_BYTES: u64 = 2 * 1024 * 1024;
 /// Cap on concurrent connection-handler threads. Each connection serves one
 /// request then closes, so this bounds in-flight requests; 64 comfortably covers
 /// a browser overlay fetching a page full of assets in parallel while keeping a
@@ -114,6 +118,114 @@ pub fn resolve_under_roots(requested: &Path, roots: &[PathBuf]) -> Option<PathBu
         }
     }
     None
+}
+
+/// Resolve one of the exact canonical files granted to a pane. This is kept
+/// separate from directory roots so a visualization under qmux's private
+/// workspace metadata does not grant the preview token access to sibling
+/// sessions, state, or credentials.
+pub fn resolve_exact_file(requested: &Path, granted: &[PathBuf]) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(requested).ok()?;
+    granted
+        .iter()
+        .any(|allowed| allowed == &canonical)
+        .then_some(canonical)
+}
+
+fn valid_codex_inline_vis_filename(file: &str) -> bool {
+    let Some(stem) = file.strip_suffix(".html") else {
+        return false;
+    };
+    !stem.is_empty()
+        && stem.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn valid_visualization_session_id(session_id: &str) -> bool {
+    !session_id.is_empty()
+        && session_id.len() <= 128
+        && session_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn dated_directories(root: &Path, digits: usize) -> Result<Vec<PathBuf>, String> {
+    let entries = fs::read_dir(root).map_err(|err| {
+        format!(
+            "failed to read visualization directory {}: {err}",
+            root.display()
+        )
+    })?;
+    let mut directories = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to inspect visualization directory {}: {err}",
+                root.display()
+            )
+        })?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.len() == digits
+            && name.bytes().all(|byte| byte.is_ascii_digit())
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            directories.push(entry.path());
+        }
+    }
+    directories.sort();
+    Ok(directories)
+}
+
+/// Resolve the file named by a `codex-inline-vis` directive inside the owning
+/// Codex thread's dated visualization directory. The directive supplies only a
+/// contract-valid basename; the trusted pane session supplies the directory.
+pub fn resolve_codex_inline_visualization(
+    visualization_root: &Path,
+    session_id: &str,
+    file: &str,
+) -> Result<PathBuf, String> {
+    if !valid_visualization_session_id(session_id) {
+        return Err("the attached Codex session has an invalid id".to_string());
+    }
+    if !valid_codex_inline_vis_filename(file) {
+        return Err(format!("invalid codex-inline-vis file '{file}'"));
+    }
+    let canonical_root = fs::canonicalize(visualization_root).map_err(|_| {
+        format!(
+            "Codex visualization storage {} was not found",
+            visualization_root.display()
+        )
+    })?;
+    let mut matches = Vec::new();
+    for year in dated_directories(&canonical_root, 4)? {
+        for month in dated_directories(&year, 2)? {
+            for day in dated_directories(&month, 2)? {
+                let candidate = day.join(session_id).join(file);
+                let Ok(canonical) = fs::canonicalize(&candidate) else {
+                    continue;
+                };
+                if canonical.starts_with(&canonical_root) && canonical.is_file() {
+                    matches.push(canonical);
+                }
+            }
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(format!(
+            "Codex visualization '{file}' was not found for session {session_id}"
+        )),
+        _ => Err(format!(
+            "Codex visualization '{file}' is ambiguous for session {session_id}"
+        )),
+    }
 }
 
 struct RequestHead {
@@ -264,6 +376,10 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
         return response;
     }
     let raw_requested = query.is_some_and(|q| q.split('&').any(|p| p == "raw" || p == "raw=1"));
+    let codex_inline_vis_requested = query.is_some_and(|q| {
+        q.split('&')
+            .any(|p| p == "codex-inline-vis" || p == "codex-inline-vis=1")
+    });
     let body_font_id = query_parameter(query, "qmux-body-font");
     // The path is "/<token>/<abs path>": the first segment is the per-pane token, and
     // everything from the next '/' onward is the percent-encoded absolute path (with
@@ -286,7 +402,10 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
     };
 
     let roots = state.pane_file_roots(&pane_id);
-    let Some(canonical) = resolve_under_roots(Path::new(&decoded), &roots) else {
+    let grants = state.pane_file_preview_grants(&pane_id);
+    let Some(canonical) = resolve_under_roots(Path::new(&decoded), &roots)
+        .or_else(|| resolve_exact_file(Path::new(&decoded), &grants))
+    else {
         // Either it doesn't exist or it isn't under an allowed root — same opaque 403
         // so the server isn't a probe for which paths exist.
         return Response::error(403, "Forbidden");
@@ -310,6 +429,40 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
     // still load, but only from this same file-server origin; nothing may talk to the
     // network. `state.file_server_port()` is always set once the server is serving.
     let csp = state.file_server_port().map(file_content_csp);
+
+    // `codex-inline-vis` files are HTML fragments rather than standalone pages.
+    // Supply the small host shell and theme tokens they expect, while retaining
+    // the ordinary file preview's opaque-origin sandbox and no-network CSP.
+    if codex_inline_vis_requested {
+        if !canonical
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
+        {
+            return Response::error(400, "Bad Request");
+        }
+        if total > MAX_CODEX_INLINE_VIS_BYTES {
+            return Response::error(413, "Payload Too Large");
+        }
+        let Ok(source) = read_slice(file, 0, total) else {
+            return Response::error(500, "Internal Server Error");
+        };
+        let page = render_codex_inline_visualization_page(
+            &canonical,
+            &String::from_utf8_lossy(&source),
+            body_font_id,
+        );
+        let mut response = Response::new(200, "OK");
+        response.header("Content-Type", "text/html; charset=utf-8");
+        response.header("Content-Length", &page.len().to_string());
+        if let Some(csp) = csp {
+            response.header("Content-Security-Policy", &csp);
+        }
+        if !is_head {
+            response.body = page.into_bytes();
+        }
+        return response;
+    }
 
     // Markdown is rendered into a styled HTML page at serve time (unless `?raw=1` opts
     // out), so the overlay shows a document instead of plain source. Rendering
@@ -534,6 +687,72 @@ fn is_markdown(path: &Path) -> bool {
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref(),
         Some("md" | "markdown")
+    )
+}
+
+// Minimal self-contained host surface for the HTML fragments emitted through
+// `::codex-inline-vis`. Fragment-specific CSS owns the visualization itself;
+// these are the shared theme and utility classes the Codex contract expects.
+// External resources deliberately remain blocked by file_content_csp: unlike
+// Codex's standalone renderer, this page's URL carries a pane capability token.
+const CODEX_INLINE_VIS_CSS: &str = "\
+__QMUX_FONT_FACE__\
+:root { color-scheme: light dark; --font-size-base: 14px; --background: #f7f8f7; --foreground: #1d2421; --card: #ffffff; --card-foreground: #1d2421; --popover: #ffffff; --popover-foreground: #1d2421; --primary: #26322d; --primary-foreground: #ffffff; --secondary: #e8eeeb; --secondary-foreground: #1d2421; --muted: #edf1ef; --muted-foreground: #5e6d66; --accent: #e1e9e5; --accent-foreground: #1d2421; --destructive: #a63d40; --border: #ccd6d1; --input: #aebcb5; --ring: #42554c; --viz-series-1: #187a54; --viz-series-2: #8a5d15; --viz-series-3: #496aa0; --viz-series-4: #8a4e86; --viz-series-5: #ad4e35; --viz-series-6: #4f7777; }\
+@media (prefers-color-scheme: dark) { :root { --background: #111514; --foreground: #e5e9e7; --card: #181d1b; --card-foreground: #e5e9e7; --popover: #202624; --popover-foreground: #e5e9e7; --primary: #d7dfdb; --primary-foreground: #111514; --secondary: #29302d; --secondary-foreground: #e5e9e7; --muted: #242b28; --muted-foreground: #99a49f; --accent: #303936; --accent-foreground: #eef2f0; --destructive: #d06b6b; --border: #36403c; --input: #46514c; --ring: #a9b8b1; --viz-series-1: #8fd5b6; --viz-series-2: #d8b77a; --viz-series-3: #8eacd8; --viz-series-4: #c595c2; --viz-series-5: #df927d; --viz-series-6: #8eb8b8; } }\
+* { box-sizing: border-box; }\
+html, body { min-height: 100%; }\
+body { margin: 0; padding: 16px; color: var(--foreground); background: var(--background); font-family: __QMUX_BODY_FONT__; font-size: var(--font-size-base); font-variant-ligatures: no-common-ligatures; }\
+button, input, select, textarea { font: inherit; }\
+svg, canvas, img { max-width: 100%; }\
+.card { border: 1px solid var(--border); border-radius: 10px; color: var(--card-foreground); background: var(--card); }\
+.viz-row, .viz-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }\
+.viz-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 180px), 1fr)); gap: 10px; }\
+.viz-stat { padding: 12px; }\
+.viz-stat-value { color: var(--foreground); font-size: 1.4em; font-weight: 500; }\
+.viz-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 2px 7px; border-radius: 999px; color: var(--accent-foreground); background: var(--accent); }\
+.btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 30px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--secondary-foreground); background: var(--secondary); cursor: pointer; }\
+.btn:not(:disabled):hover { border-color: var(--input); background: var(--accent); }\
+.btn-primary { border-color: var(--primary); color: var(--primary-foreground); background: var(--primary); }\
+.btn-ghost { border-color: transparent; color: var(--muted-foreground); background: transparent; }\
+.btn-block { width: 100%; }\
+.btn:disabled { cursor: not-allowed; opacity: 0.4; }\
+.viz-tile { width: 100%; min-height: 52px; }\
+.form-label { display: block; margin-bottom: 6px; color: var(--foreground); }\
+.form-control, .form-select { display: block; width: 100%; min-height: 30px; padding: 4px 8px; border: 1px solid var(--input); border-radius: 7px; color: var(--foreground); background: var(--secondary); }\
+.form-check { display: flex; align-items: center; gap: 7px; }\
+.table-responsive { width: 100%; overflow-x: auto; }\
+.table { width: 100%; border-collapse: collapse; }\
+.table th, .table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; }\
+.table-sm th, .table-sm td { padding: 5px 7px; }\
+.text-small { font-size: max(11px, 0.85em); }\
+.text-muted { color: var(--muted-foreground); }\
+.text-destructive { color: var(--destructive); }\
+.text-end { text-align: end !important; font-variant-numeric: tabular-nums; }\
+.text-center { text-align: center !important; }\
+.text-nowrap { white-space: nowrap; }\
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }\
+[data-lucide] { display: inline-flex; width: 16px; height: 16px; align-items: center; justify-content: center; font-style: normal; }\
+[data-lucide]:empty::before { content: '\\25c7'; font-size: 11px; }\
+:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }";
+
+fn render_codex_inline_visualization_page(
+    path: &Path,
+    source: &str,
+    body_font_id: Option<&str>,
+) -> String {
+    let title = escape_html(
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Codex visualization"),
+    );
+    let css = CODEX_INLINE_VIS_CSS
+        .replace("__QMUX_FONT_FACE__", markdown_font_face_css(body_font_id))
+        .replace("__QMUX_BODY_FONT__", markdown_body_font(body_font_id));
+    format!(
+        "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{title}</title>\n<style>{css}</style>\n</head>\n\
+         <body>\n{source}\n</body>\n</html>\n"
     )
 }
 
@@ -1122,6 +1341,95 @@ mod tests {
             String::from_utf8(body).unwrap().contains("<h1>Hello</h1>"),
             "range response should carry the full rendered page"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolves_only_thread_scoped_codex_inline_visualizations() {
+        let base =
+            std::env::temp_dir().join(format!("qmux-fs-inline-vis-resolve-{}", std::process::id()));
+        let root = base.join("visualizations");
+        let thread = root
+            .join("2026")
+            .join("08")
+            .join("08")
+            .join("019fe2fe-2ef7-7aa2-a632-3f1d6d2bf391");
+        std::fs::create_dir_all(&thread).unwrap();
+        let visual = thread.join("artifact-tray-options.html");
+        std::fs::write(&visual, "<div>preview</div>").unwrap();
+
+        assert_eq!(
+            resolve_codex_inline_visualization(
+                &root,
+                "019fe2fe-2ef7-7aa2-a632-3f1d6d2bf391",
+                "artifact-tray-options.html",
+            )
+            .unwrap(),
+            std::fs::canonicalize(&visual).unwrap()
+        );
+        assert!(
+            resolve_codex_inline_visualization(
+                &root,
+                "019fe2fe-2ef7-7aa2-a632-3f1d6d2bf391",
+                "../artifact.html",
+            )
+            .is_err()
+        );
+        assert!(resolve_codex_inline_visualization(&root, "../../other", "artifact.html").is_err());
+
+        let duplicate = root
+            .join("2026")
+            .join("08")
+            .join("09")
+            .join("019fe2fe-2ef7-7aa2-a632-3f1d6d2bf391");
+        std::fs::create_dir_all(&duplicate).unwrap();
+        std::fs::write(duplicate.join("artifact-tray-options.html"), "duplicate").unwrap();
+        assert!(
+            resolve_codex_inline_visualization(
+                &root,
+                "019fe2fe-2ef7-7aa2-a632-3f1d6d2bf391",
+                "artifact-tray-options.html",
+            )
+            .unwrap_err()
+            .contains("ambiguous")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn exact_preview_grant_serves_wrapped_inline_vis_but_not_siblings() {
+        let base =
+            std::env::temp_dir().join(format!("qmux-fs-inline-vis-serve-{}", std::process::id()));
+        let root = base.join("ws");
+        let visuals = base.join("private-visuals");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&visuals).unwrap();
+        let visual = visuals.join("preview.html");
+        let sibling = visuals.join("other.html");
+        std::fs::write(&visual, "<div class=\"card\">preview</div>").unwrap();
+        std::fs::write(&sibling, "private sibling").unwrap();
+
+        let state = test_state(&root, &base, "pane-vis");
+        let canonical = state.grant_pane_file_preview("pane-vis", &visual).unwrap();
+        let info = start_file_server(state.clone()).unwrap();
+        state.set_file_server(info.port);
+        let token = state.pane_file_token("pane-vis").unwrap();
+        let path = format!(
+            "{}?codex-inline-vis=1",
+            url_path(info.port, &token, &canonical)
+        );
+        let (head, body) = http_get_full(info.port, &path, None);
+        let body = String::from_utf8(body).unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "head: {head}");
+        assert!(head.contains("Content-Security-Policy"), "head: {head}");
+        assert!(body.starts_with("<!doctype html>"), "body: {body}");
+        assert!(body.contains("--background:"), "body: {body}");
+        assert!(body.contains("<div class=\"card\">preview</div>"));
+
+        let (status, _) = http_get(info.port, &url_path(info.port, &token, &sibling), None);
+        assert!(status.contains("403"), "status: {status}");
 
         let _ = std::fs::remove_dir_all(&base);
     }

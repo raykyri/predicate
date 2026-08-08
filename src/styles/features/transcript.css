@@ -852,6 +852,45 @@ header + .turn-blocks {
   text-decoration: underline;
 }
 
+/* Explicit launch affordance for localhost HTML and Codex visualization
+   directives. The button contains no text node and is excluded from selection,
+   so copying across it preserves exactly the transcript source. */
+.turn-markdown-artifact-link {
+  display: inline;
+}
+
+.turn-markdown-artifact-open {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  margin: 0 0 0 3px;
+  padding: 1px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  background: transparent;
+  cursor: pointer;
+  line-height: 0;
+  vertical-align: -3px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.turn-markdown-artifact-open svg {
+  width: 12px;
+  height: 12px;
+  pointer-events: none;
+}
+
+.turn-markdown-artifact-open:hover,
+.turn-markdown-artifact-open:focus-visible {
+  color: var(--accent-color);
+  background: var(--surface-fill-hover);
+}
+
 .turn-markdown blockquote {
   border-left: 2px solid var(--markdown-blockquote-border);
   padding-left: 9px;

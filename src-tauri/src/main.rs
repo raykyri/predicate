@@ -619,6 +619,62 @@ fn browser_open_local_path(
     Ok(serde_json::json!({ "url": url, "sandbox": sandbox }))
 }
 
+/// Resolve and open the HTML fragment named by a transcript
+/// `::codex-inline-vis` directive. The file name is untrusted transcript text;
+/// the owning session and visualization root come only from qmux state.
+#[tauri::command(async)]
+async fn browser_open_codex_inline_visualization(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    file: String,
+) -> Result<serde_json::Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !state.pane_exists(&pane_id)? {
+            return Err(format!("pane {pane_id} was not found"));
+        }
+        let agent = state
+            .agent_by_pane(&pane_id)?
+            .ok_or_else(|| format!("pane {pane_id} has no attached agent"))?;
+        if agent.adapter != "codex" {
+            return Err("codex-inline-vis can only be opened for a Codex session".to_string());
+        }
+        let session_id = agent
+            .session_id
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| "the attached Codex agent has no session id".to_string())?;
+        let visualization_root = state
+            .config()
+            .workspace_root
+            .join(".codex")
+            .join("visualizations");
+        let path = file_server::resolve_codex_inline_visualization(
+            &visualization_root,
+            session_id,
+            file.trim(),
+        )?;
+        let canonical = state.grant_pane_file_preview(&pane_id, &path)?;
+        let port = state
+            .file_server_port()
+            .ok_or_else(|| "the file server is not running".to_string())?;
+        let token = state.pane_file_token(&pane_id)?;
+        let url = format!(
+            "{}?codex-inline-vis=1",
+            file_server::file_url(port, &token, &canonical)
+        );
+        state.emit(events::QmuxEvent::new(
+            "browser.open",
+            Some(pane_id),
+            None,
+            serde_json::json!({ "url": url, "sandbox": true }),
+        ));
+        Ok(serde_json::json!({ "url": url, "sandbox": true }))
+    })
+    .await
+    .map_err(|err| format!("browser_open_codex_inline_visualization task failed: {err}"))?
+}
+
 fn is_file_server_url(url: &str, port: u16) -> bool {
     url.starts_with(&format!("http://127.0.0.1:{port}/"))
         || url.starts_with(&format!("http://localhost:{port}/"))
@@ -2900,6 +2956,7 @@ fn main() {
             human_browser::human_browser_reload,
             open_external_url,
             browser_open_local_path,
+            browser_open_codex_inline_visualization,
             prompt_library_list,
             prompt_library_save,
             prompt_library_delete,
