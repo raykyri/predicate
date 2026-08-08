@@ -13718,7 +13718,7 @@ function MainApp() {
           }}
         >
           <div
-            className={`settings-panel${settingsTab === "agents" ? " settings-panel--wide" : ""}`}
+            className="settings-panel"
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-title"

@@ -129,7 +129,8 @@ pub fn resolve_launch(agent: &RegistryAgent) -> Result<(String, AcpAgentConfig),
         ("uvx", uvx, Vec::new(), uvx.env.clone())
     } else if agent.distribution.binary.is_some() {
         return Err(
-            "this agent ships as a prebuilt binary, which qmux does not install yet".to_string(),
+            "This agent ships as a prebuilt binary, which qmux cannot automatically install yet"
+                .to_string(),
         );
     } else {
         return Err("this agent publishes no distribution qmux understands".to_string());

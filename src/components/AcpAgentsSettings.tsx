@@ -154,13 +154,6 @@ export default function AcpAgentsSettings({ config, onConfigChange }: AcpAgentsS
 
   return (
     <div className="acp-agents-settings">
-      <p className="settings-hint">
-        ACP agents are a command line, not a built-in adapter. Add them from the published
-        registry (npx/uvx only), or declare them under{" "}
-        <code>adapters.acp.agents</code> in <code>qmux.config.json</code>. qmux never rewrites
-        that file.
-      </p>
-
       <section className="acp-agents-section" aria-labelledby="acp-installed-heading">
         <div className="acp-agents-section-header">
           <h3 id="acp-installed-heading">Installed</h3>
@@ -262,7 +255,7 @@ export default function AcpAgentsSettings({ config, onConfigChange }: AcpAgentsS
         {registry === null && loading ? (
           <p className="settings-hint">Loading registry…</p>
         ) : filteredRegistry.length === 0 ? (
-          <p className="settings-hint">No agents match.</p>
+          <p className="settings-hint acp-agents-empty">No agents match.</p>
         ) : (
           <ul className="acp-agents-list acp-agents-list--registry">
             {filteredRegistry.map((entry) => {
