@@ -1,0 +1,315 @@
+/* Artifact tray: a small draggable card floating over the right pane (same
+   family as .btw-floating-pane) listing files/URLs agent panes opened via
+   `qmux open`. Default position is the top-right corner under the header;
+   dragging switches it to an explicit left/top kept per pane. */
+.artifact-tray {
+  position: absolute;
+  top: 48px;
+  right: 8px;
+  z-index: 12;
+  display: flex;
+  width: 216px;
+  max-width: calc(100% - 16px);
+  flex-direction: column;
+  border: 1px solid var(--control-border);
+  border-radius: 10px;
+  background: var(--right-pane-bg);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+}
+
+.artifact-tray-titlebar {
+  display: flex;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--surface-divider);
+  border-radius: 9px 9px 0 0;
+  background: var(--chrome-header-bg);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.artifact-tray.is-collapsed .artifact-tray-titlebar {
+  border-bottom: 0;
+  border-radius: 9px;
+}
+
+.artifact-tray-clip {
+  flex: none;
+  color: var(--accent-color);
+}
+
+.artifact-tray-label {
+  flex: 1;
+  color: var(--accent-color);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.artifact-tray-chrome-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.artifact-tray-chrome-button:hover {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
+}
+
+.artifact-tray-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 40vh;
+  padding: 3px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.artifact-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.artifact-tray-row:hover {
+  background: var(--popover-item-hover-bg);
+}
+
+.artifact-tray-row:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
+/* Rows from sibling panes in the workspace: muted, no badge — hovering one
+   previews its source tab with the queue menu's wait-target treatment. */
+.artifact-tray-row.is-other {
+  opacity: 0.5;
+}
+
+.artifact-tray-row.is-other:hover {
+  opacity: 1;
+}
+
+.artifact-tray-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-tray-meta {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.artifact-tray-thumb {
+  display: flex;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--surface-divider);
+  border-radius: 4px;
+  background: var(--popover-bg);
+  color: var(--text-muted);
+}
+
+.artifact-tray-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Hover swaps the timestamp for the per-type action cluster, like the session
+   menu swaps meta for actions. */
+.artifact-tray-actions {
+  display: none;
+  flex: none;
+  gap: 1px;
+}
+
+.artifact-tray-row:hover .artifact-tray-actions,
+.artifact-tray-row:focus-within .artifact-tray-actions {
+  display: inline-flex;
+}
+
+.artifact-tray-row:hover .artifact-tray-meta,
+.artifact-tray-row:focus-within .artifact-tray-meta {
+  display: none;
+}
+
+.artifact-tray-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.artifact-tray-actions button:hover {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
+}
+
+/* Undo footer: appears after a remove, holding the last removal. */
+.artifact-tray-undo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 4px 3px 2px 6px;
+  border-top: 1px solid var(--surface-divider);
+  color: var(--text-faint);
+  font-size: 10.5px;
+}
+
+.artifact-tray-undo svg {
+  flex: none;
+}
+
+.artifact-tray-undo-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-tray-undo button {
+  flex: none;
+  min-height: 0;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-color);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.artifact-tray-undo button:hover {
+  background: var(--chrome-control-bg-hover);
+}
+
+/* Small hover preview card (images and HTML), beside whichever tray edge has room. */
+.artifact-tray-preview {
+  position: absolute;
+  top: 30px;
+  z-index: 14;
+  width: 148px;
+  padding: 4px;
+  border: 1px solid var(--surface-divider);
+  border-radius: var(--radius-lg);
+  background: var(--popover-bg);
+  box-shadow: var(--popover-shadow);
+  pointer-events: none;
+}
+
+.artifact-tray-preview.is-left {
+  right: calc(100% + 8px);
+}
+
+.artifact-tray-preview.is-right {
+  left: calc(100% + 8px);
+}
+
+.artifact-tray-preview img,
+.artifact-tray-preview iframe {
+  display: block;
+  width: 100%;
+  height: 110px;
+  max-height: 110px;
+  border: 1px solid var(--surface-divider);
+  border-radius: 4px;
+  background: var(--popover-bg);
+}
+
+.artifact-tray-preview img {
+  height: auto;
+  object-fit: contain;
+}
+
+.artifact-tray-preview-caption {
+  display: block;
+  overflow: hidden;
+  padding: 4px 2px 1px;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Header paperclip: count badge + one pulse when the count ticks up. */
+.turn-pane-header-button.artifact-tray-toggle {
+  position: relative;
+}
+
+.artifact-tray-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: flex;
+  min-width: 14px;
+  height: 14px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border: 2px solid var(--chrome-header-bg);
+  border-radius: 7px;
+  background: var(--accent-color);
+  color: var(--chrome-header-bg);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+@keyframes artifact-tray-pulse {
+  0% {
+    box-shadow: 0 0 0 0 var(--accent-shadow);
+  }
+  100% {
+    box-shadow: 0 0 0 7px rgb(0 0 0 / 0%);
+  }
+}
+
+.turn-pane-header-button.artifact-tray-toggle.is-pulsing {
+  animation: artifact-tray-pulse 0.9s ease-out 2;
+}

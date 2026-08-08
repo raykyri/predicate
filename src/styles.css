@@ -10,5 +10,6 @@
 @import "./styles/features/transcript.css" layer(features);
 @import "./styles/features/composer.css" layer(features);
 @import "./styles/features/browser.css" layer(features);
+@import "./styles/features/artifact-tray.css" layer(features);
 @import "./styles/features/publishing.css" layer(features);
 @import "./styles/reduced-motion.css" layer(features);

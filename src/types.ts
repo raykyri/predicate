@@ -246,6 +246,19 @@ export interface AgentInfo {
   createdAt: number;
 }
 
+/** One artifact-tray entry: a file or loopback URL opened from an agent pane via
+ * `qmux open`. File artifacts carry `path` (canonical, absolute) and are re-opened
+ * through `browserOpenLocalPath`, which mints a fresh file-server URL; URL
+ * artifacts carry the loopback `url` directly. */
+export interface ArtifactInfo {
+  id: string;
+  groupId: string | null;
+  paneId: string;
+  path?: string | null;
+  url?: string | null;
+  createdAt: number;
+}
+
 export type ShellAgentJobState = "foreground" | "backgrounded" | "stopped";
 
 export interface ShellAgentJobInfo {

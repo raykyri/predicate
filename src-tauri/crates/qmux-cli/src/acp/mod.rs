@@ -1041,10 +1041,7 @@ fn interactive_authenticate(
         .collect();
     let _ = request_silent(
         "hook.notify",
-        hook_payload(
-            "AuthRequired",
-            json!({ "authMethods": methods_payload }),
-        ),
+        hook_payload("AuthRequired", json!({ "authMethods": methods_payload })),
     );
 
     println!("\n{}", bold("Sign in required"));
@@ -1074,7 +1071,10 @@ fn interactive_authenticate(
                 if let Some(method) = methods.iter().find(|method| method.id == choice) {
                     method
                 } else {
-                    println!("{}", dim(&format!("enter 1-{} or a method id", methods.len())));
+                    println!(
+                        "{}",
+                        dim(&format!("enter 1-{} or a method id", methods.len()))
+                    );
                     continue;
                 }
             }

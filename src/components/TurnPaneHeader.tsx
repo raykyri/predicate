@@ -4,6 +4,7 @@ import {
   Minimize2,
   PanelLeftOpen,
   PanelRightClose,
+  Paperclip,
   SquareCenterlineDashedVertical,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -42,6 +43,11 @@ interface TurnPaneHeaderProps {
   onToggleQueueSplit: () => void;
   browserOpen: boolean;
   onToggleBrowser: () => void;
+  // Workspace artifact-tray entries for this pane's group. Zero hides the
+  // paperclip entirely; a count increase pulses it once.
+  artifactCount?: number;
+  artifactTrayOpen?: boolean;
+  onToggleArtifactTray?: () => void;
   transcriptExpanded: boolean;
   transcriptShortcutLabel: string;
   onToggleTranscriptExpanded: () => void;
@@ -75,6 +81,9 @@ export default function TurnPaneHeader({
   onToggleQueueSplit,
   browserOpen,
   onToggleBrowser,
+  artifactCount = 0,
+  artifactTrayOpen = false,
+  onToggleArtifactTray,
   transcriptExpanded,
   transcriptShortcutLabel,
   onToggleTranscriptExpanded,
@@ -85,6 +94,19 @@ export default function TurnPaneHeader({
   promptProjectPath,
 }: TurnPaneHeaderProps) {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  // One pulse when a new artifact lands (the count ticks up), so an agent
+  // opening a file is noticeable without stealing focus.
+  const [artifactPulse, setArtifactPulse] = useState(false);
+  const prevArtifactCountRef = useRef(artifactCount);
+  useEffect(() => {
+    const previous = prevArtifactCountRef.current;
+    prevArtifactCountRef.current = artifactCount;
+    if (artifactCount > previous) {
+      setArtifactPulse(true);
+      const timer = window.setTimeout(() => setArtifactPulse(false), 1900);
+      return () => window.clearTimeout(timer);
+    }
+  }, [artifactCount]);
   const sessionTriggerRef = useRef<HTMLButtonElement | null>(null);
   const sessionPopoverRef = useRef<HTMLDivElement | null>(null);
   const [sessionPos, setSessionPos] = useState<MenuPos | null>(null);
@@ -324,6 +346,21 @@ export default function TurnPaneHeader({
         >
           <Globe size={14} aria-hidden="true" />
         </button>
+        {artifactCount > 0 && onToggleArtifactTray ? (
+          <button
+            type="button"
+            className={`control-button turn-pane-header-button artifact-tray-toggle${
+              artifactTrayOpen ? " is-active" : ""
+            }${artifactPulse ? " is-pulsing" : ""}`}
+            title={artifactTrayOpen ? "Hide artifact tray" : "Show artifact tray"}
+            aria-label={artifactTrayOpen ? "Hide artifact tray" : "Show artifact tray"}
+            aria-pressed={artifactTrayOpen}
+            onClick={onToggleArtifactTray}
+          >
+            <Paperclip size={14} aria-hidden="true" />
+            <span className="artifact-tray-badge">{artifactCount}</span>
+          </button>
+        ) : null}
         <button
           type="button"
           className={`control-button turn-pane-header-button${transcriptExpanded ? " is-active" : ""}`}

@@ -5,9 +5,10 @@
 //! process can reach a loopback port, a random `token` (not loopback alone) is what
 //! gates access. The token is *per pane* (minted in `AppState::pane_file_token`): the
 //! server resolves it back to the requesting pane and only serves paths that
-//! canonicalize under that pane's own roots (`pane_file_roots`). So a token an agent
-//! obtains for its own pane can't reach another pane's directory, and `..`/symlinks
-//! can't escape into `~/.ssh/id_rsa`.
+//! canonicalize under that pane's own roots (`pane_file_roots`), including the local
+//! temporary directories where agents commonly write artifacts. So a token an agent
+//! obtains for its own pane can't reach another pane's workspace, and `..`/symlinks
+//! can't escape into other locations such as `~/.ssh/id_rsa`.
 //!
 //! Hand-rolled GET/HEAD + Range over `TcpListener` to keep the dependency posture of
 //! the rest of the backend (cf. the hand-rolled base64 in events.rs). Each connection
@@ -1162,6 +1163,14 @@ mod tests {
             .to_string()
     }
 
+    /// Scratch space outside the production temp-directory allowlist, used by
+    /// tests that need to distinguish a pane root from a forbidden sibling.
+    fn non_temp_test_dir(label: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("target/qmux-file-server-tests")
+            .join(format!("{label}-{}", std::process::id()))
+    }
+
     /// Builds an `AppState` with a live pane scoped to `root`, matching the
     /// production invariant required before a pane file token may serve files.
     fn test_state(root: &Path, base: &Path, pane_id: &str) -> AppState {
@@ -1258,7 +1267,7 @@ mod tests {
 
     #[test]
     fn serves_files_under_root_with_range_and_blocks_the_rest() {
-        let base = std::env::temp_dir().join(format!("qmux-fs-serve-{}", std::process::id()));
+        let base = non_temp_test_dir("serve");
         let root = base.join("ws");
         let outside = base.join("outside");
         std::fs::create_dir_all(&root).unwrap();
@@ -1400,8 +1409,7 @@ mod tests {
 
     #[test]
     fn exact_preview_grant_serves_wrapped_inline_vis_but_not_siblings() {
-        let base =
-            std::env::temp_dir().join(format!("qmux-fs-inline-vis-serve-{}", std::process::id()));
+        let base = non_temp_test_dir("inline-vis");
         let root = base.join("ws");
         let visuals = base.join("private-visuals");
         std::fs::create_dir_all(&root).unwrap();

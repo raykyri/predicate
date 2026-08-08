@@ -1,5 +1,7 @@
 use crate::research::{ResearchFolderState, ResearchNode, ResearchTree};
-use crate::state::{GlobalDraft, PaneInfo, PaneSplitInfo, QueuedTurn, RecentSessionInfo};
+use crate::state::{
+    ArtifactInfo, GlobalDraft, PaneInfo, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
+};
 use crate::thread_graph::ThreadRecord;
 use crate::workspace::{AgentInfo, GroupInfo};
 use serde::de::DeserializeOwned;
@@ -71,6 +73,11 @@ pub struct PersistedState {
     /// entries remain after their tab closes so Home can show recent work.
     #[serde(default)]
     pub recent_sessions: Vec<RecentSessionInfo>,
+    /// Artifact-tray entries: files/loopback URLs opened from agent panes via
+    /// `qmux open`, oldest first. Entries outlive their pane (the tray is
+    /// workspace-scoped) and are pruned when their group is deleted.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactInfo>,
     /// Per-agent composer drafts: the unsent text sitting in the right-pane input.
     /// Persisted so an in-progress draft survives a restart, recovered alongside
     /// queues and transcripts.
@@ -129,6 +136,7 @@ impl Default for PersistedState {
             agents: Vec::new(),
             queues: HashMap::new(),
             recent_sessions: Vec::new(),
+            artifacts: Vec::new(),
             drafts: HashMap::new(),
             global_drafts: Vec::new(),
             inflight: HashMap::new(),
@@ -694,6 +702,7 @@ fn deserialize_lenient(value: Value) -> (PersistedState, Vec<String>) {
     state.groups = take_vec(&mut map, "groups", "group", &mut dropped);
     state.agents = take_vec(&mut map, "agents", "agent", &mut dropped);
     state.recent_sessions = take_vec(&mut map, "recentSessions", "recent session", &mut dropped);
+    state.artifacts = take_vec(&mut map, "artifacts", "artifact", &mut dropped);
     state.pane_splits = take_vec(&mut map, "paneSplits", "pane split", &mut dropped);
     state.group_order = take_string_vec(&mut map, "groupOrder");
     state.queues = take_map_of_vecs(&mut map, "queues", "queued turn", &mut dropped);

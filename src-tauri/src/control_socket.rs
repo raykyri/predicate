@@ -394,7 +394,7 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
             }
             let payload = serde_json::from_value::<BrowserOpen>(request.payload)
                 .map_err(|err| format!("invalid browser.open payload: {err}"))?;
-            let (url, sandbox) = resolve_browser_target(
+            let resolved = resolve_browser_target(
                 state,
                 &authed_pane,
                 payload.target.trim(),
@@ -404,9 +404,25 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
                 "browser.open",
                 Some(authed_pane.clone()),
                 None,
-                json!({ "url": url, "sandbox": sandbox }),
+                json!({ "url": resolved.url, "sandbox": resolved.sandbox }),
             ));
-            Ok(json!({ "url": url, "sandbox": sandbox }))
+            // Panes with an attached agent also collect the target into the
+            // workspace artifact tray. This deliberately covers both callers a
+            // pane token can represent: the agent itself, and the user typing
+            // `qmux open` while that agent is backgrounded — the PTY offers no
+            // way to tell them apart, and both belong in the tray. Best-effort:
+            // a tray failure must not fail the open.
+            if state.agent_by_pane(&authed_pane)?.is_some() {
+                let path = resolved
+                    .path
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let url = path.is_none().then(|| resolved.url.clone());
+                if let Err(err) = state.record_artifact(&authed_pane, path, url) {
+                    eprintln!("failed to record artifact for pane {authed_pane}: {err}");
+                }
+            }
+            Ok(json!({ "url": resolved.url, "sandbox": resolved.sandbox }))
         }
         // Other agent spawning and turn queueing are management operations that belong
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
@@ -451,6 +467,17 @@ fn is_loopback_http_url(url: &str) -> bool {
     false
 }
 
+/// A browser-overlay target resolved for one pane. `path` carries the canonical
+/// filesystem path for file targets — the artifact tray persists that instead of
+/// `url`, whose file-server token goes stale across runs — and is None for
+/// loopback http(s) URLs.
+#[derive(Debug)]
+pub(crate) struct ResolvedBrowserTarget {
+    pub url: String,
+    pub sandbox: bool,
+    pub path: Option<std::path::PathBuf>,
+}
+
 /// Resolve a browser-overlay target for `pane_id`: either a loopback http(s)
 /// URL (returned as-is, unsandboxed) or a path under the pane's file roots
 /// (minted into a token-bearing file-server URL and sandboxed). Shared by the
@@ -461,7 +488,7 @@ pub(crate) fn resolve_browser_target(
     authed_pane: &str,
     target: &str,
     cwd: Option<&str>,
-) -> Result<(String, bool), String> {
+) -> Result<ResolvedBrowserTarget, String> {
     if target.is_empty() {
         return Err("nothing to open".to_string());
     }
@@ -471,7 +498,11 @@ pub(crate) fn resolve_browser_target(
                 "refusing to open '{target}': the browser overlay only loads http(s) URLs on localhost/127.0.0.1"
             ));
         }
-        return Ok((target.to_string(), false));
+        return Ok(ResolvedBrowserTarget {
+            url: target.to_string(),
+            sandbox: false,
+            path: None,
+        });
     }
 
     let requested = {
@@ -497,7 +528,11 @@ pub(crate) fn resolve_browser_target(
         .file_server_port()
         .ok_or_else(|| "the file server is not running".to_string())?;
     let token = state.pane_file_token(authed_pane)?;
-    Ok((crate::file_server::file_url(port, &token, &canonical), true))
+    Ok(ResolvedBrowserTarget {
+        url: crate::file_server::file_url(port, &token, &canonical),
+        sandbox: true,
+        path: Some(canonical),
+    })
 }
 
 fn ensure_pane_scope(authed_pane: &str, requested_pane: &str) -> Result<(), String> {
@@ -657,12 +692,8 @@ mod tests {
     #[test]
     fn browser_target_rejects_relative_paths_without_a_cwd() {
         let state = test_state();
-        let err =
-            resolve_browser_target(&state, "pane-1", "report.html", None).unwrap_err();
-        assert!(
-            err.contains("working directory"),
-            "unexpected error: {err}"
-        );
+        let err = resolve_browser_target(&state, "pane-1", "report.html", None).unwrap_err();
+        assert!(err.contains("working directory"), "unexpected error: {err}");
     }
 
     #[test]
@@ -708,6 +739,35 @@ mod tests {
             err.contains("not authorized for that agent"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn browser_open_records_an_artifact_only_for_agent_panes() {
+        let state = test_state();
+        let payload = json!({ "target": "http://localhost:5173/dash" });
+
+        // A plain terminal pane opens the overlay without feeding the tray.
+        let no_agent_token = state.pane_token("pane-1").unwrap();
+        handle_line(
+            &state,
+            &request_line(&no_agent_token, "browser.open", payload.clone()),
+        )
+        .unwrap();
+        assert!(state.list_artifacts().unwrap().is_empty());
+
+        // A pane with an attached agent records the target — whether the agent
+        // ran `qmux open` or the user did while the agent was backgrounded.
+        state.insert_agent(agent_bound_to("pane-2")).unwrap();
+        let agent_token = state.pane_token("pane-2").unwrap();
+        handle_line(&state, &request_line(&agent_token, "browser.open", payload)).unwrap();
+        let artifacts = state.list_artifacts().unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].pane_id, "pane-2");
+        assert_eq!(
+            artifacts[0].url.as_deref(),
+            Some("http://localhost:5173/dash")
+        );
+        assert!(artifacts[0].path.is_none());
     }
 
     #[test]

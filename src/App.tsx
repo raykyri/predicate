@@ -67,6 +67,7 @@ import {
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
+import ArtifactTray from "./components/ArtifactTray";
 import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
@@ -357,6 +358,12 @@ import {
 } from "./lib/settings";
 import {
   acknowledgeAgent,
+  artifactFileUrl,
+  artifactList,
+  artifactOpenExternal,
+  artifactRemove,
+  artifactRestore,
+  artifactReveal,
   attachPane,
   claimNativeTerminalPointerForWebDrag,
   clearAgentWorkingStatus,
@@ -479,6 +486,7 @@ import type {
   AcpAuthMethod,
   AcpAuthPrompt,
   AgentInfo,
+  ArtifactInfo,
   ClaudeSkill,
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
@@ -507,6 +515,9 @@ import type { NativeTerminalTheme, ShowHideShortcutSetting } from "./lib/api";
 import type { MenuBarSnapshot, MenuBarStatusTone } from "./lib/api";
 
 const LEFT_SIDEBAR_DEFAULT_WIDTH = 268;
+
+// How long the artifact tray's undo footer holds the last removal.
+const ARTIFACT_UNDO_MS = 10_000;
 const LEFT_SIDEBAR_MIN_WIDTH = 208;
 const LEFT_SIDEBAR_MAX_WIDTH = 420;
 // Below this width the New shell/New agent buttons drop their icons to keep the
@@ -2579,6 +2590,19 @@ function MainApp() {
     Record<string, BrowserOverlayState>
   >({});
   browserOverlayByPaneRef.current = browserOverlayByPane;
+  // Artifact tray: files/URLs agent panes opened via `qmux open`. The backend owns
+  // the durable list (oldest first); this mirror is hydrated at startup and kept
+  // current by artifact.added/removed events.
+  const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([]);
+  // The last tray removal, held for the undo footer until it times out or the
+  // user restores it.
+  const [artifactUndo, setArtifactUndo] = useState<ArtifactInfo | null>(null);
+  const artifactUndoTimerRef = useRef<number | null>(null);
+  // Per-pane tray chrome: closed (paperclip toggle / titlebar ×), collapsed to
+  // the titlebar, and the dragged position (null = default top-right anchor).
+  const [artifactTrayUiByPane, setArtifactTrayUiByPane] = useState<
+    Record<string, { closed?: boolean; collapsed?: boolean; pos?: { x: number; y: number } | null }>
+  >({});
   const [transcriptExpandedByPane, setTranscriptExpandedByPane] = useState<
     Record<string, boolean>
   >({});
@@ -6501,6 +6525,7 @@ function MainApp() {
           existingResearchActivity,
           existingResearchFolders,
           existingPublications,
+          existingArtifacts,
         ] = await Promise.all([
           getRuntimeConfig(),
           getLauncherAdapterPreference().catch(() => null),
@@ -6513,6 +6538,7 @@ function MainApp() {
           listResearchActivity().catch((): ResearchNode[] => []),
           listResearchFolders().catch(emptyResearchFolderState),
           listPublications().catch((): PublicationBinding[] => []),
+          artifactList().catch((): ArtifactInfo[] => []),
         ]);
         if (cancelled) {
           return;
@@ -6528,6 +6554,7 @@ function MainApp() {
             : null,
         );
         setAgents(existingAgents);
+        setArtifacts(existingArtifacts);
         const partitionedResearchTrees = partitionResearchTrees(existingResearchTrees);
         setResearchTrees(partitionedResearchTrees.active);
         setArchivedResearchTrees(partitionedResearchTrees.archived);
@@ -6972,6 +6999,109 @@ function MainApp() {
       }).catch(() => undefined);
     }
   }, []);
+  // Keeps the artifact mirror in step with backend tray mutations. `added`
+  // carries the new entry plus any ids it displaced (a dedupe bump or the
+  // per-group cap); re-sorting by createdAt keeps undo restores — which the
+  // backend inserts mid-list — in chronological order.
+  const handleArtifactEvent = useCallback((event: QmuxEvent) => {
+    if (event.type === "artifact.added") {
+      const artifact = event.payload.artifact as ArtifactInfo | undefined;
+      if (!artifact || typeof artifact.id !== "string") {
+        return;
+      }
+      const removedIds = new Set(
+        Array.isArray(event.payload.removedIds)
+          ? (event.payload.removedIds as unknown[]).filter(
+              (id): id is string => typeof id === "string",
+            )
+          : [],
+      );
+      setArtifacts((current) =>
+        [
+          ...current.filter(
+            (entry) => entry.id !== artifact.id && !removedIds.has(entry.id),
+          ),
+          artifact,
+        ].sort((a, b) => a.createdAt - b.createdAt),
+      );
+      return;
+    }
+    if (event.type === "artifact.removed") {
+      const id = event.payload.id;
+      if (typeof id === "string") {
+        setArtifacts((current) => current.filter((entry) => entry.id !== id));
+      }
+    }
+  }, []);
+
+  function clearArtifactUndoTimer() {
+    if (artifactUndoTimerRef.current !== null) {
+      window.clearTimeout(artifactUndoTimerRef.current);
+      artifactUndoTimerRef.current = null;
+    }
+  }
+
+  const removeArtifact = useCallback((artifact: ArtifactInfo) => {
+    void artifactRemove(artifact.id)
+      .then((removed) => {
+        clearArtifactUndoTimer();
+        setArtifactUndo(removed);
+        artifactUndoTimerRef.current = window.setTimeout(() => {
+          setArtifactUndo(null);
+          artifactUndoTimerRef.current = null;
+        }, ARTIFACT_UNDO_MS);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function undoArtifactRemove() {
+    if (!artifactUndo) {
+      return;
+    }
+    clearArtifactUndoTimer();
+    const restoring = artifactUndo;
+    setArtifactUndo(null);
+    void artifactRestore(restoring).catch((err) =>
+      setError(err instanceof Error ? err.message : String(err)),
+    );
+  }
+
+  // Re-opens a tray entry. Files go through browserOpenLocalPath, which mints a
+  // fresh token URL and re-validates the path against the target pane's roots —
+  // stored file-server URLs would be stale across restarts. Entries whose source
+  // pane still exists open there (activating that tab, which is what the muted
+  // cross-pane rows promise); if the pane is gone the tray's own pane hosts it.
+  const openArtifact = useCallback(
+    (artifact: ArtifactInfo, fallbackPaneId: string) => {
+      const sourceExists = panesRef.current.some((pane) => pane.id === artifact.paneId);
+      const targetPaneId = sourceExists ? artifact.paneId : fallbackPaneId;
+      if (targetPaneId !== activePaneIdRef.current) {
+        activateTerminalPane(targetPaneId);
+      }
+      if (artifact.path) {
+        void browserOpenLocalPath(targetPaneId, artifact.path).catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+      } else if (artifact.url) {
+        openBrowserOverlay(targetPaneId, artifact.url, false);
+      }
+    },
+    [activateTerminalPane, openBrowserOverlay],
+  );
+
+  const openArtifactExternally = useCallback((artifact: ArtifactInfo) => {
+    void artifactOpenExternal(artifact.id).catch((err) =>
+      setError(err instanceof Error ? err.message : String(err)),
+    );
+  }, []);
+
+  const revealArtifact = useCallback((artifact: ArtifactInfo) => {
+    void artifactReveal(artifact.id).catch((err) =>
+      setError(err instanceof Error ? err.message : String(err)),
+    );
+  }, []);
+
   const clearResearchUnseen = useCallback((treeId: string) => {
     // Both attention flags: viewing acknowledges failures exactly like
     // ordinary settlements (the backend clears both by advancing
@@ -8688,6 +8818,7 @@ function MainApp() {
     onQueuedBtwForked: handleQueuedBtwForked,
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
     onAcpAuthEvent: handleAcpAuthEvent,
+    onArtifactEvent: handleArtifactEvent,
     onTerminalSearchRequested: openNativeTerminalSearch,
     onTerminalPasteRequested: requestNativeTerminalPaste,
     onTerminalUserInput: reportNativeTerminalInput,
@@ -12595,6 +12726,13 @@ function MainApp() {
               onToggleQueueSplit={toggleActiveQueueSplit}
               browserOpen={surface.browserOverlay?.open ?? false}
               onToggleBrowser={toggleActiveBrowserOverlay}
+              artifactCount={artifactsForGroup(surface.pane.groupId).length}
+              artifactTrayOpen={!artifactTrayUiByPane[surface.pane.id]?.closed}
+              onToggleArtifactTray={() =>
+                patchArtifactTrayUi(surface.pane.id, {
+                  closed: !artifactTrayUiByPane[surface.pane.id]?.closed,
+                })
+              }
               transcriptExpanded={activeTranscriptExpanded}
               transcriptShortcutLabel={EXPAND_TOGGLE_SHORTCUT_LABEL}
               onToggleTranscriptExpanded={toggleActiveTranscriptExpanded}
@@ -12762,6 +12900,66 @@ function MainApp() {
           {renderTurnPaneSurface(surface, false)}
         </BtwFloatingPane>
       ));
+  }
+
+  function artifactsForGroup(groupId: string) {
+    return artifacts.filter((artifact) => artifact.groupId === groupId);
+  }
+
+  function patchArtifactTrayUi(
+    paneId: string,
+    patch: Partial<{
+      closed: boolean;
+      collapsed: boolean;
+      pos: { x: number; y: number } | null;
+    }>,
+  ) {
+    setArtifactTrayUiByPane((current) => ({
+      ...current,
+      [paneId]: { ...current[paneId], ...patch },
+    }));
+  }
+
+  // The floating artifact tray for one right-pane cell: on by default whenever
+  // its workspace has artifacts, hidden by the header paperclip / titlebar ×.
+  function renderArtifactTray(surface: TurnPaneSurface) {
+    const trayArtifacts = artifactsForGroup(surface.pane.groupId);
+    const ui = artifactTrayUiByPane[surface.pane.id];
+    if (trayArtifacts.length === 0 || ui?.closed) {
+      return null;
+    }
+    return (
+      <ArtifactTray
+        key={`artifact-tray-${surface.pane.id}`}
+        paneId={surface.pane.id}
+        artifacts={trayArtifacts}
+        paneExists={(paneId) => panes.some((pane) => pane.id === paneId)}
+        collapsed={ui?.collapsed ?? false}
+        position={ui?.pos ?? null}
+        onPositionChange={(pos) => patchArtifactTrayUi(surface.pane.id, { pos })}
+        onSetCollapsed={(collapsed) => patchArtifactTrayUi(surface.pane.id, { collapsed })}
+        onClose={() => patchArtifactTrayUi(surface.pane.id, { closed: true })}
+        onOpen={(artifact) => openArtifact(artifact, surface.pane.id)}
+        onOpenExternal={openArtifactExternally}
+        onReveal={revealArtifact}
+        onRemove={removeArtifact}
+        undo={
+          artifactUndo && artifactUndo.groupId === surface.pane.groupId
+            ? artifactUndo
+            : null
+        }
+        onUndo={undoArtifactRemove}
+        onHoverArtifact={(artifact) => {
+          // Hovering a sibling pane's row previews its source tab with the same
+          // wait-target treatment the queue menu uses.
+          const agentId =
+            artifact && artifact.paneId !== surface.pane.id
+              ? (agentByPaneId.get(artifact.paneId)?.id ?? null)
+              : null;
+          setWaitTargetHoverAgentId(agentId);
+        }}
+      />
+    );
   }
 
   const selectResearchTreeFromSidebar = useCallback(
@@ -15242,6 +15440,7 @@ function MainApp() {
                   {renderTurnPaneResizer()}
                   {renderTurnPaneSurface(surface, false)}
                   {renderBtwFloatingPanes(surface.pane.id)}
+                  {renderArtifactTray(surface)}
                   {renderFloatingTurnPaneControls(surface, false)}
                 </section>
               ))
@@ -15306,6 +15505,7 @@ function MainApp() {
             >
               {renderTurnPaneSurface(surface, false)}
               {renderBtwFloatingPanes(surface.pane.id)}
+              {renderArtifactTray(surface)}
               {renderFloatingTurnPaneControls(surface, true)}
             </section>
           ))}
@@ -15323,6 +15523,7 @@ function MainApp() {
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
           {renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
+          {renderArtifactTray(activeTurnPaneSurface)}
         </aside>
       ) : null}
       {/* Text-mode terminal mini-map while the transcript covers the stage:

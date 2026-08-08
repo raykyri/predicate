@@ -14,6 +14,7 @@ import type {
 } from "./publication";
 import type {
   AgentInfo,
+  ArtifactInfo,
   ClaudeSkill,
   GlobalDraft,
   GlobalTaskLauncherHotkey,
@@ -846,6 +847,36 @@ export function browserOpenCodexInlineVisualization(paneId: string, file: string
     "browser_open_codex_inline_visualization",
     { paneId, file },
   );
+}
+
+export function artifactList() {
+  return invoke<ArtifactInfo[]>("artifact_list");
+}
+
+/** Removes an artifact-tray entry; returns it so the tray's undo can restore it. */
+export function artifactRemove(artifactId: string) {
+  return invoke<ArtifactInfo>("artifact_remove", { artifactId });
+}
+
+export function artifactRestore(artifact: ArtifactInfo) {
+  return invoke<void>("artifact_restore", { artifact });
+}
+
+/** Opens an artifact outside qmux: URLs in the default browser, files with the
+ * OS default app for the file type. */
+export function artifactOpenExternal(artifactId: string) {
+  return invoke<void>("artifact_open_external", { artifactId });
+}
+
+/** Reveals a file artifact in the OS file manager, selecting the file. */
+export function artifactReveal(artifactId: string) {
+  return invoke<void>("artifact_reveal", { artifactId });
+}
+
+/** Token-scoped file-server URL for a file artifact (thumbnails/previews), or
+ * null when the source pane is gone or the file left the pane's roots. */
+export function artifactFileUrl(artifactId: string) {
+  return invoke<string | null>("artifact_file_url", { artifactId });
 }
 
 export type HumanBrowserSnapshot = {

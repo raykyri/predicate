@@ -62,8 +62,8 @@ use show_hide_shortcut::{
 };
 use sleep::SleepGuard;
 use state::{
-    AppState, PaneInfo, PaneLayoutEntry, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
-    ShellAgentJobInfo,
+    AppState, ArtifactInfo, PaneInfo, PaneLayoutEntry, PaneSplitInfo, QueuedTurn,
+    RecentSessionInfo, ShellAgentJobInfo,
 };
 use tauri::Manager;
 use transcript::{
@@ -609,14 +609,133 @@ fn browser_open_local_path(
             "refusing to open relative path '{trimmed}'; use an absolute path or `qmux open`"
         ));
     }
-    let (url, sandbox) = control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
+    let resolved = control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
     state.emit(events::QmuxEvent::new(
         "browser.open",
         Some(pane_id),
         None,
-        serde_json::json!({ "url": url, "sandbox": sandbox }),
+        serde_json::json!({ "url": resolved.url, "sandbox": resolved.sandbox }),
     ));
-    Ok(serde_json::json!({ "url": url, "sandbox": sandbox }))
+    Ok(serde_json::json!({ "url": resolved.url, "sandbox": resolved.sandbox }))
+}
+
+#[tauri::command]
+fn artifact_list(state: tauri::State<'_, AppState>) -> Result<Vec<ArtifactInfo>, String> {
+    state.list_artifacts()
+}
+
+/// Removes an artifact-tray entry, returning it so the frontend can offer undo.
+#[tauri::command]
+fn artifact_remove(
+    state: tauri::State<'_, AppState>,
+    artifact_id: String,
+) -> Result<ArtifactInfo, String> {
+    state.remove_artifact(&artifact_id)
+}
+
+/// Reinserts a previously removed artifact (the tray's undo).
+#[tauri::command]
+fn artifact_restore(
+    state: tauri::State<'_, AppState>,
+    artifact: ArtifactInfo,
+) -> Result<(), String> {
+    state.restore_artifact(artifact)
+}
+
+/// Opens an artifact outside qmux: URL artifacts in the default browser, file
+/// artifacts with the OS default app for that file type (a browser for .html).
+/// The target comes from qmux state by id, never from arbitrary frontend input.
+#[tauri::command(async)]
+fn artifact_open_external(
+    state: tauri::State<'_, AppState>,
+    artifact_id: String,
+) -> Result<(), String> {
+    let artifact = state.artifact(&artifact_id)?;
+    if let Some(url) = &artifact.url {
+        return open_in_os_browser(url);
+    }
+    let path = artifact
+        .path
+        .as_deref()
+        .ok_or_else(|| "artifact has no target".to_string())?;
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("'{path}' no longer exists"));
+    }
+    open_path_with_default_app(std::path::Path::new(path))
+}
+
+/// Mints a token-scoped file-server URL for a file artifact so the tray can
+/// render tiny thumbnails/previews. None (rather than an error) when the source
+/// pane is gone — file tokens are per-pane — or the artifact is a URL or the
+/// file moved outside the pane's roots; the tray falls back to a glyph tile.
+#[tauri::command]
+fn artifact_file_url(
+    state: tauri::State<'_, AppState>,
+    artifact_id: String,
+) -> Result<Option<String>, String> {
+    let artifact = state.artifact(&artifact_id)?;
+    let Some(path) = artifact.path.as_deref() else {
+        return Ok(None);
+    };
+    if !state.pane_exists(&artifact.pane_id)? {
+        return Ok(None);
+    }
+    let Some(port) = state.file_server_port() else {
+        return Ok(None);
+    };
+    let Ok(token) = state.pane_file_token(&artifact.pane_id) else {
+        return Ok(None);
+    };
+    let roots = state.pane_file_roots(&artifact.pane_id);
+    let Some(canonical) = file_server::resolve_under_roots(std::path::Path::new(path), &roots)
+    else {
+        return Ok(None);
+    };
+    Ok(Some(file_server::file_url(port, &token, &canonical)))
+}
+
+/// Reveals a file artifact in the OS file manager, selecting the file itself.
+#[tauri::command(async)]
+fn artifact_reveal(state: tauri::State<'_, AppState>, artifact_id: String) -> Result<(), String> {
+    let artifact = state.artifact(&artifact_id)?;
+    let path = artifact
+        .path
+        .as_deref()
+        .ok_or_else(|| "URL artifacts have no folder to open".to_string())?;
+    if !std::path::Path::new(path).exists() {
+        return Err(format!("'{path}' no longer exists"));
+    }
+    reveal_path_in_file_manager(std::path::Path::new(path))
+}
+
+#[cfg(target_os = "macos")]
+fn open_path_with_default_app(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("failed to open {}: {err}", path.display()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_path_with_default_app(path: &std::path::Path) -> Result<(), String> {
+    open_path_in_file_manager(path)
+}
+
+#[cfg(target_os = "macos")]
+fn reveal_path_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("failed to reveal {}: {err}", path.display()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal_path_in_file_manager(path: &std::path::Path) -> Result<(), String> {
+    let parent = path.parent().unwrap_or(path);
+    open_path_in_file_manager(parent)
 }
 
 /// Resolve and open the HTML fragment named by a transcript
@@ -2957,6 +3076,12 @@ fn main() {
             open_external_url,
             browser_open_local_path,
             browser_open_codex_inline_visualization,
+            artifact_list,
+            artifact_remove,
+            artifact_restore,
+            artifact_open_external,
+            artifact_reveal,
+            artifact_file_url,
             prompt_library_list,
             prompt_library_save,
             prompt_library_delete,

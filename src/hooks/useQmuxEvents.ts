@@ -116,6 +116,8 @@ export interface UseQmuxEventsHandlers {
   onAgentPromptSubmitted?: (agentId: string, prompt: string) => void;
   /** ACP first-run auth: show methods, update error, or clear the prompt. */
   onAcpAuthEvent?: (event: QmuxEvent) => void;
+  /** Artifact tray: `artifact.added` / `artifact.removed`. App owns the state. */
+  onArtifactEvent?: (event: QmuxEvent) => void;
   onTerminalSearchRequested?: (paneId: string) => void;
   onTerminalPasteRequested?: (paneId: string, text: string | null) => void;
   onTerminalUserInput?: (paneId: string) => void;
@@ -173,6 +175,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onQueuedBtwForked,
     onAgentPromptSubmitted,
     onAcpAuthEvent,
+    onArtifactEvent,
     onTerminalSearchRequested,
     onTerminalPasteRequested,
     onTerminalUserInput,
@@ -412,6 +415,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         if (typeof url === "string") {
           openBrowserOverlay(event.paneId, url, event.payload.sandbox === true);
         }
+      }
+      if (event.type === "artifact.added" || event.type === "artifact.removed") {
+        onArtifactEvent?.(event);
       }
       if (
         event.type === "group.created" ||

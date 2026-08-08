@@ -76,6 +76,10 @@ const MAX_QUEUED_TURNS_PER_AGENT: usize = 500;
 /// prevents the persisted state from growing forever across months of work.
 const MAX_RECENT_SESSIONS: usize = 80;
 
+/// Upper bound on artifact-tray entries per workspace group; the oldest entries
+/// fall off first, so a long-running workspace can't grow state.json forever.
+const MAX_ARTIFACTS_PER_GROUP: usize = 50;
+
 /// How long the persister thread lets a burst of mutations settle before taking
 /// its snapshot. Long enough to fold an agent's status-hook storm (or a window
 /// resize) into one write, short enough that a crash loses at most a blink of
@@ -335,6 +339,9 @@ struct Model {
     agent_submit_watch: HashSet<(String, u64)>,
     agent_drafts: HashMap<String, String>,
     recent_sessions: HashMap<String, RecentSessionInfo>,
+    /// Files and loopback URLs surfaced from agent panes via `qmux open`, oldest
+    /// first — the per-workspace artifact tray. Persisted; capped per group.
+    artifacts: Vec<ArtifactInfo>,
     /// Agents whose currently-running (just-sent) queued turn requested a pause; when
     /// that turn finishes the agent enters paused mode. Transient (not persisted).
     agent_pending_pause: HashSet<String>,
@@ -395,6 +402,23 @@ pub struct ClosedPaneSnapshot {
     pub orphaned_agents: Vec<ClosedPaneAgentSnapshot>,
     pub index: usize,
     pub scrollback: Vec<u8>,
+}
+
+/// One artifact-tray entry: a file or loopback URL a pane's agent (or its user,
+/// while the agent was backgrounded) opened via `qmux open`. File artifacts keep
+/// the canonical path — file-server URLs are minted per run and would go stale —
+/// while URL artifacts keep the loopback URL itself.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactInfo {
+    pub id: String,
+    pub group_id: Option<String>,
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    pub created_at: u128,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1475,7 +1499,9 @@ impl AppState {
     }
 
     /// Roots a preview from a pane may read. This deliberately excludes other
-    /// qmux groups and any cwd at or above the private workspace root.
+    /// qmux groups and any cwd at or above the private workspace root. Local
+    /// temporary directories are explicit shared roots because agents commonly
+    /// write disposable HTML artifacts there rather than beneath their cwd.
     pub fn pane_file_roots(&self, pane_id: &str) -> Vec<std::path::PathBuf> {
         let model = self
             .inner
@@ -1515,6 +1541,18 @@ impl AppState {
             for agent in model.agents.values() {
                 if agent.pane_id.as_deref() == Some(pane_id) {
                     roots.push(std::path::PathBuf::from(&agent.worktree_dir));
+                }
+            }
+            // Include both conventional macOS spellings even though `/tmp`
+            // normally canonicalizes to `/private/tmp`; `temp_dir` also covers
+            // a host whose configured temporary directory lives elsewhere.
+            for temp_root in [
+                std::env::temp_dir(),
+                std::path::PathBuf::from("/tmp"),
+                std::path::PathBuf::from("/private/tmp"),
+            ] {
+                if !roots.contains(&temp_root) {
+                    roots.push(temp_root);
                 }
             }
             return roots;
@@ -1885,6 +1923,16 @@ impl AppState {
                     model.recent_sessions.insert(session.id.clone(), session);
                 }
             }
+            // Drop artifacts whose group is gone so deleted workspaces don't
+            // leave orphaned tray entries accumulating in state.json.
+            model.artifacts = persisted
+                .artifacts
+                .into_iter()
+                .filter(|artifact| match &artifact.group_id {
+                    Some(group_id) => model.groups.contains_key(group_id),
+                    None => true,
+                })
+                .collect();
             model.active_tab_id = active_tab_id;
             model.pane_splits = persisted.pane_splits;
             hydrated_agents = model.agents.values().cloned().collect::<Vec<_>>();
@@ -2064,6 +2112,7 @@ impl AppState {
                     .map(|(agent_id, queue)| (agent_id.clone(), queue.iter().cloned().collect()))
                     .collect(),
                 recent_sessions: recent_sessions_sorted(&model),
+                artifacts: model.artifacts.clone(),
                 drafts: model.agent_drafts.clone(),
                 global_drafts: model.global_drafts.clone(),
                 inflight: model.agent_inflight.clone(),
@@ -2365,6 +2414,151 @@ impl AppState {
             session.missing = recent_session_missing(session);
         }
         Ok(sessions)
+    }
+
+    /// Records an artifact-tray entry for `pane_id`, deduplicating on the target
+    /// within the pane's group (a re-open bumps the entry to newest instead of
+    /// duplicating it) and capping the group's tray at `MAX_ARTIFACTS_PER_GROUP`.
+    /// Emits `artifact.added` carrying the entry plus any ids it displaced.
+    pub fn record_artifact(
+        &self,
+        pane_id: &str,
+        path: Option<String>,
+        url: Option<String>,
+    ) -> Result<ArtifactInfo, String> {
+        if path.is_none() && url.is_none() {
+            return Err("an artifact needs a path or a url".to_string());
+        }
+        let artifact = ArtifactInfo {
+            id: self.next_id("artifact"),
+            group_id: self.pane_group_id(pane_id)?,
+            pane_id: pane_id.to_string(),
+            path,
+            url,
+            created_at: now_millis(),
+        };
+        let removed_ids = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let mut removed = Vec::new();
+            model.artifacts.retain(|existing| {
+                let duplicate = existing.group_id == artifact.group_id
+                    && existing.path == artifact.path
+                    && existing.url == artifact.url;
+                if duplicate {
+                    removed.push(existing.id.clone());
+                }
+                !duplicate
+            });
+            model.artifacts.push(artifact.clone());
+            // The vec is oldest-first, so trimming a too-large group from the
+            // front drops its oldest entries and can never evict the new one.
+            let in_group = model
+                .artifacts
+                .iter()
+                .filter(|entry| entry.group_id == artifact.group_id)
+                .count();
+            let mut to_drop = in_group.saturating_sub(MAX_ARTIFACTS_PER_GROUP);
+            model.artifacts.retain(|entry| {
+                if to_drop > 0 && entry.group_id == artifact.group_id {
+                    to_drop -= 1;
+                    removed.push(entry.id.clone());
+                    return false;
+                }
+                true
+            });
+            removed
+        };
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "artifact.added",
+            Some(pane_id.to_string()),
+            None,
+            serde_json::json!({ "artifact": artifact, "removedIds": removed_ids }),
+        ));
+        Ok(artifact)
+    }
+
+    pub fn list_artifacts(&self) -> Result<Vec<ArtifactInfo>, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model.artifacts.clone())
+    }
+
+    pub fn artifact(&self, artifact_id: &str) -> Result<ArtifactInfo, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        model
+            .artifacts
+            .iter()
+            .find(|entry| entry.id == artifact_id)
+            .cloned()
+            .ok_or_else(|| format!("artifact {artifact_id} was not found"))
+    }
+
+    /// Removes an artifact-tray entry and returns it, so the tray's undo can
+    /// restore it verbatim. Emits `artifact.removed`.
+    pub fn remove_artifact(&self, artifact_id: &str) -> Result<ArtifactInfo, String> {
+        let removed = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let index = model
+                .artifacts
+                .iter()
+                .position(|entry| entry.id == artifact_id)
+                .ok_or_else(|| format!("artifact {artifact_id} was not found"))?;
+            model.artifacts.remove(index)
+        };
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "artifact.removed",
+            Some(removed.pane_id.clone()),
+            None,
+            serde_json::json!({ "id": removed.id }),
+        ));
+        Ok(removed)
+    }
+
+    /// Reinserts a previously removed artifact at its chronological position
+    /// (tray undo). A duplicate id is a no-op so a double-undo can't clone rows.
+    /// Emits `artifact.added`.
+    pub fn restore_artifact(&self, artifact: ArtifactInfo) -> Result<(), String> {
+        {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if model.artifacts.iter().any(|entry| entry.id == artifact.id) {
+                return Ok(());
+            }
+            let index = model
+                .artifacts
+                .iter()
+                .position(|entry| entry.created_at > artifact.created_at)
+                .unwrap_or(model.artifacts.len());
+            model.artifacts.insert(index, artifact.clone());
+        }
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "artifact.added",
+            Some(artifact.pane_id.clone()),
+            None,
+            serde_json::json!({ "artifact": artifact, "removedIds": [] }),
+        ));
+        Ok(())
     }
 
     /// Removes and returns the agent-session resume queued for `pane_id` at restore, if
@@ -10038,6 +10232,73 @@ mod tests {
     }
 
     #[test]
+    fn artifact_tray_records_dedupes_caps_and_persists() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        assert!(state.restore_session().is_empty());
+        let mut group = sample_group();
+        group.dir = workspace.display().to_string();
+        group.managed_dir = workspace.join("managed").display().to_string();
+        group.agents.clear();
+        state.insert_group_after(group, None).unwrap();
+        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
+
+        let first = state
+            .record_artifact("pane-1", Some("/tmp/work/report.html".to_string()), None)
+            .unwrap();
+        assert_eq!(first.group_id.as_deref(), Some("group-1"));
+
+        // Re-opening the same target bumps the entry instead of duplicating it.
+        let bumped = state
+            .record_artifact("pane-1", Some("/tmp/work/report.html".to_string()), None)
+            .unwrap();
+        let listed = state.list_artifacts().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, bumped.id);
+
+        state
+            .record_artifact("pane-1", None, Some("http://localhost:5173/".to_string()))
+            .unwrap();
+
+        // Remove + restore round-trips the entry (the tray's undo); a repeated
+        // restore of the same id stays a no-op.
+        let removed = state.remove_artifact(&bumped.id).unwrap();
+        assert_eq!(state.list_artifacts().unwrap().len(), 1);
+        state.restore_artifact(removed.clone()).unwrap();
+        state.restore_artifact(removed.clone()).unwrap();
+        let listed = state.list_artifacts().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert!(listed.iter().any(|entry| entry.id == removed.id));
+
+        // The per-group cap evicts the oldest entries first.
+        for index in 0..MAX_ARTIFACTS_PER_GROUP {
+            state
+                .record_artifact("pane-1", Some(format!("/tmp/work/file-{index}.html")), None)
+                .unwrap();
+        }
+        let listed = state.list_artifacts().unwrap();
+        assert_eq!(listed.len(), MAX_ARTIFACTS_PER_GROUP);
+        assert!(listed.iter().all(|entry| entry.id != removed.id));
+
+        // Test-mode mutations persist synchronously: the snapshot carries the
+        // tray, and a reload prunes entries whose group has been deleted.
+        let outcome = persistence::load_with_diagnostics(&workspace);
+        assert!(outcome.warning.is_none());
+        assert_eq!(outcome.state.artifacts.len(), MAX_ARTIFACTS_PER_GROUP);
+
+        let mut orphaned = outcome.state;
+        orphaned.artifacts[0].group_id = Some("group-deleted".to_string());
+        orphaned.panes.clear();
+        persistence::save(&workspace, &orphaned).unwrap();
+        let reloaded = AppState::new(test_config(workspace));
+        reloaded.restore_session();
+        assert_eq!(
+            reloaded.list_artifacts().unwrap().len(),
+            MAX_ARTIFACTS_PER_GROUP - 1
+        );
+    }
+
+    #[test]
     fn detached_research_import_remaps_tree_and_node_id_collisions() {
         let root = temp_workspace();
         let state = AppState::new(test_config(root.clone()));
@@ -15882,6 +16143,18 @@ mod tests {
     fn file_preview_roots_fail_closed_for_an_unknown_pane() {
         let state = AppState::new(test_config(temp_workspace()));
         assert!(state.pane_file_roots("missing-pane").is_empty());
+    }
+
+    #[test]
+    fn local_file_preview_roots_include_temporary_artifact_directories() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
+
+        let roots = state.pane_file_roots("pane-1");
+        assert!(roots.contains(&std::env::temp_dir()));
+        assert!(roots.contains(&std::path::PathBuf::from("/tmp")));
+        assert!(roots.contains(&std::path::PathBuf::from("/private/tmp")));
     }
 
     #[test]
