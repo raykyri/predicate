@@ -14257,9 +14257,18 @@ function MainApp() {
             </label>
 
             <div className="settings-row">
-              <label htmlFor="settings-worktree-location" className="settings-label">
-                Worktree location
-              </label>
+              <div className="settings-label-stack">
+                <label htmlFor="settings-worktree-location" className="settings-label">
+                  Worktree location
+                </label>
+                <p className="settings-hint settings-hint-weak">
+                  {settings.worktreeLocation === "localQmux"
+                    ? "New worktrees stored in <project>/.qmux/worktrees/<name>."
+                    : settings.worktreeLocation === "localClaude"
+                      ? "New worktrees stored in <project>/.claude/worktrees/<name>."
+                      : "New worktrees stored in qmux’s global workspace directory."}
+                </p>
+              </div>
               <select
                 id="settings-worktree-location"
                 className="settings-select"
@@ -14277,13 +14286,6 @@ function MainApp() {
                 ))}
               </select>
             </div>
-            <p className="settings-hint settings-hint-weak">
-              {settings.worktreeLocation === "localQmux"
-                ? "New worktrees stored in <project>/.qmux/worktrees/<name>."
-                : settings.worktreeLocation === "localClaude"
-                  ? "New worktrees stored in <project>/.claude/worktrees/<name>."
-                  : "New worktrees stored in qmux’s global workspace directory."}
-            </p>
 
             <div className="settings-row settings-research-instructions-row">
               <div className="settings-label-stack">
@@ -14297,7 +14299,7 @@ function MainApp() {
               <textarea
                 id="settings-research-instructions"
                 className="form-field settings-input settings-textarea"
-                rows={3}
+                rows={2}
                 placeholder={DEFAULT_RESEARCH_LAUNCH_INSTRUCTION}
                 value={settings.researchLaunchInstruction}
                 onChange={(event) => {

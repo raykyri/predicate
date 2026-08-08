@@ -25,23 +25,6 @@ const SESSION_MENU_MAX_HEIGHT = 400;
 // session/browser/transcript controls on the right. Its height matches the
 // browser overlay's address bar so the two read as a single chrome line when
 // the browser is open.
-// Pretty-print a stored model for the session header. Short family names
-// (`fable`) and multi-part presets (`gpt-5.6-sol`) are title-cased per token;
-// unknown full ids are left as-is so nothing is mangled when mapping failed.
-function formatSessionModelLabel(model: string): string {
-  const trimmed = model.trim();
-  // Full Claude API ids that somehow skipped backend normalization — leave raw.
-  if (/^claude-/i.test(trimmed) && /-\d/.test(trimmed)) {
-    return trimmed;
-  }
-  return trimmed.replace(/[A-Za-z]+/g, (token) => {
-    if (token.length === 0) {
-      return token;
-    }
-    return `${token.charAt(0).toUpperCase()}${token.slice(1).toLowerCase()}`;
-  });
-}
-
 interface TurnPaneHeaderProps {
   agentId?: string | null;
   // The active agent's session id, or null before SessionStart lands.
@@ -115,7 +98,7 @@ export default function TurnPaneHeader({
     [transcriptOptions],
   );
   const canOpenSessionMenu = Boolean(sessionId || sessionOptions.length > 0);
-  const modelLabel = model?.trim() ? formatSessionModelLabel(model.trim()) : null;
+  const modelLabel = model?.trim() || null;
   const sessionLabel = sessionId
     ? modelLabel
       ? `(${modelLabel}) Session: ${sessionId}`
