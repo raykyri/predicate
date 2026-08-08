@@ -1261,9 +1261,22 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
 }
 
 /* Errors lost their red box along with every other border; a red left rule on the
-   row keeps them glanceable. */
+   row keeps them glanceable. Drawn with a ::before bar instead of an inset
+   box-shadow so the rule stays straight rather than bending around the
+   summary's border-radius. */
 .tool-block.is-error > summary {
-  box-shadow: inset 2px 0 0 #b5705f;
+  position: relative;
+}
+
+.tool-block.is-error > summary::before {
+  content: "";
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--status-error-fg);
 }
 
 .tool-summary {
@@ -1309,6 +1322,10 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
   font-size: calc(13px + var(--transcript-font-delta, 0px));
 }
 
+.tool-summary-error {
+  color: var(--status-error-fg);
+}
+
 /* Expanded payloads keep a faint full box so raw output stays delineated, indented
    beneath their tool row. */
 .tool-payload {
@@ -1325,6 +1342,14 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
   font-size: calc(11px + var(--transcript-font-delta, 0px));
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.tool-payload.is-error {
+  border-color: var(--danger-border);
+}
+
+.tool-payload.is-error > .tool-payload-label {
+  color: var(--status-error-fg);
 }
 
 .tool-block pre,

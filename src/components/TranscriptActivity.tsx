@@ -305,6 +305,7 @@ function ToolEntryView({
           label={entry.isError ? "Error" : "Result"}
           value={entry.result}
           maxPayloadCharacters={maxPayloadCharacters}
+          isError={entry.isError}
         />
       ) : null}
     </details>
@@ -344,13 +345,15 @@ function ToolPayload({
   label,
   value,
   maxPayloadCharacters,
+  isError,
 }: {
   label: string;
   value: unknown;
   maxPayloadCharacters?: number;
+  isError?: boolean;
 }) {
   return (
-    <div className="tool-payload">
+    <div className={`tool-payload${isError ? " is-error" : ""}`}>
       <div className="tool-payload-label">{label}</div>
       <pre>{serializeActivityValue(value, maxPayloadCharacters)}</pre>
     </div>
@@ -475,11 +478,19 @@ function ToolEntryStatus({
     return <span className="tool-summary-meta">running</span>;
   }
   if (!showTokenCount) {
-    return entry.isError ? <span className="tool-summary-meta">error</span> : null;
+    return entry.isError ? (
+      <span className="tool-summary-meta">
+        <span className="tool-summary-error">error</span>
+      </span>
+    ) : null;
   }
   const tokenCount = serializedActivityTokenEstimate(entry.result);
   if (entry.isError) {
-    return <span className="tool-summary-meta">error, {tokenCount}</span>;
+    return (
+      <span className="tool-summary-meta">
+        <span className="tool-summary-error">error</span> · {tokenCount}
+      </span>
+    );
   }
   return <span className="tool-summary-meta">{tokenCount}</span>;
 }
