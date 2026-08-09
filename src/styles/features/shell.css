@@ -226,6 +226,20 @@
   --pane-indent: 14px;
 }
 
+/* Keep the left sidebar's scrollbars compact so they don't crowd its narrow
+   lists. The explicit WebKit size covers the macOS app webview. */
+.sidebar .pane-list,
+.sidebar .research-sidebar-section,
+.sidebar .research-live-terminals .pane-list-body {
+  scrollbar-width: thin;
+}
+
+.sidebar .pane-list::-webkit-scrollbar,
+.sidebar .research-sidebar-section::-webkit-scrollbar,
+.sidebar .research-live-terminals .pane-list-body::-webkit-scrollbar {
+  width: 8px;
+}
+
 .empty-state {
   display: flex;
   align-items: center;
