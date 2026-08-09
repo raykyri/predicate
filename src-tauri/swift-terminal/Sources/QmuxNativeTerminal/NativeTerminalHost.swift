@@ -15,14 +15,20 @@ private func nativeTerminalDidReceiveAppShortcut(
 @_silgen_name("qmux_native_terminal_did_commit_geometry")
 private func nativeTerminalDidCommitGeometry(_ paneID: UnsafePointer<CChar>)
 
-@_silgen_name("qmux_native_terminal_did_resume_after_wake")
-private func nativeTerminalDidResumeAfterWake() -> UInt64
+@_silgen_name("qmux_native_terminal_did_begin_interface_health_check")
+private func nativeTerminalDidBeginInterfaceHealthCheck() -> UInt64
 
-@_silgen_name("qmux_native_terminal_will_sleep")
-private func nativeTerminalWillSleep()
+@_silgen_name("qmux_native_terminal_did_cancel_interface_health_check")
+private func nativeTerminalDidCancelInterfaceHealthCheck()
 
 @_silgen_name("qmux_native_terminal_did_detect_unhealthy_webview")
 private func nativeTerminalDidDetectUnhealthyWebView(_ generation: UInt64)
+
+@_silgen_name("qmux_native_terminal_did_rebuild_surface")
+private func nativeTerminalDidRebuildSurface(_ paneID: UnsafePointer<CChar>) -> Int32
+
+@_silgen_name("qmux_native_terminal_did_request_surface_recovery")
+private func nativeTerminalDidRequestSurfaceRecovery(_ markAll: Int32) -> Int32
 
 @MainActor
 final class NativeTerminalHost {
@@ -41,10 +47,22 @@ final class NativeTerminalHost {
     private var appBecameActiveObserver: NSObjectProtocol?
     private var appResignedActiveObserver: NSObjectProtocol?
     private var windowMiniaturizedObserver: NSObjectProtocol?
+    private var windowDeminiaturizedObserver: NSObjectProtocol?
+    private var screenParametersObserver: NSObjectProtocol?
     private var workspaceWakeObserver: NSObjectProtocol?
     private var workspaceWillSleepObserver: NSObjectProtocol?
-    private var wakeHealthCheckPending = false
-    private var wakeHealthCheckInFlight = false
+    private var interfaceHealthCheckPending = false
+    private var interfaceHealthCheckInFlight = false
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
+    private var lifecycleGapTimer: DispatchSourceTimer?
+    private var memoryPressureCritical = false
+    private var inactiveSince: TimeInterval?
+    private var lastLifecycleTick = ProcessInfo.processInfo.systemUptime
+    /// Panes whose Ghostty/Metal surface predates a suspension, GPU/display
+    /// transition, or explicit recovery. Visible panes rebuild immediately;
+    /// hidden panes rebuild lazily on their next reveal to keep recovery's
+    /// peak memory bounded.
+    private var staleSurfacePaneIDs: Set<String> = []
     private var webViewHealthProbeGeneration: UInt64 = 0
     private var webViewHealthRustGeneration: UInt64?
     private var webViewHealthSnapshotAttempt = 0
@@ -200,6 +218,101 @@ final class NativeTerminalHost {
         return true
     }
 
+    /// Recreates Ghostty surfaces without touching their PTYs. The Rust callback
+    /// restores each replacement from the pane's bounded durable scrollback;
+    /// live child processes and their file descriptors remain unchanged.
+    func recoverTerminalSurfaces(markAll: Bool = true) -> Bool {
+        guard container != nil else { return false }
+        if markAll {
+            staleSurfacePaneIDs.formUnion(panes.keys)
+        }
+        rebuildVisibleStaleSurfaces()
+        return true
+    }
+
+    private func rebuildVisibleStaleSurfaces() {
+        guard !memoryPressureCritical else { return }
+        let visiblePaneIDs = staleSurfacePaneIDs.filter { paneID in
+            panes[paneID].map { !$0.view.isHidden } ?? false
+        }
+        for paneID in visiblePaneIDs {
+            _ = rebuildSurface(id: paneID)
+        }
+    }
+
+    @discardableResult
+    private func rebuildSurface(id: String, revealing: Bool = false) -> Bool {
+        guard staleSurfacePaneIDs.contains(id),
+              !memoryPressureCritical,
+              let container,
+              let oldPane = panes[id]
+        else { return false }
+
+        let frame = oldPane.view.frame
+        let wasHidden = oldPane.view.isHidden
+        let willBeVisible = !wasHidden || revealing
+        let ownedKeyboard = keyboardOwnerPane === oldPane
+        let capturedPointer = pointerCapturePane === oldPane
+        let acceptsPointerInput = oldPane.acceptsPointerInput
+        let acceptsKeyboardInput = oldPane.acceptsKeyboardInput
+        let acceptsKeyboardClaim = oldPane.acceptsKeyboardClaim
+        let wasFocused = oldPane.isFocused
+
+        // Tear down the old CAMetalLayer before allocating its replacement so
+        // recovery does not momentarily double a pane's GPU footprint. Clearing
+        // the delegate prevents surface destruction from being mistaken for a
+        // user-requested pane close.
+        oldPane.view.delegate = nil
+        releaseFirstResponderIfHeld(by: oldPane.view)
+        TerminalSessionRegistry.shared.unregister(id)
+        oldPane.view.removeFromSuperview()
+
+        let pane = NativeTerminalPane(
+            paneID: id,
+            workingDirectory: oldPane.workingDirectory,
+            themeName: currentThemeName
+        )
+        pane.acceptsPointerInput = acceptsPointerInput
+        pane.acceptsKeyboardInput = acceptsKeyboardInput
+        pane.acceptsKeyboardClaim = acceptsKeyboardClaim
+        pane.isFocused = wasFocused
+        pane.view.frame = frame
+        pane.view.isHidden = !willBeVisible
+        pane.view.setSurfaceVisible(willBeVisible)
+        container.addSubview(pane.view)
+        panes[id] = pane
+        TerminalSessionRegistry.shared.register(pane.terminalSession, for: id)
+        if let currentSettings {
+            _ = pane.applySettings(currentSettings)
+        }
+        if willBeVisible, frame.width > 0, frame.height > 0 {
+            applyGeometry(frame, to: pane, forceFit: true)
+        }
+        if ownedKeyboard {
+            keyboardOwnerPane = nil
+        }
+        if ownedKeyboard ||
+            (desiredKeyboardOwnerPaneID == id && willBeVisible && acceptsKeyboardClaim)
+        {
+            _ = setKeyboardOwner(pane)
+        }
+        if capturedPointer {
+            pointerCapturePane = pane
+        }
+        guard pane.view.isSurfaceLive,
+              !willBeVisible || pane.hasCommittedGeometry
+        else {
+            // Leave it marked stale: a later layout/settings pass can finish
+            // surface creation and another recovery attempt can retry.
+            return false
+        }
+        let restored = id.withCString { nativeTerminalDidRebuildSurface($0) == 1 }
+        if restored {
+            staleSurfacePaneIDs.remove(id)
+        }
+        return restored
+    }
+
     /// True once the pane's surface is live and has been fitted to a real
     /// frame, i.e. replayed scrollback would render at the width the pane
     /// actually keeps rather than the zero-frame default grid.
@@ -210,6 +323,7 @@ final class NativeTerminalHost {
 
     func removePane(id: String) {
         guard let pane = panes.removeValue(forKey: id) else { return }
+        staleSurfacePaneIDs.remove(id)
         TerminalSessionRegistry.shared.unregister(id)
         if desiredKeyboardOwnerPaneID == id {
             desiredKeyboardOwnerPaneID = nil
@@ -256,9 +370,19 @@ final class NativeTerminalHost {
         deferGeometry: Bool,
         revision: UInt64
     ) -> Bool {
-        guard let pane = panes[id] else { return false }
+        guard var pane = panes[id] else { return false }
         if let lastRevision = layoutRevisionByPaneID[id], revision <= lastRevision {
             return true
+        }
+        if visible, staleSurfacePaneIDs.contains(id), !memoryPressureCritical {
+            // Make the target eligible for the serialized "visible stale"
+            // recovery pass. The replacement is created at this same frame and
+            // the normal layout work below immediately applies final policy.
+            pane.view.isHidden = false
+            pane.view.setSurfaceVisible(true)
+            _ = nativeTerminalDidRequestSurfaceRecovery(0)
+            guard let replacement = panes[id] else { return false }
+            pane = replacement
         }
         layoutRevisionByPaneID[id] = revision
         let keyboardClaimChanged = pane.acceptsKeyboardClaim != acceptsKeyboardClaim
@@ -511,10 +635,11 @@ final class NativeTerminalHost {
     func prepareForWebViewReload() -> Bool {
         guard container != nil else { return false }
         webViewHealthProbeGeneration &+= 1
-        wakeHealthCheckPending = false
-        wakeHealthCheckInFlight = false
+        interfaceHealthCheckPending = false
+        interfaceHealthCheckInFlight = false
         webViewHealthRustGeneration = nil
         desiredKeyboardOwnerPaneID = nil
+        desiredKeyboardOwnerRevision = 0
         _ = setKeyboardOwner(nil)
         consumedAppShortcutKeyCodes.removeAll()
         for pane in panes.values {
@@ -527,10 +652,14 @@ final class NativeTerminalHost {
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
         humanBrowserWebView = nil
-        // Drop document-owned deferral flags; the new document will re-request
-        // geometry. Keep in-flight frames/fit IDs so a reload mid-resize does
-        // not strand panes at pre-reload sizes until the next set_layout pass.
+        // Layout revisions and deferred frames belong to the old document. A
+        // replacement document must be able to publish a complete layout even
+        // if its clock-derived revision seed is lower (clock correction), and
+        // an old deferred resize must never land after that replacement.
         clientDeferredGeometryPaneIDs.removeAll()
+        pendingPaneFrames.removeAll()
+        pendingFitPaneIDs.removeAll()
+        layoutRevisionByPaneID.removeAll()
         windowLiveResizeActive = false
         return true
     }
@@ -630,6 +759,14 @@ final class NativeTerminalHost {
             NotificationCenter.default.removeObserver(windowMiniaturizedObserver)
             self.windowMiniaturizedObserver = nil
         }
+        if let windowDeminiaturizedObserver {
+            NotificationCenter.default.removeObserver(windowDeminiaturizedObserver)
+            self.windowDeminiaturizedObserver = nil
+        }
+        if let screenParametersObserver {
+            NotificationCenter.default.removeObserver(screenParametersObserver)
+            self.screenParametersObserver = nil
+        }
         if let workspaceWakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceWakeObserver)
             self.workspaceWakeObserver = nil
@@ -638,8 +775,14 @@ final class NativeTerminalHost {
             NSWorkspace.shared.notificationCenter.removeObserver(workspaceWillSleepObserver)
             self.workspaceWillSleepObserver = nil
         }
-        wakeHealthCheckPending = false
-        wakeHealthCheckInFlight = false
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
+        lifecycleGapTimer?.cancel()
+        lifecycleGapTimer = nil
+        interfaceHealthCheckPending = false
+        interfaceHealthCheckInFlight = false
+        memoryPressureCritical = false
+        inactiveSince = nil
         webViewHealthProbeGeneration &+= 1
         webViewHealthRustGeneration = nil
         setKeyboardOwner(nil)
@@ -655,6 +798,7 @@ final class NativeTerminalHost {
             pane.view.removeFromSuperview()
         }
         panes.removeAll()
+        staleSurfacePaneIDs.removeAll()
         TerminalSessionRegistry.shared.unregisterAll()
         clientDeferredGeometryPaneIDs.removeAll()
         pendingPaneFrames.removeAll()
@@ -783,51 +927,126 @@ final class NativeTerminalHost {
     }
 
     private func systemDidWake() {
-        wakeHealthCheckPending = true
-        schedulePostWakeHealthCheckIfVisible()
+        requestInterfaceRecovery()
     }
 
     private func systemWillSleep() {
-        wakeHealthCheckPending = false
-        wakeHealthCheckInFlight = false
+        resetInterruptedInputState()
+        interfaceHealthCheckPending = false
+        interfaceHealthCheckInFlight = false
         webViewHealthProbeGeneration &+= 1
         webViewHealthRustGeneration = nil
-        nativeTerminalWillSleep()
+        nativeTerminalDidCancelInterfaceHealthCheck()
     }
 
-    private func deferPostWakeHealthCheckIfNeeded(_ changedWindow: NSWindow? = nil) {
+    private func applicationDidResignActive() {
+        inactiveSince = ProcessInfo.processInfo.systemUptime
+        resetInterruptedInputState()
+        deferInterfaceHealthCheckIfNeeded()
+    }
+
+    private func applicationDidBecomeActive() {
+        let now = ProcessInfo.processInfo.systemUptime
+        // Ordinary app switching must not reset terminal scroll position. A
+        // five-minute absence is long enough to plausibly include App Nap or
+        // an OS-level suspension; shorter stalls are covered precisely by the
+        // main-queue gap detector instead.
+        if let inactiveSince, now - inactiveSince >= 5 * 60 {
+            requestInterfaceRecovery()
+        } else {
+            scheduleInterfaceHealthCheckIfVisible()
+        }
+        self.inactiveSince = nil
+    }
+
+    private func lifecycleTimerDidFire() {
+        let now = ProcessInfo.processInfo.systemUptime
+        let schedulingGap = now - lastLifecycleTick
+        lastLifecycleTick = now
+        // A normal five-second main-queue timer should not miss three complete
+        // intervals. A longer gap means the process was suspended or the main
+        // actor was starved badly enough that its renderers merit validation.
+        if schedulingGap >= 15 {
+            requestInterfaceRecovery()
+        }
+    }
+
+    private func memoryPressureDidChange(_ event: DispatchSource.MemoryPressureEvent) {
+        if event.contains(.warning) || event.contains(.critical) {
+            memoryPressureCritical = true
+            resetInterruptedInputState()
+            staleSurfacePaneIDs.formUnion(panes.keys)
+            interfaceHealthCheckPending = true
+            deferInterfaceHealthCheckIfNeeded()
+            return
+        }
+        if event.contains(.normal) {
+            memoryPressureCritical = false
+            scheduleInterfaceHealthCheckIfVisible()
+        }
+    }
+
+    private func requestInterfaceRecovery() {
+        resetInterruptedInputState()
+        staleSurfacePaneIDs.formUnion(panes.keys)
+        interfaceHealthCheckPending = true
+        scheduleInterfaceHealthCheckIfVisible()
+    }
+
+    /// AppKit may never deliver the release half of a key or pointer gesture
+    /// when the process is suspended or the app deactivates mid-event. Retire
+    /// only transient claims here; sticky DOM claims (an open menu) and logical
+    /// keyboard ownership remain intact if the existing document proves healthy.
+    private func resetInterruptedInputState() {
+        consumedAppShortcutKeyCodes.removeAll()
+        for pane in panes.values {
+            pane.consumedShortcutKeyCodes.removeAll()
+            pane.reportCommandModifier(active: false)
+        }
+        pointerCapturePane = nil
+        webGesturePointerActive = false
+        if webPointerClaimClearsOnPointerUp {
+            webPointerRoutingClaimed = false
+            webPointerClaimClearsOnPointerUp = false
+        }
+    }
+
+    private func deferInterfaceHealthCheckIfNeeded(_ changedWindow: NSWindow? = nil) {
         if let changedWindow, changedWindow !== window {
             return
         }
-        guard wakeHealthCheckPending || wakeHealthCheckInFlight ||
+        guard interfaceHealthCheckPending || interfaceHealthCheckInFlight ||
                 webViewHealthRustGeneration != nil
         else { return }
-        wakeHealthCheckPending = true
-        wakeHealthCheckInFlight = false
+        interfaceHealthCheckPending = true
+        interfaceHealthCheckInFlight = false
         webViewHealthProbeGeneration &+= 1
         webViewHealthRustGeneration = nil
-        nativeTerminalWillSleep()
+        nativeTerminalDidCancelInterfaceHealthCheck()
     }
 
-    private func isEligibleForPostWakeHealthCheck(_ candidate: NSWindow) -> Bool {
-        NSApp.isActive &&
+    private func isEligibleForInterfaceHealthCheck(_ candidate: NSWindow) -> Bool {
+        !memoryPressureCritical &&
+            NSApp.isActive &&
             candidate === window &&
             candidate.isVisible &&
             !candidate.isMiniaturized
     }
 
-    private func schedulePostWakeHealthCheckIfVisible() {
-        guard wakeHealthCheckPending,
+    private func scheduleInterfaceHealthCheckIfVisible() {
+        guard interfaceHealthCheckPending,
+              !memoryPressureCritical,
               NSApp.isActive,
               let window,
               window.isVisible,
               !window.isMiniaturized
         else { return }
-        wakeHealthCheckPending = false
-        wakeHealthCheckInFlight = true
+        interfaceHealthCheckPending = false
+        interfaceHealthCheckInFlight = true
         webViewHealthProbeGeneration &+= 1
         let generation = webViewHealthProbeGeneration
-        // Give WindowServer/WebKit a short grace period to reconnect after wake.
+        // Give WindowServer/WebKit a short grace period to reconnect after a
+        // wake, process suspension, or display/GPU transition.
         // The actual watchdog below is deliberately much longer, so ordinary
         // resume scheduling or a busy frontend cannot trigger a reload.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
@@ -837,24 +1056,26 @@ final class NativeTerminalHost {
             guard NSApp.isActive,
                   let window = self.window,
                   window.isVisible,
-                  !window.isMiniaturized
+                  !window.isMiniaturized,
+                  !self.memoryPressureCritical
             else {
-                self.wakeHealthCheckPending = true
-                self.wakeHealthCheckInFlight = false
+                self.interfaceHealthCheckPending = true
+                self.interfaceHealthCheckInFlight = false
                 return
             }
-            self.startPostWakeHealthCheck(in: window, generation: generation)
+            _ = nativeTerminalDidRequestSurfaceRecovery(1)
+            self.startInterfaceHealthCheck(in: window, generation: generation)
         }
     }
 
-    private func startPostWakeHealthCheck(in window: NSWindow, generation: UInt64) {
+    private func startInterfaceHealthCheck(in window: NSWindow, generation: UInt64) {
         // This event requires an acknowledgement from the current document, so
         // it catches a dead JavaScript event loop even when WebKit did not report
         // a WebContent process termination.
-        let rustGeneration = nativeTerminalDidResumeAfterWake()
+        let rustGeneration = nativeTerminalDidBeginInterfaceHealthCheck()
         webViewHealthRustGeneration = rustGeneration == 0 ? nil : rustGeneration
         webViewHealthSnapshotAttempt = 0
-        takePostWakeSnapshot(
+        takeInterfaceHealthSnapshot(
             in: window,
             generation: generation,
             rustGeneration: rustGeneration,
@@ -862,7 +1083,7 @@ final class NativeTerminalHost {
         )
     }
 
-    private func takePostWakeSnapshot(
+    private func takeInterfaceHealthSnapshot(
         in window: NSWindow,
         generation: UInt64,
         rustGeneration: UInt64,
@@ -871,8 +1092,8 @@ final class NativeTerminalHost {
         guard generation == webViewHealthProbeGeneration,
               attempt == webViewHealthSnapshotAttempt
         else { return }
-        guard isEligibleForPostWakeHealthCheck(window) else {
-            deferPostWakeHealthCheckIfNeeded(window)
+        guard isEligibleForInterfaceHealthCheck(window) else {
+            deferInterfaceHealthCheckIfNeeded(window)
             return
         }
         // A JavaScript round-trip alone is insufficient for the observed failure:
@@ -883,7 +1104,7 @@ final class NativeTerminalHost {
               webView.bounds.width > 0,
               webView.bounds.height > 0
         else {
-            finishPostWakeSnapshot(
+            finishInterfaceHealthSnapshot(
                 generation: generation,
                 rustGeneration: rustGeneration,
                 attempt: attempt,
@@ -901,7 +1122,7 @@ final class NativeTerminalHost {
         webView.takeSnapshot(with: configuration) { [weak self] image, error in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    self?.finishPostWakeSnapshot(
+                    self?.finishInterfaceHealthSnapshot(
                         generation: generation,
                         rustGeneration: rustGeneration,
                         attempt: attempt,
@@ -915,7 +1136,7 @@ final class NativeTerminalHost {
                   generation == self.webViewHealthProbeGeneration,
                   attempt == self.webViewHealthSnapshotAttempt
             else { return }
-            self.finishPostWakeSnapshot(
+            self.finishInterfaceHealthSnapshot(
                 generation: generation,
                 rustGeneration: rustGeneration,
                 attempt: attempt,
@@ -924,7 +1145,7 @@ final class NativeTerminalHost {
         }
     }
 
-    private func finishPostWakeSnapshot(
+    private func finishInterfaceHealthSnapshot(
         generation: UInt64,
         rustGeneration: UInt64,
         attempt: Int,
@@ -933,16 +1154,16 @@ final class NativeTerminalHost {
         guard generation == webViewHealthProbeGeneration,
               attempt == webViewHealthSnapshotAttempt
         else { return }
-        guard let window, isEligibleForPostWakeHealthCheck(window) else {
-            deferPostWakeHealthCheckIfNeeded()
+        guard let window, isEligibleForInterfaceHealthCheck(window) else {
+            deferInterfaceHealthCheckIfNeeded()
             return
         }
         if healthy {
-            wakeHealthCheckInFlight = false
+            interfaceHealthCheckInFlight = false
             webViewHealthProbeGeneration &+= 1
             // Rust's event-loop watchdog owns the generation until its
             // acknowledgement window closes. Forget it just after that so a
-            // much later app hide does not schedule a redundant wake probe.
+            // much later app hide does not schedule a redundant recovery probe.
             DispatchQueue.main.asyncAfter(deadline: .now() + 8.25) { [weak self] in
                 guard let self,
                       self.webViewHealthRustGeneration == rustGeneration
@@ -962,12 +1183,12 @@ final class NativeTerminalHost {
                       self.webViewHealthSnapshotAttempt == 1
                 else { return }
                 guard let window = self.window,
-                      self.isEligibleForPostWakeHealthCheck(window)
+                      self.isEligibleForInterfaceHealthCheck(window)
                 else {
-                    self.deferPostWakeHealthCheckIfNeeded()
+                    self.deferInterfaceHealthCheckIfNeeded()
                     return
                 }
-                self.takePostWakeSnapshot(
+                self.takeInterfaceHealthSnapshot(
                     in: window,
                     generation: generation,
                     rustGeneration: rustGeneration,
@@ -976,7 +1197,7 @@ final class NativeTerminalHost {
             }
             return
         }
-        wakeHealthCheckInFlight = false
+        interfaceHealthCheckInFlight = false
         webViewHealthProbeGeneration &+= 1
         if rustGeneration != 0 {
             nativeTerminalDidDetectUnhealthyWebView(rustGeneration)
@@ -1013,7 +1234,7 @@ final class NativeTerminalHost {
                 queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
-                    NativeTerminalHost.shared.schedulePostWakeHealthCheckIfVisible()
+                    NativeTerminalHost.shared.scheduleInterfaceHealthCheckIfVisible()
                 }
             }
         }
@@ -1024,7 +1245,7 @@ final class NativeTerminalHost {
                 queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
-                    NativeTerminalHost.shared.schedulePostWakeHealthCheckIfVisible()
+                    NativeTerminalHost.shared.applicationDidBecomeActive()
                 }
             }
         }
@@ -1035,7 +1256,7 @@ final class NativeTerminalHost {
                 queue: .main
             ) { _ in
                 MainActor.assumeIsolated {
-                    NativeTerminalHost.shared.deferPostWakeHealthCheckIfNeeded()
+                    NativeTerminalHost.shared.applicationDidResignActive()
                 }
             }
         }
@@ -1047,7 +1268,31 @@ final class NativeTerminalHost {
             ) { notification in
                 let changedWindow = notification.object as? NSWindow
                 MainActor.assumeIsolated {
-                    NativeTerminalHost.shared.deferPostWakeHealthCheckIfNeeded(changedWindow)
+                    NativeTerminalHost.shared.deferInterfaceHealthCheckIfNeeded(changedWindow)
+                }
+            }
+        }
+        if windowDeminiaturizedObserver == nil {
+            windowDeminiaturizedObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.didDeminiaturizeNotification,
+                object: nil,
+                queue: .main
+            ) { notification in
+                let changedWindow = notification.object as? NSWindow
+                MainActor.assumeIsolated {
+                    guard changedWindow === NativeTerminalHost.shared.window else { return }
+                    NativeTerminalHost.shared.scheduleInterfaceHealthCheckIfVisible()
+                }
+            }
+        }
+        if screenParametersObserver == nil {
+            screenParametersObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didChangeScreenParametersNotification,
+                object: nil,
+                queue: .main
+            ) { _ in
+                MainActor.assumeIsolated {
+                    NativeTerminalHost.shared.requestInterfaceRecovery()
                 }
             }
         }
@@ -1072,6 +1317,32 @@ final class NativeTerminalHost {
                     NativeTerminalHost.shared.systemWillSleep()
                 }
             }
+        }
+        if memoryPressureSource == nil {
+            let source = DispatchSource.makeMemoryPressureSource(
+                eventMask: [.normal, .warning, .critical],
+                queue: .main
+            )
+            source.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, let event = self.memoryPressureSource?.data else { return }
+                    self.memoryPressureDidChange(event)
+                }
+            }
+            memoryPressureSource = source
+            source.activate()
+        }
+        if lifecycleGapTimer == nil {
+            lastLifecycleTick = ProcessInfo.processInfo.systemUptime
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 5, repeating: 5, leeway: .seconds(1))
+            timer.setEventHandler { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.lifecycleTimerDidFire()
+                }
+            }
+            lifecycleGapTimer = timer
+            timer.activate()
         }
         let mask: NSEvent.EventTypeMask = [
             .leftMouseDown,

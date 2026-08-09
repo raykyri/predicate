@@ -112,7 +112,8 @@ const RELOAD_INTERFACE_MENU_ID: &str = "qmux-reload-interface";
 ///   a second webview over the same state.
 /// - Adds "Reload Interface" to the View menu. It is native (rather than a DOM
 ///   shortcut) so it remains usable when WebKit's renderer is unhealthy, and reloads
-///   only the webview while preserving PTYs and native terminal surfaces.
+///   the webview while preserving PTYs and rebuilding native terminal surfaces from
+///   bounded durable history.
 /// - Strips the native "Close Window" items (⌘W on macOS, Alt+F4 elsewhere) so the
 ///   webview receives ⌘W itself; the frontend then routes ⌘W to close the active pane.
 /// - On macOS, replaces the predefined "Quit" item with our own ⌘Q item. The native
@@ -181,7 +182,7 @@ fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) 
         return;
     }
     if event.id().as_ref() == RELOAD_INTERFACE_MENU_ID {
-        reload_main_webview(app);
+        reload_main_webview(app, true);
         return;
     }
     if event.id().as_ref() != QUIT_MENU_ID {
@@ -2714,10 +2715,10 @@ fn acknowledge_interface_health_probe(generation: u64) {
     let _ = INTERFACE_HEALTH.acknowledge(generation);
 }
 
-/// Called by the AppKit wake observer once qmux is active and its window is
-/// visible. The native side separately snapshots WKWebView to exercise the GPU
-/// compositor; this event/ack round trip proves the document's JavaScript event
-/// loop is also responsive.
+/// Called by AppKit after a wake, suspension gap, pressure recovery, or display
+/// transition once qmux is visible. The native side separately snapshots
+/// WKWebView to exercise the compositor; this event/ack round trip waits for
+/// frontend animation frames and proves the document can still schedule paint.
 #[cfg(desktop)]
 pub(crate) fn begin_interface_health_probe(state: AppState) -> u64 {
     let generation = INTERFACE_HEALTH.begin();
@@ -2733,15 +2734,15 @@ pub(crate) fn begin_interface_health_probe(state: AppState) -> u64 {
             state,
             generation,
             true,
-            "frontend did not acknowledge the post-wake health probe",
+            "frontend did not paint and acknowledge the interface recovery probe",
         );
     });
     generation
 }
 
 /// Called by the native WKWebView snapshot watchdog when the compositor fails
-/// or never completes. Reload only the webview; PTYs and Ghostty surfaces stay
-/// alive through the same reset path as the manual recovery command.
+/// or never completes. Reload only the webview; PTYs stay alive and any stale
+/// Ghostty surfaces were already replaced by the native recovery pass.
 #[cfg(desktop)]
 /// How long to wait before retrying a health-driven reload that was deferred
 /// because the main window was unfocused, minimized, or hidden. Short enough
@@ -2794,7 +2795,7 @@ pub(crate) fn request_unhealthy_interface_reload(
             return;
         }
         eprintln!("qmux: {reason}; reloading interface");
-        reload_main_webview(&app_handle_on_main);
+        reload_main_webview(&app_handle_on_main, false);
     });
 }
 
@@ -2832,7 +2833,10 @@ fn prepare_main_webview_reload(app: Option<&tauri::AppHandle>) {
 }
 
 #[cfg(desktop)]
-fn reload_main_webview(app: &tauri::AppHandle) {
+fn reload_main_webview(app: &tauri::AppHandle, recover_terminal_surfaces: bool) {
+    if recover_terminal_surfaces && let Err(err) = pty::recover_native_terminal_surfaces(true) {
+        eprintln!("qmux: failed to recover native terminal surfaces: {err}");
+    }
     prepare_main_webview_reload(Some(app));
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("qmux: cannot reload interface because the main webview is missing");
@@ -2947,6 +2951,9 @@ fn main() {
         let label = webview.label();
         eprintln!("qmux: WebContent process terminated for {label}; reloading");
         if label == "main" {
+            if let Err(err) = pty::recover_native_terminal_surfaces(true) {
+                eprintln!("qmux: failed to recover native terminal surfaces: {err}");
+            }
             prepare_main_webview_reload(Some(webview.app_handle()));
         }
         if let Err(err) = webview.reload() {

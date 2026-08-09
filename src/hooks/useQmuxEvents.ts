@@ -226,7 +226,15 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "app.interface_health_probe") {
         const generation = event.payload.generation;
         if (typeof generation === "number" && Number.isSafeInteger(generation)) {
-          void acknowledgeInterfaceHealthProbe(generation).catch(() => undefined);
+          // Waiting for two animation frames makes the acknowledgement prove
+          // more than a live JavaScript event loop: WebKit must still be able
+          // to schedule a paint after suspension/GPU-process churn. If rAF is
+          // wedged, the native watchdog reloads the document instead.
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              void acknowledgeInterfaceHealthProbe(generation).catch(() => undefined);
+            });
+          });
         }
       }
       if (event.type.startsWith("research.")) {

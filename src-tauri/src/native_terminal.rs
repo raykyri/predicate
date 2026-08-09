@@ -8,6 +8,8 @@ use crate::state::AppState;
 static APP_STATE: OnceLock<Mutex<Option<AppState>>> = OnceLock::new();
 static REPLAYING_PANES: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+#[cfg(target_os = "macos")]
+const MAX_NATIVE_SCROLLBACK_ROWS: u32 = 50_000;
 
 /// Main-thread delegate reports that need the model lock or the filesystem
 /// (OSC title, cwd). They arrive on the AppKit main thread, and applying them
@@ -467,6 +469,7 @@ mod imp {
             active: i32,
         ) -> i32;
         fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
+        fn qmux_native_terminal_recover_surfaces(mark_all: i32) -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
         fn qmux_native_terminal_submit(pane_id: *const c_char) -> i32;
@@ -831,6 +834,17 @@ mod imp {
         }
     }
 
+    pub fn recover_surfaces(mark_all: bool) -> Result<(), String> {
+        // SAFETY: surface replacement is synchronous on the main actor. Swift
+        // preserves pane ids and asks Rust to replay bounded durable history
+        // into each replacement without restarting its PTY.
+        if unsafe { qmux_native_terminal_recover_surfaces(i32::from(mark_all)) } == 1 {
+            Ok(())
+        } else {
+            Err("native terminal host is not attached".to_string())
+        }
+    }
+
     pub fn set_web_overlay_region(region: NativeWebOverlayRegion) -> Result<(), String> {
         if !region.x.is_finite()
             || !region.y.is_finite()
@@ -928,6 +942,8 @@ mod imp {
             || settings.line_height <= 0.0
             || !settings.scroll_sensitivity.is_finite()
             || settings.scroll_sensitivity <= 0.0
+            || settings.scrollback_rows == 0
+            || settings.scrollback_rows > super::MAX_NATIVE_SCROLLBACK_ROWS
         {
             return Err("native terminal settings contain invalid numeric values".to_string());
         }
@@ -972,6 +988,8 @@ mod imp {
             || settings.line_height <= 0.0
             || !settings.scroll_sensitivity.is_finite()
             || settings.scroll_sensitivity <= 0.0
+            || settings.scrollback_rows == 0
+            || settings.scrollback_rows > super::MAX_NATIVE_SCROLLBACK_ROWS
         {
             return Err("native terminal settings contain invalid numeric values".to_string());
         }
@@ -1134,6 +1152,10 @@ mod imp {
         Ok(())
     }
 
+    pub fn recover_surfaces(_mark_all: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn focus(_pane_id: &str) -> Result<(), String> {
         Err("native terminals are only available on macOS".to_string())
     }
@@ -1178,10 +1200,10 @@ mod imp {
 #[allow(unused_imports)]
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
-    paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, remove,
-    seed_settings, send_text, set_human_browser_loading_background, set_human_browser_webview,
-    set_iframe_shortcut_fallback, set_layout, set_stage_backstop, set_web_overlay_region,
-    set_web_pointer_claimed, shutdown, submit, update_settings,
+    paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, recover_surfaces,
+    remove, seed_settings, send_text, set_human_browser_loading_background,
+    set_human_browser_webview, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
+    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1291,6 +1313,43 @@ pub extern "C" fn qmux_native_terminal_did_commit_geometry(pane_id: *const std::
     with_app_state(|state| crate::pty::complete_pending_attach(state, &pane_id));
 }
 
+/// Swift replaced a stale Ghostty/Metal surface while preserving the pane's
+/// PTY. Rehydrate the fresh emulator from bounded durable history; replay mode
+/// suppresses terminal-session write callbacks so escape sequences can never
+/// leak back into the child process as input.
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_rebuild_surface(
+    pane_id: *const std::ffi::c_char,
+) -> i32 {
+    let Some(pane_id) = callback_string(pane_id) else {
+        return 0;
+    };
+    let mut restored = false;
+    with_app_state(
+        |state| match crate::pty::replay_rebuilt_native_surface(state, &pane_id) {
+            Ok(()) => restored = true,
+            Err(err) => {
+                eprintln!("qmux: failed to restore rebuilt native surface {pane_id}: {err}");
+            }
+        },
+    );
+    i32::from(restored)
+}
+
+/// Swift lifecycle observers route surface recovery back through Rust so the
+/// PTY output gate can make session replacement plus scrollback replay atomic
+/// with respect to high-volume live output.
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_request_surface_recovery(mark_all: i32) -> i32 {
+    match crate::pty::recover_native_terminal_surfaces(mark_all == 1) {
+        Ok(()) => 1,
+        Err(err) => {
+            eprintln!("qmux: failed to recover native terminal surfaces: {err}");
+            0
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn qmux_native_terminal_did_write(
     pane_id: *const std::ffi::c_char,
@@ -1333,13 +1392,14 @@ fn emit_native_event(event_type: &str, pane_id: *const std::ffi::c_char) {
     });
 }
 
-/// AppKit observed a system wake followed by qmux becoming active with a visible
-/// window. Start the document event-loop half of the health check. A stale
-/// readiness flag is intentional here: if the old document died without a page
-/// navigation, the emitted probe is dropped and the timeout reloads it.
+/// AppKit observed a wake, suspension gap, memory-pressure recovery, or display
+/// transition while qmux has an active visible window. Start the document
+/// event-loop half of the health check. A stale readiness flag is intentional:
+/// if the old document died without a navigation, the probe is dropped and the
+/// timeout reloads it.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn qmux_native_terminal_did_resume_after_wake() -> u64 {
+pub extern "C" fn qmux_native_terminal_did_begin_interface_health_check() -> u64 {
     if !events_listener_ready() {
         return 0;
     }
@@ -1352,12 +1412,13 @@ pub extern "C" fn qmux_native_terminal_did_resume_after_wake() -> u64 {
 
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
-pub extern "C" fn qmux_native_terminal_will_sleep() {
+pub extern "C" fn qmux_native_terminal_did_cancel_interface_health_check() {
     crate::cancel_interface_health_probe();
 }
 
-/// The native WKWebView snapshot failed or timed out after wake, which exercises
-/// the compositor even if JavaScript remains responsive after a GPU-process loss.
+/// The native WKWebView snapshot failed or timed out during a recovery check,
+/// which exercises the compositor even if JavaScript remains responsive after
+/// a GPU-process loss.
 #[cfg(target_os = "macos")]
 #[unsafe(no_mangle)]
 pub extern "C" fn qmux_native_terminal_did_detect_unhealthy_webview(generation: u64) {
@@ -1369,7 +1430,7 @@ pub extern "C" fn qmux_native_terminal_did_detect_unhealthy_webview(generation: 
             state.clone(),
             generation,
             false,
-            "WKWebView compositor failed its post-wake health check",
+            "WKWebView compositor failed its interface recovery health check",
         );
     });
 }

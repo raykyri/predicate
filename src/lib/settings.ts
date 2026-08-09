@@ -208,7 +208,11 @@ export const WORKTREE_LOCATION_OPTIONS: { id: WorktreeLocation; label: string }[
 
 export const DEFAULT_SCROLLBACK_ROWS = 10000;
 export const SCROLLBACK_ROWS_MIN = 1000;
-export const SCROLLBACK_ROWS_MAX = 200000;
+// Ghostty's native limit is byte-backed (qmux budgets roughly 1 KiB per
+// requested row), so 200k allowed a single pane to reserve about 200 MiB and
+// made a few noisy build panes capable of forcing system suspension. Fifty
+// thousand remains 5x the default while bounding that per-surface exposure.
+export const SCROLLBACK_ROWS_MAX = 50000;
 export const DEFAULT_LINE_HEIGHT = 1;
 export const LINE_HEIGHT_MIN = 0.7;
 export const LINE_HEIGHT_MAX = 1.3;

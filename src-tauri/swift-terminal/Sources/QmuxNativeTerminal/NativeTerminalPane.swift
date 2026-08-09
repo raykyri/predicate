@@ -77,6 +77,7 @@ final class NativeTerminalPane: NSObject,
     TerminalSurfaceOpenURLDelegate
 {
     let paneID: String
+    let workingDirectory: String?
     let view: QmuxTerminalView
     let controller: TerminalController
     let terminalSession: InMemoryTerminalSession
@@ -110,6 +111,7 @@ final class NativeTerminalPane: NSObject,
         themeName: String
     ) {
         self.paneID = paneID
+        self.workingDirectory = workingDirectory
         terminalSession = InMemoryTerminalSession(
             write: { data in
                 guard !data.isEmpty else { return }

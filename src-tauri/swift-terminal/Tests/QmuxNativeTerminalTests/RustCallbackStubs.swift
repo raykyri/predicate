@@ -117,13 +117,23 @@ func nativeTerminalDidReceiveAppShortcutStub(
 @_cdecl("qmux_native_terminal_did_commit_geometry")
 func nativeTerminalDidCommitGeometryStub(_: UnsafePointer<CChar>) {}
 
-@_cdecl("qmux_native_terminal_did_resume_after_wake")
-func nativeTerminalDidResumeAfterWakeStub() -> UInt64 {
+@_cdecl("qmux_native_terminal_did_rebuild_surface")
+func nativeTerminalDidRebuildSurfaceStub(_: UnsafePointer<CChar>) -> Int32 { 1 }
+
+@_cdecl("qmux_native_terminal_did_request_surface_recovery")
+func nativeTerminalDidRequestSurfaceRecoveryStub(_ markAll: Int32) -> Int32 {
+    MainActor.assumeIsolated {
+        NativeTerminalHost.shared.recoverTerminalSurfaces(markAll: markAll == 1) ? 1 : 0
+    }
+}
+
+@_cdecl("qmux_native_terminal_did_begin_interface_health_check")
+func nativeTerminalDidBeginInterfaceHealthCheckStub() -> UInt64 {
     0
 }
 
-@_cdecl("qmux_native_terminal_will_sleep")
-func nativeTerminalWillSleepStub() {}
+@_cdecl("qmux_native_terminal_did_cancel_interface_health_check")
+func nativeTerminalDidCancelInterfaceHealthCheckStub() {}
 
 @_cdecl("qmux_native_terminal_did_detect_unhealthy_webview")
 func nativeTerminalDidDetectUnhealthyWebViewStub(_: UInt64) {}

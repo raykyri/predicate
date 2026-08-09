@@ -21,7 +21,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -117,6 +117,21 @@ const KILL_ESCALATION_TICKS: u32 = 2;
 /// an insert/remove — never across FFI or another lock.
 static DEFERRED_ATTACHES: std::sync::LazyLock<Mutex<HashSet<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Normal native output holds a shared guard across both surface delivery and
+/// durable append. Surface recovery takes the exclusive guard while Swift
+/// swaps sessions and Rust replays the resulting snapshot. This closes the
+/// otherwise-small race where a high-volume build could land between the swap
+/// and replay, duplicating or omitting the newest chunk. Shared guards preserve
+/// ordinary multi-pane output concurrency.
+static NATIVE_SURFACE_OUTPUT_GATE: RwLock<()> = RwLock::new(());
+
+pub fn recover_native_terminal_surfaces(mark_all: bool) -> Result<(), String> {
+    let _recovery = NATIVE_SURFACE_OUTPUT_GATE
+        .write()
+        .unwrap_or_else(|err| err.into_inner());
+    crate::native_terminal::recover_surfaces(mark_all)
+}
 
 /// Per-native-pane input senders, feeding each pane's writer thread (see
 /// `start_native_input_writer`). Ghostty's input callback delivers every
@@ -1450,6 +1465,23 @@ pub fn attach_pane(state: &AppState, pane_id: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Restores a replacement Ghostty surface for an already-attached pane. This
+/// intentionally bypasses the one-time attach bookkeeping: the PTY and reader
+/// stay live while only the renderer is replaced after suspension/GPU loss.
+/// Durable scrollback is bounded on disk and sanitized before replay, and none
+/// of these emulator bytes are written back to the child process.
+pub fn replay_rebuilt_native_surface(state: &AppState, pane_id: &str) -> Result<(), String> {
+    if state.pane_is_native(pane_id)? != Some(true) {
+        return Ok(());
+    }
+    let restored = read_pane_scrollback(&state.config().workspace_root, pane_id)?;
+    let restored = sanitize_scrollback_replay(&restored);
+    if !restored.is_empty() {
+        crate::native_terminal::receive(pane_id, &restored, true)?;
+    }
+    crate::native_terminal::receive(pane_id, RESTORED_SCROLLBACK_TERMINAL_RESET, true)
+}
+
 /// Clears terminal modes a program may have left active in a pane that
 /// outlives it. A shell-launched agent (`qmux agent-exec codex ...`) that is
 /// killed or crashes never restores what its TUI pushed — kitty keyboard
@@ -2358,15 +2390,21 @@ fn start_reader_thread(
                         // there is no renderer — the webview dropped the old
                         // per-chunk pty.data events unread — so output is only
                         // recorded.
-                        if native_surface
-                            && let Err(err) =
+                        if native_surface {
+                            let _delivery = NATIVE_SURFACE_OUTPUT_GATE
+                                .read()
+                                .unwrap_or_else(|err| err.into_inner());
+                            if let Err(err) =
                                 crate::native_terminal::receive(&pane_id, chunk, false)
-                        {
-                            eprintln!(
-                                "qmux: failed to render output for native pane {pane_id}: {err}"
-                            );
+                            {
+                                eprintln!(
+                                    "qmux: failed to render output for native pane {pane_id}: {err}"
+                                );
+                            }
+                            record_scrollback(&state, &pane_id, chunk);
+                        } else {
+                            record_scrollback(&state, &pane_id, chunk);
                         }
-                        record_scrollback(&state, &pane_id, chunk);
                     }
                 }
                 Err(err) => {
