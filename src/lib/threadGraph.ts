@@ -4,6 +4,7 @@ import type {
   ThreadGraph,
   ThreadNode,
   ThreadParticipant,
+  TranscriptAnnotation,
   Turn,
   TurnNode,
 } from "../types";
@@ -14,6 +15,40 @@ import type {
 // got an explicit thread. Kept untrimmed so lookups match the backend's keys.
 export function threadIdForAgent(agent: AgentInfo): string {
   return agent.threadId && agent.threadId.trim() ? agent.threadId : `thread-${agent.id}`;
+}
+
+export function addThreadGraphAnnotation(
+  graph: ThreadGraph,
+  annotation: TranscriptAnnotation,
+): ThreadGraph {
+  const current = graph.annotations ?? [];
+  if (current.some(({ id }) => id === annotation.id)) {
+    return graph;
+  }
+  return { ...graph, annotations: [...current, annotation] };
+}
+
+export function removeThreadGraphAnnotation(
+  graph: ThreadGraph,
+  annotationId: string,
+): ThreadGraph {
+  const current = graph.annotations ?? [];
+  const next = current.filter(({ id }) => id !== annotationId);
+  return next.length === current.length ? graph : { ...graph, annotations: next };
+}
+
+/** Highlights follow their source turn onto every branch that contains it.
+ * Keep a missing-node highlight as an orphan, but do not mistake a source on
+ * another branch for a deleted source. */
+export function threadGraphAnnotationsForTurns(
+  graph: ThreadGraph,
+  turns: Turn[],
+): TranscriptAnnotation[] {
+  const visibleTurnIds = new Set(turns.map((turn) => turn.id));
+  return (graph.annotations ?? []).filter(
+    (annotation) =>
+      visibleTurnIds.has(annotation.sourceTurnId) || !graph.nodes[annotation.sourceTurnId],
+  );
 }
 
 // The branch whose turns the right pane renders for this agent — shared by

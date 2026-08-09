@@ -2670,6 +2670,73 @@ impl AppState {
         store.read_thread(&record.id)
     }
 
+    pub fn create_transcript_annotation(
+        &self,
+        agent_id: &str,
+        source_turn_id: &str,
+        text: String,
+    ) -> Result<thread_graph::TranscriptAnnotation, String> {
+        let text = text.trim().to_string();
+        let (agent, record) = {
+            let model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let agent = model
+                .agents
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| format!("agent {agent_id} was not found"))?;
+            let thread_id = thread_graph::agent_thread_id(&agent);
+            let record = model
+                .threads
+                .get(&thread_id)
+                .cloned()
+                .ok_or_else(|| format!("thread {thread_id} was not found"))?;
+            (agent, record)
+        };
+        let annotation = thread_graph::TranscriptAnnotation {
+            id: self.next_id("transcript-annotation"),
+            source_turn_id: source_turn_id.to_string(),
+            text,
+            created_at: now_millis().min(u64::MAX as u128) as u64,
+        };
+        let saved = thread_graph::ThreadStore::new(record.storage_root)
+            .create_annotation(&agent, annotation)?;
+        // The annotation graph write above is synchronous. Commit the allocator
+        // high-water mark too, so a restart cannot reuse the saved annotation id.
+        self.persist_now();
+        Ok(saved)
+    }
+
+    pub fn remove_transcript_annotation(
+        &self,
+        agent_id: &str,
+        annotation_id: &str,
+    ) -> Result<thread_graph::TranscriptAnnotation, String> {
+        let (agent, record) = {
+            let model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let agent = model
+                .agents
+                .get(agent_id)
+                .cloned()
+                .ok_or_else(|| format!("agent {agent_id} was not found"))?;
+            let thread_id = thread_graph::agent_thread_id(&agent);
+            let record = model
+                .threads
+                .get(&thread_id)
+                .cloned()
+                .ok_or_else(|| format!("thread {thread_id} was not found"))?;
+            (agent, record)
+        };
+        thread_graph::ThreadStore::new(record.storage_root).remove_annotation(&agent, annotation_id)
+    }
+
     pub fn list_research_trees(&self) -> Result<Vec<ResearchTreeSummary>, String> {
         self.list_research_trees_with_archived(false)
     }

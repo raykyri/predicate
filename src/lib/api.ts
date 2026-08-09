@@ -54,6 +54,7 @@ import type {
   SubmitAgentTurnMode,
   SubmitAgentTurnResult,
   TranscriptOption,
+  TranscriptAnnotation,
   ThreadGraph,
   Turn,
   WorktreeStatus,
@@ -438,6 +439,25 @@ export function listThreadGraphs() {
 
 export function getThreadGraph(threadId: string) {
   return invoke<ThreadGraph | null>("get_thread_graph", { threadId });
+}
+
+export function createTranscriptAnnotation(
+  agentId: string,
+  sourceTurnId: string,
+  text: string,
+) {
+  return invoke<TranscriptAnnotation>("create_transcript_annotation", {
+    agentId,
+    sourceTurnId,
+    text,
+  });
+}
+
+export function removeTranscriptAnnotation(agentId: string, annotationId: string) {
+  return invoke<TranscriptAnnotation>("remove_transcript_annotation", {
+    agentId,
+    annotationId,
+  });
 }
 
 export function listResearchTrees(includeArchived = false) {

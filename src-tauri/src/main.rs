@@ -1058,6 +1058,35 @@ async fn get_thread_graph(
 }
 
 #[tauri::command]
+async fn create_transcript_annotation(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    source_turn_id: String,
+    text: String,
+) -> Result<thread_graph::TranscriptAnnotation, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.create_transcript_annotation(&agent_id, &source_turn_id, text)
+    })
+    .await
+    .map_err(|err| format!("create_transcript_annotation task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn remove_transcript_annotation(
+    state: tauri::State<'_, AppState>,
+    agent_id: String,
+    annotation_id: String,
+) -> Result<thread_graph::TranscriptAnnotation, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.remove_transcript_annotation(&agent_id, &annotation_id)
+    })
+    .await
+    .map_err(|err| format!("remove_transcript_annotation task failed: {err}"))?
+}
+
+#[tauri::command]
 async fn list_research_trees(
     state: tauri::State<'_, AppState>,
     include_archived: Option<bool>,
@@ -3140,6 +3169,8 @@ fn main() {
             list_home_turn_history,
             list_thread_graphs,
             get_thread_graph,
+            create_transcript_annotation,
+            remove_transcript_annotation,
             list_research_trees,
             reorder_research_trees,
             list_research_folders,

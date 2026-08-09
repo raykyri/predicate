@@ -4,6 +4,7 @@ import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
   pendingGraphOverlayTurns,
+  threadGraphAnnotationsForTurns,
 } from "../src/lib/threadGraph";
 import { upsertThreadGraphs } from "../src/lib/appHelpers";
 import type { AgentInfo, ThreadGraph, Turn } from "../src/types";
@@ -101,6 +102,28 @@ test("live turns from a non-focused branch reject the overlay", () => {
   }
   const pending = overlay(graph, AGENT, [...turns, makeTurn(3)]);
   assert.equal(pending, null);
+});
+
+test("annotations follow visible sources, hide other branches, and retain deleted sources", () => {
+  const turns = makeTurns(3);
+  const graph = storedGraphFor(turns);
+  const sideBranchSource = makeTurn(100, "assistant");
+  const sideGraph = buildSingleAgentThreadGraph(
+    { ...AGENT, branchId: "branch-side" },
+    [sideBranchSource],
+  );
+  graph.branches["branch-side"] = sideGraph.branches["branch-side"];
+  Object.assign(graph.nodes, sideGraph.nodes);
+  graph.annotations = [
+    { id: "visible", sourceTurnId: turns[1].id, text: "visible", createdAt: 1 },
+    { id: "other-branch", sourceTurnId: sideBranchSource.id, text: "hidden", createdAt: 2 },
+    { id: "deleted", sourceTurnId: "deleted-source", text: "orphan", createdAt: 3 },
+  ];
+
+  assert.deepEqual(
+    threadGraphAnnotationsForTurns(graph, turns).map(({ id }) => id),
+    ["visible", "deleted"],
+  );
 });
 
 // The regression the overlay exists for: with a >200-turn history, an appended

@@ -3,7 +3,13 @@
 // derivation) is testable without rendering — TurnOverlay's import chain
 // reaches ESM-only markdown packages that the node test runner can't load.
 
-import type { MessageAnchor, ThreadParticipant, Turn, TurnBlock } from "../types";
+import type {
+  MessageAnchor,
+  ThreadParticipant,
+  TranscriptAnnotation,
+  Turn,
+  TurnBlock,
+} from "../types";
 import {
   stripTaggedInstructionBlocks,
   stripTaggedUserInstructionBlocks,
@@ -35,6 +41,12 @@ export interface MessageItem {
    * the optional end-of-assistant-group timestamp footer.
    */
   timestamp?: number | null;
+  /** Native/qmux turns whose text or activity was folded into this visible
+   * message. Saved excerpts use these ids to stay attached across card merges. */
+  sourceTurnIds: string[];
+  /** Source turn for each entry in `blocks`, kept separately because one
+   * visible assistant card can fold text from several native turns. */
+  blockSourceTurnIds: string[];
 }
 
 export interface ToolEntry {
@@ -291,6 +303,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
 
   const createMessageItem = (
     role: string,
+    sourceTurnId: string,
     block?: MessageBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
@@ -306,10 +319,19 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     status,
     anchor,
     timestamp: typeof timestamp === "number" ? timestamp : null,
+    sourceTurnIds: [sourceTurnId],
+    blockSourceTurnIds: block ? [sourceTurnId] : [],
   });
+
+  const addSourceTurn = (item: MessageItem, sourceTurnId: string) => {
+    if (item.sourceTurnIds[item.sourceTurnIds.length - 1] !== sourceTurnId) {
+      item.sourceTurnIds.push(sourceTurnId);
+    }
+  };
 
   const pushMessageBlock = (
     role: string,
+    sourceTurnId: string,
     block: MessageBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
@@ -326,13 +348,18 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       // Deliberately keeps the existing anchor: the card now spans several
       // turns, and a fork from it must branch before the earliest.
       previous.blocks.push(block);
+      previous.blockSourceTurnIds.push(sourceTurnId);
+      addSourceTurn(previous, sourceTurnId);
       applyTimestamp(previous, timestamp);
       return;
     }
-    items.push(createMessageItem(role, block, status, participant, anchor, timestamp));
+    items.push(
+      createMessageItem(role, sourceTurnId, block, status, participant, anchor, timestamp),
+    );
   };
 
   const assistantActivityOwner = (
+    sourceTurnId: string,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
@@ -351,12 +378,14 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
         items[index].status === status &&
         participantKey(items[index].participant) === participantKey(participant)
       ) {
+        addSourceTurn(items[index], sourceTurnId);
         applyTimestamp(items[index], timestamp);
         return items[index];
       }
     }
     const fallback = createMessageItem(
       "assistant",
+      sourceTurnId,
       undefined,
       status,
       participant,
@@ -368,12 +397,13 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
   };
 
   const pushThinkingValue = (
+    sourceTurnId: string,
     value: unknown,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
-    const owner = assistantActivityOwner(status, participant, timestamp);
+    const owner = assistantActivityOwner(sourceTurnId, status, participant, timestamp);
     const previousActivity = owner.activities[owner.activities.length - 1];
     if (previousActivity?.type === "thinking" && previousActivity.status === status) {
       previousActivity.values.push(value);
@@ -388,15 +418,17 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
   };
 
   const pushToolEntry = (
+    sourceTurnId: string,
     entry: ToolEntry,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
-    assistantActivityOwner(status, participant, timestamp).activities.push(entry);
+    assistantActivityOwner(sourceTurnId, status, participant, timestamp).activities.push(entry);
   };
 
   const registerToolUse = (
+    sourceTurnId: string,
     block: ToolUseBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
@@ -411,7 +443,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       isError: false,
       status,
     };
-    pushToolEntry(entry, status, participant, timestamp);
+    pushToolEntry(sourceTurnId, entry, status, participant, timestamp);
     queueFor(pendingByStatus, statusKey(status)).push(entry);
     if (entry.id) {
       queueFor(pendingById, entry.id).push(entry);
@@ -419,6 +451,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
   };
 
   const attachToolResult = (
+    sourceTurnId: string,
     block: ToolResultBlock,
     status?: TurnTimelineStatus,
     participant?: ThreadParticipant | null,
@@ -455,6 +488,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
 
     // A result with no pending call at all — surface it on its own row.
     pushToolEntry(
+      sourceTurnId,
       {
         type: "tool",
         key: nextKey("tool-result"),
@@ -483,25 +517,25 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       keyBase = `${turn.id}:${blockIndex}`;
       switch (block.type) {
         case "text":
-          pushMessageBlock(turn.role, block, status, participant, anchor, timestamp);
+          pushMessageBlock(turn.role, turn.id, block, status, participant, anchor, timestamp);
           break;
         case "toolUse":
           if (showActivityDetail) {
-            registerToolUse(block, status, participant, timestamp);
+            registerToolUse(turn.id, block, status, participant, timestamp);
           }
           break;
         case "toolResult":
           if (showActivityDetail) {
-            attachToolResult(block, status, participant, timestamp);
+            attachToolResult(turn.id, block, status, participant, timestamp);
           }
           break;
         case "raw":
           if (turn.role === "assistant") {
             if (showActivityDetail) {
-              pushThinkingValue(block.value, status, participant, timestamp);
+              pushThinkingValue(turn.id, block.value, status, participant, timestamp);
             }
           } else {
-            pushMessageBlock(turn.role, block, status, participant, anchor, timestamp);
+            pushMessageBlock(turn.role, turn.id, block, status, participant, anchor, timestamp);
           }
           break;
       }
@@ -631,11 +665,59 @@ export function sameMessageItem(a: MessageItem, b: MessageItem): boolean {
     a.role === b.role &&
     a.status === b.status &&
     a.timestamp === b.timestamp &&
+    a.sourceTurnIds.length === b.sourceTurnIds.length &&
+    a.sourceTurnIds.every((turnId, index) => turnId === b.sourceTurnIds[index]) &&
+    a.blockSourceTurnIds.length === b.blockSourceTurnIds.length &&
+    a.blockSourceTurnIds.every(
+      (turnId, index) => turnId === b.blockSourceTurnIds[index],
+    ) &&
     participantKey(a.participant) === participantKey(b.participant) &&
     sameMessageBlockList(a.blocks, b.blocks) &&
     a.activities.length === b.activities.length &&
     a.activities.every((activity, index) => sameActivityItem(activity, b.activities[index]))
   );
+}
+
+export interface TimelineAnnotations {
+  byItemKey: Map<string, TranscriptAnnotation[]>;
+  orphaned: TranscriptAnnotation[];
+}
+
+/** Places each saved excerpt after the visible message containing its source
+ * turn. The final matching item wins when presentation folding changes, and
+ * missing sources remain available for an explicit orphaned section. */
+export function annotationsForTimeline(
+  items: MessageItem[],
+  annotations: TranscriptAnnotation[],
+): TimelineAnnotations {
+  const itemKeyByTurnId = new Map<string, string>();
+  for (const item of items) {
+    if (item.role !== "assistant") {
+      continue;
+    }
+    for (const turnId of item.sourceTurnIds) {
+      itemKeyByTurnId.set(turnId, item.key);
+    }
+  }
+  const byItemKey = new Map<string, TranscriptAnnotation[]>();
+  const orphaned: TranscriptAnnotation[] = [];
+  const ordered = [...annotations].sort(
+    (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+  );
+  for (const annotation of ordered) {
+    const itemKey = itemKeyByTurnId.get(annotation.sourceTurnId);
+    if (!itemKey) {
+      orphaned.push(annotation);
+      continue;
+    }
+    const existing = byItemKey.get(itemKey);
+    if (existing) {
+      existing.push(annotation);
+    } else {
+      byItemKey.set(itemKey, [annotation]);
+    }
+  }
+  return { byItemKey, orphaned };
 }
 
 /**

@@ -514,6 +514,14 @@ export interface ThreadGraph {
   rootTurnIds: string[];
   branches: Record<string, ThreadBranch>;
   nodes: Record<string, ThreadNode>;
+  annotations?: TranscriptAnnotation[];
+}
+
+export interface TranscriptAnnotation {
+  id: string;
+  sourceTurnId: string;
+  text: string;
+  createdAt: number;
 }
 
 export interface ThreadBranch {
