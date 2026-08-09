@@ -222,7 +222,7 @@ import {
 } from "./lib/appShortcuts";
 import { requestComposerInsert } from "./lib/promptLibrary";
 import { nativeHumanBrowserOwnerIds } from "./lib/humanBrowserState";
-import { isArtifactBrowserOpen } from "./lib/artifacts";
+import { artifactTrayVisible, isArtifactBrowserOpen } from "./lib/artifacts";
 import { createTranscriptScrollCaptureSlot } from "./lib/transcriptScroll";
 import {
   addThreadGraphAnnotation,
@@ -13183,12 +13183,13 @@ function MainApp() {
     }));
   }
 
-  // The floating artifact tray for one right-pane cell: on by default whenever
-  // its workspace has artifacts, hidden by the header paperclip / titlebar ×.
-  function renderArtifactTray(surface: TurnPaneSurface) {
+  // The floating artifact tray for one right-pane cell. A single pane and the
+  // top visible split show it by default; lower splits require an explicit
+  // reopen so a split workspace does not repeat the same draggable card.
+  function renderArtifactTray(surface: TurnPaneSurface, defaultVisible = true) {
     const trayArtifacts = artifactsForGroup(surface.pane.groupId);
     const ui = artifactTrayUiByPane[surface.pane.id];
-    if (trayArtifacts.length === 0 || ui?.closed) {
+    if (!artifactTrayVisible(trayArtifacts.length > 0, ui?.closed, defaultVisible)) {
       return null;
     }
     return (
@@ -15670,7 +15671,7 @@ function MainApp() {
               ))
             : null}
           {!activeTranscriptVisibleExpanded && splitRightPaneMode && hasVisibleRightBar
-            ? visibleRightBarSurfaces.map((surface) => (
+            ? visibleRightBarSurfaces.map((surface, index) => (
                 <section
                   key={surface.pane.id}
                   className={`turn-pane turn-pane-split-cell${
@@ -15703,7 +15704,7 @@ function MainApp() {
                   {renderTurnPaneResizer()}
                   {renderTurnPaneSurface(surface, false)}
                   {renderBtwFloatingPanes(surface.pane.id)}
-                  {renderArtifactTray(surface)}
+                  {renderArtifactTray(surface, index === 0)}
                   {renderFloatingTurnPaneControls(surface, false)}
                 </section>
               ))
@@ -15742,7 +15743,7 @@ function MainApp() {
           gives every transcript an equal-width column. */}
       {activeTranscriptVisibleExpanded && splitRightPaneMode ? (
         <aside className="turn-pane is-expanded is-headerless-expanded is-split-expanded">
-          {visibleRightBarSurfaces.map((surface) => (
+          {visibleRightBarSurfaces.map((surface, index) => (
             <section
               key={surface.pane.id}
               className={`turn-pane-expanded-split-cell${
@@ -15768,7 +15769,7 @@ function MainApp() {
             >
               {renderTurnPaneSurface(surface, false)}
               {renderBtwFloatingPanes(surface.pane.id)}
-              {renderArtifactTray(surface)}
+              {renderArtifactTray(surface, index === 0)}
               {renderFloatingTurnPaneControls(surface, true)}
             </section>
           ))}

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   artifactKind,
   artifactName,
+  artifactTrayVisible,
   isArtifactBrowserOpen,
 } from "../src/lib/artifacts";
 import type { BrowserOverlayState } from "../src/appTypes";
@@ -52,4 +53,12 @@ test("an open browser toggles only for the artifact that owns its page", () => {
   assert.equal(isArtifactBrowserOpen(browser, "artifact-1"), true);
   assert.equal(isArtifactBrowserOpen(browser, "artifact-2"), false);
   assert.equal(isArtifactBrowserOpen({ ...browser, open: false }, "artifact-1"), false);
+});
+
+test("only the top split shows its artifact tray by default", () => {
+  assert.equal(artifactTrayVisible(true, undefined, true), true);
+  assert.equal(artifactTrayVisible(true, undefined, false), false);
+  assert.equal(artifactTrayVisible(true, false, false), true);
+  assert.equal(artifactTrayVisible(true, true, true), false);
+  assert.equal(artifactTrayVisible(false, false, true), false);
 });

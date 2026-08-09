@@ -17,6 +17,22 @@ const HTML_EXTENSIONS = new Set(["htm", "html"]);
 
 export type ArtifactKind = "url" | "image" | "html" | "file";
 
+/**
+ * A tray is normally open when its pane has artifacts. Split layouts can turn
+ * that default off for lower cells without overriding an explicit user reopen
+ * (`closed === false`).
+ */
+export function artifactTrayVisible(
+  hasArtifacts: boolean,
+  closed: boolean | undefined,
+  defaultVisible: boolean,
+): boolean {
+  if (!hasArtifacts || closed === true) {
+    return false;
+  }
+  return defaultVisible || closed === false;
+}
+
 export function isArtifactBrowserOpen(
   overlay: BrowserOverlayState | undefined,
   artifactId: string,
