@@ -42,6 +42,7 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Pencil,
+  PictureInPicture2,
   Plus,
   Settings,
   SquareChevronLeft,
@@ -103,6 +104,7 @@ import SidebarModeToggle from "./components/SidebarModeToggle";
 import TerminalPane from "./components/TerminalPane";
 import type { TerminalPaneHandle } from "./components/TerminalPane";
 import TerminalPip from "./components/TerminalPip";
+import { shouldShowTerminalPip, shouldShowTerminalPipToggle } from "./lib/terminalPip";
 import TurnOverlay, {
   formatTurnsTranscript,
   type TranscriptScrollPosition,
@@ -2668,6 +2670,11 @@ function MainApp() {
   const [splitTranscriptExpandedByPane, setSplitTranscriptExpandedByPane] = useState<
     Record<string, boolean>
   >({});
+  // PiP is opt-in per pane. Keeping the flag separate from transcript expansion
+  // lets a pane remember the choice across expand/restore and tab round trips.
+  const [terminalPipEnabledByPane, setTerminalPipEnabledByPane] = useState<
+    Record<string, boolean>
+  >({});
   const [rightBarCollapsed, setRightBarCollapsed] = useState(false);
   const [queueSplitByAgent, setQueueSplitByAgent] = useState<Record<string, boolean>>({});
   const [queueSplitHeightByAgent, setQueueSplitHeightByAgent] = useState<Record<string, number>>(
@@ -4164,6 +4171,12 @@ function MainApp() {
       );
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
+    setTerminalPipEnabledByPane((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([paneId]) => ids.has(paneId)),
+      );
+      return Object.keys(next).length === Object.keys(current).length ? current : next;
+    });
     for (const [agentId, pending] of pendingFirstTitleByAgentRef.current) {
       if (!ids.has(pending.paneId)) {
         pendingFirstTitleByAgentRef.current.delete(agentId);
@@ -4667,6 +4680,10 @@ function MainApp() {
     toggleTranscriptExpandedForPane(paneId);
   }
 
+  function toggleTerminalPipForPane(paneId: string) {
+    setTerminalPipEnabledByPane((current) => toggledPaneRecord(current, paneId));
+  }
+
   function expandNewAgentTranscriptByDefault(pane: PaneInfo) {
     if (settingsRef.current.codeMode || pane.kind !== "agent") {
       return;
@@ -4973,6 +4990,20 @@ function MainApp() {
     ? splitTranscriptExpanded && splitTurnPaneSurfaces.length > 0
     : Boolean(activePane && activePaneHasTurnSidebar && transcriptExpandedByPane[activePane.id]);
   const activeTranscriptVisibleExpanded = activeTranscriptExpanded && !rightBarCollapsed;
+  const terminalPipToggleVisible = shouldShowTerminalPipToggle({
+    transcriptExpanded: activeTranscriptExpanded,
+    rightPaneCollapsed: rightBarCollapsed,
+    nativeTerminalAvailable: IS_MAC,
+  });
+  const activeTerminalPipVisible = Boolean(
+    activePane &&
+      shouldShowTerminalPip({
+        transcriptExpanded: activeTranscriptExpanded,
+        toggledOn: Boolean(terminalPipEnabledByPane[activePane.id]),
+        rightPaneCollapsed: rightBarCollapsed,
+        nativeTerminalAvailable: IS_MAC,
+      }),
+  );
   const activePaneHasTurnPaneHeader =
     activePaneHasTurnSidebar && !splitRightPaneMode && !rightBarCollapsed;
   const activePaneReservesTurnPaneWidth = Boolean(
@@ -12625,6 +12656,33 @@ function MainApp() {
       leftSidebarRestore.paneId === surface.pane.id;
     return (
       <div className="turn-pane-floating-controls">
+        {terminalPipToggleVisible ? (
+          <button
+            type="button"
+            className={`control-button turn-pane-header-button${
+              terminalPipEnabledByPane[surface.pane.id] ? " is-active" : ""
+            }`}
+            title={
+              terminalPipEnabledByPane[surface.pane.id]
+                ? "Hide terminal preview"
+                : "Show terminal preview"
+            }
+            aria-label={
+              terminalPipEnabledByPane[surface.pane.id]
+                ? "Hide terminal picture in picture"
+                : "Show terminal picture in picture"
+            }
+            aria-pressed={Boolean(terminalPipEnabledByPane[surface.pane.id])}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              activateTerminalPane(surface.pane.id);
+              toggleTerminalPipForPane(surface.pane.id);
+            }}
+          >
+            <PictureInPicture2 size={14} aria-hidden="true" />
+          </button>
+        ) : null}
         <button
           type="button"
           className={`control-button turn-pane-header-button turn-pane-floating-expand-button${
@@ -12842,6 +12900,9 @@ function MainApp() {
                 })
               }
               transcriptExpanded={activeTranscriptExpanded}
+              showTerminalPipToggle={terminalPipToggleVisible}
+              terminalPipEnabled={Boolean(terminalPipEnabledByPane[surface.pane.id])}
+              onToggleTerminalPip={() => toggleTerminalPipForPane(surface.pane.id)}
               transcriptShortcutLabel={EXPAND_TOGGLE_SHORTCUT_LABEL}
               onToggleTranscriptExpanded={toggleActiveTranscriptExpanded}
               onCollapseRightBar={() =>
@@ -15637,7 +15698,7 @@ function MainApp() {
       {/* Text-mode terminal mini-map while the transcript covers the stage:
           polls Ghostty viewport text and paints it at the pane's grid shape.
           Click restores. */}
-      {activeTranscriptVisibleExpanded && activePane && IS_MAC ? (
+      {activeTerminalPipVisible && activePane ? (
         <TerminalPip
           paneId={activePane.id}
           title={displayPaneTitle(activePane, agentByPaneId.get(activePane.id))}

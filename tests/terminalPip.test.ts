@@ -3,9 +3,37 @@ import test from "node:test";
 import {
   fitTerminalPipFontSize,
   formatTerminalPipText,
+  shouldShowTerminalPip,
+  shouldShowTerminalPipToggle,
   TERMINAL_PIP_MAX_FONT_SIZE,
   TERMINAL_PIP_MIN_FONT_SIZE,
 } from "../src/lib/terminalPip";
+
+test("terminal PiP toggle is only offered for an expanded right pane", () => {
+  const visible = {
+    transcriptExpanded: true,
+    rightPaneCollapsed: false,
+    nativeTerminalAvailable: true,
+  };
+  assert.equal(shouldShowTerminalPipToggle(visible), true);
+  assert.equal(shouldShowTerminalPipToggle({ ...visible, transcriptExpanded: false }), false);
+  assert.equal(shouldShowTerminalPipToggle({ ...visible, rightPaneCollapsed: true }), false);
+  assert.equal(shouldShowTerminalPipToggle({ ...visible, nativeTerminalAvailable: false }), false);
+});
+
+test("terminal PiP is opt-in for an open expanded transcript", () => {
+  const visible = {
+    transcriptExpanded: true,
+    toggledOn: true,
+    rightPaneCollapsed: false,
+    nativeTerminalAvailable: true,
+  };
+  assert.equal(shouldShowTerminalPip(visible), true);
+  assert.equal(shouldShowTerminalPip({ ...visible, toggledOn: false }), false);
+  assert.equal(shouldShowTerminalPip({ ...visible, transcriptExpanded: false }), false);
+  assert.equal(shouldShowTerminalPip({ ...visible, rightPaneCollapsed: true }), false);
+  assert.equal(shouldShowTerminalPip({ ...visible, nativeTerminalAvailable: false }), false);
+});
 
 test("formatTerminalPipText preserves trailing blank rows for the grid shape", () => {
   assert.equal(formatTerminalPipText("hello\nworld\n\n\n"), "hello\nworld\n\n\n");

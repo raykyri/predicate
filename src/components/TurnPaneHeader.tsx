@@ -5,6 +5,7 @@ import {
   PanelLeftOpen,
   PanelRightClose,
   Paperclip,
+  PictureInPicture2,
   SquareCenterlineDashedVertical,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -49,6 +50,9 @@ interface TurnPaneHeaderProps {
   artifactTrayOpen?: boolean;
   onToggleArtifactTray?: () => void;
   transcriptExpanded: boolean;
+  showTerminalPipToggle: boolean;
+  terminalPipEnabled: boolean;
+  onToggleTerminalPip: () => void;
   transcriptShortcutLabel: string;
   onToggleTranscriptExpanded: () => void;
   onCollapseRightBar: () => void;
@@ -85,6 +89,9 @@ export default function TurnPaneHeader({
   artifactTrayOpen = false,
   onToggleArtifactTray,
   transcriptExpanded,
+  showTerminalPipToggle,
+  terminalPipEnabled,
+  onToggleTerminalPip,
   transcriptShortcutLabel,
   onToggleTranscriptExpanded,
   onCollapseRightBar,
@@ -359,6 +366,24 @@ export default function TurnPaneHeader({
           >
             <Paperclip size={14} aria-hidden="true" />
             <span className="artifact-tray-badge">{artifactCount}</span>
+          </button>
+        ) : null}
+        {showTerminalPipToggle ? (
+          <button
+            type="button"
+            className={`control-button turn-pane-header-button${
+              terminalPipEnabled ? " is-active" : ""
+            }`}
+            title={terminalPipEnabled ? "Hide terminal preview" : "Show terminal preview"}
+            aria-label={
+              terminalPipEnabled
+                ? "Hide terminal picture in picture"
+                : "Show terminal picture in picture"
+            }
+            aria-pressed={terminalPipEnabled}
+            onClick={onToggleTerminalPip}
+          >
+            <PictureInPicture2 size={14} aria-hidden="true" />
           </button>
         ) : null}
         <button

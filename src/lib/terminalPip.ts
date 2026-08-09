@@ -8,6 +8,41 @@ export function formatTerminalPipText(raw: string): string {
   return raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+export interface TerminalPipVisibility {
+  transcriptExpanded: boolean;
+  toggledOn: boolean;
+  rightPaneCollapsed: boolean;
+  nativeTerminalAvailable: boolean;
+}
+
+export type TerminalPipToggleVisibility = Omit<TerminalPipVisibility, "toggledOn">;
+
+/** The PiP affordance only makes sense once the transcript owns the stage. */
+export function shouldShowTerminalPipToggle({
+  transcriptExpanded,
+  rightPaneCollapsed,
+  nativeTerminalAvailable,
+}: TerminalPipToggleVisibility): boolean {
+  return transcriptExpanded && !rightPaneCollapsed && nativeTerminalAvailable;
+}
+
+/** PiP is opt-in and can only occupy an open, expanded transcript stage. */
+export function shouldShowTerminalPip({
+  transcriptExpanded,
+  toggledOn,
+  rightPaneCollapsed,
+  nativeTerminalAvailable,
+}: TerminalPipVisibility): boolean {
+  return (
+    toggledOn &&
+    shouldShowTerminalPipToggle({
+      transcriptExpanded,
+      rightPaneCollapsed,
+      nativeTerminalAvailable,
+    })
+  );
+}
+
 /** Smallest mini-map font; below this the card clips rather than shrink further. */
 export const TERMINAL_PIP_MIN_FONT_SIZE = 3.5;
 /** Never let a narrow grid blow the preview up past a comfortable read. */
