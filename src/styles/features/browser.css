@@ -28,6 +28,15 @@
   max-width: calc(100% - var(--browser-overlay-left, 64px) - 20px);
 }
 
+/* Full-width browser mode covers the sidebar, terminal, and turn pane while
+   preserving the regular overlay width for restore. */
+.app-shell .browser-overlay.is-full-width {
+  left: 20px;
+  right: 20px;
+  width: auto;
+  max-width: none;
+}
+
 /* Navigation bar across the top; close sits on the left and engine selection on the right. */
 .browser-overlay-nav {
   flex: 0 0 auto;

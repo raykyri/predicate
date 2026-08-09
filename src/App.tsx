@@ -374,6 +374,7 @@ import {
   artifactRestore,
   artifactReveal,
   attachPane,
+  browserOpenPreviewExternal,
   claimNativeTerminalPointerForWebDrag,
   clearAgentWorkingStatus,
   closeWorktreePane,
@@ -4415,6 +4416,7 @@ function MainApp() {
           sandbox: effectiveSandbox,
           mode: effectiveSandbox ? "webkit" : (current[paneId]?.mode ?? "webkit"),
           size: current[paneId]?.size ?? null,
+          fullWidth: current[paneId]?.fullWidth ?? false,
         },
       }));
     },
@@ -4467,6 +4469,7 @@ function MainApp() {
           sandbox: prev?.sandbox ?? false,
           mode: prev?.mode ?? "webkit",
           size: prev?.size ?? null,
+          fullWidth: prev?.fullWidth ?? false,
         },
       };
     });
@@ -4498,6 +4501,16 @@ function MainApp() {
         return current;
       }
       return { ...current, [paneId]: { ...prev, size } };
+    });
+  }
+
+  function setBrowserOverlayFullWidth(paneId: string, fullWidth: boolean) {
+    setBrowserOverlayByPane((current) => {
+      const prev = current[paneId];
+      if (!prev) {
+        return current;
+      }
+      return { ...current, [paneId]: { ...prev, fullWidth } };
     });
   }
 
@@ -15732,6 +15745,7 @@ function MainApp() {
           mode={activeBrowserOverlay.mode}
           bodyFontId={settings.bodyFontId}
           size={activeBrowserOverlay.size}
+          fullWidth={activeBrowserOverlay.fullWidth ?? false}
           toggleShortcutLabel={activePaneHasTurnPaneHeader ? null : EXPAND_TOGGLE_SHORTCUT_LABEL}
           occluded={nativeBrowserOccluded}
           geometryRevision={nativeBrowserGeometryRevision}
@@ -15739,20 +15753,25 @@ function MainApp() {
           onLocationChange={(url) => setHumanBrowserLocation(activeBrowserOwnerId, url)}
           onRefresh={refreshActiveBrowserOverlay}
           onOpenExternal={(currentUrl) => {
-            // Never leak a token-bearing file-server URL to the OS browser (the button is
-            // also disabled for these, and the backend refuses them as the real boundary).
-            if (
-              currentUrl &&
-              !isFileServerUrl(currentUrl, configRef.current?.fileServerPort ?? null)
-            ) {
-              void openExternalUrl(currentUrl);
+            if (!currentUrl) {
+              return;
             }
+            if (isFileServerUrl(currentUrl, configRef.current?.fileServerPort ?? null)) {
+              void browserOpenPreviewExternal(currentUrl).catch((err) => {
+                setError(err instanceof Error ? err.message : String(err));
+              });
+              return;
+            }
+            void openExternalUrl(currentUrl);
           }}
           onClose={toggleActiveBrowserOverlay}
           onModeChange={(mode, currentUrl) =>
             setBrowserOverlayMode(activeBrowserOwnerId, mode, currentUrl)
           }
           onResize={(size) => setBrowserOverlaySize(activeBrowserOwnerId, size)}
+          onFullWidthChange={(fullWidth) =>
+            setBrowserOverlayFullWidth(activeBrowserOwnerId, fullWidth)
+          }
         />
       ) : null}
       {linkMenu ? (

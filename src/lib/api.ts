@@ -833,6 +833,11 @@ export function openExternalUrl(url: string) {
   return invoke<void>("open_external_url", { url });
 }
 
+/** Opens the source file behind a protected qmux preview as a validated file:// URL. */
+export function browserOpenPreviewExternal(url: string) {
+  return invoke<void>("browser_open_preview_external", { url });
+}
+
 /** Open an absolute local file path in the pane's browser overlay (sandboxed). */
 export function browserOpenLocalPath(paneId: string, path: string, artifactId?: string) {
   return invoke<{ url: string; sandbox: boolean }>("browser_open_local_path", {

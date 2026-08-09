@@ -1,4 +1,4 @@
-import { Bot, ExternalLink, Globe, RotateCw, X } from "lucide-react";
+import { Bot, Expand, ExternalLink, Globe, Minimize2, RotateCw, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
@@ -96,6 +96,7 @@ interface BrowserOverlayProps {
   // localhost pages remain untouched.
   bodyFontId: string;
   size?: BrowserOverlaySize | null;
+  fullWidth: boolean;
   toggleShortcutLabel?: string | null;
   // A native child cannot be covered by DOM stacking. Hide it while an app
   // modal/menu is above this overlay, then restore it to the measured slot.
@@ -109,7 +110,7 @@ interface BrowserOverlayProps {
   onLocationChange: (url: string) => void;
   // Reload the current page.
   onRefresh: () => void;
-  // Open the current page in the system's default external browser.
+  // Open the current page, or a protected preview's source file, externally.
   onOpenExternal: (currentUrl?: string) => void;
   // Close the overlay.
   onClose: () => void;
@@ -117,6 +118,8 @@ interface BrowserOverlayProps {
   onModeChange: (mode: BrowserOverlayMode, currentUrl?: string | null) => void;
   // Persist a user-resized overlay size in the app's per-pane React state.
   onResize: (size: BrowserOverlaySize) => void;
+  // Expand across the transcript pane, or restore the browser's saved width.
+  onFullWidthChange: (fullWidth: boolean) => void;
 }
 
 export default function BrowserOverlay({
@@ -127,6 +130,7 @@ export default function BrowserOverlay({
   mode,
   bodyFontId,
   size,
+  fullWidth,
   toggleShortcutLabel,
   occluded,
   geometryRevision,
@@ -137,6 +141,7 @@ export default function BrowserOverlay({
   onClose,
   onModeChange,
   onResize,
+  onFullWidthChange,
 }: BrowserOverlayProps) {
   // Editable copy of the address, re-synced whenever the loaded URL changes so the
   // bar tracks navigation without clobbering what the user is mid-typing.
@@ -715,7 +720,10 @@ export default function BrowserOverlay({
   }
 
   const overlayStyle: CSSProperties | undefined = size
-    ? { width: `${size.width}px`, height: `${size.height}px` }
+    ? {
+        ...(fullWidth ? {} : { width: `${size.width}px` }),
+        height: `${size.height}px`,
+      }
     : undefined;
   const closeTitle = toggleShortcutLabel
     ? `Hide browser (Esc, ${toggleShortcutLabel})`
@@ -812,7 +820,7 @@ export default function BrowserOverlay({
   return (
     <div
       ref={overlayRef}
-      className={`browser-overlay${url ? "" : " is-empty"}${resizing ? " is-resizing" : ""}`}
+      className={`browser-overlay${url ? "" : " is-empty"}${fullWidth ? " is-full-width" : ""}${resizing ? " is-resizing" : ""}`}
       style={overlayStyle}
       role="region"
       aria-label="Browser overlay"
@@ -827,13 +835,15 @@ export default function BrowserOverlay({
         >
           <X size={14} aria-hidden="true" />
         </button>
-        <div
-          className="browser-overlay-resize-handle"
-          role="separator"
-          aria-label="Resize browser overlay"
-          title="Resize browser overlay"
-          onPointerDown={startResize}
-        />
+        {fullWidth ? null : (
+          <div
+            className="browser-overlay-resize-handle"
+            role="separator"
+            aria-label="Resize browser overlay"
+            title="Resize browser overlay"
+            onPointerDown={startResize}
+          />
+        )}
         <form
           className="browser-overlay-nav-form"
           onSubmit={(event) => {
@@ -865,6 +875,20 @@ export default function BrowserOverlay({
         <div className="browser-overlay-nav-controls">
           <button
             type="button"
+            className={`icon-button browser-overlay-button${fullWidth ? " is-active" : ""}`}
+            title={fullWidth ? "Restore browser width" : "Expand browser to full width"}
+            aria-label={fullWidth ? "Restore browser width" : "Expand browser to full width"}
+            aria-pressed={fullWidth}
+            onClick={() => onFullWidthChange(!fullWidth)}
+          >
+            {fullWidth ? (
+              <Minimize2 size={14} aria-hidden="true" />
+            ) : (
+              <Expand size={14} aria-hidden="true" />
+            )}
+          </button>
+          <button
+            type="button"
             className="icon-button browser-overlay-button"
             title="Refresh browser"
             aria-label="Refresh browser"
@@ -881,17 +905,10 @@ export default function BrowserOverlay({
           <button
             type="button"
             className="icon-button browser-overlay-button"
-            title={
-              sandbox
-                ? "Can't open file content externally (would leak the access token)"
-                : "Open in external browser"
-            }
-            aria-label="Open in external browser"
+            title={sandbox ? "Open source file externally" : "Open in external browser"}
+            aria-label={sandbox ? "Open source file externally" : "Open in external browser"}
             onClick={() => onOpenExternal(displayedUrl ?? undefined)}
-            // File-server content carries a capability token in its URL; opening it in the
-            // OS browser would leak that token. The backend refuses it too, but disable the
-            // affordance so the action isn't offered in the first place.
-            disabled={!displayedUrl || sandbox}
+            disabled={!displayedUrl}
           >
             <ExternalLink size={14} aria-hidden="true" />
           </button>

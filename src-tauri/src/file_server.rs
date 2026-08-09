@@ -133,6 +133,34 @@ pub fn resolve_exact_file(requested: &Path, granted: &[PathBuf]) -> Option<PathB
         .then_some(canonical)
 }
 
+/// Resolves the encoded path portion of a token-bearing preview URL back to the
+/// canonical source file it is currently authorized to serve. External-open
+/// commands use this instead of handing the capability-bearing localhost URL to
+/// another application.
+pub fn resolve_tokenized_file_path(
+    state: &AppState,
+    encoded_url_path: &str,
+) -> Result<PathBuf, String> {
+    let after_root = encoded_url_path
+        .strip_prefix('/')
+        .ok_or_else(|| "invalid qmux preview URL".to_string())?;
+    let slash = after_root
+        .find('/')
+        .ok_or_else(|| "invalid qmux preview URL".to_string())?;
+    let (token, encoded_path) = after_root.split_at(slash);
+    let pane_id = state
+        .pane_for_file_token(token)
+        .ok_or_else(|| "qmux preview URL is no longer authorized".to_string())?;
+    let decoded = percent_decode(encoded_path)
+        .ok_or_else(|| "invalid path encoding in qmux preview URL".to_string())?;
+    let requested = Path::new(&decoded);
+    let roots = state.pane_file_roots(&pane_id);
+    let grants = state.pane_file_preview_grants(&pane_id);
+    resolve_under_roots(requested, &roots)
+        .or_else(|| resolve_exact_file(requested, &grants))
+        .ok_or_else(|| "qmux preview file is no longer authorized".to_string())
+}
+
 fn valid_codex_inline_vis_filename(file: &str) -> bool {
     let Some(stem) = file.strip_suffix(".html") else {
         return false;
@@ -1438,6 +1466,44 @@ mod tests {
 
         let (status, _) = http_get(info.port, &url_path(info.port, &token, &sibling), None);
         assert!(status.contains("403"), "status: {status}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tokenized_url_paths_resolve_only_authorized_source_files() {
+        let base = non_temp_test_dir("external-source");
+        let root = base.join("ws");
+        let outside = base.join("outside");
+        let granted_dir = base.join("private-visuals");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&granted_dir).unwrap();
+        let report = root.join("report with spaces.html");
+        let secret = outside.join("secret.html");
+        let granted = granted_dir.join("visual.html");
+        std::fs::write(&report, "report").unwrap();
+        std::fs::write(&secret, "secret").unwrap();
+        std::fs::write(&granted, "visual").unwrap();
+
+        let state = test_state(&root, &base, "pane-external");
+        let token = state.pane_file_token("pane-external").unwrap();
+        let report = std::fs::canonicalize(report).unwrap();
+        let secret = std::fs::canonicalize(secret).unwrap();
+        let granted = state
+            .grant_pane_file_preview("pane-external", &granted)
+            .unwrap();
+
+        assert_eq!(
+            resolve_tokenized_file_path(&state, &url_path(8123, &token, &report)).unwrap(),
+            report
+        );
+        assert_eq!(
+            resolve_tokenized_file_path(&state, &url_path(8123, &token, &granted)).unwrap(),
+            granted
+        );
+        assert!(resolve_tokenized_file_path(&state, &url_path(8123, &token, &secret)).is_err());
+        assert!(resolve_tokenized_file_path(&state, &url_path(8123, "unknown", &report)).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
     }

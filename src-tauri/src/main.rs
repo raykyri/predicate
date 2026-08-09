@@ -65,7 +65,7 @@ use state::{
     AppState, ArtifactInfo, PaneInfo, PaneLayoutEntry, PaneSplitInfo, QueuedTurn,
     RecentSessionInfo, ShellAgentJobInfo,
 };
-use tauri::Manager;
+use tauri::{Manager, Url};
 use transcript::{
     TranscriptOption, Turn, list_agent_transcripts as list_agent_transcript_options,
     set_agent_transcript as repoint_agent_transcript,
@@ -582,6 +582,37 @@ fn open_external_url(state: tauri::State<'_, AppState>, url: String) -> Result<(
         );
     }
     open_in_os_browser(&url)
+}
+
+fn validated_preview_url(url: &str, file_server_port: u16) -> Result<Url, String> {
+    let parsed = Url::parse(url).map_err(|err| format!("invalid qmux preview URL: {err}"))?;
+    if parsed.scheme() != "http"
+        || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+        || parsed.port_or_known_default() != Some(file_server_port)
+    {
+        return Err("refusing to resolve a URL outside the qmux file server".to_string());
+    }
+    Ok(parsed)
+}
+
+/// Opens the source file behind a protected qmux preview without disclosing the
+/// preview capability to the external application. The URL is validated against
+/// the live file-server port and resolved through the same pane roots/exact grants
+/// enforced by the server before it becomes a file:// URL.
+#[tauri::command(async)]
+fn browser_open_preview_external(
+    state: tauri::State<'_, AppState>,
+    url: String,
+) -> Result<(), String> {
+    let port = state
+        .file_server_port()
+        .ok_or_else(|| "the file server is not running".to_string())?;
+    let parsed = validated_preview_url(&url, port)?;
+    let source = file_server::resolve_tokenized_file_path(&state, parsed.path())?;
+    let mut file_url = Url::from_file_path(&source)
+        .map_err(|_| format!("failed to build a file URL for {}", source.display()))?;
+    file_url.set_fragment(parsed.fragment());
+    open_in_os_browser(file_url.as_str())
 }
 
 /// Mint a token-scoped file-server URL for an absolute local path under the
@@ -3079,6 +3110,7 @@ fn main() {
             human_browser::human_browser_snapshot,
             human_browser::human_browser_reload,
             open_external_url,
+            browser_open_preview_external,
             browser_open_local_path,
             browser_open_codex_inline_visualization,
             artifact_list,
@@ -3292,5 +3324,23 @@ mod interface_health_tests {
         assert!(tracker.claim_reload(generation));
         assert!(!tracker.claim_reload(generation));
         assert!(!tracker.claim_unanswered_reload(generation));
+    }
+}
+
+#[cfg(test)]
+mod browser_preview_url_tests {
+    use super::validated_preview_url;
+
+    #[test]
+    fn accepts_only_the_live_loopback_file_server_origin() {
+        let preview = "http://127.0.0.1:8123/token/path/report.html#result";
+        let parsed = validated_preview_url(preview, 8123).unwrap();
+        assert_eq!(parsed.path(), "/token/path/report.html");
+        assert_eq!(parsed.fragment(), Some("result"));
+
+        assert!(validated_preview_url("http://localhost:8123/token/file", 8123).is_ok());
+        assert!(validated_preview_url("http://localhost:5173/", 8123).is_err());
+        assert!(validated_preview_url("https://localhost:8123/token/file", 8123).is_err());
+        assert!(validated_preview_url("http://example.com:8123/token/file", 8123).is_err());
     }
 }
