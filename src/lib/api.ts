@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { PaneLayoutItem } from "./paneTree";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
+import { HumanBrowserLifecycleQueue } from "./humanBrowserLifecycleQueue";
 import type {
   PublicationBinding,
   PublicationProposal,
@@ -909,27 +910,32 @@ export type HumanBrowserSync = {
 // per owner so another pane's update cannot accidentally suppress a destroy.
 let humanBrowserSurfaceRevision = 0;
 let humanBrowserGeneration: Promise<number> | null = null;
+const humanBrowserLifecycleQueue = new HumanBrowserLifecycleQueue();
 
 function getHumanBrowserGeneration() {
   humanBrowserGeneration ??= invoke<number>("human_browser_generation");
   return humanBrowserGeneration;
 }
 
-export async function syncHumanBrowser(request: HumanBrowserSync) {
-  humanBrowserSurfaceRevision += 1;
-  const revision = humanBrowserSurfaceRevision;
-  const generation = await getHumanBrowserGeneration();
-  return invoke<HumanBrowserSnapshot | null>("human_browser_sync", {
-    request: { ...request, generation, revision },
+export function syncHumanBrowser(request: HumanBrowserSync) {
+  return humanBrowserLifecycleQueue.enqueue(async () => {
+    humanBrowserSurfaceRevision += 1;
+    const revision = humanBrowserSurfaceRevision;
+    const generation = await getHumanBrowserGeneration();
+    return invoke<HumanBrowserSnapshot | null>("human_browser_sync", {
+      request: { ...request, generation, revision },
+    });
   });
 }
 
-export async function destroyHumanBrowser(ownerId: string) {
-  humanBrowserSurfaceRevision += 1;
-  const revision = humanBrowserSurfaceRevision;
-  const generation = await getHumanBrowserGeneration();
-  return invoke<void>("human_browser_destroy", {
-    request: { ownerId, generation, revision },
+export function destroyHumanBrowser(ownerId: string) {
+  return humanBrowserLifecycleQueue.enqueue(async () => {
+    humanBrowserSurfaceRevision += 1;
+    const revision = humanBrowserSurfaceRevision;
+    const generation = await getHumanBrowserGeneration();
+    return invoke<void>("human_browser_destroy", {
+      request: { ownerId, generation, revision },
+    });
   });
 }
 
@@ -940,10 +946,12 @@ export async function getHumanBrowserSnapshot(ownerId: string) {
   });
 }
 
-export async function reloadHumanBrowser(ownerId: string) {
-  const generation = await getHumanBrowserGeneration();
-  return invoke<void>("human_browser_reload", {
-    request: { ownerId, generation },
+export function reloadHumanBrowser(ownerId: string) {
+  return humanBrowserLifecycleQueue.enqueue(async () => {
+    const generation = await getHumanBrowserGeneration();
+    return invoke<void>("human_browser_reload", {
+      request: { ownerId, generation },
+    });
   });
 }
 

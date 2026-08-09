@@ -10,7 +10,7 @@ use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, State, Url,
@@ -141,6 +141,31 @@ impl HumanBrowserInner {
 #[derive(Default)]
 pub struct HumanBrowserManager {
     inner: Mutex<HumanBrowserInner>,
+    /// Native child-view transitions must never overlap. In particular,
+    /// `add_child` temporarily yields to AppKit/WebKit while the state mutex is
+    /// intentionally unlocked, so the mutex alone cannot serialize creation.
+    lifecycle_busy: AtomicBool,
+}
+
+struct HumanBrowserLifecyclePermit<'a> {
+    busy: &'a AtomicBool,
+}
+
+impl Drop for HumanBrowserLifecyclePermit<'_> {
+    fn drop(&mut self) {
+        self.busy.store(false, Ordering::Release);
+    }
+}
+
+impl HumanBrowserManager {
+    fn try_begin_lifecycle(&self) -> Result<HumanBrowserLifecyclePermit<'_>, String> {
+        self.lifecycle_busy
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map(|_| HumanBrowserLifecyclePermit {
+                busy: &self.lifecycle_busy,
+            })
+            .map_err(|_| "human browser lifecycle is busy; retry the request".to_string())
+    }
 }
 
 fn emit_event(app: &AppHandle, event: HumanBrowserEvent) {
@@ -337,6 +362,7 @@ pub async fn human_browser_sync(
     validate_owner_id(&request.owner_id)?;
     let bounds = validated_bounds(&request)?;
     let url = validated_human_url(&app, &state, &request.url)?;
+    let _lifecycle = manager.try_begin_lifecycle()?;
     // Tauri requires an async command when WebView2 may create a child webview;
     // a synchronous IPC handler can deadlock while add_child dispatches to the
     // Windows UI thread. The mutex is used only to prepare/commit state; no
@@ -484,6 +510,7 @@ pub fn human_browser_destroy(
     manager: State<'_, HumanBrowserManager>,
 ) -> Result<(), String> {
     validate_owner_id(&request.owner_id)?;
+    let _lifecycle = manager.try_begin_lifecycle()?;
     let mut inner = manager
         .inner
         .lock()
@@ -543,6 +570,7 @@ pub fn human_browser_reload(
     manager: State<'_, HumanBrowserManager>,
 ) -> Result<(), String> {
     validate_owner_id(&request.owner_id)?;
+    let _lifecycle = manager.try_begin_lifecycle()?;
     let view = {
         let inner = manager
             .inner
@@ -656,5 +684,14 @@ mod tests {
         assert!(!inner.accept_surface_request("pane-a", 1, 2));
         assert!(!inner.accept_destroy_request("pane-a", 1, 3));
         assert!(inner.accept_surface_request("pane-a", 2, 1));
+    }
+
+    #[test]
+    fn lifecycle_permit_rejects_overlap_and_recovers_after_drop() {
+        let manager = HumanBrowserManager::default();
+        let first = manager.try_begin_lifecycle().unwrap();
+        assert!(manager.try_begin_lifecycle().is_err());
+        drop(first);
+        assert!(manager.try_begin_lifecycle().is_ok());
     }
 }

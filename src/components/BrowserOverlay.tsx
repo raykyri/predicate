@@ -196,14 +196,21 @@ export default function BrowserOverlay({
     let locationPollSuppressedUntil = 0;
     let syncSequence = 0;
     let lastSyncedUrl = url;
+    let syncInFlight = false;
+    let syncPending = false;
 
     const syncSlot = async () => {
       frame = null;
-      const body = bodyRef.current;
-      const currentUrl = humanBrowserUrlRef.current;
-      if (cancelled || !body || !currentUrl) {
+      if (cancelled || syncInFlight || !syncPending) {
         return;
       }
+      syncPending = false;
+      const body = bodyRef.current;
+      const currentUrl = humanBrowserUrlRef.current;
+      if (!body || !currentUrl) {
+        return;
+      }
+      syncInFlight = true;
       const rect = body.getBoundingClientRect();
       const sequence = ++syncSequence;
       const navigationRevision = humanBrowserNavigationRevisionRef.current;
@@ -231,11 +238,17 @@ export default function BrowserOverlay({
         if (!cancelled && sequence === syncSequence) {
           setHumanBrowserError(error instanceof Error ? error.message : String(error));
         }
+      } finally {
+        syncInFlight = false;
+        if (!cancelled && syncPending) {
+          scheduleSync();
+        }
       }
     };
 
     const scheduleSync = () => {
-      if (frame === null) {
+      syncPending = true;
+      if (!syncInFlight && frame === null) {
         frame = requestAnimationFrame(() => void syncSlot());
       }
     };
@@ -313,6 +326,7 @@ export default function BrowserOverlay({
     scheduleSync();
     return () => {
       cancelled = true;
+      syncPending = false;
       syncHumanBrowserSlotRef.current = () => undefined;
       if (frame !== null) {
         cancelAnimationFrame(frame);
