@@ -282,7 +282,12 @@ import {
   setPaneSplitFlagEnabled,
   splitFractions,
 } from "./lib/paneSplits";
-import { leftSidebarRestorePlacement } from "./lib/sidebarControls";
+import {
+  activeSidebarScrollRegion,
+  leftSidebarRestorePlacement,
+  sidebarScrollRegionsForMode,
+  type SidebarScrollRegion,
+} from "./lib/sidebarControls";
 import {
   TERMINAL_FONT_SIZE,
   TERMINAL_FONT_SIZE_MAX,
@@ -1495,6 +1500,37 @@ interface HomeTurnHistoryState {
 function MainApp() {
   const appRef = useRef<HTMLElement | null>(null);
   const paneListRef = useRef<HTMLElement | null>(null);
+  const sidebarScrollTopByRegionRef = useRef<Record<SidebarScrollRegion, number>>({
+    terminal: 0,
+    research: 0,
+    researchTerminals: 0,
+  });
+  const sidebarScrollElement = useCallback((region: SidebarScrollRegion) => {
+    const paneList = paneListRef.current;
+    if (!paneList) {
+      return null;
+    }
+    if (region === "research") {
+      return paneList.querySelector<HTMLElement>(".research-sidebar-section");
+    }
+    if (region === "researchTerminals") {
+      return paneList.querySelector<HTMLElement>(
+        ".research-live-terminals .pane-list-body",
+      );
+    }
+    return paneList;
+  }, []);
+  const captureSidebarScroll = useCallback(
+    (mode: SidebarMode) => {
+      for (const region of sidebarScrollRegionsForMode(mode)) {
+        const element = sidebarScrollElement(region);
+        if (element) {
+          sidebarScrollTopByRegionRef.current[region] = element.scrollTop;
+        }
+      }
+    },
+    [sidebarScrollElement],
+  );
   const mainStageRef = useRef<HTMLDivElement | null>(null);
   const terminalPaneRefs = useRef(new Map<string, TerminalPaneHandle>());
   // Opening/closing either side pane resizes native terminal surfaces. Keep the
@@ -1847,10 +1883,13 @@ function MainApp() {
   }, []);
   const lastTerminalTabIdRef = useRef<string>(HOME_TAB_ID);
   const setSidebarMode = useCallback((mode: SidebarMode) => {
+    if (mode !== sidebarModeRef.current) {
+      captureSidebarScroll(sidebarModeRef.current);
+    }
     sidebarModeRef.current = mode;
     setSidebarModeState(mode);
     localStorage.setItem(SIDEBAR_MODE_STORAGE_KEY, mode);
-  }, []);
+  }, [captureSidebarScroll]);
   // The Home rails' visibility filter: agent ids the user has hidden via the
   // group selector's checkboxes. Everything not in the set is shown, so new
   // terminals appear by default. Persists across restarts.
@@ -4589,6 +4628,9 @@ function MainApp() {
   }
 
   function setLeftSidebarCollapsedForActivePane(collapsed: boolean) {
+    if (collapsed) {
+      captureSidebarScroll(sidebarModeRef.current);
+    }
     setLeftSidebarCollapsed(collapsed);
     if (collapsed) {
       setPaneContextMenu(null);
@@ -6808,6 +6850,18 @@ function MainApp() {
     }
   }, [activePaneId, paneSplits, panes]);
 
+  // Each sidebar mode owns independent scroll containers. Restore all of the
+  // incoming mode's regions before minimally revealing its selected row, so a
+  // terminal/research switch does not collapse either list back to the top.
+  useLayoutEffect(() => {
+    for (const region of sidebarScrollRegionsForMode(sidebarMode)) {
+      const element = sidebarScrollElement(region);
+      if (element) {
+        element.scrollTop = sidebarScrollTopByRegionRef.current[region];
+      }
+    }
+  }, [leftSidebarCollapsed, sidebarMode, sidebarScrollElement]);
+
   // Switching sidebar modes can restore the same terminal pane or research tree
   // ID, so the mode must also trigger this after the matching rows are rendered.
   useLayoutEffect(() => {
@@ -6829,9 +6883,17 @@ function MainApp() {
               : row.dataset.paneId === activePaneId,
           );
     if (selectedRow) {
-      scrollChildIntoViewVertically(paneList, selectedRow);
+      const scrollRegion = activeSidebarScrollRegion(sidebarMode, activeSurface);
+      const scrollContainer = sidebarScrollElement(scrollRegion) ?? paneList;
+      scrollChildIntoViewVertically(scrollContainer, selectedRow);
     }
-  }, [activePaneId, activeResearchTreeId, activeSurface, sidebarMode]);
+  }, [
+    activePaneId,
+    activeResearchTreeId,
+    activeSurface,
+    sidebarMode,
+    sidebarScrollElement,
+  ]);
 
   // Report the focused pane to the backend so it can stamp `last_active_at`, which
   // feeds the group's spawn-cwd heuristic (most-recently-active shell pane). One
@@ -11428,15 +11490,15 @@ function MainApp() {
   }, [settings.researchLaunchInstruction]);
 
   // Escape handling for the worktree close/exit dialogs and the settings panel
-  // lives in the app-level Escape dispatcher; this effect only resets the
-  // settings panel's transient state when it closes.
+  // lives in the app-level Escape dispatcher; this effect only resets transient
+  // controls when it closes. Keep settingsTab so reopening returns to the same
+  // section.
   useEffect(() => {
     if (!settingsOpen || settingsTab !== "theme") {
       closeThemePicker();
     }
     if (!settingsOpen) {
       setOpenRouterKeyVisible(false);
-      setSettingsTab("basic");
       setShowHideShortcutCapturing(false);
     }
   }, [closeThemePicker, settingsOpen, settingsTab]);
