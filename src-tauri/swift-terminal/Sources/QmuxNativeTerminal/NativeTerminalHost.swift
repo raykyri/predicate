@@ -493,6 +493,17 @@ final class NativeTerminalHost {
         return true
     }
 
+    /// Covers WebKit's otherwise-white canvas before an external document has
+    /// painted. Clear it once loading finishes so transparent websites retain
+    /// the browser's normal steady-state appearance.
+    func setHumanBrowserLoadingBackground(_ webView: WKWebView?, active: Bool) -> Bool {
+        guard let webView else { return false }
+        webView.underPageBackgroundColor = active
+            ? NSColor(cgColor: QmuxTerminalTheme.backgroundColor(named: currentThemeName))
+            : nil
+        return true
+    }
+
     /// Drops routing state owned by the current DOM document before WKWebView
     /// reloads. Terminal panes and their Ghostty surfaces deliberately survive;
     /// the new document will republish layout, pointer policy, and keyboard

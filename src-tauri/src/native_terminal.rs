@@ -462,6 +462,10 @@ mod imp {
             native_view: *mut c_void,
             active: i32,
         ) -> i32;
+        fn qmux_native_terminal_set_human_browser_loading_background(
+            native_view: *mut c_void,
+            active: i32,
+        ) -> i32;
         fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
@@ -791,6 +795,32 @@ mod imp {
         }
     }
 
+    /// Temporarily replaces WKWebView's white under-page canvas while an
+    /// external document is between navigations. The Swift host resolves the
+    /// live terminal theme; clearing this after load restores ordinary browser
+    /// rendering for pages whose root background is transparent.
+    pub fn set_human_browser_loading_background(
+        native_view: *mut c_void,
+        active: bool,
+    ) -> Result<(), String> {
+        if native_view.is_null() {
+            return Err("human browser native view is null".to_string());
+        }
+        // SAFETY: Tauri owns the WKWebView for this synchronous call, and Swift
+        // changes only its public underPageBackgroundColor property.
+        if unsafe {
+            qmux_native_terminal_set_human_browser_loading_background(
+                native_view,
+                i32::from(active),
+            )
+        } == 1
+        {
+            Ok(())
+        } else {
+            Err("native terminal host rejected the human browser background update".to_string())
+        }
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         // SAFETY: the reset is synchronous main-actor state bookkeeping. It
         // preserves every pane and Ghostty surface.
@@ -1093,6 +1123,13 @@ mod imp {
         Ok(())
     }
 
+    pub fn set_human_browser_loading_background(
+        _native_view: *mut c_void,
+        _active: bool,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         Ok(())
     }
@@ -1142,9 +1179,9 @@ mod imp {
 pub use imp::{
     action, available, create_host_managed, focus, initialize, is_ready_for_replay,
     paste_approved_text, prepare_for_webview_reload, read_viewport_text, receive, remove,
-    seed_settings, send_text, set_human_browser_webview, set_iframe_shortcut_fallback, set_layout,
-    set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown, submit,
-    update_settings,
+    seed_settings, send_text, set_human_browser_loading_background, set_human_browser_webview,
+    set_iframe_shortcut_fallback, set_layout, set_stage_backstop, set_web_overlay_region,
+    set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {

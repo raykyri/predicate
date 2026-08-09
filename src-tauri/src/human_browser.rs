@@ -9,8 +9,8 @@ use crate::native_terminal;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Rect, State, Url,
@@ -258,6 +258,52 @@ fn set_native_browser_active(_webview: &Webview, _active: bool) -> Result<(), St
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn set_native_browser_loading_background(webview: &Webview, active: bool) -> Result<(), String> {
+    webview
+        .with_webview(move |platform| {
+            if let Err(error) =
+                native_terminal::set_human_browser_loading_background(platform.inner(), active)
+            {
+                eprintln!("qmux: failed to update human-browser loading background: {error}");
+            }
+        })
+        .map_err(|error| format!("failed to access the native human browser: {error}"))
+}
+
+#[cfg(target_os = "macos")]
+fn set_native_browser_loading_background_from_state(
+    webview: &Webview,
+    active: Arc<AtomicBool>,
+) -> Result<(), String> {
+    webview
+        .with_webview(move |platform| {
+            // with_webview can be dispatched to AppKit after add_child returns.
+            // Read the state there so a very fast load cannot be overwritten
+            // with the stale initial value.
+            let active = active.load(Ordering::Acquire);
+            if let Err(error) =
+                native_terminal::set_human_browser_loading_background(platform.inner(), active)
+            {
+                eprintln!("qmux: failed to update human-browser loading background: {error}");
+            }
+        })
+        .map_err(|error| format!("failed to access the native human browser: {error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_native_browser_loading_background_from_state(
+    _webview: &Webview,
+    _active: Arc<AtomicBool>,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_native_browser_loading_background(_webview: &Webview, _active: bool) -> Result<(), String> {
+    Ok(())
+}
+
 fn deactivate_view(view: &HumanBrowserView) {
     let _ = set_native_browser_active(&view.webview, false);
     let _ = view.webview.hide();
@@ -283,12 +329,17 @@ fn create_webview(
     let popup_app = app.clone();
     let popup_state = state.clone();
     let popup_owner = owner_id.to_string();
+    let loading_background_active = Arc::new(AtomicBool::new(true));
+    let page_loading_background_active = loading_background_active.clone();
 
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(initial_url))
         .on_navigation(move |url| {
             validated_human_url(&navigation_app, &navigation_state, url.as_str()).is_ok()
         })
-        .on_page_load(move |_webview, payload| {
+        .on_page_load(move |webview, payload| {
+            let loading = payload.event() == PageLoadEvent::Started;
+            page_loading_background_active.store(loading, Ordering::Release);
+            let _ = set_native_browser_loading_background(&webview, loading);
             emit_event(
                 &page_app,
                 HumanBrowserEvent {
@@ -296,7 +347,7 @@ fn create_webview(
                     kind: "navigation",
                     url: Some(payload.url().to_string()),
                     title: None,
-                    loading: Some(payload.event() == PageLoadEvent::Started),
+                    loading: Some(loading),
                 },
             );
         })
@@ -336,9 +387,24 @@ fn create_webview(
     let window = app
         .get_window(MAIN_WEBVIEW_LABEL)
         .ok_or_else(|| "the main window is unavailable".to_string())?;
-    window
-        .add_child(builder, bounds.position, bounds.size)
-        .map_err(|error| format!("failed to create the human browser: {error}"))
+    // Wry adds a child WKWebView to the view hierarchy during construction.
+    // Give it no drawable area until the hide/background messages below have
+    // reached AppKit; human_browser_sync applies the requested bounds later.
+    #[cfg(target_os = "macos")]
+    let initial_size = LogicalSize::new(0.0, 0.0);
+    #[cfg(not(target_os = "macos"))]
+    let initial_size = bounds.size;
+    let webview = window
+        .add_child(builder, bounds.position, initial_size)
+        .map_err(|error| format!("failed to create the human browser: {error}"))?;
+    // add_child creates a visible native view. Hide it before installing the
+    // themed canvas; human_browser_sync positions and reveals it afterwards.
+    if let Err(error) = webview.hide() {
+        let _ = webview.close();
+        return Err(format!("failed to hide the new human browser: {error}"));
+    }
+    let _ = set_native_browser_loading_background_from_state(&webview, loading_background_active);
+    Ok(webview)
 }
 
 fn current_snapshot(owner_id: &str, view: &HumanBrowserView) -> HumanBrowserSnapshot {
@@ -462,6 +528,7 @@ pub async fn human_browser_sync(
             .map_err(|error| format!("failed to position the human browser: {error}"))?;
 
         if request.navigation_revision > view.navigation_revision {
+            let _ = set_native_browser_loading_background(&view.webview, true);
             let current_url = view.webview.url().ok();
             if current_url.as_ref().is_some_and(|current| current == &url) {
                 view.webview
@@ -476,10 +543,10 @@ pub async fn human_browser_sync(
             view.navigation_revision = request.navigation_revision;
         }
 
+        set_native_browser_active(&view.webview, true)?;
         view.webview
             .show()
-            .map_err(|error| format!("failed to show the human browser: {error}"))?;
-        set_native_browser_active(&view.webview, true)
+            .map_err(|error| format!("failed to show the human browser: {error}"))
     })();
     if let Err(error) = update_result {
         deactivate_view(&view);

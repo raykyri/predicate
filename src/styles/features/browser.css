@@ -164,8 +164,8 @@
   min-width: 0;
   min-height: 0;
   padding: 24px;
-  background: #ffffff;
-  color: #6d2727;
+  background: var(--terminal-bg, var(--terminal-pane-bg));
+  color: var(--danger-fg-muted);
   text-align: center;
 }
 
