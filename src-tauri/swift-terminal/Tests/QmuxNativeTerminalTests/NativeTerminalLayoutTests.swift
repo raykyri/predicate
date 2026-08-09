@@ -4,6 +4,39 @@ import XCTest
 @testable import QmuxNativeTerminal
 
 final class NativeTerminalLayoutTests: XCTestCase {
+    func testClearScreenChordIsOnlyBareCommandK() throws {
+        func event(
+            _ modifiers: NSEvent.ModifierFlags,
+            characters: String = "k"
+        ) throws -> NSEvent {
+            try XCTUnwrap(
+                NSEvent.keyEvent(
+                    with: .keyDown,
+                    location: .zero,
+                    modifierFlags: modifiers,
+                    timestamp: 1,
+                    windowNumber: 0,
+                    context: nil,
+                    characters: characters,
+                    charactersIgnoringModifiers: characters,
+                    isARepeat: false,
+                    keyCode: 40
+                )
+            )
+        }
+
+        XCTAssertTrue(QmuxTerminalView.isClearScreenChord(try event(.command)))
+        XCTAssertTrue(
+            QmuxTerminalView.isClearScreenChord(try event(.command, characters: "K"))
+        )
+        XCTAssertFalse(
+            QmuxTerminalView.isClearScreenChord(try event([.command, .shift], characters: "K"))
+        )
+        XCTAssertFalse(
+            QmuxTerminalView.isClearScreenChord(try event(.command, characters: "j"))
+        )
+    }
+
     func testStaleSettingsCannotReplaceNewerTheme() async throws {
         try await MainActor.run {
             let pane = NativeTerminalPane(

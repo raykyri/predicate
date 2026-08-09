@@ -33,8 +33,9 @@ const SUBMIT_KEY: &[u8] = b"\r";
 // into the pane can still enable its desired live keyboard mode afterward.
 const RESTORED_SCROLLBACK_TERMINAL_RESET: &[u8] = b"\x18\x1b>\x1b[0m\x1b(B\x1b[4l\x1b[?1l\x1b[?7h\x1b[?9l\x1b[?25h\x1b[?45l\x1b[?66l\x1b[?47l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l\x1b[?1047l\x1b[?2004l\x1b[?2026l\x1b[>4;0m\x1b[=0u";
 // The subset of the reset that is safe to send to a *live* pane's surface —
-// one an exited agent left behind for the surviving shell — as opposed to a
-// fresh surface being rebuilt from scrollback. It clears only latched input
+// one an exited or suspended agent left behind for the surviving shell — as
+// opposed to a fresh surface being rebuilt from scrollback. It clears only
+// latched input
 // and reporting modes (keypad, cursor-key, mouse, focus, bracketed paste,
 // synchronized output, xterm modifyOtherKeys, and the Kitty keyboard flags)
 // plus cursor-position-neutral display state (SGR, ASCII charset, insert mode,
@@ -1485,6 +1486,22 @@ pub fn reset_pane_terminal_modes(state: &AppState, pane_id: &str) -> Result<(), 
     Ok(())
 }
 
+/// Makes a live pane usable by its shell after a foreground TUI is stopped or
+/// moved into the background. Unlike `reset_pane_terminal_modes`, this does not
+/// write the full reset to durable scrollback: the agent is still alive and may
+/// resume its existing alternate-screen session with `fg`. Only the live,
+/// cursor-neutral input/reporting reset is sent to the renderer; a well-behaved
+/// TUI re-enables its preferred modes when it handles SIGCONT.
+pub fn reset_live_pane_terminal_modes(state: &AppState, pane_id: &str) -> Result<(), String> {
+    let Some(native_surface) = state.pane_is_native(pane_id)? else {
+        return Ok(());
+    };
+    if native_surface {
+        crate::native_terminal::receive(pane_id, LIVE_PANE_TERMINAL_MODE_RESET, false)?;
+    }
+    Ok(())
+}
+
 /// Finishes an attach that `attach_pane` parked while the native surface still
 /// had its pre-layout default grid. Called from native callbacks (geometry
 /// commit, grid resize) that fire on the main thread, so it only touches the
@@ -2835,9 +2852,19 @@ mod tests {
             vec!["-c".to_string(), "sleep 30".to_string()],
         );
 
+        // A job-control handoff touches only the live renderer. The still-live
+        // TUI may resume its alternate screen, so its durable log must remain
+        // untouched.
+        reset_live_pane_terminal_modes(&state, &pane.id).unwrap();
+        assert!(
+            read_pane_scrollback(&workspace, &pane.id)
+                .unwrap()
+                .is_empty()
+        );
+
         // The pane was never attached, so the reader thread is still buffering
-        // (pre-attach output is not recorded): the reset is the only scrollback
-        // writer here and the log contents are exact, not racy.
+        // (pre-attach output is not recorded): the exit reset is the only
+        // scrollback writer here and the log contents are exact, not racy.
         reset_pane_terminal_modes(&state, &pane.id).unwrap();
         assert_eq!(
             read_pane_scrollback(&workspace, &pane.id).unwrap(),

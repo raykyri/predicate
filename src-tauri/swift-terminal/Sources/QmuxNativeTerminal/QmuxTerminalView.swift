@@ -35,12 +35,23 @@ final class QmuxTerminalView: TerminalView {
     // failed, stranding the responder somewhere that can't take the chord —
     // which previously ended in the catch-all as a consumed no-op.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let ownsKeyboard = window?.firstResponder === self
+            || shouldOfferAppShortcutFallback?() == true
         if event.type == .keyDown,
            let onAppShortcutKeyEquivalent,
-           window?.firstResponder === self || shouldOfferAppShortcutFallback?() == true,
+           ownsKeyboard,
            onAppShortcutKeyEquivalent(event)
         {
             return true
+        }
+        // Cmd-K deliberately remains Ghostty's clear-screen chord in a native
+        // terminal. Dispatch it directly while this pane owns the keyboard so
+        // it also survives the owner/first-responder desync a stopped TUI can
+        // expose after Ctrl-Z. Falling through to upstream is insufficient in
+        // that state: its key-equivalent path requires this exact view to be
+        // first responder before it will evaluate the Ghostty binding.
+        if event.type == .keyDown, ownsKeyboard, Self.isClearScreenChord(event) {
+            return performBindingAction("clear_screen")
         }
         // Native menu chords must keep falling through to AppKit: Ghostty's
         // catch-all would otherwise consume them for a focused terminal.
@@ -50,6 +61,11 @@ final class QmuxTerminalView: TerminalView {
             return false
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    static func isClearScreenChord(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection([.shift, .control, .option, .command])
+        return mods == .command && event.charactersIgnoringModifiers?.lowercased() == "k"
     }
 
     private static func isNativeMenuChord(_ event: NSEvent) -> Bool {
