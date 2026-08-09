@@ -221,6 +221,7 @@ import {
 import { requestComposerInsert } from "./lib/promptLibrary";
 import { nativeHumanBrowserOwnerIds } from "./lib/humanBrowserState";
 import { isArtifactBrowserOpen } from "./lib/artifacts";
+import { createTranscriptScrollCaptureSlot } from "./lib/transcriptScroll";
 import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
@@ -1522,6 +1523,15 @@ function MainApp() {
   // shape as the queue scroll above; the `stuck` flag re-pins a transcript that
   // grew while hidden to its new bottom.
   const transcriptScrollByAgentRef = useRef<Record<string, TranscriptScrollPosition>>({});
+  // The active TurnOverlay registers a DOM-backed snapshot here. Pane selection
+  // invokes it before scheduling a tab change, preserving expanded geometry.
+  const activeTranscriptScrollCaptureSlotRef = useRef(
+    createTranscriptScrollCaptureSlot(),
+  );
+  const registerActiveTranscriptScrollCapture = useCallback(
+    (capture: () => void) => activeTranscriptScrollCaptureSlotRef.current.register(capture),
+    [],
+  );
   const launcherInputRef = useRef<HTMLTextAreaElement | null>(null);
   // Keep active-tab actions reachable from the global keydown listener without
   // re-registering it on every state change.
@@ -1829,6 +1839,9 @@ function MainApp() {
   const activeSurfaceRef = useRef(activeSurface);
   activeSurfaceRef.current = activeSurface;
   const setActiveSurface = useCallback((surface: "pane" | "research") => {
+    if (surface !== activeSurfaceRef.current) {
+      activeTranscriptScrollCaptureSlotRef.current.capture();
+    }
     activeSurfaceRef.current = surface;
     setActiveSurfaceState(surface);
   }, []);
@@ -1963,6 +1976,9 @@ function MainApp() {
       if (typeof next === "function") {
         setActivePaneIdState((current) => {
           const resolved = next(current);
+          if (resolved !== current) {
+            activeTranscriptScrollCaptureSlotRef.current.capture();
+          }
           activePaneIdRef.current = resolved;
           activePaneRef.current =
             resolved && resolved !== HOME_TAB_ID
@@ -1971,6 +1987,9 @@ function MainApp() {
           return resolved;
         });
         return;
+      }
+      if (next !== activePaneIdRef.current) {
+        activeTranscriptScrollCaptureSlotRef.current.capture();
       }
       setActiveSurface("pane");
       activePaneIdRef.current = next;
@@ -12687,6 +12706,11 @@ function MainApp() {
         agentId={agent?.id ?? surface.pane.id}
         getTranscriptScroll={getTranscriptScroll}
         saveTranscriptScroll={saveTranscriptScroll}
+        registerScrollCapture={
+          surface.pane.id === activePane?.id
+            ? registerActiveTranscriptScrollCapture
+            : undefined
+        }
         // The save request is a window event handled only by the prompt
         // library menu inside TurnPaneHeader. Headerless surfaces (split
         // cells, split right-pane mode) mount no listener, so offering the

@@ -88,6 +88,9 @@ interface TurnOverlayProps {
   // so a remembered position survives the docked pane unmounting entirely.
   getTranscriptScroll?: (agentId: string) => TranscriptScrollPosition | undefined;
   saveTranscriptScroll?: (agentId: string, position: TranscriptScrollPosition) => void;
+  // Registers a synchronous capture owned by the active pane. App calls it
+  // before changing tabs, while this transcript's DOM geometry is still live.
+  registerScrollCapture?: (capture: () => void) => () => void;
   // Identifies the prompt-library listener that can handle "save message as
   // prompt" requests. Unlike agentId, this is absent for detached transcripts.
   savePromptAgentId?: string | null;
@@ -196,6 +199,7 @@ export default function TurnOverlay({
   agentId,
   getTranscriptScroll,
   saveTranscriptScroll,
+  registerScrollCapture,
   savePromptAgentId,
   notice,
   transcriptOptions = [],
@@ -277,6 +281,17 @@ export default function TurnOverlay({
     }
   };
 
+  const currentTimelineScrollPosition = (
+    timeline: HTMLDivElement,
+  ): TranscriptScrollPosition => {
+    const distanceFromBottom =
+      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+    return {
+      scrollTop: timeline.scrollTop,
+      stuck: jumpingToLatestRef.current || distanceFromBottom <= STICK_TO_BOTTOM_THRESHOLD,
+    };
+  };
+
   const handleTimelineScroll = () => {
     const timeline = timelineRef.current;
     if (!timeline) {
@@ -290,23 +305,40 @@ export default function TurnOverlay({
     // The stick-to-bottom ref must update synchronously (layout effects read it
     // on the very next commit); the sticky-message geometry can wait for the
     // next frame — see scheduleStickyUserStuckUpdate.
-    const distanceFromBottom = timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-    const reachedLatest = distanceFromBottom <= STICK_TO_BOTTOM_THRESHOLD;
+    const position = currentTimelineScrollPosition(timeline);
+    const reachedLatest =
+      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <=
+      STICK_TO_BOTTOM_THRESHOLD;
     if (reachedLatest) {
       jumpingToLatestRef.current = false;
     }
-    const stuck = jumpingToLatestRef.current || reachedLatest;
-    stickToBottomRef.current = stuck;
-    setJumpToLatestVisible(!stuck);
+    stickToBottomRef.current = position.stuck;
+    setJumpToLatestVisible(!position.stuck);
     // Remember where this transcript is parked so switching tabs (or away to
     // Home/Research) and back restores it. This fires for programmatic scrolls
-    // too (auto-pin to bottom, restore), so the stored value stays current
-    // without a separate save-on-unmount path.
+    // too (auto-pin to bottom, restore), so the stored value stays current.
     if (agentId) {
-      saveTranscriptScroll?.(agentId, { scrollTop: timeline.scrollTop, stuck });
+      saveTranscriptScroll?.(agentId, position);
     }
     scheduleStickyUserStuckUpdate();
   };
+
+  // Give App a last-chance synchronous capture for tab switches. The ordinary
+  // onScroll path normally has the same value, but WebKit may clamp/reflow an
+  // expanded pane during the tab commit without delivering a final usable
+  // event. Registering before the switch avoids reading the shared timeline
+  // after React has reconciled it with the incoming transcript.
+  useLayoutEffect(() => {
+    if (!agentId || !registerScrollCapture) {
+      return;
+    }
+    return registerScrollCapture(() => {
+      const timeline = timelineRef.current;
+      if (timeline) {
+        saveTranscriptScroll?.(agentId, currentTimelineScrollPosition(timeline));
+      }
+    });
+  }, [agentId, registerScrollCapture, saveTranscriptScroll]);
 
   const jumpToLatest = () => {
     const timeline = timelineRef.current;
