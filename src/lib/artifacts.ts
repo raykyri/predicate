@@ -27,11 +27,6 @@ export function artifactKind(artifact: ArtifactInfo): ArtifactKind {
   return HTML_EXTENSIONS.has(extension) ? "html" : "file";
 }
 
-export function artifactCanPreview(artifact: ArtifactInfo): boolean {
-  const kind = artifactKind(artifact);
-  return kind === "image" || kind === "html";
-}
-
 export function artifactName(artifact: ArtifactInfo): string {
   if (artifact.path) {
     return artifact.path.split("/").pop() || artifact.path;

@@ -13,11 +13,7 @@ import {
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { artifactFileUrl } from "../lib/api";
-import {
-  artifactCanPreview,
-  artifactKind,
-  artifactName,
-} from "../lib/artifacts";
+import { artifactKind, artifactName } from "../lib/artifacts";
 import { formatRelativeTime } from "../lib/transcriptSessions";
 import type { ArtifactInfo } from "../types";
 
@@ -46,8 +42,6 @@ interface ArtifactTrayProps {
 
 const FRAME_INSET = 8;
 const DEFAULT_TOP = 48;
-/** Hover dwell before the preview card shows. */
-const PREVIEW_DELAY_MS = 400;
 
 export default function ArtifactTray({
   paneId,
@@ -71,15 +65,11 @@ export default function ArtifactTray({
   // per artifact id. null = fetched but unavailable (source pane gone, file
   // moved); the row falls back to a glyph tile.
   const [thumbUrlById, setThumbUrlById] = useState<Record<string, string | null>>({});
-  const [previewArtifactId, setPreviewArtifactId] = useState<string | null>(null);
-  /** Which side of the tray the preview card opens on, from free space. */
-  const [previewSide, setPreviewSide] = useState<"left" | "right">("left");
-  const previewTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const missing = artifacts.filter(
       (artifact) =>
-        artifactCanPreview(artifact) && !(artifact.id in thumbUrlById),
+        artifactKind(artifact) === "image" && !(artifact.id in thumbUrlById),
     );
     if (missing.length === 0) {
       return;
@@ -98,15 +88,6 @@ export default function ArtifactTray({
       disposed = true;
     };
   }, [artifacts, thumbUrlById]);
-
-  useEffect(
-    () => () => {
-      if (previewTimerRef.current !== null) {
-        window.clearTimeout(previewTimerRef.current);
-      }
-    },
-    [],
-  );
 
   // A dragged position is clamped back inside the cell when the pane shrinks;
   // the default (null) position is a CSS right-anchor and clamps itself.
@@ -170,45 +151,9 @@ export default function ArtifactTray({
     window.addEventListener("pointercancel", stop);
   }
 
-  function hoverRow(artifact: ArtifactInfo) {
-    onHoverArtifact(artifact);
-    if (previewTimerRef.current !== null) {
-      window.clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
-    }
-    setPreviewArtifactId(null);
-    if (!artifactCanPreview(artifact) || !thumbUrlById[artifact.id]) {
-      return;
-    }
-    previewTimerRef.current = window.setTimeout(() => {
-      previewTimerRef.current = null;
-      const frame = frameRef.current;
-      const parent = frame?.parentElement;
-      if (frame && parent) {
-        const spaceLeft = frame.offsetLeft;
-        const spaceRight = parent.clientWidth - frame.offsetLeft - frame.offsetWidth;
-        setPreviewSide(spaceLeft >= spaceRight ? "left" : "right");
-      }
-      setPreviewArtifactId(artifact.id);
-    }, PREVIEW_DELAY_MS);
-  }
-
-  function leaveRow() {
-    onHoverArtifact(null);
-    if (previewTimerRef.current !== null) {
-      window.clearTimeout(previewTimerRef.current);
-      previewTimerRef.current = null;
-    }
-    setPreviewArtifactId(null);
-  }
-
   // Newest first: the freshest artifact is the one the user is most likely
   // reaching for, and the tray grows downward from its titlebar.
   const rows = [...artifacts].reverse();
-  const previewArtifact = previewArtifactId
-    ? rows.find((artifact) => artifact.id === previewArtifactId)
-    : undefined;
-  const previewUrl = previewArtifact ? thumbUrlById[previewArtifact.id] : null;
 
   return (
     <div
@@ -252,8 +197,8 @@ export default function ArtifactTray({
                 role="button"
                 tabIndex={0}
                 className={`artifact-tray-row${other ? " is-other" : ""}`}
-                onMouseEnter={() => hoverRow(artifact)}
-                onMouseLeave={leaveRow}
+                onMouseEnter={() => onHoverArtifact(artifact)}
+                onMouseLeave={() => onHoverArtifact(null)}
                 onClick={() => onOpen(artifact)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter" || event.key === " ") {
@@ -348,26 +293,6 @@ export default function ArtifactTray({
           ) : null}
         </div>
       )}
-      {previewArtifact && previewUrl ? (
-        <div className={`artifact-tray-preview is-${previewSide}`}>
-          {artifactKind(previewArtifact) === "html" ? (
-            <iframe
-              src={previewUrl}
-              title={`Preview of ${artifactName(previewArtifact)}`}
-              // Match the full browser overlay: scripts may render, but the
-              // opaque origin cannot read other token-gated file responses.
-              sandbox="allow-scripts"
-              referrerPolicy="no-referrer"
-              tabIndex={-1}
-            />
-          ) : (
-            <img src={previewUrl} alt="" />
-          )}
-          <span className="artifact-tray-preview-caption">
-            {artifactName(previewArtifact)}
-          </span>
-        </div>
-      ) : null}
     </div>
   );
 }

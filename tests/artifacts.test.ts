@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import {
-  artifactCanPreview,
-  artifactKind,
-  artifactName,
-} from "../src/lib/artifacts";
+import { artifactKind, artifactName } from "../src/lib/artifacts";
 import type { ArtifactInfo } from "../src/types";
 
 function artifact(path?: string, url?: string): ArtifactInfo {
@@ -18,19 +14,16 @@ function artifact(path?: string, url?: string): ArtifactInfo {
   };
 }
 
-test("HTML artifacts receive hover previews", () => {
+test("HTML artifacts are classified by extension", () => {
   for (const path of ["/tmp/report.html", "/private/tmp/report.HTM"]) {
-    const entry = artifact(path);
-    assert.equal(artifactKind(entry), "html");
-    assert.equal(artifactCanPreview(entry), true);
+    assert.equal(artifactKind(artifact(path)), "html");
   }
 });
 
-test("images remain previewable while generic files and URLs do not", () => {
+test("images, generic files, and URLs have distinct artifact kinds", () => {
   assert.equal(artifactKind(artifact("/tmp/chart.svg")), "image");
-  assert.equal(artifactCanPreview(artifact("/tmp/chart.svg")), true);
-  assert.equal(artifactCanPreview(artifact("/tmp/data.csv")), false);
-  assert.equal(artifactCanPreview(artifact(undefined, "http://localhost:3000")), false);
+  assert.equal(artifactKind(artifact("/tmp/data.csv")), "file");
+  assert.equal(artifactKind(artifact(undefined, "http://localhost:3000")), "url");
 });
 
 test("artifact names are compact for files and loopback URLs", () => {
