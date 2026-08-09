@@ -67,7 +67,7 @@ import {
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
-import ArtifactTray from "./components/ArtifactTray";
+import ArtifactTray, { type ArtifactTrayPosition } from "./components/ArtifactTray";
 import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
@@ -2602,7 +2602,7 @@ function MainApp() {
   // Per-pane tray chrome: closed (paperclip toggle / titlebar ×), collapsed to
   // the titlebar, and the dragged position (null = default top-right anchor).
   const [artifactTrayUiByPane, setArtifactTrayUiByPane] = useState<
-    Record<string, { closed?: boolean; collapsed?: boolean; pos?: { x: number; y: number } | null }>
+    Record<string, { closed?: boolean; collapsed?: boolean; pos?: ArtifactTrayPosition | null }>
   >({});
   const [transcriptExpandedByPane, setTranscriptExpandedByPane] = useState<
     Record<string, boolean>
@@ -12933,7 +12933,7 @@ function MainApp() {
     patch: Partial<{
       closed: boolean;
       collapsed: boolean;
-      pos: { x: number; y: number } | null;
+      pos: ArtifactTrayPosition | null;
     }>,
   ) {
     setArtifactTrayUiByPane((current) => ({

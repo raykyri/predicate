@@ -1,7 +1,7 @@
 /* Artifact tray: a small draggable card floating over the right pane (same
    family as .btw-floating-pane) listing files/URLs agent panes opened via
    `qmux open`. Default position is the top-right corner under the header;
-   dragging switches it to an explicit left/top kept per pane. */
+   dragging stores an explicit top/right offset kept per pane. */
 .artifact-tray {
   position: absolute;
   top: 48px;

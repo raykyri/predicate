@@ -25,8 +25,8 @@ interface ArtifactTrayProps {
   paneExists: (paneId: string) => boolean;
   collapsed: boolean;
   /** Dragged position; null keeps the default top-right anchor. */
-  position: { x: number; y: number } | null;
-  onPositionChange: (position: { x: number; y: number }) => void;
+  position: ArtifactTrayPosition | null;
+  onPositionChange: (position: ArtifactTrayPosition) => void;
   onSetCollapsed: (collapsed: boolean) => void;
   onClose: () => void;
   onOpen: (artifact: ArtifactInfo) => void;
@@ -40,8 +40,12 @@ interface ArtifactTrayProps {
   onHoverArtifact: (artifact: ArtifactInfo | null) => void;
 }
 
+export interface ArtifactTrayPosition {
+  top: number;
+  right: number;
+}
+
 const FRAME_INSET = 8;
-const DEFAULT_TOP = 48;
 
 export default function ArtifactTray({
   paneId,
@@ -101,13 +105,19 @@ export default function ArtifactTray({
       return;
     }
     const constrain = () => {
-      const maxX = Math.max(FRAME_INSET, parent.clientWidth - frame.offsetWidth - FRAME_INSET);
-      const maxY = Math.max(FRAME_INSET, parent.clientHeight - frame.offsetHeight - FRAME_INSET);
+      const maxRight = Math.max(
+        FRAME_INSET,
+        parent.clientWidth - frame.offsetWidth - FRAME_INSET,
+      );
+      const maxTop = Math.max(
+        FRAME_INSET,
+        parent.clientHeight - frame.offsetHeight - FRAME_INSET,
+      );
       const clamped = {
-        x: Math.min(maxX, Math.max(FRAME_INSET, position.x)),
-        y: Math.min(maxY, Math.max(FRAME_INSET, position.y)),
+        top: Math.min(maxTop, Math.max(FRAME_INSET, position.top)),
+        right: Math.min(maxRight, Math.max(FRAME_INSET, position.right)),
       };
-      if (clamped.x !== position.x || clamped.y !== position.y) {
+      if (clamped.top !== position.top || clamped.right !== position.right) {
         onPositionChange(clamped);
       }
     };
@@ -131,14 +141,29 @@ export default function ArtifactTray({
     const start = { x: event.clientX, y: event.clientY };
     // The default anchor has no stored position; the frame's current offsets
     // are the origin either way.
-    const origin = { x: frame.offsetLeft, y: frame.offsetTop };
+    const origin = {
+      top: frame.offsetTop,
+      right: parent.clientWidth - frame.offsetLeft - frame.offsetWidth,
+    };
 
     const move = (moveEvent: PointerEvent) => {
-      const maxX = Math.max(FRAME_INSET, parent.clientWidth - frame.offsetWidth - FRAME_INSET);
-      const maxY = Math.max(FRAME_INSET, parent.clientHeight - frame.offsetHeight - FRAME_INSET);
+      const maxRight = Math.max(
+        FRAME_INSET,
+        parent.clientWidth - frame.offsetWidth - FRAME_INSET,
+      );
+      const maxTop = Math.max(
+        FRAME_INSET,
+        parent.clientHeight - frame.offsetHeight - FRAME_INSET,
+      );
       onPositionChange({
-        x: Math.min(maxX, Math.max(FRAME_INSET, origin.x + moveEvent.clientX - start.x)),
-        y: Math.min(maxY, Math.max(FRAME_INSET, origin.y + moveEvent.clientY - start.y)),
+        top: Math.min(
+          maxTop,
+          Math.max(FRAME_INSET, origin.top + moveEvent.clientY - start.y),
+        ),
+        right: Math.min(
+          maxRight,
+          Math.max(FRAME_INSET, origin.right - (moveEvent.clientX - start.x)),
+        ),
       });
     };
     const stop = () => {
@@ -159,7 +184,7 @@ export default function ArtifactTray({
     <div
       ref={frameRef}
       className={`artifact-tray${collapsed ? " is-collapsed" : ""}`}
-      style={position ? { left: position.x, top: position.y, right: "auto" } : undefined}
+      style={position ? { top: position.top, right: position.right, left: "auto" } : undefined}
     >
       <div className="artifact-tray-titlebar" onPointerDown={startDrag}>
         <Paperclip size={11} aria-hidden="true" className="artifact-tray-clip" />
