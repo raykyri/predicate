@@ -9,6 +9,7 @@ mod control_socket;
 mod events;
 mod file_server;
 mod global_task_launcher;
+mod history;
 mod host;
 mod human_browser;
 mod image_files;
@@ -999,6 +1000,24 @@ fn list_recent_sessions(
 }
 
 #[tauri::command(async)]
+fn list_conversation_history(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<history::HistoryEntry>, String> {
+    history::list(&state)
+}
+
+#[tauri::command]
+async fn launch_conversation_history(
+    state: tauri::State<'_, AppState>,
+    request: history::HistoryLaunchRequest,
+) -> Result<PaneInfo, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || history::launch(&state, request))
+        .await
+        .map_err(|err| format!("history launch task failed: {err}"))?
+}
+
+#[tauri::command(async)]
 fn list_turns(
     state: tauri::State<'_, AppState>,
     agent_id: Option<String>,
@@ -1243,6 +1262,8 @@ fn launch_fresh_research_run(
         use_worktree: Some(false),
         options,
         parent_id: None,
+        resume_session_id: None,
+        fork_session: false,
     };
     match spawn_agent_pane(state, spawn) {
         Ok(pane) => {
@@ -3230,6 +3251,8 @@ fn main() {
             list_shell_agent_jobs,
             list_recent_sessions,
             list_turns,
+            list_conversation_history,
+            launch_conversation_history,
             list_home_turn_history,
             list_thread_graphs,
             get_thread_graph,

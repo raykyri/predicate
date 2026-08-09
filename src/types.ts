@@ -673,6 +673,35 @@ export interface SpawnAgentRequest {
   initialSize?: InitialPaneSize | null;
   useWorktree?: boolean | null;
   options?: Record<string, unknown> | null;
+  resumeSessionId?: string | null;
+  forkSession?: boolean;
+}
+
+export interface ConversationHistoryEntry {
+  id: string;
+  adapter: "claude" | "codex";
+  sessionId: string;
+  cwd: string;
+  title: string;
+  preview?: string | null;
+  transcriptPath: string;
+  lastActiveAt: number;
+  createdAt?: number | null;
+  cwdExists: boolean;
+  active: boolean;
+  paneId?: string | null;
+  agentId?: string | null;
+  status?: AgentInfo["status"] | null;
+  model?: string | null;
+  effort?: string | null;
+}
+
+export type ConversationHistoryLaunchMode = "resume" | "fork" | "forkWorktree";
+
+export interface ConversationHistoryLaunchRequest {
+  historyId: string;
+  mode: ConversationHistoryLaunchMode;
+  prompt?: string | null;
 }
 
 export interface WorktreeStatus {

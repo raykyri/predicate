@@ -322,8 +322,17 @@ impl ClaudeAdapter {
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
         let binary = self.ensure_binary()?;
         let options = ClaudeLaunchOptions::from_value(request.options)?;
+        let resume_session_id = request
+            .resume_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .map(ToString::to_string);
+        if request.fork_session && resume_session_id.is_none() {
+            return Err("a Claude history fork requires a session id".to_string());
+        }
 
-        let agent = prepare_agent_workspace_with_parent(
+        let mut agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: request.group_id,
@@ -336,6 +345,16 @@ impl ClaudeAdapter {
             },
             request.parent_id.as_deref(),
         )?;
+        if let Some(session_id) = resume_session_id.as_ref() {
+            if request.fork_session {
+                agent.fork_point = Some(session_id.clone());
+                agent.root_session_id = Some(session_id.clone());
+            } else {
+                agent.session_id = Some(session_id.clone());
+            }
+            agent.status = AgentStatus::Idle;
+            state.update_agent(agent.clone())?;
+        }
         let cwd = request
             .cwd
             .map(PathBuf::from)
@@ -370,6 +389,14 @@ impl ClaudeAdapter {
         let permission_mode = options.permission_mode.unwrap_or("auto".to_string());
         args.push("--permission-mode".to_string());
         args.push(permission_mode);
+
+        if let Some(session_id) = resume_session_id {
+            args.push("--resume".to_string());
+            args.push(session_id);
+            if request.fork_session {
+                args.push("--fork-session".to_string());
+            }
+        }
 
         let prompt = request.prompt.trim();
         let has_prompt = !prompt.is_empty();
@@ -1510,6 +1537,8 @@ impl SpawnClaudeRequest {
             use_worktree: self.use_worktree,
             options,
             parent_id: None,
+            resume_session_id: None,
+            fork_session: false,
         }
     }
 }

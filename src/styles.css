@@ -12,5 +12,6 @@
 @import "./styles/features/browser.css" layer(features);
 @import "./styles/features/artifact-tray.css" layer(features);
 @import "./styles/features/agent-debug-panel.css" layer(features);
+@import "./styles/features/history.css" layer(features);
 @import "./styles/features/publishing.css" layer(features);
 @import "./styles/reduced-motion.css" layer(features);

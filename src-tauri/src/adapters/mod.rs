@@ -644,6 +644,12 @@ pub struct SpawnAgentRequest {
     /// User launches omit it; orchestration surfaces set it to their caller.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// Provider-native conversation selected by the backend history scanner.
+    #[serde(default)]
+    pub resume_session_id: Option<String>,
+    /// Branch `resume_session_id` rather than continuing it in place.
+    #[serde(default)]
+    pub fork_session: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1395,6 +1401,8 @@ pub fn spawn_sibling_agent_session(
                 use_worktree: Some(false),
                 options: Value::Null,
                 parent_id: Some(source.id.clone()),
+                resume_session_id: None,
+                fork_session: false,
             },
         )?;
     if let Some(source_pane) = source.pane_id.as_deref() {

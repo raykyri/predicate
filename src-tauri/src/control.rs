@@ -677,6 +677,8 @@ fn agent_start(state: &AppState, context: &ControlContext, arguments: Value) -> 
             use_worktree: Some(args.use_worktree),
             options,
             parent_id: None,
+            resume_session_id: None,
+            fork_session: false,
         },
     )
     .map_err(internal)?;

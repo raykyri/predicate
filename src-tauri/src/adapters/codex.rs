@@ -289,8 +289,17 @@ impl CodexAdapter {
         let binary = self.ensure_binary()?;
         let options = CodexLaunchOptions::from_value(request.options)?;
         let codex_home = ensure_codex_integration()?;
+        let resume_session_id = request
+            .resume_session_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|session_id| !session_id.is_empty())
+            .map(ToString::to_string);
+        if request.fork_session && resume_session_id.is_none() {
+            return Err("a Codex history fork requires a session id".to_string());
+        }
 
-        let agent = prepare_agent_workspace_with_parent(
+        let mut agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: request.group_id,
@@ -303,6 +312,16 @@ impl CodexAdapter {
             },
             request.parent_id.as_deref(),
         )?;
+        if let Some(session_id) = resume_session_id.as_ref() {
+            if request.fork_session {
+                agent.fork_point = Some(session_id.clone());
+                agent.root_session_id = Some(session_id.clone());
+            } else {
+                agent.session_id = Some(session_id.clone());
+            }
+            agent.status = AgentStatus::Idle;
+            state.update_agent(agent.clone())?;
+        }
         let cwd = request
             .cwd
             .map(PathBuf::from)
@@ -316,7 +335,24 @@ impl CodexAdapter {
         }
 
         let has_initial_prompt = prompt_has_initial_text(&request.prompt);
-        let tail_args = prompt_tail_args(&request.prompt);
+        let tail_args = if let Some(session_id) = resume_session_id {
+            let mut args = vec![
+                if request.fork_session {
+                    "fork"
+                } else {
+                    "resume"
+                }
+                .to_string(),
+                session_id,
+            ];
+            if has_initial_prompt {
+                args.push("--".to_string());
+                args.push(request.prompt.trim().to_string());
+            }
+            args
+        } else {
+            prompt_tail_args(&request.prompt)
+        };
         let args = build_codex_args(
             &cwd,
             Some(&state.config().workspace_root),

@@ -23,6 +23,8 @@ import type {
   ArtifactInfo,
   ConversationHistorySnapshot,
   ClaudeSkill,
+  ConversationHistoryEntry,
+  ConversationHistoryLaunchRequest,
   GlobalDraft,
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
@@ -79,6 +81,14 @@ export function setCompletionSound(soundId: CompletionSoundId) {
 
 export function listShellAgentJobs() {
   return invoke<ShellAgentJobInfo[]>("list_shell_agent_jobs");
+}
+
+export function listConversationHistory() {
+  return invoke<ConversationHistoryEntry[]>("list_conversation_history");
+}
+
+export function launchConversationHistory(request: ConversationHistoryLaunchRequest) {
+  return invoke<PaneInfo>("launch_conversation_history", { request });
 }
 
 // Shows the main window. It starts hidden (visible: false in tauri.conf.json)

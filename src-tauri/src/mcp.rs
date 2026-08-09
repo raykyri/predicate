@@ -117,6 +117,8 @@ fn spawn_child(state: &AppState, caller: &AgentInfo, arguments: Value) -> Result
             use_worktree: Some(args.use_worktree),
             options,
             parent_id: Some(caller.id.clone()),
+            resume_session_id: None,
+            fork_session: false,
         },
     )?;
     let child = state

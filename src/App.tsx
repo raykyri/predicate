@@ -29,6 +29,7 @@ import {
   FolderGit2,
   Globe,
   GitBranch,
+  History,
   Layers,
   LoaderCircle,
   MessageSquareText,
@@ -58,6 +59,7 @@ import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
 import CommandPalette, { type PaletteCommand } from "./components/CommandPalette";
 import GlobalTaskLauncher from "./components/GlobalTaskLauncher";
+import ConversationHistoryDialog from "./components/ConversationHistoryDialog";
 import NativeInput from "./components/NativeInput";
 import {
   ComposerSubmitShortcutGlyph,
@@ -473,6 +475,7 @@ import {
   listAgentTurnQueue,
   listGlobalDrafts,
   listHomeTurnHistory,
+  launchConversationHistory,
   createGlobalDraft,
   deleteGlobalDraft,
   destroyHumanBrowser,
@@ -543,6 +546,8 @@ import type {
   ClaudeSkill,
   ConversationHistoryRef,
   ConversationHistorySnapshot,
+  ConversationHistoryEntry,
+  ConversationHistoryLaunchMode,
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
   GlobalDraft,
@@ -2341,6 +2346,8 @@ function MainApp() {
   const markdownImportRequestSeqRef = useRef(0);
   const markdownDropBlockedRef = useRef(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [conversationHistoryOpen, setConversationHistoryOpen] = useState(false);
+  const [conversationHistoryLaunching, setConversationHistoryLaunching] = useState(false);
   // Saved prompts shown in the palette's "Insert prompt" section, refreshed on
   // each open so edits made in the library menu or on disk show up.
   const [paletteSavedPrompts, setPaletteSavedPrompts] = useState<SavedPrompt[]>([]);
@@ -9658,6 +9665,13 @@ function MainApp() {
       action: () => void openGlobalTaskLauncher().catch(() => undefined),
     });
     commands.push({
+      id: "action:conversation-history",
+      section: "Actions",
+      title: "Conversation history",
+      hint: "Resume or fork Claude and Codex sessions",
+      action: () => setConversationHistoryOpen(true),
+    });
+    commands.push({
       id: "action:new-tab",
       section: "Actions",
       title: "New agent",
@@ -11223,9 +11237,46 @@ function MainApp() {
     }
   }
 
-  // Forks the active session into a new tab (resuming it) immediately after the
-  // current tab, or joins it into a split directly below when `splitBelow` is set,
-  // and focuses the fork. The
+  async function launchHistoryEntry(
+    entry: ConversationHistoryEntry,
+    mode: ConversationHistoryLaunchMode,
+    prompt: string,
+  ) {
+    if (conversationHistoryLaunching) return;
+    setConversationHistoryLaunching(true);
+    setError(null);
+    try {
+      const pane = await launchConversationHistory({
+        historyId: entry.id,
+        mode,
+        prompt: prompt || null,
+      });
+      setPanesPreservingRecoveredDismissals((current) =>
+        current.some((candidate) => candidate.id === pane.id) ? current : [...current, pane],
+      );
+      setActivePaneId(pane.id);
+      setLastActiveGroupId(pane.groupId);
+      expandNewAgentTranscriptByDefault(pane);
+      const [latestAgents] = await Promise.all([listAgents(), refreshGroups()]);
+      setAgents(latestAgents);
+      setConversationHistoryOpen(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setConversationHistoryLaunching(false);
+    }
+  }
+
+  function focusHistoryPane(paneId: string) {
+    setConversationHistoryOpen(false);
+    focusPaneTab(paneId);
+  }
+
+  // Forks the active session into a new tab (resuming it) — as a sibling right
+  // after the current tab, nested under it when `nest` is set, or joined into a
+  // split directly below it when `splitBelow` is set — and focuses the fork. The
   // backend also emits agent.forked, which refetches the ordered pane list, so the
   // optimistic placement below is just to avoid a flicker.
   async function forkPane(
@@ -14210,6 +14261,17 @@ function MainApp() {
                   </span>
                 ) : null}
               </div>
+              <div className="sidebar-action-with-hint">
+                <button
+                  className="control-button sidebar-settings-button"
+                  type="button"
+                  aria-label="Conversation history"
+                  title="Conversation history"
+                  onClick={() => setConversationHistoryOpen(true)}
+                >
+                  <History size={14} aria-hidden="true" />
+                </button>
+              </div>
             </>
           ) : (
             <>
@@ -14829,6 +14891,14 @@ function MainApp() {
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
         commands={commandPaletteOpen ? buildPaletteCommands() : []}
+      />
+
+      <ConversationHistoryDialog
+        open={conversationHistoryOpen}
+        launching={conversationHistoryLaunching}
+        onClose={() => setConversationHistoryOpen(false)}
+        onFocusPane={focusHistoryPane}
+        onLaunch={launchHistoryEntry}
       />
 
       {settingsOpen ? (
