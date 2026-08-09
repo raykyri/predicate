@@ -1,4 +1,5 @@
 import type { ArtifactInfo } from "../types";
+import type { BrowserOverlayState } from "../appTypes";
 
 const IMAGE_EXTENSIONS = new Set([
   "avif",
@@ -15,6 +16,13 @@ const IMAGE_EXTENSIONS = new Set([
 const HTML_EXTENSIONS = new Set(["htm", "html"]);
 
 export type ArtifactKind = "url" | "image" | "html" | "file";
+
+export function isArtifactBrowserOpen(
+  overlay: BrowserOverlayState | undefined,
+  artifactId: string,
+): boolean {
+  return overlay?.open === true && overlay.artifactId === artifactId;
+}
 
 export function artifactKind(artifact: ArtifactInfo): ArtifactKind {
   if (!artifact.path) {

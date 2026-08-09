@@ -99,7 +99,12 @@ export interface UseQmuxEventsHandlers {
   refreshAgentTurnQueue: (agentId: string) => Promise<void>;
   refreshTranscriptOptions: (agentId: string) => Promise<void>;
   // Binds a browser-overlay URL to a pane (the backend emits the fully-formed URL).
-  openBrowserOverlay: (paneId: string, url: string, sandbox?: boolean) => void;
+  openBrowserOverlay: (
+    paneId: string,
+    url: string,
+    sandbox?: boolean,
+    artifactId?: string | null,
+  ) => void;
   // Picks the next active pane when a pane closes, honoring split membership and
   // collapsed groups. Supplied by App so the pane.removed path selects consistently with
   // the user-initiated close path (forgetClosedPane).
@@ -413,7 +418,13 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "browser.open" && event.paneId) {
         const url = event.payload.url;
         if (typeof url === "string") {
-          openBrowserOverlay(event.paneId, url, event.payload.sandbox === true);
+          const artifactId = event.payload.artifactId;
+          openBrowserOverlay(
+            event.paneId,
+            url,
+            event.payload.sandbox === true,
+            typeof artifactId === "string" ? artifactId : null,
+          );
         }
       }
       if (event.type === "artifact.added" || event.type === "artifact.removed") {

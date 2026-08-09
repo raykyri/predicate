@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { artifactKind, artifactName } from "../src/lib/artifacts";
+import {
+  artifactKind,
+  artifactName,
+  isArtifactBrowserOpen,
+} from "../src/lib/artifacts";
+import type { BrowserOverlayState } from "../src/appTypes";
 import type { ArtifactInfo } from "../src/types";
 
 function artifact(path?: string, url?: string): ArtifactInfo {
@@ -32,4 +37,19 @@ test("artifact names are compact for files and loopback URLs", () => {
     artifactName(artifact(undefined, "http://localhost:3000/dashboard/")),
     "localhost:3000/dashboard",
   );
+});
+
+test("an open browser toggles only for the artifact that owns its page", () => {
+  const browser: BrowserOverlayState = {
+    url: "http://localhost:3000/report",
+    open: true,
+    artifactId: "artifact-1",
+    reloadNonce: 1,
+    sandbox: false,
+    mode: "webkit",
+  };
+
+  assert.equal(isArtifactBrowserOpen(browser, "artifact-1"), true);
+  assert.equal(isArtifactBrowserOpen(browser, "artifact-2"), false);
+  assert.equal(isArtifactBrowserOpen({ ...browser, open: false }, "artifact-1"), false);
 });

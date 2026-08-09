@@ -105,6 +105,8 @@ export type BrowserOverlayMode = "webkit" | "agent";
 export type BrowserOverlayState = {
   url: string | null;
   open: boolean;
+  /** Artifact-tray entry that opened the current page, if any. */
+  artifactId?: string | null;
   reloadNonce: number;
   sandbox: boolean;
   mode: BrowserOverlayMode;

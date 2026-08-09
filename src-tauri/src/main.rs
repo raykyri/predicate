@@ -593,6 +593,7 @@ fn browser_open_local_path(
     state: tauri::State<'_, AppState>,
     pane_id: String,
     path: String,
+    artifact_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     if !state.pane_exists(&pane_id)? {
         return Err(format!("pane {pane_id} was not found"));
@@ -614,7 +615,11 @@ fn browser_open_local_path(
         "browser.open",
         Some(pane_id),
         None,
-        serde_json::json!({ "url": resolved.url, "sandbox": resolved.sandbox }),
+        serde_json::json!({
+            "url": resolved.url,
+            "sandbox": resolved.sandbox,
+            "artifactId": artifact_id,
+        }),
     ));
     Ok(serde_json::json!({ "url": resolved.url, "sandbox": resolved.sandbox }))
 }

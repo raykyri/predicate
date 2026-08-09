@@ -220,6 +220,7 @@ import {
 } from "./lib/appShortcuts";
 import { requestComposerInsert } from "./lib/promptLibrary";
 import { nativeHumanBrowserOwnerIds } from "./lib/humanBrowserState";
+import { isArtifactBrowserOpen } from "./lib/artifacts";
 import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
@@ -4324,25 +4325,30 @@ function MainApp() {
   // so even re-opening the same URL reloads. Driven by the browser.open event.
   // `sandbox` is set for token-bearing file-server URLs so the iframe loads them in an
   // opaque origin (see BrowserOverlay); plain http(s) URLs are not sandboxed.
-  const openBrowserOverlay = useCallback((paneId: string, url: string, sandbox = false) => {
-    // Force the sandbox on for any token-bearing file-server URL regardless of the
-    // caller's flag: only the backend browser.open event passes sandbox=true, so typed
-    // navigation and link opens would otherwise load a file-server URL as a trusted
-    // same-origin document and defeat the token protection. Dev-server URLs are excluded
-    // by isFileServerUrl and keep their real same-origin context.
-    const effectiveSandbox = sandbox || isFileServerUrl(url, configRef.current?.fileServerPort ?? null);
-    setBrowserOverlayByPane((current) => ({
-      ...current,
-      [paneId]: {
-        url,
-        open: true,
-        reloadNonce: (current[paneId]?.reloadNonce ?? 0) + 1,
-        sandbox: effectiveSandbox,
-        mode: effectiveSandbox ? "webkit" : (current[paneId]?.mode ?? "webkit"),
-        size: current[paneId]?.size ?? null,
-      },
-    }));
-  }, []);
+  const openBrowserOverlay = useCallback(
+    (paneId: string, url: string, sandbox = false, artifactId: string | null = null) => {
+      // Force the sandbox on for any token-bearing file-server URL regardless of the
+      // caller's flag: only the backend browser.open event passes sandbox=true, so typed
+      // navigation and link opens would otherwise load a file-server URL as a trusted
+      // same-origin document and defeat the token protection. Dev-server URLs are excluded
+      // by isFileServerUrl and keep their real same-origin context.
+      const effectiveSandbox =
+        sandbox || isFileServerUrl(url, configRef.current?.fileServerPort ?? null);
+      setBrowserOverlayByPane((current) => ({
+        ...current,
+        [paneId]: {
+          url,
+          open: true,
+          artifactId,
+          reloadNonce: (current[paneId]?.reloadNonce ?? 0) + 1,
+          sandbox: effectiveSandbox,
+          mode: effectiveSandbox ? "webkit" : (current[paneId]?.mode ?? "webkit"),
+          size: current[paneId]?.size ?? null,
+        },
+      }));
+    },
+    [],
+  );
 
   const openLinkForPane = useCallback(
     (paneId: string | null | undefined, url: string) => {
@@ -4385,6 +4391,7 @@ function MainApp() {
         [paneId]: {
           url: prev?.url ?? null,
           open: !(prev?.open ?? false),
+          artifactId: prev?.artifactId ?? null,
           reloadNonce: prev?.reloadNonce ?? 0,
           sandbox: prev?.sandbox ?? false,
           mode: prev?.mode ?? "webkit",
@@ -4453,6 +4460,7 @@ function MainApp() {
           ...prev,
           mode,
           url: nextUrl,
+          artifactId: nextUrl === prev.url ? prev.artifactId : null,
           reloadNonce:
             mode === "webkit" && nextUrl !== prev.url
               ? prev.reloadNonce + 1
@@ -4483,7 +4491,10 @@ function MainApp() {
       ) {
         return current;
       }
-      return { ...current, [paneId]: { ...previous, url: normalized } };
+      return {
+        ...current,
+        [paneId]: { ...previous, url: normalized, artifactId: null },
+      };
     });
   }
 
@@ -7067,7 +7078,8 @@ function MainApp() {
     );
   }
 
-  // Re-opens a tray entry. Files go through browserOpenLocalPath, which mints a
+  // Opens a tray entry, or closes the browser when that entry already owns it.
+  // Files go through browserOpenLocalPath, which mints a
   // fresh token URL and re-validates the path against the target pane's roots —
   // stored file-server URLs would be stale across restarts. Entries whose source
   // pane still exists open there (activating that tab, which is what the muted
@@ -7079,12 +7091,22 @@ function MainApp() {
       if (targetPaneId !== activePaneIdRef.current) {
         activateTerminalPane(targetPaneId);
       }
+      if (isArtifactBrowserOpen(browserOverlayByPaneRef.current[targetPaneId], artifact.id)) {
+        setBrowserOverlayByPane((current) => {
+          const overlay = current[targetPaneId];
+          if (!isArtifactBrowserOpen(overlay, artifact.id)) {
+            return current;
+          }
+          return { ...current, [targetPaneId]: { ...overlay, open: false } };
+        });
+        return;
+      }
       if (artifact.path) {
-        void browserOpenLocalPath(targetPaneId, artifact.path).catch((err) => {
+        void browserOpenLocalPath(targetPaneId, artifact.path, artifact.id).catch((err) => {
           setError(err instanceof Error ? err.message : String(err));
         });
       } else if (artifact.url) {
-        openBrowserOverlay(targetPaneId, artifact.url, false);
+        openBrowserOverlay(targetPaneId, artifact.url, false, artifact.id);
       }
     },
     [activateTerminalPane, openBrowserOverlay],
