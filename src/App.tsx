@@ -2670,7 +2670,19 @@ function MainApp() {
   const [focusedAssistantTurn, setFocusedAssistantTurn] = useState<{
     paneId: string;
     itemKey: string;
+    restoreDockedOnClose: boolean;
+    splitMode: boolean;
   } | null>(null);
+  const assistantTurnReaderOpen = focusedAssistantTurn !== null;
+  useLayoutEffect(() => {
+    if (!assistantTurnReaderOpen) {
+      return;
+    }
+    // Reader mode covers the native terminal stage. Own pointer routing for
+    // its full lifetime so AppKit cannot send a press or release to Ghostty
+    // while the DOM overlay and native surface visibility settle.
+    return claimNativeTerminalPointerForWebDrag();
+  }, [assistantTurnReaderOpen]);
   // PiP is opt-in per pane. Keeping the flag separate from transcript expansion
   // lets a pane remember the choice across expand/restore and tab round trips.
   const [terminalPipEnabledByPane, setTerminalPipEnabledByPane] = useState<
@@ -5092,6 +5104,13 @@ function MainApp() {
       focusedAssistantTurn &&
       (!activeTranscriptVisibleExpanded || !focusedAssistantTurnSurface)
     ) {
+      if (focusedAssistantTurn.restoreDockedOnClose) {
+        setTranscriptExpandedForPane(
+          focusedAssistantTurn.paneId,
+          false,
+          focusedAssistantTurn.splitMode,
+        );
+      }
       setFocusedAssistantTurn(null);
     }
   }, [
@@ -5189,6 +5208,7 @@ function MainApp() {
       // open (hidden) composer must not eat terminal input.
       // The palette and expanded/browser overlays must own both the DOM
       // gesture and keyboard while they cover the terminal stage.
+      assistantTurnReaderOpen ||
       activeTranscriptVisibleExpanded ||
       activeBrowserOverlay?.open ||
       // Drag/layout gestures and terminal-local search/confirm overlays also
@@ -12961,7 +12981,7 @@ function MainApp() {
         showActivityDetail={settings.showToolCalls}
         stickyUserMessages={settings.stickyUserMessages}
         showAssistantTimestamps={settings.showAssistantTimestamps}
-        assistantTurnFocusEnabled={activeTranscriptVisibleExpanded}
+        assistantTurnFocusEnabled={!rightBarCollapsed}
         focusedAssistantTurnKey={
           focusedAssistantTurn?.paneId === surface.pane.id
             ? focusedAssistantTurn.itemKey
@@ -12970,8 +12990,21 @@ function MainApp() {
         onFocusAssistantTurn={(itemKey) => {
           if (itemKey) {
             activateTerminalPane(surface.pane.id);
-            setFocusedAssistantTurn({ paneId: surface.pane.id, itemKey });
+            setTranscriptExpandedForPane(surface.pane.id, true);
+            setFocusedAssistantTurn({
+              paneId: surface.pane.id,
+              itemKey,
+              restoreDockedOnClose: !activeTranscriptVisibleExpanded,
+              splitMode: splitRightPaneMode,
+            });
           } else {
+            if (focusedAssistantTurn?.restoreDockedOnClose) {
+              setTranscriptExpandedForPane(
+                focusedAssistantTurn.paneId,
+                false,
+                focusedAssistantTurn.splitMode,
+              );
+            }
             setFocusedAssistantTurn(null);
           }
         }}

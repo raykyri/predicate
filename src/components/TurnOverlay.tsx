@@ -132,8 +132,9 @@ interface TurnOverlayProps {
   // When true, show a wall-clock timestamp after each consecutive run of
   // assistant messages (before the next non-assistant message, or at the tail).
   showAssistantTimestamps?: boolean;
-  // Expanded-reader state is owned by App so split panes still share one
-  // focused response. The key may point anywhere inside the assistant run.
+  // Reader state is owned by App so docked panes can expand into it and split
+  // panes still share one focused response. The key may point anywhere inside
+  // the assistant run.
   assistantTurnFocusEnabled?: boolean;
   focusedAssistantTurnKey?: string | null;
   onFocusAssistantTurn?: (itemKey: string | null) => void;
@@ -1239,7 +1240,11 @@ export default function TurnOverlay({
                         className="turn-assistant-focus-button"
                         title="Read this assistant turn"
                         aria-label="Read this assistant turn in focus mode"
-                        onClick={() => focusAssistantTurn(item.key)}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          focusAssistantTurn(item.key);
+                        }}
                       >
                         <ArrowUpRight size={13} aria-hidden="true" />
                       </button>
