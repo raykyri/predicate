@@ -44,6 +44,7 @@ import {
   Pencil,
   PictureInPicture2,
   Plus,
+  RotateCcw,
   Settings,
   SquareChevronLeft,
   SquareChevronRight,
@@ -10207,6 +10208,52 @@ function MainApp() {
     setRenamePaneId(pane.id);
   }
 
+  async function resetPaneTitle(pane: PaneInfo) {
+    const paneAgent = agents.find((agent) => agent.paneId === pane.id);
+    const nextTitle = defaultPaneTitle(pane, paneAgent, config);
+    if (!nextTitle) {
+      return;
+    }
+
+    const previousWasManuallyTitled = manuallyTitledPaneIds.has(pane.id);
+    setManuallyTitledPaneIds((current) => {
+      const next = new Set(current);
+      next.delete(pane.id);
+      return next;
+    });
+    if (pane.title === nextTitle) {
+      return;
+    }
+
+    setPanesPreservingRecoveredDismissals((current) =>
+      current.map((candidate) =>
+        candidate.id === pane.id ? { ...candidate, title: nextTitle } : candidate,
+      ),
+    );
+    try {
+      const updated = await renamePane(pane.id, nextTitle);
+      setPanesPreservingRecoveredDismissals((current) =>
+        current.map((candidate) =>
+          candidate.id === pane.id ? { ...candidate, title: updated.title } : candidate,
+        ),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setManuallyTitledPaneIds((current) => {
+        const next = new Set(current);
+        if (previousWasManuallyTitled) {
+          next.add(pane.id);
+        }
+        return next;
+      });
+      setPanesPreservingRecoveredDismissals((current) =>
+        current.map((candidate) =>
+          candidate.id === pane.id ? { ...candidate, title: pane.title } : candidate,
+        ),
+      );
+    }
+  }
+
   function openGroupRenameDialog(group: GroupInfo) {
     setRenameValue(displayGroupName(group));
     setRenamePaneId(null);
@@ -14136,6 +14183,19 @@ function MainApp() {
             </div>
           </dl>
           <div className="pane-context-actions" role="menu" aria-label="Tab actions">
+            <button
+              type="button"
+              role="menuitem"
+              className="control-button"
+              title="Restore this tab's default title"
+              onClick={() => {
+                setPaneContextMenu(null);
+                void resetPaneTitle(contextMenuPane);
+              }}
+            >
+              <RotateCcw size={13} aria-hidden="true" />
+              <span>Reset title</span>
+            </button>
             <button
               type="button"
               role="menuitem"
