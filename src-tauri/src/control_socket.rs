@@ -384,6 +384,17 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
             )?;
             serde_json::to_value(pane).map_err(|err| format!("failed to encode forked pane: {err}"))
         }
+        "mcp.call" => {
+            #[derive(Debug, Deserialize)]
+            struct McpCallPayload {
+                name: String,
+                #[serde(default)]
+                arguments: Value,
+            }
+            let payload = serde_json::from_value::<McpCallPayload>(request.payload)
+                .map_err(|err| format!("invalid mcp.call payload: {err}"))?;
+            crate::mcp::handle_call(state, &authed_pane, &payload.name, payload.arguments)
+        }
         "browser.open" => {
             #[derive(Debug, Deserialize)]
             #[serde(rename_all = "camelCase")]
@@ -768,6 +779,43 @@ mod tests {
             Some("http://localhost:5173/dash")
         );
         assert!(artifacts[0].path.is_none());
+    }
+
+    #[test]
+    fn mcp_requires_an_agent_bound_to_the_authenticated_pane() {
+        let state = test_state();
+        let token = state.pane_token("pane-1").unwrap();
+        let err = handle_line(
+            &state,
+            &request_line(
+                &token,
+                "mcp.call",
+                json!({ "name": "whoami", "arguments": {} }),
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("active agent pane"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn mcp_whoami_resolves_identity_from_the_authenticated_pane() {
+        let state = test_state();
+        state.insert_agent(agent_bound_to("pane-2")).unwrap();
+        let token = state.pane_token("pane-2").unwrap();
+        let value = handle_line(
+            &state,
+            &request_line(
+                &token,
+                "mcp.call",
+                json!({ "name": "whoami", "arguments": {} }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(value["agent"]["id"], "agent-1");
+        assert_eq!(
+            value["capabilities"]["write"],
+            "direct parent and direct children only"
+        );
     }
 
     #[test]

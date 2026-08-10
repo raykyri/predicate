@@ -6,6 +6,7 @@
 //! reporting, and forks once a transport exists.
 
 mod acp;
+mod mcp;
 mod muse;
 
 use qmux_proto::{ControlRequest, ControlResponse};
@@ -17,6 +18,8 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::Command;
 use std::time::Duration;
+
+const MCP_USAGE_HINT: &str = "Add `qmux mcp` as a stdio MCP server in your agent CLI.\nRun it inside a qmux agent pane so it inherits the authenticated environment.";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +40,10 @@ struct PreparedLaunchEnv {
 pub fn run_cli_if_requested() -> Result<bool, String> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
+        if env::var_os("QMUX_SOCK").is_some() && env::var_os("QMUX_TOKEN").is_some() {
+            println!("{MCP_USAGE_HINT}");
+            return Ok(true);
+        }
         return Ok(false);
     };
 
@@ -140,6 +147,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             run_agent_exec("muse".to_string(), args.collect())?;
             Ok(true)
         }
+        "mcp" => {
+            mcp::run()?;
+            Ok(true)
+        }
         "acp" => {
             acp::run(args.collect())?;
             Ok(true)
@@ -202,7 +213,7 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         "help" | "--help" | "-h" => {
             println!(
-                "usage: qmux [ping|notify|muse-notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|muse|acp|fork|open]"
+                "usage: qmux [ping|notify|muse-notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|muse|acp|mcp|fork|open]"
             );
             Ok(true)
         }
@@ -327,7 +338,15 @@ fn request_and_print(command: &str, payload: Value) -> Result<(), String> {
 }
 
 fn request_value(command: &str, payload: Value) -> Result<Value, String> {
-    let raw = request(command, payload)?;
+    request_value_with_timeout(command, payload, Duration::from_secs(2))
+}
+
+pub(crate) fn request_value_with_timeout(
+    command: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let raw = request_with_timeout(command, payload, timeout)?;
     let response = serde_json::from_str::<ControlResponse>(&raw)
         .map_err(|err| format!("invalid qmux response: {err}"))?;
     if response.ok {
@@ -340,9 +359,17 @@ fn request_value(command: &str, payload: Value) -> Result<Value, String> {
 }
 
 fn request(command: &str, payload: Value) -> Result<String, String> {
+    request_with_timeout(command, payload, Duration::from_secs(2))
+}
+
+fn request_with_timeout(
+    command: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<String, String> {
     let socket_path = env::var("QMUX_SOCK").map_err(|_| "QMUX_SOCK is not set".to_string())?;
     let token = env::var("QMUX_TOKEN").map_err(|_| "QMUX_TOKEN is not set".to_string())?;
-    send_request(&socket_path, &token, command, payload)
+    send_request_with_timeout(&socket_path, &token, command, payload, timeout)
 }
 
 fn send_request(
@@ -351,10 +378,20 @@ fn send_request(
     command: &str,
     payload: Value,
 ) -> Result<String, String> {
+    send_request_with_timeout(socket_path, token, command, payload, Duration::from_secs(2))
+}
+
+fn send_request_with_timeout(
+    socket_path: &str,
+    token: &str,
+    command: &str,
+    payload: Value,
+    timeout: Duration,
+) -> Result<String, String> {
     let token = token.to_string();
     let mut stream = UnixStream::connect(socket_path)
         .map_err(|err| format!("failed to connect to {socket_path}: {err}"))?;
-    let timeout = Some(Duration::from_secs(2));
+    let timeout = Some(timeout);
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
     let request = ControlRequest {
@@ -384,5 +421,17 @@ fn parse_payload(input: &str) -> Value {
         Value::Null
     } else {
         serde_json::from_str(input).unwrap_or_else(|_| Value::String(input.to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_usage_hint_is_at_most_two_lines_and_names_the_server_command() {
+        assert!(MCP_USAGE_HINT.lines().count() <= 2);
+        assert!(MCP_USAGE_HINT.contains("qmux mcp"));
+        assert!(MCP_USAGE_HINT.contains("stdio"));
     }
 }

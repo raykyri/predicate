@@ -12,6 +12,7 @@ mod host;
 mod human_browser;
 mod image_files;
 mod launch_path;
+mod mcp;
 mod menu_bar;
 mod native_terminal;
 mod persistence;
