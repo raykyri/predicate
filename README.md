@@ -276,6 +276,10 @@ hosted view can show proposal status without a separate collaboration database.
   - `QMUX_WORKSPACE_ROOT`
 - `QMUX_CLI` is also set when the app can resolve the qmux executable, for
   in-pane tooling.
+- Local pane processes receive a qmux-owned, socket-namespaced `bin` directory
+  at the front of `PATH`. Its `qmux` symlink targets the qmux app binary that
+  spawned the pane, so agents and other descendants can call `qmux` without
+  changing the user's shell configuration or installing a global executable.
 - Agent panes also receive `QMUX_AGENT_ID`.
 - Hooks call `qmux notify <event>` over the token-gated Unix socket; qmux routes
   the notification to the owning agent's adapter. The same socket, scoped to the

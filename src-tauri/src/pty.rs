@@ -1137,11 +1137,12 @@ pub fn spawn_pty(state: &AppState, spec: PtySpawnSpec) -> Result<PaneInfo, Strin
 /// 24-bit color capability, and a UTF-8 locale backfill. TERM is added by the
 /// host-owned PTY spawn below; using the widely installed xterm-256color entry
 /// avoids depending on a separate Ghostty app installation for terminfo.
-fn base_child_envs() -> Vec<(String, String)> {
+fn base_child_envs(state: &AppState) -> Result<Vec<(String, String)>, String> {
     let mut envs = Vec::new();
-    if let Some(path) = crate::launch_path::child_path() {
-        envs.push(("PATH".to_string(), path));
-    }
+    envs.push((
+        "PATH".to_string(),
+        crate::launch_path::pane_child_path(&state.config().socket_path)?,
+    ));
     envs.push(("COLORTERM".to_string(), "truecolor".to_string()));
     // Backfill a UTF-8 locale only when one wasn't inherited — a GUI launch
     // gets no LANG, defaulting programs to the C locale and breaking Unicode,
@@ -1149,7 +1150,7 @@ fn base_child_envs() -> Vec<(String, String)> {
     if env::var_os("LANG").is_none() {
         envs.push(("LANG".to_string(), "en_US.UTF-8".to_string()));
     }
-    envs
+    Ok(envs)
 }
 
 /// Creates `dir` if it is missing and restricts it to the owning user. Callers
@@ -1276,6 +1277,7 @@ fn spawn_portable_pty(
     mut spec: PtySpawnSpec,
     native_surface: bool,
 ) -> Result<PaneInfo, String> {
+    let base_envs = base_child_envs(state)?;
     materialize_support_files_or_fallback(&mut spec)?;
     let pane_id = spec.pane_id.unwrap_or_else(|| state.next_id("pane"));
     let initial_size = resolved_initial_size(spec.initial_size);
@@ -1293,7 +1295,7 @@ fn spawn_portable_pty(
     command.args(spec.args);
     command.cwd(spec.cwd.clone());
     scrub_inherited_qmux_context(&mut command);
-    for (key, value) in base_child_envs() {
+    for (key, value) in base_envs {
         command.env(key, value);
     }
     // Describe the renderer to the child rather than inheriting the outer
