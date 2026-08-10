@@ -69,6 +69,9 @@ import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
 import BrowserOverlay from "./components/BrowserOverlay";
 import ArtifactTray, { type ArtifactTrayPosition } from "./components/ArtifactTray";
+import AgentDebugPanel, {
+  type AgentDebugPanelPosition,
+} from "./components/AgentDebugPanel";
 import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
@@ -2651,6 +2654,11 @@ function MainApp() {
   // the titlebar, and the dragged position (null = default top-right anchor).
   const [artifactTrayUiByPane, setArtifactTrayUiByPane] = useState<
     Record<string, { closed?: boolean; collapsed?: boolean; pos?: ArtifactTrayPosition | null }>
+  >({});
+  // The panel is globally enabled from Display settings, but each pane remembers
+  // its own in-session dragged position as the user switches between agents.
+  const [debugPanelPositionByPane, setDebugPanelPositionByPane] = useState<
+    Record<string, AgentDebugPanelPosition | null>
   >({});
   const [transcriptExpandedByPane, setTranscriptExpandedByPane] = useState<
     Record<string, boolean>
@@ -13228,6 +13236,31 @@ function MainApp() {
     );
   }
 
+  function renderAgentDebugPanel(surface: TurnPaneSurface) {
+    if (
+      !settings.showDebugPanel ||
+      !surface.agent ||
+      surface.pane.id !== activePane?.id
+    ) {
+      return null;
+    }
+    return (
+      <AgentDebugPanel
+        key={`agent-debug-${surface.agent.id}`}
+        agent={surface.agent}
+        paneId={surface.pane.id}
+        position={debugPanelPositionByPane[surface.pane.id] ?? null}
+        onPositionChange={(position) =>
+          setDebugPanelPositionByPane((current) => ({
+            ...current,
+            [surface.pane.id]: position,
+          }))
+        }
+        onQueueChange={setAgentQueuedTurns}
+      />
+    );
+  }
+
   const selectResearchTreeFromSidebar = useCallback(
     (treeId: string) => {
       if (
@@ -14630,6 +14663,21 @@ function MainApp() {
                 ) : null}
               </div>
             ) : null}
+
+            <div className="settings-divider" role="separator" />
+
+            <label className="settings-row settings-toggle">
+              <span className="settings-label">Show debug panel</span>
+              <input
+                type="checkbox"
+                className="settings-checkbox"
+                checked={settings.showDebugPanel}
+                onChange={(event) => {
+                  const showDebugPanel = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, showDebugPanel }));
+                }}
+              />
+            </label>
               </>
             ) : (
               <>
@@ -15707,6 +15755,7 @@ function MainApp() {
                   {renderTurnPaneSurface(surface, false)}
                   {renderBtwFloatingPanes(surface.pane.id)}
                   {renderArtifactTray(surface, index === 0)}
+                  {renderAgentDebugPanel(surface)}
                   {renderFloatingTurnPaneControls(surface, false)}
                 </section>
               ))
@@ -15772,6 +15821,7 @@ function MainApp() {
               {renderTurnPaneSurface(surface, false)}
               {renderBtwFloatingPanes(surface.pane.id)}
               {renderArtifactTray(surface, index === 0)}
+              {renderAgentDebugPanel(surface)}
               {renderFloatingTurnPaneControls(surface, true)}
             </section>
           ))}
@@ -15790,6 +15840,7 @@ function MainApp() {
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
           {renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
           {renderArtifactTray(activeTurnPaneSurface)}
+          {renderAgentDebugPanel(activeTurnPaneSurface)}
         </aside>
       ) : null}
       {/* Text-mode terminal mini-map while the transcript covers the stage:

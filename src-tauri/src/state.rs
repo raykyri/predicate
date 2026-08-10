@@ -515,6 +515,47 @@ pub struct AgentOutstandingSend {
     pub source: AgentSendSource,
 }
 
+/// Debug-only view of a turn's delivery state. `QueuedTurn::possibly_pasted` is
+/// intentionally absent from normal persistence/API serialization, but it is the
+/// key signal when a retry will submit a bare Return instead of pasting again.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDeliveryDebugTurn {
+    pub id: String,
+    pub text: String,
+    pub pause_after: bool,
+    pub wait_for: Option<QueuedTurnWait>,
+    pub delivery: Option<QueuedTurnDelivery>,
+    pub possibly_pasted: bool,
+}
+
+impl From<&QueuedTurn> for AgentDeliveryDebugTurn {
+    fn from(turn: &QueuedTurn) -> Self {
+        Self {
+            id: turn.id.clone(),
+            text: turn.text.clone(),
+            pause_after: turn.pause_after,
+            wait_for: turn.wait_for.clone(),
+            delivery: turn.delivery.clone(),
+            possibly_pasted: turn.possibly_pasted,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDeliveryDebugInfo {
+    pub typing: bool,
+    pub draining: bool,
+    pub pending_pause: bool,
+    pub activity_revision: u64,
+    pub status_revision: u64,
+    pub queued_turns: Vec<AgentDeliveryDebugTurn>,
+    pub inflight: Option<AgentDeliveryDebugTurn>,
+    pub outstanding_sends: Vec<AgentOutstandingSend>,
+    pub submit_watch_send_ids: Vec<u64>,
+}
+
 /// A prompt queued application-wide before it has an owner — the home view's
 /// Drafts rail. Assigning one to an agent marks it consumed (kept for a while
 /// as history) rather than deleting it, so an assignment that queues work is
@@ -8126,6 +8167,58 @@ impl AppState {
         Ok(model.agent_typing.contains(agent_id))
     }
 
+    /// Snapshot of the transient machinery between an agent queue and its PTY.
+    /// Exposed only to the opt-in in-app Debug panel; it does not mutate or clear
+    /// tracking, so observing a missed submit cannot change its recovery behavior.
+    pub fn agent_delivery_debug(&self, agent_id: &str) -> Result<AgentDeliveryDebugInfo, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        if !model.agents.contains_key(agent_id) {
+            return Err(format!("Agent {agent_id} was not found"));
+        }
+        let mut submit_watch_send_ids = model
+            .agent_submit_watch
+            .iter()
+            .filter_map(|(id, send_id)| (id == agent_id).then_some(*send_id))
+            .collect::<Vec<_>>();
+        submit_watch_send_ids.sort_unstable();
+        Ok(AgentDeliveryDebugInfo {
+            typing: model.agent_typing.contains(agent_id),
+            draining: model.agent_draining.contains(agent_id),
+            pending_pause: model.agent_pending_pause.contains(agent_id),
+            activity_revision: model
+                .agent_activity
+                .get(agent_id)
+                .copied()
+                .unwrap_or_default(),
+            status_revision: model
+                .agent_status_activity
+                .get(agent_id)
+                .copied()
+                .unwrap_or_default(),
+            queued_turns: model
+                .agent_turn_queues
+                .get(agent_id)
+                .into_iter()
+                .flatten()
+                .map(AgentDeliveryDebugTurn::from)
+                .collect(),
+            inflight: model
+                .agent_inflight
+                .get(agent_id)
+                .map(AgentDeliveryDebugTurn::from),
+            outstanding_sends: model
+                .agent_send_tracking
+                .get(agent_id)
+                .map(|tracking| tracking.outstanding_sends.iter().cloned().collect())
+                .unwrap_or_default(),
+            submit_watch_send_ids,
+        })
+    }
+
     /// Stores the agent's composer draft and snapshots it to disk. A trimmed-empty
     /// draft drops the entry so recovery never restores stray whitespace and the
     /// map does not grow an entry per cleared composer.
@@ -14912,6 +15005,29 @@ mod tests {
             AgentTurnClaim::Ready { turn, .. } => assert_eq!(turn.text, "second"),
             _ => panic!("expected the second turn to be claimed"),
         }
+    }
+
+    #[test]
+    fn delivery_debug_snapshot_exposes_transient_queue_and_submit_state() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        state.insert_agent(sample_agent("agent-1")).unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "queued".to_string())
+            .unwrap();
+        state.set_agent_typing("agent-1", true).unwrap();
+        let send_id = state
+            .record_agent_send("agent-1", ".".to_string(), AgentSendSource::DirectSend)
+            .unwrap();
+        assert!(state.begin_agent_submit_watch("agent-1", send_id));
+
+        let snapshot = state.agent_delivery_debug("agent-1").unwrap();
+        assert!(snapshot.typing);
+        assert_eq!(snapshot.queued_turns.len(), 1);
+        assert_eq!(snapshot.queued_turns[0].text, "queued");
+        assert_eq!(snapshot.outstanding_sends.len(), 1);
+        assert_eq!(snapshot.outstanding_sends[0].id, send_id);
+        assert_eq!(snapshot.submit_watch_send_ids, vec![send_id]);
     }
 
     #[test]

@@ -1,0 +1,217 @@
+.agent-debug-panel {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 13;
+  display: flex;
+  width: 248px;
+  max-width: calc(100% - 16px);
+  max-height: calc(100% - 16px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--control-border);
+  border-radius: 10px;
+  background: var(--right-pane-bg);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+}
+
+.agent-debug-titlebar {
+  display: flex;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--surface-divider);
+  background: var(--chrome-header-bg);
+  color: var(--accent-color);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.agent-debug-titlebar > span {
+  flex: 1;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.agent-debug-titlebar code {
+  color: var(--text-faint);
+  font-size: 9.5px;
+  font-weight: 500;
+  text-transform: none;
+}
+
+.agent-debug-body {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 7px;
+  padding: 7px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.agent-debug-status {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.agent-debug-status-primary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-debug-status-primary .pane-tab-dot {
+  position: static;
+  width: 7px;
+  height: 7px;
+  flex: none;
+}
+
+.agent-debug-status-primary strong {
+  color: var(--text-strong);
+  font-size: 11px;
+}
+
+.agent-debug-status dl {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.agent-debug-status dl > div {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 6px;
+}
+
+.agent-debug-status dt {
+  color: var(--text-faint);
+}
+
+.agent-debug-status dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-debug-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.agent-debug-chip {
+  padding: 1px 4px;
+  border: 1px solid var(--surface-divider);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.agent-debug-chip.is-active {
+  border-color: var(--accent-color);
+  color: var(--accent-color);
+}
+
+.agent-debug-chip.is-warn,
+.agent-debug-detail.is-warn {
+  color: var(--warning-color, #d6a64a);
+}
+
+.agent-debug-detail {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+  line-height: 1.35;
+}
+
+.agent-debug-detail code {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+}
+
+.agent-debug-detail.is-error,
+.agent-debug-result.is-error {
+  color: var(--danger-color, #e06c75);
+}
+
+.agent-debug-actions {
+  display: grid;
+  gap: 3px;
+  padding-top: 5px;
+  border-top: 1px solid var(--surface-divider);
+}
+
+.agent-debug-actions h3 {
+  margin: 0 0 1px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.agent-debug-actions.is-pipeline {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.agent-debug-actions.is-pipeline h3,
+.agent-debug-actions.is-pipeline button:last-child {
+  grid-column: 1 / -1;
+}
+
+.agent-debug-actions button {
+  min-height: 25px;
+  padding: 4px 7px;
+  border: 1px solid var(--control-border);
+  border-radius: 5px;
+  background: var(--chrome-control-bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 10.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-debug-actions button:hover:not(:disabled) {
+  border-color: var(--accent-color);
+  background: var(--chrome-control-bg-hover);
+}
+
+.agent-debug-actions button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.agent-debug-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  padding-top: 5px;
+  border-top: 1px solid var(--surface-divider);
+  color: var(--text-muted);
+  line-height: 1.35;
+}
+
+.agent-debug-result.is-running svg {
+  flex: none;
+  animation: spinner-spin 1s linear infinite;
+}
+
+.agent-debug-result.is-success {
+  color: var(--accent-color);
+}

@@ -23,6 +23,14 @@ pub enum SubmitAgentTurnMode {
     Steer,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AgentDebugInputKind {
+    TextOnly,
+    ReturnOnly,
+    TextAndReturn,
+}
+
 /// qMux sends leading-`!` text through the agent TUI, but the TUI handles it as a
 /// shell escape rather than an agent turn. Those commands may not emit a normal
 /// Stop/idle hook after they finish, so they must not enter the running lifecycle.
@@ -1169,6 +1177,42 @@ fn turn_write_options(agent: &AgentInfo, pane_id: String, turn: &QueuedTurn) -> 
     }
 }
 
+fn debug_input_write_options(
+    agent: &AgentInfo,
+    pane_id: String,
+    kind: AgentDebugInputKind,
+) -> PaneWriteOptions {
+    let mut options = turn_write_options(agent, pane_id, &QueuedTurn::new(".".to_string()));
+    match kind {
+        AgentDebugInputKind::TextOnly => options.submit = false,
+        AgentDebugInputKind::ReturnOnly => {
+            options.data.clear();
+            options.paste = false;
+        }
+        AgentDebugInputKind::TextAndReturn => {}
+    }
+    options
+}
+
+/// Sends one diagnostic payload through the exact transport options used by a
+/// normal queued turn for this adapter. This deliberately bypasses status,
+/// outstanding-send, and recovery bookkeeping: the Debug panel uses it to isolate
+/// the payload and Return legs themselves from the higher-level turn pipeline.
+pub fn debug_agent_input(
+    state: &AppState,
+    agent_id: &str,
+    kind: AgentDebugInputKind,
+) -> Result<(), String> {
+    let agent = state
+        .agent(agent_id)?
+        .ok_or_else(|| format!("Agent {agent_id} was not found"))?;
+    let pane_id = agent
+        .pane_id
+        .clone()
+        .ok_or_else(|| format!("Agent {agent_id} does not have an attached pane"))?;
+    write_pane(state, debug_input_write_options(&agent, pane_id, kind))
+}
+
 /// Writes one turn into the agent's own pane: reserve prompt-correlation, paste
 /// and submit, promote the status, then arm the submit-confirmation watch. Does
 /// not requeue on failure — the caller owns the turn and decides (a queue drain
@@ -2015,6 +2059,34 @@ mod tests {
         assert_eq!(options.data, "hello\x1b\rworld    indented");
         assert!(!options.paste);
         assert!(options.submit);
+    }
+
+    #[test]
+    fn debug_input_uses_the_queued_transport_with_independent_submit_legs() {
+        let agent = sample_agent(AgentStatus::Done);
+        let text =
+            debug_input_write_options(&agent, "pane-1".to_string(), AgentDebugInputKind::TextOnly);
+        assert_eq!(text.data, ".");
+        assert!(text.paste);
+        assert!(!text.submit);
+
+        let submit = debug_input_write_options(
+            &agent,
+            "pane-1".to_string(),
+            AgentDebugInputKind::ReturnOnly,
+        );
+        assert!(submit.data.is_empty());
+        assert!(!submit.paste);
+        assert!(submit.submit);
+
+        let combined = debug_input_write_options(
+            &agent,
+            "pane-1".to_string(),
+            AgentDebugInputKind::TextAndReturn,
+        );
+        assert_eq!(combined.data, ".");
+        assert!(combined.paste);
+        assert!(combined.submit);
     }
 
     #[test]

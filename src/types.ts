@@ -448,6 +448,30 @@ export interface QueuedTurn {
   delivery?: QueuedTurnDelivery | null;
 }
 
+export interface AgentDeliveryDebugTurn extends QueuedTurn {
+  possiblyPasted: boolean;
+}
+
+export interface AgentOutstandingSendDebug {
+  id: number;
+  text: string;
+  sentAtSeq: number;
+  sentAtMs: number;
+  source: "directSend" | "queuedTurn" | "steer";
+}
+
+export interface AgentDeliveryDebugInfo {
+  typing: boolean;
+  draining: boolean;
+  pendingPause: boolean;
+  activityRevision: number;
+  statusRevision: number;
+  queuedTurns: AgentDeliveryDebugTurn[];
+  inflight?: AgentDeliveryDebugTurn | null;
+  outstandingSends: AgentOutstandingSendDebug[];
+  submitWatchSendIds: number[];
+}
+
 // A prompt queued application-wide before it has an owner — the home view's
 // Drafts rail. Assigning it to an agent marks it consumed (kept as history)
 // rather than deleting it.

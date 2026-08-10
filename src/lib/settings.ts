@@ -333,6 +333,8 @@ export interface AppSettings {
   showTabDirectories: boolean;
   /** show tool calls and other activity detail in agent transcripts */
   showToolCalls: boolean;
+  /** show the draggable per-agent input delivery diagnostics panel */
+  showDebugPanel: boolean;
   /** pin the latest user message to the top of the transcript while its reply scrolls */
   stickyUserMessages: boolean;
   /**
@@ -373,6 +375,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   codeMode: true,
   showTabDirectories: true,
   showToolCalls: true,
+  showDebugPanel: false,
   stickyUserMessages: true,
   showAssistantTimestamps: false,
   requireCmdEnterToSend: true,
@@ -572,6 +575,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.showTabDirectories === "boolean" ? parsed.showTabDirectories : codeMode;
     const showToolCalls =
       typeof parsed.showToolCalls === "boolean" ? parsed.showToolCalls : codeMode;
+    const showDebugPanel =
+      typeof parsed.showDebugPanel === "boolean"
+        ? parsed.showDebugPanel
+        : DEFAULT_SETTINGS.showDebugPanel;
     const stickyUserMessages =
       typeof parsed.stickyUserMessages === "boolean"
         ? parsed.stickyUserMessages
@@ -621,6 +628,7 @@ export function loadSettings(): AppSettings {
       codeMode,
       showTabDirectories,
       showToolCalls,
+      showDebugPanel,
       stickyUserMessages,
       showAssistantTimestamps,
       requireCmdEnterToSend,

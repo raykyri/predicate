@@ -15,6 +15,7 @@ import type {
 } from "./publication";
 import type {
   AgentInfo,
+  AgentDeliveryDebugInfo,
   ArtifactInfo,
   ClaudeSkill,
   GlobalDraft,
@@ -840,6 +841,19 @@ export function reorderQueuedAgentTurn(
 
 export function sendNextQueuedAgentTurn(agentId: string) {
   return invoke<SendNextQueuedAgentTurnResult>("agent_send_next_queued_turn", { agentId });
+}
+
+export type AgentDebugInputKind = "textOnly" | "returnOnly" | "textAndReturn";
+
+/** Exercises the same adapter-specific PTY payload/submit options used by a
+ * queued turn, without touching lifecycle or prompt-correlation state. */
+export function sendAgentDebugInput(agentId: string, kind: AgentDebugInputKind) {
+  return invoke<void>("agent_debug_input", { agentId, kind });
+}
+
+/** Transient queue-to-PTY state for the opt-in delivery Debug panel. */
+export function getAgentDeliveryDebug(agentId: string) {
+  return invoke<AgentDeliveryDebugInfo>("agent_delivery_debug", { agentId });
 }
 
 /** Marks/clears that the user is actively typing for an agent, so the backend holds
