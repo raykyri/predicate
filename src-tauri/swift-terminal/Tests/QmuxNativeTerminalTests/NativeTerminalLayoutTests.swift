@@ -253,61 +253,6 @@ final class NativeTerminalLayoutTests: XCTestCase {
         }
     }
 
-    func testInterfaceRecoveryRebuildsVisibleSurfaceWithoutRemovingPane() async throws {
-        try await MainActor.run {
-            try Self.withPane { paneID, _ in
-                let originalSession = try XCTUnwrap(
-                    TerminalSessionRegistry.shared.session(for: paneID)
-                )
-
-                XCTAssertTrue(NativeTerminalHost.shared.recoverTerminalSurfaces())
-
-                let replacementSession = try XCTUnwrap(
-                    TerminalSessionRegistry.shared.session(for: paneID)
-                )
-                XCTAssertFalse(originalSession === replacementSession)
-                XCTAssertTrue(NativeTerminalHost.shared.paneIsReadyForReplay(id: paneID))
-            }
-        }
-    }
-
-    func testInterfaceRecoveryDefersHiddenSurfaceUntilReveal() async throws {
-        try await MainActor.run {
-            try Self.withPane { _, frame in
-                let hiddenPaneID = "native-hidden-recovery-test-pane"
-                XCTAssertTrue(
-                    NativeTerminalHost.shared.createPane(
-                        id: hiddenPaneID,
-                        workingDirectory: nil
-                    )
-                )
-                XCTAssertTrue(
-                    Self.setLayout(paneID: hiddenPaneID, frame: frame, visible: false)
-                )
-                let originalSession = try XCTUnwrap(
-                    TerminalSessionRegistry.shared.session(for: hiddenPaneID)
-                )
-
-                XCTAssertTrue(NativeTerminalHost.shared.recoverTerminalSurfaces())
-                let stillParkedSession = try XCTUnwrap(
-                    TerminalSessionRegistry.shared.session(for: hiddenPaneID)
-                )
-                XCTAssertTrue(originalSession === stillParkedSession)
-
-                XCTAssertTrue(
-                    Self.setLayout(paneID: hiddenPaneID, frame: frame, visible: true)
-                )
-                let replacementSession = try XCTUnwrap(
-                    TerminalSessionRegistry.shared.session(for: hiddenPaneID)
-                )
-                XCTAssertFalse(originalSession === replacementSession)
-                XCTAssertTrue(
-                    NativeTerminalHost.shared.paneIsReadyForReplay(id: hiddenPaneID)
-                )
-            }
-        }
-    }
-
     func testWebViewReloadClearsOldDocumentLayoutRevisions() async throws {
         try await MainActor.run {
             try Self.withPane { paneID, frame in

@@ -24,12 +24,6 @@ private func nativeTerminalDidCancelInterfaceHealthCheck()
 @_silgen_name("qmux_native_terminal_did_detect_unhealthy_webview")
 private func nativeTerminalDidDetectUnhealthyWebView(_ generation: UInt64)
 
-@_silgen_name("qmux_native_terminal_did_rebuild_surface")
-private func nativeTerminalDidRebuildSurface(_ paneID: UnsafePointer<CChar>) -> Int32
-
-@_silgen_name("qmux_native_terminal_did_request_surface_recovery")
-private func nativeTerminalDidRequestSurfaceRecovery(_ markAll: Int32) -> Int32
-
 @MainActor
 final class NativeTerminalHost {
     static let shared = NativeTerminalHost()
@@ -58,11 +52,6 @@ final class NativeTerminalHost {
     private var memoryPressureCritical = false
     private var inactiveSince: TimeInterval?
     private var lastLifecycleTick = ProcessInfo.processInfo.systemUptime
-    /// Panes whose Ghostty/Metal surface predates a suspension, GPU/display
-    /// transition, or explicit recovery. Visible panes rebuild immediately;
-    /// hidden panes rebuild lazily on their next reveal to keep recovery's
-    /// peak memory bounded.
-    private var staleSurfacePaneIDs: Set<String> = []
     private var webViewHealthProbeGeneration: UInt64 = 0
     private var webViewHealthRustGeneration: UInt64?
     private var webViewHealthSnapshotAttempt = 0
@@ -218,101 +207,6 @@ final class NativeTerminalHost {
         return true
     }
 
-    /// Recreates Ghostty surfaces without touching their PTYs. The Rust callback
-    /// restores each replacement from the pane's bounded durable scrollback;
-    /// live child processes and their file descriptors remain unchanged.
-    func recoverTerminalSurfaces(markAll: Bool = true) -> Bool {
-        guard container != nil else { return false }
-        if markAll {
-            staleSurfacePaneIDs.formUnion(panes.keys)
-        }
-        rebuildVisibleStaleSurfaces()
-        return true
-    }
-
-    private func rebuildVisibleStaleSurfaces() {
-        guard !memoryPressureCritical else { return }
-        let visiblePaneIDs = staleSurfacePaneIDs.filter { paneID in
-            panes[paneID].map { !$0.view.isHidden } ?? false
-        }
-        for paneID in visiblePaneIDs {
-            _ = rebuildSurface(id: paneID)
-        }
-    }
-
-    @discardableResult
-    private func rebuildSurface(id: String, revealing: Bool = false) -> Bool {
-        guard staleSurfacePaneIDs.contains(id),
-              !memoryPressureCritical,
-              let container,
-              let oldPane = panes[id]
-        else { return false }
-
-        let frame = oldPane.view.frame
-        let wasHidden = oldPane.view.isHidden
-        let willBeVisible = !wasHidden || revealing
-        let ownedKeyboard = keyboardOwnerPane === oldPane
-        let capturedPointer = pointerCapturePane === oldPane
-        let acceptsPointerInput = oldPane.acceptsPointerInput
-        let acceptsKeyboardInput = oldPane.acceptsKeyboardInput
-        let acceptsKeyboardClaim = oldPane.acceptsKeyboardClaim
-        let wasFocused = oldPane.isFocused
-
-        // Tear down the old CAMetalLayer before allocating its replacement so
-        // recovery does not momentarily double a pane's GPU footprint. Clearing
-        // the delegate prevents surface destruction from being mistaken for a
-        // user-requested pane close.
-        oldPane.view.delegate = nil
-        releaseFirstResponderIfHeld(by: oldPane.view)
-        TerminalSessionRegistry.shared.unregister(id)
-        oldPane.view.removeFromSuperview()
-
-        let pane = NativeTerminalPane(
-            paneID: id,
-            workingDirectory: oldPane.workingDirectory,
-            themeName: currentThemeName
-        )
-        pane.acceptsPointerInput = acceptsPointerInput
-        pane.acceptsKeyboardInput = acceptsKeyboardInput
-        pane.acceptsKeyboardClaim = acceptsKeyboardClaim
-        pane.isFocused = wasFocused
-        pane.view.frame = frame
-        pane.view.isHidden = !willBeVisible
-        pane.view.setSurfaceVisible(willBeVisible)
-        container.addSubview(pane.view)
-        panes[id] = pane
-        TerminalSessionRegistry.shared.register(pane.terminalSession, for: id)
-        if let currentSettings {
-            _ = pane.applySettings(currentSettings)
-        }
-        if willBeVisible, frame.width > 0, frame.height > 0 {
-            applyGeometry(frame, to: pane, forceFit: true)
-        }
-        if ownedKeyboard {
-            keyboardOwnerPane = nil
-        }
-        if ownedKeyboard ||
-            (desiredKeyboardOwnerPaneID == id && willBeVisible && acceptsKeyboardClaim)
-        {
-            _ = setKeyboardOwner(pane)
-        }
-        if capturedPointer {
-            pointerCapturePane = pane
-        }
-        guard pane.view.isSurfaceLive,
-              !willBeVisible || pane.hasCommittedGeometry
-        else {
-            // Leave it marked stale: a later layout/settings pass can finish
-            // surface creation and another recovery attempt can retry.
-            return false
-        }
-        let restored = id.withCString { nativeTerminalDidRebuildSurface($0) == 1 }
-        if restored {
-            staleSurfacePaneIDs.remove(id)
-        }
-        return restored
-    }
-
     /// True once the pane's surface is live and has been fitted to a real
     /// frame, i.e. replayed scrollback would render at the width the pane
     /// actually keeps rather than the zero-frame default grid.
@@ -323,7 +217,6 @@ final class NativeTerminalHost {
 
     func removePane(id: String) {
         guard let pane = panes.removeValue(forKey: id) else { return }
-        staleSurfacePaneIDs.remove(id)
         TerminalSessionRegistry.shared.unregister(id)
         if desiredKeyboardOwnerPaneID == id {
             desiredKeyboardOwnerPaneID = nil
@@ -370,19 +263,9 @@ final class NativeTerminalHost {
         deferGeometry: Bool,
         revision: UInt64
     ) -> Bool {
-        guard var pane = panes[id] else { return false }
+        guard let pane = panes[id] else { return false }
         if let lastRevision = layoutRevisionByPaneID[id], revision <= lastRevision {
             return true
-        }
-        if visible, staleSurfacePaneIDs.contains(id), !memoryPressureCritical {
-            // Make the target eligible for the serialized "visible stale"
-            // recovery pass. The replacement is created at this same frame and
-            // the normal layout work below immediately applies final policy.
-            pane.view.isHidden = false
-            pane.view.setSurfaceVisible(true)
-            _ = nativeTerminalDidRequestSurfaceRecovery(0)
-            guard let replacement = panes[id] else { return false }
-            pane = replacement
         }
         layoutRevisionByPaneID[id] = revision
         let keyboardClaimChanged = pane.acceptsKeyboardClaim != acceptsKeyboardClaim
@@ -798,7 +681,6 @@ final class NativeTerminalHost {
             pane.view.removeFromSuperview()
         }
         panes.removeAll()
-        staleSurfacePaneIDs.removeAll()
         TerminalSessionRegistry.shared.unregisterAll()
         clientDeferredGeometryPaneIDs.removeAll()
         pendingPaneFrames.removeAll()
@@ -975,7 +857,6 @@ final class NativeTerminalHost {
         if event.contains(.warning) || event.contains(.critical) {
             memoryPressureCritical = true
             resetInterruptedInputState()
-            staleSurfacePaneIDs.formUnion(panes.keys)
             interfaceHealthCheckPending = true
             deferInterfaceHealthCheckIfNeeded()
             return
@@ -988,7 +869,6 @@ final class NativeTerminalHost {
 
     private func requestInterfaceRecovery() {
         resetInterruptedInputState()
-        staleSurfacePaneIDs.formUnion(panes.keys)
         interfaceHealthCheckPending = true
         scheduleInterfaceHealthCheckIfVisible()
     }
@@ -1063,7 +943,6 @@ final class NativeTerminalHost {
                 self.interfaceHealthCheckInFlight = false
                 return
             }
-            _ = nativeTerminalDidRequestSurfaceRecovery(1)
             self.startInterfaceHealthCheck(in: window, generation: generation)
         }
     }

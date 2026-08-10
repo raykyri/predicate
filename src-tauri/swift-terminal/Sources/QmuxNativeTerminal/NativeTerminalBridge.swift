@@ -262,13 +262,6 @@ public func qmuxNativeTerminalPrepareForWebViewReload() -> Int32 {
     }
 }
 
-@_cdecl("qmux_native_terminal_recover_surfaces")
-public func qmuxNativeTerminalRecoverSurfaces(_ markAll: Int32) -> Int32 {
-    onTerminalMain {
-        NativeTerminalHost.shared.recoverTerminalSurfaces(markAll: markAll == 1) ? 1 : 0
-    }
-}
-
 @_cdecl("qmux_native_terminal_focus")
 public func qmuxNativeTerminalFocus(_ paneID: UnsafePointer<CChar>?) -> Int32 {
     guard let paneID = terminalString(paneID) else { return 0 }
