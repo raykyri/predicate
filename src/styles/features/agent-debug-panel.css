@@ -47,6 +47,33 @@
   text-transform: none;
 }
 
+.agent-debug-close {
+  appearance: none;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.agent-debug-close:hover {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
+}
+
+.agent-debug-close:focus-visible {
+  border: 0;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
 .agent-debug-body {
   display: flex;
   min-height: 0;
@@ -55,6 +82,28 @@
   padding: 7px;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+.agent-debug-target {
+  display: grid;
+  gap: 3px;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.agent-debug-target select {
+  min-width: 0;
+  height: 26px;
+  border: 1px solid var(--control-border);
+  border-radius: 5px;
+  background: var(--chrome-control-bg);
+  color: var(--text-primary);
+  font-size: 10.5px;
+  letter-spacing: normal;
+  text-transform: none;
 }
 
 .agent-debug-status {

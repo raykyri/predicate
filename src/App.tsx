@@ -13331,6 +13331,18 @@ function MainApp() {
         key={`agent-debug-${surface.agent.id}`}
         agent={surface.agent}
         paneId={surface.pane.id}
+        targets={panes.flatMap((pane) => {
+          const targetAgent = agentByPaneId.get(pane.id);
+          return targetAgent
+            ? [
+                {
+                  agent: targetAgent,
+                  paneId: pane.id,
+                  label: displayPaneTitle(pane, targetAgent),
+                },
+              ]
+            : [];
+        })}
         position={debugPanelPositionByPane[surface.pane.id] ?? null}
         onPositionChange={(position) =>
           setDebugPanelPositionByPane((current) => ({
@@ -13339,6 +13351,9 @@ function MainApp() {
           }))
         }
         onQueueChange={setAgentQueuedTurns}
+        onClose={() =>
+          setSettings((current) => ({ ...current, showDebugPanel: false }))
+        }
       />
     );
   }

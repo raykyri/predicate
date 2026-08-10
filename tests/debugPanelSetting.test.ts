@@ -16,6 +16,9 @@ test("the agent debug panel is opt-in and persists through Display settings", ()
 
   saveSettings({ ...DEFAULT_SETTINGS, showDebugPanel: true });
   assert.equal(loadSettings().showDebugPanel, true);
+
+  saveSettings({ ...DEFAULT_SETTINGS, showDebugPanel: false });
+  assert.equal(loadSettings().showDebugPanel, false);
 });
 
 test("invalid stored debug visibility falls back to hidden", () => {
