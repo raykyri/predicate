@@ -410,17 +410,13 @@
   background: var(--right-pane-bg);
 }
 
-.turn-card.is-status-superseded,
-.turn-card.is-status-interrupted {
+.turn-card.is-status-superseded {
   opacity: 0.55;
 }
 
 .turn-card.is-status-superseded .turn-text,
 .turn-card.is-status-superseded .turn-markdown,
-.turn-card.is-status-superseded .long-user-message,
-.turn-card.is-status-interrupted .turn-text,
-.turn-card.is-status-interrupted .turn-markdown,
-.turn-card.is-status-interrupted .long-user-message {
+.turn-card.is-status-superseded .long-user-message {
   text-decoration-line: line-through;
   text-decoration-color: rgba(241, 240, 232, 0.8);
   text-decoration-thickness: 1px;
@@ -477,6 +473,28 @@
 
 .turn-card-role-label {
   min-width: 0;
+}
+
+.turn-context-status {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: calc(10px + var(--transcript-font-delta, 0px));
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.turn-context-status + .turn-message-menu {
+  margin-left: 0;
+}
+
+.is-activity-context-status {
+  margin: 2px 10px 0;
+  text-align: right;
+}
+
+.turn-card.is-context-rolled-back {
+  border-color: color-mix(in srgb, var(--text-muted) 28%, transparent);
 }
 
 .turn-message-menu {
@@ -1231,29 +1249,18 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
 
 .tool-block.is-status-superseded > summary,
 .tool-block.is-status-superseded > .tool-payload,
-.tool-block.is-status-interrupted > summary,
-.tool-block.is-status-interrupted > .tool-payload,
 .thinking-block.is-status-superseded > summary,
 .thinking-block.is-status-superseded > pre,
 .thinking-block.is-status-superseded > .thinking-prose,
-.thinking-block.is-status-interrupted > summary,
-.thinking-block.is-status-interrupted > pre,
-.thinking-block.is-status-interrupted > .thinking-prose,
-.activity-group-block.is-status-superseded > summary,
-.activity-group-block.is-status-interrupted > summary {
+.activity-group-block.is-status-superseded > summary {
   opacity: 0.55;
 }
 
 .tool-block.is-status-superseded > summary,
 .tool-block.is-status-superseded > .tool-payload,
-.tool-block.is-status-interrupted > summary,
-.tool-block.is-status-interrupted > .tool-payload,
 .thinking-block.is-status-superseded > summary,
 .thinking-block.is-status-superseded > pre,
-.thinking-block.is-status-interrupted > summary,
-.thinking-block.is-status-interrupted > pre,
-.activity-group-block.is-status-superseded > summary,
-.activity-group-block.is-status-interrupted > summary {
+.activity-group-block.is-status-superseded > summary {
   text-decoration-line: line-through;
   text-decoration-color: rgba(217, 221, 217, 0.8);
   text-decoration-thickness: 1px;

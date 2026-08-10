@@ -1041,13 +1041,11 @@
   padding-left: 0;
 }
 
-.research-response-message.is-status-superseded,
-.research-response-message.is-status-interrupted {
+.research-response-message.is-status-superseded {
   opacity: 0.55;
 }
 
-.research-response-message.is-status-superseded > .turn-markdown,
-.research-response-message.is-status-interrupted > .turn-markdown {
+.research-response-message.is-status-superseded > .turn-markdown {
   text-decoration-line: line-through;
   text-decoration-color: rgba(241, 240, 232, 0.8);
   text-decoration-thickness: 1px;

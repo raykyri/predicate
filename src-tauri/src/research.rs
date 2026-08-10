@@ -1472,6 +1472,17 @@ fn normalized_text(value: &str) -> String {
     value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+pub(crate) fn turn_is_in_active_context(turn: &crate::transcript::Turn) -> bool {
+    turn.status != Some(crate::transcript::TurnStatus::Superseded)
+        && turn.context_status != Some(crate::transcript::TurnContextStatus::RolledBack)
+}
+
+pub(crate) fn has_active_assistant_turn(turns: &[crate::transcript::Turn]) -> bool {
+    turns
+        .iter()
+        .any(|turn| turn.role == "assistant" && turn_is_in_active_context(turn))
+}
+
 fn turn_native_id(turn: &crate::transcript::Turn) -> Option<&str> {
     turn.native_message_id
         .as_deref()
@@ -1483,7 +1494,7 @@ fn turn_native_id(turn: &crate::transcript::Turn) -> Option<&str> {
 // inside them re-allocated it for every turn scanned — on every hook-driven
 // agent event, under the model lock.
 fn turn_matches_normalized_prompt(turn: &crate::transcript::Turn, expected: &str) -> bool {
-    if turn.role != "user" {
+    if turn.role != "user" || !turn_is_in_active_context(turn) {
         return false;
     }
     !expected.is_empty()
@@ -1494,7 +1505,7 @@ fn turn_matches_normalized_prompt(turn: &crate::transcript::Turn, expected: &str
 }
 
 fn turn_contains_normalized_prompt(turn: &crate::transcript::Turn, expected: &str) -> bool {
-    if turn.role != "user" {
+    if turn.role != "user" || !turn_is_in_active_context(turn) {
         return false;
     }
     !expected.is_empty()
@@ -1515,6 +1526,7 @@ pub fn prompt_native_id(turns: &[crate::transcript::Turn], prompt: &str) -> Opti
 
 fn turn_has_prompt_text(turn: &crate::transcript::Turn) -> bool {
     turn.role == "user"
+        && turn_is_in_active_context(turn)
         && turn.blocks.iter().any(|block| {
             matches!(block, crate::transcript::TurnBlock::Text { text }
                 if !text.trim().is_empty())
@@ -1533,7 +1545,8 @@ fn response_boundary(
     turns
         .iter()
         .rposition(|turn| {
-            prompt_native_id.is_some_and(|id| turn_native_id(turn) == Some(id))
+            (turn_is_in_active_context(turn)
+                && prompt_native_id.is_some_and(|id| turn_native_id(turn) == Some(id)))
                 || turn_matches_normalized_prompt(turn, &expected)
         })
         .or_else(|| {
@@ -1598,6 +1611,9 @@ pub fn response_preview(
     let mut fallback_text = None;
     let mut text_after_last_activity = None;
     for turn in &turns[start..] {
+        if !turn_is_in_active_context(turn) {
+            continue;
+        }
         for block in &turn.blocks {
             match block {
                 crate::transcript::TurnBlock::Text { text }
@@ -2173,6 +2189,7 @@ pub fn document_turn(node_id: &str, markdown: &str) -> crate::transcript::Turn {
         timestamp: None,
         status: None,
         status_reason: None,
+        context_status: None,
         native_id: None,
         parent_native_id: None,
         native_message_id: None,
@@ -2206,6 +2223,7 @@ fn conversation_tool_activity_turn(
         timestamp: None,
         status: None,
         status_reason: None,
+        context_status: None,
         native_id: None,
         parent_native_id: None,
         native_message_id: None,
@@ -2252,6 +2270,7 @@ fn is_raw_tool_call_block(block: &crate::transcript::TurnBlock) -> bool {
 /// filter can never disagree about where an exchange starts.
 fn turn_has_exportable_prompt(turn: &crate::transcript::Turn) -> bool {
     turn.role == "user"
+        && turn_is_in_active_context(turn)
         && turn.blocks.iter().any(|block| {
             is_user_attachment_block(block)
                 || matches!(block, crate::transcript::TurnBlock::Text { text }
@@ -2291,8 +2310,8 @@ pub const CONVERSATION_ATTACHMENT_MARKER: &str = "[image attachment]";
 ///   exchange structure survives without the payload.
 /// - qmux-injected tagged-instruction blocks are stripped from user text
 ///   (whole-message and leading-block forms); adapter interruption markers
-///   and superseded (rewound) turns are dropped — none of that is
-///   conversation the user held.
+///   and records outside active context are dropped — none of that belongs in
+///   the conversation the exported node will continue.
 /// - Turn ids are reissued from the node id and native session/message ids
 ///   are cleared: the exported node must hold no pointer back to the source
 ///   session.
@@ -2313,7 +2332,9 @@ pub fn conversation_export_turns(
     let mut has_prompt = false;
     let mut has_answer = false;
     for turn in turns {
-        if turn.status == Some(crate::transcript::TurnStatus::Superseded) {
+        if turn.status == Some(crate::transcript::TurnStatus::Superseded)
+            || turn.context_status == Some(crate::transcript::TurnContextStatus::RolledBack)
+        {
             continue;
         }
         let role = turn.role.as_str();
@@ -2373,6 +2394,7 @@ pub fn conversation_export_turns(
                 timestamp: turn.timestamp,
                 status: turn.status,
                 status_reason: turn.status_reason,
+                context_status: turn.context_status,
                 native_id: None,
                 parent_native_id: None,
                 native_message_id: None,
@@ -2598,6 +2620,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: None,
             parent_native_id: None,
             native_message_id: None,
@@ -3070,6 +3093,7 @@ mod tests {
             timestamp: Some(7),
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: Some(format!("native-{id}")),
             parent_native_id: Some("native-parent".to_string()),
             native_message_id: Some(format!("message-{id}")),
@@ -3175,9 +3199,12 @@ mod tests {
     }
 
     #[test]
-    fn conversation_export_drops_instructions_supersessions_and_foreign_roles() {
+    fn conversation_export_drops_instructions_excluded_context_and_foreign_roles() {
         let mut superseded = export_turn("a0", "assistant", vec![text_block("Rewound answer")]);
         superseded.status = Some(crate::transcript::TurnStatus::Superseded);
+        let mut rolled_back =
+            export_turn("a00", "assistant", vec![text_block("Rolled-back answer")]);
+        rolled_back.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
         let turns = vec![
             export_turn(
                 "i1",
@@ -3188,6 +3215,7 @@ mod tests {
             ),
             export_turn("u1", "user", vec![text_block("Real question")]),
             superseded,
+            rolled_back,
             export_turn("s1", "system", vec![text_block("system chatter")]),
             export_turn(
                 "t1",
@@ -3205,6 +3233,7 @@ mod tests {
         let encoded = serde_json::to_string(&exported).unwrap();
         assert!(!encoded.contains("injected"), "{encoded}");
         assert!(!encoded.contains("Rewound"), "{encoded}");
+        assert!(!encoded.contains("Rolled-back"), "{encoded}");
         assert!(!encoded.contains("hidden"), "{encoded}");
         assert!(!encoded.contains("system chatter"), "{encoded}");
     }
@@ -3383,6 +3412,17 @@ mod tests {
         // Nothing prompt-like at all: nothing in flight to drop.
         let assistant_only = vec![export_turn("a1", "assistant", vec![text_block("Answer")])];
         assert_eq!(completed_exchange_boundary(&assistant_only), None);
+
+        // A rolled-back prompt is visible history, not the exchange currently
+        // in model context.
+        let mut rolled_back = export_turn("u2", "user", vec![text_block("Discarded prompt")]);
+        rolled_back.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
+        let with_rollback = vec![
+            export_turn("u1", "user", vec![text_block("Active question")]),
+            export_turn("a1", "assistant", vec![text_block("Delivered answer")]),
+            rolled_back,
+        ];
+        assert_eq!(completed_exchange_boundary(&with_rollback), Some(0));
     }
 
     #[test]
@@ -3849,6 +3889,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: None,
             parent_native_id: None,
             native_message_id: None,
@@ -3900,6 +3941,27 @@ mod tests {
             response_preview(&turns_with_trailing_thinking, None, "Question", &[]).as_deref(),
             Some("Draft answer")
         );
+
+        // A later rolled-back copy of the prompt must not steal the response
+        // boundary or sidebar preview from the surviving exchange.
+        let mut rolled_back_prompt = turn("discarded-user", "user", "New question");
+        rolled_back_prompt.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
+        let mut rolled_back_answer = turn("discarded-answer", "assistant", "Discarded answer");
+        rolled_back_answer.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
+        assert!(!has_active_assistant_turn(&[rolled_back_answer.clone()]));
+        let with_rollback = vec![
+            turn("new-user", "user", "New question"),
+            turn("new-answer", "assistant", "Surviving answer"),
+            rolled_back_prompt,
+            rolled_back_answer,
+        ];
+        let visible = response_turns(&with_rollback, None, "New question", &[]);
+        assert_eq!(visible[0].id, "new-answer");
+        assert_eq!(
+            response_preview(&with_rollback, None, "New question", &[]).as_deref(),
+            Some("Surviving answer")
+        );
+        assert!(has_active_assistant_turn(&with_rollback));
     }
 
     #[test]
@@ -3917,6 +3979,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: None,
             parent_native_id: None,
             native_message_id: None,
@@ -3964,6 +4027,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: None,
             parent_native_id: None,
             native_message_id: None,

@@ -32,7 +32,11 @@ export function clamp(value: number, min: number, max: number) {
 }
 
 export function firstUserTurnText(turn: Turn): string | null {
-  if (turn.role !== "user" || turn.status === "superseded") {
+  if (
+    turn.role !== "user" ||
+    turn.status === "superseded" ||
+    turn.contextStatus === "rolledBack"
+  ) {
     return null;
   }
 
@@ -59,12 +63,12 @@ export function latestUserTurnText(turns: Turn[]): string | null {
   return null;
 }
 
-/** When the conversation last moved: the newest non-superseded turn that
- * carries a native timestamp. */
+/** When active context last moved: the newest included, non-superseded turn
+ * that carries a native timestamp. */
 export function latestTurnTimestamp(turns: Turn[]): number | null {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
-    if (turn.status === "superseded") {
+    if (turn.status === "superseded" || turn.contextStatus === "rolledBack") {
       continue;
     }
     if (typeof turn.timestamp === "number") {
@@ -80,7 +84,11 @@ export function latestTurnTimestamp(turns: Turn[]): number | null {
 export function latestAssistantTurnText(turns: Turn[]): string | null {
   for (let index = turns.length - 1; index >= 0; index -= 1) {
     const turn = turns[index];
-    if (turn.role !== "assistant" || turn.status === "superseded") {
+    if (
+      turn.role !== "assistant" ||
+      turn.status === "superseded" ||
+      turn.contextStatus === "rolledBack"
+    ) {
       continue;
     }
     for (let blockIndex = turn.blocks.length - 1; blockIndex >= 0; blockIndex -= 1) {
@@ -314,7 +322,8 @@ export function isTurn(value: unknown): value is Turn {
     typeof turn.role === "string" &&
     Array.isArray(turn.blocks) &&
     optionalTurnStatus(turn.status) &&
-    optionalTurnStatusReason(turn.statusReason)
+    optionalTurnStatusReason(turn.statusReason) &&
+    optionalTurnContextStatus(turn.contextStatus)
   );
 }
 
@@ -337,6 +346,10 @@ function optionalTurnStatusReason(value: unknown) {
     value === "claudePromptBranch" ||
     value === "unknownBranch"
   );
+}
+
+function optionalTurnContextStatus(value: unknown) {
+  return value === undefined || value === null || value === "rolledBack";
 }
 
 // Validates an agent payload arriving on an event before it is applied to local
@@ -454,6 +467,7 @@ export function reconcileReplacedTurns(
       prior.sourceIndex === turn.sourceIndex &&
       prior.status === turn.status &&
       prior.statusReason === turn.statusReason &&
+      prior.contextStatus === turn.contextStatus &&
       prior.blocks.length === turn.blocks.length &&
       JSON.stringify(prior) === JSON.stringify(turn)
     ) {

@@ -21,6 +21,7 @@ function makeTurn(options: {
   text?: string;
   timestamp?: number | null;
   status?: Turn["status"];
+  contextStatus?: Turn["contextStatus"];
 }): Turn {
   nextTurnId += 1;
   return {
@@ -31,6 +32,7 @@ function makeTurn(options: {
     sourceIndex: nextTurnId,
     timestamp: options.timestamp ?? null,
     status: options.status ?? null,
+    contextStatus: options.contextStatus ?? null,
   };
 }
 
@@ -111,6 +113,18 @@ test("railPastTurns skips superseded records and instruction-only prompts", () =
   assert.equal(past.length, 1);
   assert.equal(past[0].text, "kept");
   assert.equal(past[0].settledAt, 200);
+});
+
+test("rail helpers omit records excluded from active context", () => {
+  const turns = [
+    makeTurn({ role: "user", text: "rolled back", timestamp: 100, contextStatus: "rolledBack" }),
+    makeTurn({ role: "assistant", text: "old answer", timestamp: 150, contextStatus: "rolledBack" }),
+    makeTurn({ role: "user", text: "active", timestamp: 200 }),
+  ];
+
+  assert.equal(railLatestUserTurn(turns), "active");
+  assert.equal(latestUserTurnTimestamp(turns), 200);
+  assert.deepEqual(railPastTurns(turns), []);
 });
 
 test("railPastTurns caches by turns-array identity", () => {

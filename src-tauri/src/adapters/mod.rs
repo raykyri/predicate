@@ -457,6 +457,7 @@ pub(crate) fn parse_claude_native_transcript_value(
         timestamp: native_timestamp_ms(value),
         status: None,
         status_reason: None,
+        context_status: None,
         native_id: string_field(value, "uuid"),
         parent_native_id: string_field(value, "parentUuid")
             .or_else(|| string_field(value, "parent_uuid")),

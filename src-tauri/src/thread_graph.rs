@@ -1,4 +1,4 @@
-use crate::transcript::{Turn, TurnBlock, TurnStatus, TurnStatusReason};
+use crate::transcript::{Turn, TurnBlock, TurnContextStatus, TurnStatus, TurnStatusReason};
 use crate::workspace::AgentInfo;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -555,6 +555,8 @@ pub struct BaseThreadNode {
     pub status: Option<TurnStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<TurnStatusReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_status: Option<TurnContextStatus>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1262,6 +1264,7 @@ fn turn_node_from_turn(
             created_order,
             status: turn.status,
             status_reason: turn.status_reason,
+            context_status: turn.context_status,
         },
         turn: ThreadTurnContent {
             role: turn.role.clone(),
@@ -1330,7 +1333,10 @@ fn focused_branch_turn_nodes<'a>(graph: &'a ThreadGraph, branch_id: &str) -> Vec
 }
 
 fn first_user_text(node: &TurnNode) -> Option<String> {
-    if node.turn.role != "user" || node.base.status == Some(TurnStatus::Superseded) {
+    if node.turn.role != "user"
+        || node.base.status == Some(TurnStatus::Superseded)
+        || node.base.context_status == Some(TurnContextStatus::RolledBack)
+    {
         return None;
     }
     node.turn.blocks.iter().find_map(|block| match block {
@@ -1369,6 +1375,7 @@ pub fn home_turn_history_page(
             });
             exchange_last_timestamp = None;
         } else if node.base.status != Some(TurnStatus::Superseded)
+            && node.base.context_status != Some(TurnContextStatus::RolledBack)
             && let Some(timestamp) = node.turn.timestamp
         {
             exchange_last_timestamp = Some(timestamp);
@@ -1633,6 +1640,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: Some(format!("native-{id}")),
             parent_native_id: None,
             native_message_id: None,
@@ -1979,7 +1987,9 @@ mod tests {
     fn snapshot_round_trips_owner_only_graph() {
         let worktree = temp_worktree("qmux-thread-graph-roundtrip");
         let agent = sample_agent(worktree.display().to_string());
-        let turns = vec![sample_turn("agent-1", "turn-1", "user", 0)];
+        let mut turn = sample_turn("agent-1", "turn-1", "user", 0);
+        turn.context_status = Some(TurnContextStatus::RolledBack);
+        let turns = vec![turn];
         let store = ThreadStore::new(worktree.clone());
 
         store.replace_agent_branch_turns(&agent, &turns).unwrap();
@@ -1998,6 +2008,13 @@ mod tests {
             .expect("snapshot exists");
         assert_eq!(graph.nodes.len(), 1);
         assert!(graph.nodes.contains_key("turn-1"));
+        let Some(ThreadNode::Turn(turn)) = graph.nodes.get("turn-1") else {
+            panic!("missing turn node");
+        };
+        assert_eq!(
+            turn.base.context_status,
+            Some(TurnContextStatus::RolledBack)
+        );
 
         fs::remove_dir_all(worktree).unwrap();
     }

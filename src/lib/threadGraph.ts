@@ -80,6 +80,7 @@ export function buildSingleAgentThreadGraph(agent: AgentInfo, turns: Turn[]): Th
       createdOrder: index,
       status: turn.status ?? null,
       statusReason: turn.statusReason ?? null,
+      contextStatus: turn.contextStatus ?? null,
       turn: {
         role: turn.role,
         blocks: turn.blocks,
@@ -190,6 +191,36 @@ export function pendingGraphOverlayTurns(
   return turns.slice(firstMissing);
 }
 
+/**
+ * A stored graph refresh is debounced behind the live transcript stream. Keep
+ * rendering its full branch, but let the live window override mutable turn
+ * state immediately so an interruption or rollback does not briefly show the
+ * graph's stale status/context flags.
+ */
+export function overlayLiveTurnState(branchTurns: Turn[], liveTurns: Turn[]): Turn[] {
+  const liveById = new Map(liveTurns.map((turn) => [turn.id, turn]));
+  let changed = false;
+  const overlaid = branchTurns.map((turn) => {
+    const live = liveById.get(turn.id);
+    if (
+      !live ||
+      (turn.status ?? null) === (live.status ?? null) &&
+        (turn.statusReason ?? null) === (live.statusReason ?? null) &&
+        (turn.contextStatus ?? null) === (live.contextStatus ?? null)
+    ) {
+      return turn;
+    }
+    changed = true;
+    return {
+      ...turn,
+      status: live.status ?? null,
+      statusReason: live.statusReason ?? null,
+      contextStatus: live.contextStatus ?? null,
+    };
+  });
+  return changed ? overlaid : branchTurns;
+}
+
 export function focusedBranchTurns(graph: ThreadGraph, agent: AgentInfo): Turn[] {
   const branchId = resolveFocusedBranchId(graph, agent);
   const branchSelection = focusedBranchSelection(graph, branchId);
@@ -210,6 +241,7 @@ export function focusedBranchTurns(graph: ThreadGraph, agent: AgentInfo): Turn[]
       participant: node.participant,
       status: node.status === "active" ? null : node.status,
       statusReason: node.statusReason ?? null,
+      contextStatus: node.contextStatus ?? null,
       nativeId: node.native?.nativeId ?? null,
       parentNativeId: node.native?.parentNativeId ?? null,
       nativeMessageId: node.native?.nativeMessageId ?? null,

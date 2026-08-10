@@ -7,6 +7,7 @@ import {
   type ActivityLeafItem,
   type ThinkingItem,
   type ToolEntry,
+  type TurnTimelineContextStatus,
   type TurnTimelineStatus,
 } from "../lib/turnTimeline";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
@@ -50,6 +51,10 @@ type ToolActionKind = keyof typeof TOOL_ACTION_NAMES;
 
 export function timelineStatusClass(status: TurnTimelineStatus | undefined) {
   return status ? ` is-status-${status}` : "";
+}
+
+export function timelineContextStatusClass(status: TurnTimelineContextStatus | undefined) {
+  return status === "rolledBack" ? " is-context-rolled-back" : "";
 }
 
 export function serializeActivityValue(value: unknown, maxCharacters?: number) {

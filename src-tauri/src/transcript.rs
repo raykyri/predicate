@@ -30,6 +30,12 @@ pub struct Turn {
     pub status: Option<TurnStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_reason: Option<TurnStatusReason>,
+    /// Whether this record is still part of the context Codex will reconstruct
+    /// for the next turn. This is deliberately independent from `status`: an
+    /// interrupted response can remain visible while a later rollback excludes
+    /// its whole user-turn segment from active model context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_status: Option<TurnContextStatus>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,6 +59,12 @@ pub enum TurnStatusReason {
     Interrupted,
     ClaudePromptBranch,
     UnknownBranch,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TurnContextStatus {
+    RolledBack,
 }
 
 /// A block of one turn, as the frontend receives it.

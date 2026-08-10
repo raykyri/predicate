@@ -23,6 +23,7 @@ export type RawBlock = Extract<TurnBlock, { type: "raw" }>;
 
 export type MessageBlock = TextBlock | RawBlock;
 export type TurnTimelineStatus = NonNullable<Turn["status"]>;
+export type TurnTimelineContextStatus = NonNullable<Turn["contextStatus"]>;
 
 export interface MessageItem {
   type: "message";
@@ -32,6 +33,7 @@ export interface MessageItem {
   blocks: MessageBlock[];
   activities: ActivityItem[];
   status?: TurnTimelineStatus;
+  contextStatus?: TurnTimelineContextStatus;
   /** Where a fork anchored at this message would branch from. Set from the
    * first turn folded into the card, so forking from a card that merged
    * back-to-back prompts branches before the first of them. */
@@ -272,8 +274,13 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
   const resolved = new Set<ToolEntry>();
   const pendingByStatus = new Map<string, PendingToolQueue>();
   const pendingById = new Map<string, PendingToolQueue>();
-  // Real statuses are non-empty, so "" is a safe key for the undefined status.
-  const statusKey = (status?: TurnTimelineStatus) => status ?? "";
+  // Id-less results may only claim a call from the same presentation state.
+  // Outcome status alone is insufficient now that rolled-back and active calls
+  // can both have no status; keep context membership in the queue key too.
+  const activityStateKey = (
+    status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
+  ) => `${status ?? ""}\0${contextStatus ?? ""}`;
   const queueFor = (map: Map<string, PendingToolQueue>, key: string) => {
     let queue = map.get(key);
     if (!queue) {
@@ -306,6 +313,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     sourceTurnId: string,
     block?: MessageBlock,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     anchor?: MessageAnchor | null,
     timestamp?: number | null,
@@ -317,6 +325,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     blocks: block ? [block] : [],
     activities: [],
     status,
+    contextStatus,
     anchor,
     timestamp: typeof timestamp === "number" ? timestamp : null,
     sourceTurnIds: [sourceTurnId],
@@ -334,6 +343,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     sourceTurnId: string,
     block: MessageBlock,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     anchor?: MessageAnchor | null,
     timestamp?: number | null,
@@ -342,6 +352,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     if (
       previous?.role === role &&
       previous.status === status &&
+      previous.contextStatus === contextStatus &&
       participantKey(previous.participant) === participantKey(participant) &&
       previous.activities.length === 0
     ) {
@@ -354,13 +365,23 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       return;
     }
     items.push(
-      createMessageItem(role, sourceTurnId, block, status, participant, anchor, timestamp),
+      createMessageItem(
+        role,
+        sourceTurnId,
+        block,
+        status,
+        contextStatus,
+        participant,
+        anchor,
+        timestamp,
+      ),
     );
   };
 
   const assistantActivityOwner = (
     sourceTurnId: string,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
@@ -376,6 +397,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       }
       if (
         items[index].status === status &&
+        items[index].contextStatus === contextStatus &&
         participantKey(items[index].participant) === participantKey(participant)
       ) {
         addSourceTurn(items[index], sourceTurnId);
@@ -388,6 +410,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       sourceTurnId,
       undefined,
       status,
+      contextStatus,
       participant,
       null,
       timestamp,
@@ -400,10 +423,17 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     sourceTurnId: string,
     value: unknown,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
-    const owner = assistantActivityOwner(sourceTurnId, status, participant, timestamp);
+    const owner = assistantActivityOwner(
+      sourceTurnId,
+      status,
+      contextStatus,
+      participant,
+      timestamp,
+    );
     const previousActivity = owner.activities[owner.activities.length - 1];
     if (previousActivity?.type === "thinking" && previousActivity.status === status) {
       previousActivity.values.push(value);
@@ -421,16 +451,24 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     sourceTurnId: string,
     entry: ToolEntry,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
-    assistantActivityOwner(sourceTurnId, status, participant, timestamp).activities.push(entry);
+    assistantActivityOwner(
+      sourceTurnId,
+      status,
+      contextStatus,
+      participant,
+      timestamp,
+    ).activities.push(entry);
   };
 
   const registerToolUse = (
     sourceTurnId: string,
     block: ToolUseBlock,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
@@ -443,8 +481,8 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       isError: false,
       status,
     };
-    pushToolEntry(sourceTurnId, entry, status, participant, timestamp);
-    queueFor(pendingByStatus, statusKey(status)).push(entry);
+    pushToolEntry(sourceTurnId, entry, status, contextStatus, participant, timestamp);
+    queueFor(pendingByStatus, activityStateKey(status, contextStatus)).push(entry);
     if (entry.id) {
       queueFor(pendingById, entry.id).push(entry);
     }
@@ -454,6 +492,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
     sourceTurnId: string,
     block: ToolResultBlock,
     status?: TurnTimelineStatus,
+    contextStatus?: TurnTimelineContextStatus,
     participant?: ThreadParticipant | null,
     timestamp?: number | null,
   ) => {
@@ -477,7 +516,10 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
           idQueue.take(resolved, () => true);
       }
     } else {
-      matched = pendingByStatus.get(statusKey(status))?.take(resolved, () => true) ?? null;
+      matched =
+        pendingByStatus
+          .get(activityStateKey(status, contextStatus))
+          ?.take(resolved, () => true) ?? null;
     }
 
     if (matched) {
@@ -499,6 +541,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
         status,
       },
       status,
+      contextStatus,
       participant,
       timestamp,
     );
@@ -506,6 +549,7 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
 
   for (const turn of turns) {
     const status = timelineStatus(turn.status);
+    const contextStatus = timelineContextStatus(turn.contextStatus);
     const participant = turn.participant ?? null;
     const timestamp = turn.timestamp ?? null;
     const anchor: MessageAnchor = {
@@ -517,25 +561,50 @@ export function buildTimelineItems(turns: Turn[], showActivityDetail = true): Me
       keyBase = `${turn.id}:${blockIndex}`;
       switch (block.type) {
         case "text":
-          pushMessageBlock(turn.role, turn.id, block, status, participant, anchor, timestamp);
+          pushMessageBlock(
+            turn.role,
+            turn.id,
+            block,
+            status,
+            contextStatus,
+            participant,
+            anchor,
+            timestamp,
+          );
           break;
         case "toolUse":
           if (showActivityDetail) {
-            registerToolUse(turn.id, block, status, participant, timestamp);
+            registerToolUse(turn.id, block, status, contextStatus, participant, timestamp);
           }
           break;
         case "toolResult":
           if (showActivityDetail) {
-            attachToolResult(turn.id, block, status, participant, timestamp);
+            attachToolResult(turn.id, block, status, contextStatus, participant, timestamp);
           }
           break;
         case "raw":
           if (turn.role === "assistant") {
             if (showActivityDetail) {
-              pushThinkingValue(turn.id, block.value, status, participant, timestamp);
+              pushThinkingValue(
+                turn.id,
+                block.value,
+                status,
+                contextStatus,
+                participant,
+                timestamp,
+              );
             }
           } else {
-            pushMessageBlock(turn.role, turn.id, block, status, participant, anchor, timestamp);
+            pushMessageBlock(
+              turn.role,
+              turn.id,
+              block,
+              status,
+              contextStatus,
+              participant,
+              anchor,
+              timestamp,
+            );
           }
           break;
       }
@@ -596,6 +665,12 @@ function timelineStatus(status: Turn["status"]): TurnTimelineStatus | undefined 
   return status === "superseded" || status === "interrupted" || status === "uncertain"
     ? status
     : undefined;
+}
+
+function timelineContextStatus(
+  status: Turn["contextStatus"],
+): TurnTimelineContextStatus | undefined {
+  return status === "rolledBack" ? status : undefined;
 }
 
 // Includes the label: the header renders participant.label when present, so
@@ -664,6 +739,7 @@ export function sameMessageItem(a: MessageItem, b: MessageItem): boolean {
     a.key === b.key &&
     a.role === b.role &&
     a.status === b.status &&
+    a.contextStatus === b.contextStatus &&
     a.timestamp === b.timestamp &&
     a.sourceTurnIds.length === b.sourceTurnIds.length &&
     a.sourceTurnIds.every((turnId, index) => turnId === b.sourceTurnIds[index]) &&

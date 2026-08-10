@@ -62,6 +62,7 @@ import {
   DisclosureChevron,
   RawTranscriptDisclosure,
   TranscriptActivityItem,
+  timelineContextStatusClass,
   timelineStatusClass,
 } from "./TranscriptActivity";
 
@@ -1241,6 +1242,11 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
           onCopyHandoff={onCopyHandoff}
         />
       ) : null}
+      {item.blocks.length === 0 && item.contextStatus === "rolledBack" ? (
+        <div className="turn-context-status is-activity-context-status">
+          Excluded from active context
+        </div>
+      ) : null}
       {item.activities.map((activity) => (
         // deferPayloads keeps collapsed thinking bodies out of the DOM until
         // opened (tool entries already defer their payloads internally). A
@@ -1328,12 +1334,16 @@ function MessageItemView({
       copyText &&
       (item.role === "assistant" || showUserMessageActions),
   );
-  const showHeader = !taggedInstructionMessage && (showName || showMessageActions);
+  const showHeader =
+    !taggedInstructionMessage &&
+    (showName || showMessageActions || item.contextStatus === "rolledBack");
   return (
     <article
       className={`turn-card role-${item.role}${
         taggedInstructionMessage ? " is-tagged-instruction-message" : ""
-      }${timelineStatusClass(item.status)}${stickyClassName}`}
+      }${timelineStatusClass(item.status)}${timelineContextStatusClass(
+        item.contextStatus,
+      )}${stickyClassName}`}
     >
       {showHeader ? (
         <header className={showName ? undefined : "is-actions-only"}>
@@ -1341,6 +1351,9 @@ function MessageItemView({
             <span className="turn-card-role-label">
               {turnRoleLabel(item.role, assistantLabel, item.participant)}
             </span>
+          ) : null}
+          {item.contextStatus === "rolledBack" ? (
+            <span className="turn-context-status">Excluded from active context</span>
           ) : null}
           {showMessageActions && messageText && copyText ? (
             <MessageActionsMenu

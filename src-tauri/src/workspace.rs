@@ -748,7 +748,7 @@ pub fn remove_research_workspace(
             };
         if let Some(turns) = turns.filter(|turns| {
             node.status != crate::research::ResearchNodeStatus::Complete
-                || turns.iter().any(|turn| turn.role == "assistant")
+                || crate::research::has_active_assistant_turn(turns)
         }) {
             responses.insert(node.id.clone(), turns);
         } else if node.status == crate::research::ResearchNodeStatus::Complete {
@@ -2920,6 +2920,7 @@ mod tests {
                 timestamp: None,
                 status: None,
                 status_reason: None,
+                context_status: None,
                 native_id: None,
                 parent_native_id: None,
                 native_message_id: None,
@@ -3350,6 +3351,7 @@ mod tests {
                 timestamp: None,
                 status: None,
                 status_reason: None,
+                context_status: None,
                 native_id: None,
                 parent_native_id: None,
                 native_message_id: None,

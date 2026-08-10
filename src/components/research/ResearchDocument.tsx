@@ -92,6 +92,7 @@ import type { PublishDialogTarget } from "../PublishDialog";
 import {
   RawTranscriptDisclosure,
   TranscriptActivityItem,
+  timelineContextStatusClass,
   timelineStatusClass,
 } from "../TranscriptActivity";
 import TranscriptMarkdown, {
@@ -721,9 +722,14 @@ const ResearchTimelineItem = memo(function ResearchTimelineItem({
   if (conversation) {
     return (
       <section
-        className={`research-response-item role-${item.role} is-conversation`}
+        className={`research-response-item role-${item.role} is-conversation${timelineContextStatusClass(
+          item.contextStatus,
+        )}`}
         data-timeline-key={item.key}
       >
+        {item.contextStatus === "rolledBack" ? (
+          <div className="turn-context-status">Excluded from active context</div>
+        ) : null}
         {item.blocks.length > 0 ? (
           <div
             className={`research-response-message${
@@ -774,9 +780,14 @@ const ResearchTimelineItem = memo(function ResearchTimelineItem({
   const hasUnexpectedContent = item.role !== "assistant" && item.blocks.length > 0;
   return (
     <section
-      className={`research-response-item role-${item.role}`}
+      className={`research-response-item role-${item.role}${timelineContextStatusClass(
+        item.contextStatus,
+      )}`}
       data-timeline-key={item.key}
     >
+      {item.contextStatus === "rolledBack" ? (
+        <div className="turn-context-status">Excluded from active context</div>
+      ) : null}
       {item.blocks.length > 0 ? (
         <div
           className={`research-response-message${

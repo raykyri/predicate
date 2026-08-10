@@ -233,6 +233,7 @@ import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
   pendingGraphOverlayTurns,
+  overlayLiveTurnState,
   removeThreadGraphAnnotation,
   threadGraphAnnotationsForTurns,
   threadIdForAgent,
@@ -2806,10 +2807,13 @@ function MainApp() {
         );
       }
       const usesStoredGraph = Boolean(storedGraph && pendingTurns !== null);
-      const branchTurns =
+      const branchTurnsBase =
         usesStoredGraph && storedBranchTurns
           ? storedBranchTurns
           : focusedBranchTurns(buildSingleAgentThreadGraph(agent, normalizedTurns), agent);
+      const branchTurns = usesStoredGraph
+        ? overlayLiveTurnState(branchTurnsBase, normalizedTurns)
+        : branchTurnsBase;
       const graphTurns =
         pendingTurns && pendingTurns.length > 0 ? [...branchTurns, ...pendingTurns] : branchTurns;
       // Stored graphs can predate an adapter's presentation normalization and

@@ -194,6 +194,22 @@ test("skips superseded turns and labels interrupted ones", () => {
   assert.match(document, /### Claude \(interrupted\)\nPartial answer/);
 });
 
+test("skips visible records excluded from active context", () => {
+  const turns = [
+    turn("user", [text("Original ask.")], { contextStatus: "rolledBack" }),
+    turn("assistant", [text("Old answer.")], { contextStatus: "rolledBack" }),
+    turn("user", [text("Current ask.")]),
+    turn("assistant", [text("Current answer.")]),
+  ];
+
+  const document = build(turns, 1);
+
+  assert.ok(document);
+  assert.equal(document.includes("Original ask."), false);
+  assert.equal(document.includes("Old answer."), false);
+  assert.match(document, /Current ask\./);
+});
+
 test("hands off an assistant reply as where the previous agent left off", () => {
   const turns = [
     turn("user", [text("Add retries to the fetch helper.")]),
@@ -240,6 +256,25 @@ test("spans an assistant run split by activity and counts its work as done", () 
   assert.match(document, /- Files edited: `\/work\/repo\/src\/parser\.ts`/);
   // Tool results still never travel with a handoff.
   assert.equal(document.includes("secret token abc123"), false);
+});
+
+test("rolled-back messages neither split nor extend an active assistant run", () => {
+  const turns = [
+    turn("user", [text("Start.")]),
+    turn("assistant", [text("First part.")]),
+    turn("user", [text("Discarded steer.")], { contextStatus: "rolledBack" }),
+    turn("assistant", [text("Discarded answer.")], { contextStatus: "rolledBack" }),
+    turn("assistant", [text("Active continuation.")]),
+    turn("user", [text("Next request.")]),
+  ];
+
+  const document = buildFromAssistant(turns, 0);
+
+  assert.ok(document);
+  assert.match(document, /First part\.\n\nActive continuation\./);
+  assert.equal(document.includes("Discarded steer."), false);
+  assert.equal(document.includes("Discarded answer."), false);
+  assert.equal(document.includes("Next request."), false);
 });
 
 test("marks an interrupted assistant anchor", () => {

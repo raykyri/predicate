@@ -502,6 +502,27 @@ test("a result with an unmatched id does not steal a pending call's slot", () =>
   }
 });
 
+test("an id-less active result does not attach to a rolled-back call", () => {
+  nextIndex = 0;
+  const items = buildTimelineItems([
+    turn("assistant", [toolUse(null, "Read")], { contextStatus: "rolledBack" }),
+    turn("assistant", [toolResult(null, "fresh result")]),
+  ]);
+
+  assert.equal(items.length, 2);
+  const rolledBack = items[0].activities[0];
+  assert.equal(rolledBack.type, "tool");
+  if (rolledBack.type === "tool") {
+    assert.equal(rolledBack.result, undefined);
+  }
+  const active = items[1].activities[0];
+  assert.equal(active.type, "tool");
+  if (active.type === "tool") {
+    assert.equal(active.name, "Tool result");
+    assert.equal(active.result, "fresh result");
+  }
+});
+
 test("one activity stays a leaf while multiple activities form one disclosure group", () => {
   nextIndex = 0;
   const single = buildTimelineItems([turn("assistant", [toolUse("one")])]);
@@ -559,6 +580,24 @@ test("running, error, superseded, interrupted, and uncertain activity metadata s
   }
   assert.ok(items.some((item) => item.status === "interrupted"));
   assert.ok(items.some((item) => item.status === "uncertain"));
+});
+
+test("rolled-back context stays visible and does not merge into active messages", () => {
+  nextIndex = 0;
+  const items = buildTimelineItems([
+    turn("assistant", [text("visible but excluded")], {
+      status: "interrupted",
+      contextStatus: "rolledBack",
+    }),
+    turn("assistant", [text("active continuation")]),
+  ]);
+
+  assert.equal(items.length, 2);
+  assert.equal(messageItemText(items[0]), "visible but excluded");
+  assert.equal(items[0].status, "interrupted");
+  assert.equal(items[0].contextStatus, "rolledBack");
+  assert.equal(messageItemText(items[1]), "active continuation");
+  assert.equal(items[1].contextStatus, undefined);
 });
 
 test("prepending history keeps existing keys stable", () => {

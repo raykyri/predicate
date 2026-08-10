@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
+  overlayLiveTurnState,
   pendingGraphOverlayTurns,
   threadGraphAnnotationsForTurns,
 } from "../src/lib/threadGraph";
@@ -58,6 +59,31 @@ test("turns appended after the graph snapshot come back as the pending suffix", 
   const appended = [makeTurn(5), makeTurn(6)];
   const pending = overlay(graph, AGENT, [...graphTurns, ...appended]);
   assert.deepEqual(pending, appended);
+});
+
+test("live mutable state overrides a stale stored graph without replacing unchanged turns", () => {
+  const graphTurns = makeTurns(3);
+  const branchTurns = focusedBranchTurns(storedGraphFor(graphTurns), AGENT);
+  const liveTurns = [
+    graphTurns[0],
+    {
+      ...graphTurns[1],
+      status: "interrupted" as const,
+      statusReason: "interrupted" as const,
+      contextStatus: "rolledBack" as const,
+    },
+    graphTurns[2],
+  ];
+
+  const overlaid = overlayLiveTurnState(branchTurns, liveTurns);
+
+  assert.notEqual(overlaid, branchTurns);
+  assert.equal(overlaid[0], branchTurns[0]);
+  assert.equal(overlaid[2], branchTurns[2]);
+  assert.equal(overlaid[1].status, "interrupted");
+  assert.equal(overlaid[1].statusReason, "interrupted");
+  assert.equal(overlaid[1].contextStatus, "rolledBack");
+  assert.equal(overlayLiveTurnState(overlaid, liveTurns), overlaid);
 });
 
 test("a history with no overlap with the graph rejects the overlay", () => {

@@ -67,7 +67,11 @@ export function railPastTurns(turns: Turn[]): HomeRailPastTurn[] {
           ? { id: turn.id, text: stripped, settledAt: turn.timestamp ?? null }
           : null;
       exchangeLastTimestamp = null;
-    } else if (turn.status !== "superseded" && typeof turn.timestamp === "number") {
+    } else if (
+      turn.status !== "superseded" &&
+      turn.contextStatus !== "rolledBack" &&
+      typeof turn.timestamp === "number"
+    ) {
       exchangeLastTimestamp = turn.timestamp;
     }
   }

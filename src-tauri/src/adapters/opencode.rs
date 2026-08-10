@@ -1192,6 +1192,7 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
         timestamp: super::native_timestamp_ms(&value),
         status: None,
         status_reason: None,
+        context_status: None,
         native_id: string_field(payload, "id"),
         parent_native_id: None,
         native_message_id: string_field(payload, "id"),

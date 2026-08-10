@@ -7424,7 +7424,7 @@ impl AppState {
                 .then_some(content.turns)
                 .ok_or_else(|| "completed research response is not available yet".to_string())
         })?;
-        if !turns.iter().any(|turn| turn.role == "assistant") {
+        if !research::has_active_assistant_turn(&turns) {
             *last_candidate = Some(turns);
             return Err("research response has no assistant turn yet".to_string());
         }
@@ -9297,13 +9297,15 @@ fn upsert_recent_session_for_agent_locked(
 
     let existing = model.recent_sessions.get(&key).cloned();
     let turns = model.turns.get(&agent.id);
-    let turn_preview = turns.and_then(|turns| first_user_turn_preview(turns));
+    let has_live_turns = turns.is_some_and(|turns| !turns.is_empty());
     let mut line_count = turns.map(Vec::len).unwrap_or(0);
-    let mut preview = turn_preview.or_else(|| {
+    let mut preview = if has_live_turns {
+        turns.and_then(|turns| first_user_turn_preview(turns))
+    } else {
         existing
             .as_ref()
             .and_then(|session| session.preview.clone())
-    });
+    };
 
     // Prefer the line count cached on the previous recent-session entry before
     // considering the disk. An actively-growing session keeps its turns in
@@ -9324,7 +9326,7 @@ fn upsert_recent_session_for_agent_locked(
     // (`Loaded`) or get the path back and re-enter with the data
     // (`AppState::upsert_recent_session_for_agent`).
     let mut wants_disk_meta = None;
-    if (preview.is_none() || line_count == 0)
+    if (!has_live_turns && preview.is_none() || line_count == 0)
         && let Some(transcript_path) = agent.transcript_path.as_deref()
     {
         match &meta {
@@ -9335,7 +9337,7 @@ fn upsert_recent_session_for_agent_locked(
                 preview: disk_preview,
                 line_count: disk_line_count,
             } => {
-                if preview.is_none() {
+                if !has_live_turns && preview.is_none() {
                     preview = disk_preview.clone();
                 }
                 if line_count == 0 {
@@ -9517,7 +9519,7 @@ fn prune_recent_sessions_locked(model: &mut Model) {
 fn first_user_turn_preview(turns: &[Turn]) -> Option<String> {
     turns
         .iter()
-        .filter(|turn| turn.role == "user")
+        .filter(|turn| turn.role == "user" && research::turn_is_in_active_context(turn))
         .find_map(|turn| {
             turn.blocks.iter().find_map(|block| match block {
                 crate::transcript::TurnBlock::Text { text } => preview_text(text),
@@ -14356,6 +14358,7 @@ mod tests {
             timestamp: None,
             status: None,
             status_reason: None,
+            context_status: None,
             native_id: None,
             parent_native_id: None,
             native_message_id: None,
@@ -14691,6 +14694,45 @@ mod tests {
             sessions[0].preview.as_deref(),
             Some("Plan recent session history")
         );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn recent_session_preview_skips_prompts_outside_active_context() {
+        let mut rolled_back = sample_user_turn("agent-1", "Discarded prompt");
+        rolled_back.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
+        let active = sample_user_turn("agent-1", "Current prompt");
+
+        assert_eq!(
+            first_user_turn_preview(&[rolled_back, active]).as_deref(),
+            Some("Current prompt")
+        );
+    }
+
+    #[test]
+    fn live_rolled_back_session_does_not_restore_a_stale_preview() {
+        let workspace = temp_workspace();
+        let transcript_path = workspace.join("session-rollback.jsonl");
+        std::fs::write(
+            &transcript_path,
+            r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Discarded prompt"}]}}"#,
+        )
+        .unwrap();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.restore_session();
+
+        let mut agent = sample_agent("agent-1");
+        agent.worktree_dir = workspace.display().to_string();
+        agent.transcript_path = Some(transcript_path.display().to_string());
+        state.insert_agent(agent).unwrap();
+        let mut rolled_back = sample_user_turn("agent-1", "Discarded prompt");
+        rolled_back.context_status = Some(crate::transcript::TurnContextStatus::RolledBack);
+        state.replace_turns("agent-1", vec![rolled_back]).unwrap();
+
+        let sessions = state.list_recent_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].preview, None);
+
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

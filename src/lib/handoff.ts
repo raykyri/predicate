@@ -143,12 +143,13 @@ export function buildHandoffDocument({
   // saw as a single response.
   const anchorEnd = assistantAnchor ? assistantRunEnd(items, anchorIndex) : anchorIndex;
 
-  // Superseded turns come from abandoned fork branches: that work never
-  // happened, so presenting it as history would send the next agent after
-  // changes that are not on disk.
+  // Superseded branch work and records explicitly removed from active model
+  // context stay visible in qmux, but neither belongs in a handoff prompt.
   const history = items
     .slice(0, anchorIndex)
-    .filter((item) => item.status !== "superseded")
+    .filter(
+      (item) => item.status !== "superseded" && item.contextStatus !== "rolledBack",
+    )
     .map((item) => handoffMessage(item, assistantLabel, limits))
     .filter((message): message is HandoffMessage => message !== null);
 
@@ -240,17 +241,18 @@ function closingInstruction(assistantAnchor: boolean) {
  * Last item of the assistant run beginning at `start`. Mirrors the run grouping
  * behind "Copy response": a real user message closes the run, while tagged
  * instructions and system messages are plumbing the reader never sees as a
- * boundary. Superseded items belong to abandoned branches, so they neither
- * extend the run nor end it.
+ * boundary. Superseded and rolled-back items belong to abandoned context, so
+ * they neither extend the run nor end it.
  */
 function assistantRunEnd(items: MessageItem[], start: number) {
   let end = start;
   for (let index = start + 1; index < items.length; index += 1) {
     const item = items[index];
-    if (item.role === "user" && !messageItemIsTaggedInstruction(item)) {
+    const excluded = item.status === "superseded" || item.contextStatus === "rolledBack";
+    if (item.role === "user" && !excluded && !messageItemIsTaggedInstruction(item)) {
       break;
     }
-    if (item.role === "assistant" && item.status !== "superseded") {
+    if (item.role === "assistant" && !excluded) {
       end = index;
     }
   }
@@ -270,7 +272,11 @@ function assistantAnchorTurn(
     const item = items[index];
     // The anchor itself is shown whatever its status — the reader clicked it —
     // but a superseded item later in the span is abandoned work.
-    if (item.role !== "assistant" || (index !== start && item.status === "superseded")) {
+    if (
+      item.role !== "assistant" ||
+      (index !== start &&
+        (item.status === "superseded" || item.contextStatus === "rolledBack"))
+    ) {
       continue;
     }
     const text = messageItemCopyText(item);
@@ -460,7 +466,7 @@ function collectFilePaths(items: MessageItem[]) {
   const read: string[] = [];
   const seen = new Set<string>();
   for (const item of items) {
-    if (item.status === "superseded") {
+    if (item.status === "superseded" || item.contextStatus === "rolledBack") {
       continue;
     }
     for (const tool of toolEntries(item.activities)) {

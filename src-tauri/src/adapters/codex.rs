@@ -15,7 +15,7 @@ use crate::pty::{
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{
-    Turn, TurnBlock, TurnStatus, TurnStatusReason, codex_transcript_session_id,
+    Turn, TurnBlock, TurnContextStatus, TurnStatus, TurnStatusReason, codex_transcript_session_id,
     gather_transcript_candidates_recursive, read_codex_transcript_session_id,
     start_transcript_tail, string_field,
 };
@@ -2010,6 +2010,7 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
         timestamp: super::native_timestamp_ms(&value),
         status: None,
         status_reason: None,
+        context_status: None,
         native_id: codex_payload_turn_id(payload),
         parent_native_id: None,
         native_message_id: string_field(payload, "id"),
@@ -2027,9 +2028,14 @@ fn resolve_transcript_turns_from(
     lines: &[String],
 ) -> Vec<Turn> {
     let mut turns = Vec::new();
-    let mut active_turn_ids: Vec<String> = Vec::new();
+    // Codex rollback removes complete replay segments newest-first until it has
+    // crossed the requested number of genuine user boundaries. A newer
+    // tool/context-only segment is removed too, but does not decrement the
+    // count. Model those segments explicitly rather than treating every
+    // task_started or role=user record as an independent user turn.
+    let mut active_segments: Vec<CodexReplaySegment> = Vec::new();
     let mut interrupted_turn_ids = HashSet::new();
-    let mut superseded_turn_ids = HashSet::new();
+    let mut rolled_back_source_indices = HashSet::new();
 
     for (relative_index, line) in lines.iter().enumerate() {
         let source_index = source_index_offset + relative_index;
@@ -2039,12 +2045,19 @@ fn resolve_transcript_turns_from(
         };
 
         if value.get("type").and_then(Value::as_str) == Some("response_item") {
-            if let Some(payload) = value.get("payload")
-                && let Some(turn_id) = codex_payload_turn_id(payload)
-            {
-                push_unique_turn_id(&mut active_turn_ids, turn_id);
-            }
+            let segment_index = value.get("payload").and_then(|payload| {
+                record_codex_response_segment(
+                    &mut active_segments,
+                    codex_payload_turn_id(payload),
+                    codex_payload_is_user_turn_boundary(payload),
+                )
+            });
             if let Some(turn) = parse_transcript_line(agent_id, source_index, line) {
+                if let Some(segment_index) = segment_index {
+                    active_segments[segment_index]
+                        .turn_source_indices
+                        .push(source_index);
+                }
                 turns.push(turn);
             }
             continue;
@@ -2059,7 +2072,15 @@ fn resolve_transcript_turns_from(
         match payload.get("type").and_then(Value::as_str) {
             Some("task_started") => {
                 if let Some(turn_id) = string_field(payload, "turn_id") {
-                    push_unique_turn_id(&mut active_turn_ids, turn_id);
+                    start_codex_replay_segment(&mut active_segments, turn_id);
+                }
+            }
+            Some("user_message") => {
+                // This event is Codex's non-contextual user boundary. Context
+                // reinjections appear only as response items and are filtered
+                // by codex_payload_is_user_turn_boundary below.
+                if let Some(segment) = active_segments.last_mut() {
+                    segment.counts_as_user_turn = true;
                 }
             }
             Some("turn_aborted") => {
@@ -2072,9 +2093,14 @@ fn resolve_transcript_turns_from(
                     .get("num_turns")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
-                for _ in 0..num_turns {
-                    if let Some(turn_id) = active_turn_ids.pop() {
-                        superseded_turn_ids.insert(turn_id);
+                let mut remaining = num_turns;
+                while remaining > 0 {
+                    let Some(segment) = active_segments.pop() else {
+                        break;
+                    };
+                    rolled_back_source_indices.extend(segment.turn_source_indices);
+                    if segment.counts_as_user_turn {
+                        remaining -= 1;
                     }
                 }
             }
@@ -2083,26 +2109,116 @@ fn resolve_transcript_turns_from(
     }
 
     for turn in &mut turns {
-        let Some(turn_id) = turn.native_id.as_deref() else {
-            continue;
-        };
-        if superseded_turn_ids.contains(turn_id) {
-            turn.status = Some(TurnStatus::Superseded);
-            turn.status_reason = Some(TurnStatusReason::CodexRollback);
-        } else if interrupted_turn_ids.contains(turn_id) {
+        if turn
+            .native_id
+            .as_deref()
+            .is_some_and(|turn_id| interrupted_turn_ids.contains(turn_id))
+        {
             turn.status = Some(TurnStatus::Interrupted);
             turn.status_reason = Some(TurnStatusReason::Interrupted);
+        }
+        if rolled_back_source_indices.contains(&turn.source_index) {
+            turn.context_status = Some(TurnContextStatus::RolledBack);
         }
     }
 
     turns
 }
 
-fn push_unique_turn_id(turn_ids: &mut Vec<String>, turn_id: String) {
-    if turn_ids.last() == Some(&turn_id) || turn_ids.iter().any(|existing| existing == &turn_id) {
+struct CodexReplaySegment {
+    turn_id: String,
+    counts_as_user_turn: bool,
+    turn_source_indices: Vec<usize>,
+}
+
+fn start_codex_replay_segment(segments: &mut Vec<CodexReplaySegment>, turn_id: String) {
+    if segments
+        .last()
+        .is_some_and(|segment| segment.turn_id == turn_id)
+    {
         return;
     }
-    turn_ids.push(turn_id);
+    segments.push(CodexReplaySegment {
+        turn_id,
+        counts_as_user_turn: false,
+        turn_source_indices: Vec::new(),
+    });
+}
+
+fn record_codex_response_segment(
+    segments: &mut Vec<CodexReplaySegment>,
+    turn_id: Option<String>,
+    counts_as_user_turn: bool,
+) -> Option<usize> {
+    let segment_index = match turn_id {
+        Some(turn_id) => {
+            if let Some(index) = segments
+                .iter()
+                .rposition(|segment| segment.turn_id == turn_id)
+            {
+                index
+            } else {
+                start_codex_replay_segment(segments, turn_id);
+                segments.len() - 1
+            }
+        }
+        None => segments.len().checked_sub(1)?,
+    };
+    if let Some(segment) = segments.get_mut(segment_index) {
+        segment.counts_as_user_turn |= counts_as_user_turn;
+    }
+    Some(segment_index)
+}
+
+fn codex_payload_is_user_turn_boundary(payload: &Value) -> bool {
+    if payload.get("type").and_then(Value::as_str) != Some("message")
+        || payload.get("role").and_then(Value::as_str) != Some("user")
+    {
+        return false;
+    }
+    match payload.get("content") {
+        Some(Value::String(text)) => codex_user_text_is_turn_boundary(text),
+        Some(Value::Array(items)) => items.iter().any(|item| {
+            if item.get("type").and_then(Value::as_str) == Some("input_image") {
+                return true;
+            }
+            matches!(
+                item.get("type").and_then(Value::as_str),
+                Some("input_text" | "text")
+            ) && item
+                .get("text")
+                .and_then(Value::as_str)
+                .is_some_and(codex_user_text_is_turn_boundary)
+        }),
+        _ => false,
+    }
+}
+
+fn codex_user_text_is_turn_boundary(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty() && !codex_user_text_is_contextual(text)
+}
+
+/// Mirrors the stable wrappers Codex uses for user-role context closely enough
+/// for old rollouts that lack `EventMsg::UserMessage`. Do not classify arbitrary
+/// XML-looking text as context: a user's whole prompt can legitimately be
+/// wrapped in `<request>` (or any other application-specific tag), and treating
+/// it as plumbing makes a later rollback consume one extra real turn.
+fn codex_user_text_is_contextual(text: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "# agents.md instructions",
+        "<environment_context",
+        "<user_shell_command>",
+        "<turn_aborted>",
+        "<subagent_notification>",
+        "<codex_internal_context",
+        "<goal_context>",
+        "<recommended_plugins>",
+        "<additional_context",
+        "<hook_prompt",
+    ];
+    let text = text.trim_start().to_ascii_lowercase();
+    PREFIXES.iter().any(|prefix| text.starts_with(prefix))
 }
 
 fn codex_payload_turn_id(payload: &Value) -> Option<String> {
@@ -3513,7 +3629,7 @@ trusted_hash = "sha256:trusted"
     }
 
     #[test]
-    fn resolve_codex_transcript_marks_rolled_back_turn_superseded() {
+    fn resolve_codex_transcript_keeps_rolled_back_interrupted_turn_visible() {
         let lines = vec![
             codex_task_started_line("turn-1"),
             codex_user_message_line("turn-1", "typo"),
@@ -3533,10 +3649,15 @@ trusted_hash = "sha256:trusted"
 
         assert_eq!(turns.len(), 4);
         assert!(turns[0..2].iter().all(|turn| {
-            turn.status == Some(TurnStatus::Superseded)
-                && turn.status_reason == Some(TurnStatusReason::CodexRollback)
+            turn.status == Some(TurnStatus::Interrupted)
+                && turn.status_reason == Some(TurnStatusReason::Interrupted)
+                && turn.context_status == Some(TurnContextStatus::RolledBack)
         }));
-        assert!(turns[2..].iter().all(|turn| turn.status.is_none()));
+        assert!(
+            turns[2..]
+                .iter()
+                .all(|turn| turn.status.is_none() && turn.context_status.is_none())
+        );
     }
 
     #[test]
@@ -3554,7 +3675,175 @@ trusted_hash = "sha256:trusted"
         assert!(turns.iter().all(|turn| {
             turn.status == Some(TurnStatus::Interrupted)
                 && turn.status_reason == Some(TurnStatusReason::Interrupted)
+                && turn.context_status.is_none()
         }));
+    }
+
+    #[test]
+    fn resolve_codex_transcript_marks_rollback_without_changing_outcome() {
+        let lines = vec![
+            codex_task_started_line("turn-1"),
+            codex_user_message_line("turn-1", "prompt"),
+            codex_assistant_message_line("turn-1", "answer"),
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "thread_rolled_back", "num_turns": 1 }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 2);
+        assert!(turns.iter().all(|turn| {
+            turn.status.is_none()
+                && turn.status_reason.is_none()
+                && turn.context_status == Some(TurnContextStatus::RolledBack)
+        }));
+    }
+
+    #[test]
+    fn resolve_codex_transcript_uses_task_boundary_when_items_lack_turn_metadata() {
+        let lines = vec![
+            codex_task_started_line("turn-1"),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "prompt" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "answer" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "thread_rolled_back", "num_turns": 1 }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 2);
+        assert!(turns.iter().all(|turn| {
+            turn.native_id.is_none() && turn.context_status == Some(TurnContextStatus::RolledBack)
+        }));
+    }
+
+    #[test]
+    fn resolve_codex_transcript_does_not_treat_same_turn_steer_as_rollback() {
+        let lines = vec![
+            codex_task_started_line("turn-1"),
+            codex_user_message_line("turn-1", "original"),
+            codex_assistant_message_line("turn-1", "first part"),
+            codex_user_message_line("turn-1", "steer"),
+            codex_assistant_message_line("turn-1", "continued"),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 4);
+        assert!(turns.iter().all(|turn| {
+            turn.status.is_none() && turn.status_reason.is_none() && turn.context_status.is_none()
+        }));
+    }
+
+    #[test]
+    fn resolve_codex_transcript_rolls_back_newer_non_user_segments_too() {
+        let lines = vec![
+            codex_task_started_line("turn-0"),
+            codex_user_message_line("turn-0", "real prompt"),
+            codex_assistant_message_line("turn-0", "real answer"),
+            codex_task_started_line("turn-1"),
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{
+                        "type": "input_text",
+                        "text": "<environment_context>\ninternal\n</environment_context>"
+                    }],
+                    "internal_chat_message_metadata_passthrough": { "turn_id": "turn-1" }
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "thread_rolled_back", "num_turns": 1 }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 3);
+        assert!(
+            turns
+                .iter()
+                .all(|turn| { turn.context_status == Some(TurnContextStatus::RolledBack) })
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_counts_arbitrary_tagged_prompts_as_user_turns() {
+        let lines = vec![
+            codex_task_started_line("turn-0"),
+            codex_user_message_line("turn-0", "older prompt"),
+            codex_assistant_message_line("turn-0", "older answer"),
+            codex_task_started_line("turn-1"),
+            codex_user_message_line("turn-1", "<request>\nnew prompt\n</request>"),
+            codex_assistant_message_line("turn-1", "new answer"),
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "thread_rolled_back", "num_turns": 1 }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 4);
+        assert!(turns[0..2].iter().all(|turn| turn.context_status.is_none()));
+        assert!(
+            turns[2..]
+                .iter()
+                .all(|turn| { turn.context_status == Some(TurnContextStatus::RolledBack) })
+        );
+    }
+
+    #[test]
+    fn resolve_codex_transcript_does_not_guess_for_unscoped_records() {
+        let lines = vec![
+            json!({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{ "type": "output_text", "text": "visible tail" }]
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "event_msg",
+                "payload": { "type": "thread_rolled_back", "num_turns": 1 }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].context_status.is_none());
     }
 
     #[test]

@@ -517,6 +517,8 @@ export interface Turn {
   participant?: ThreadParticipant | null;
   status?: "superseded" | "interrupted" | "uncertain" | null;
   statusReason?: "codexRollback" | "interrupted" | "claudePromptBranch" | "unknownBranch" | null;
+  /** Active model-context membership is independent from execution outcome. */
+  contextStatus?: "rolledBack" | null;
   nativeId?: string | null;
   parentNativeId?: string | null;
   nativeMessageId?: string | null;
@@ -574,6 +576,7 @@ export interface BaseThreadNode {
   createdOrder: number;
   status?: "active" | "superseded" | "interrupted" | "uncertain" | null;
   statusReason?: "codexRollback" | "interrupted" | "claudePromptBranch" | "unknownBranch" | null;
+  contextStatus?: "rolledBack" | null;
 }
 
 export interface TurnNode extends BaseThreadNode {
