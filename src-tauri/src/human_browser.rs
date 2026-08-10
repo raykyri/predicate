@@ -306,6 +306,15 @@ fn set_native_browser_loading_background(_webview: &Webview, _active: bool) -> R
 
 fn deactivate_view(view: &HumanBrowserView) {
     let _ = set_native_browser_active(&view.webview, false);
+    // A child WKWebView sits above the main document's compositor, so a hide
+    // that is delayed or dropped by AppKit can leave its last page layer as a
+    // rectangular afterimage. Collapse the native child first; the next visible
+    // sync always publishes real bounds again before showing it.
+    #[cfg(target_os = "macos")]
+    let _ = view.webview.set_bounds(Rect {
+        position: LogicalPosition::new(0.0, 0.0).into(),
+        size: LogicalSize::new(0.0, 0.0).into(),
+    });
     let _ = view.webview.hide();
 }
 
@@ -434,29 +443,18 @@ pub async fn human_browser_sync(
     // Windows UI thread. The mutex is used only to prepare/commit state; no
     // Tauri dispatcher call occurs while it is held, so reset_all remains safe
     // while this command is in flight on the async runtime.
-    let (accepted, previous, current, hid_active) = {
+    let (accepted, previous, current) = {
         let mut inner = manager
             .inner
             .lock()
             .map_err(|_| "human browser state lock poisoned".to_string())?;
         if !inner.accept_surface_request(&request.owner_id, request.generation, request.revision) {
-            (
-                false,
-                None,
-                inner.views.get(&request.owner_id).cloned(),
-                false,
-            )
+            (false, None, inner.views.get(&request.owner_id).cloned())
         } else if !request.visible {
-            let hid_active = inner.active_owner.as_deref() == Some(request.owner_id.as_str());
-            if hid_active {
+            if inner.active_owner.as_deref() == Some(request.owner_id.as_str()) {
                 inner.active_owner = None;
             }
-            (
-                true,
-                None,
-                inner.views.get(&request.owner_id).cloned(),
-                hid_active,
-            )
+            (true, None, inner.views.get(&request.owner_id).cloned())
         } else {
             let previous = if inner.active_owner.as_deref() == Some(request.owner_id.as_str()) {
                 None
@@ -466,12 +464,7 @@ pub async fn human_browser_sync(
                     .take()
                     .and_then(|owner| inner.views.get(&owner).cloned())
             };
-            (
-                true,
-                previous,
-                inner.views.get(&request.owner_id).cloned(),
-                false,
-            )
+            (true, previous, inner.views.get(&request.owner_id).cloned())
         }
     };
 
@@ -481,7 +474,10 @@ pub async fn human_browser_sync(
             .map(|view| current_snapshot(&request.owner_id, view)));
     }
     if !request.visible {
-        if hid_active && let Some(view) = current.as_ref() {
+        // Visibility is a property of the requested native child, not of the
+        // bookkeeping pointer. Always collapse it even if an interrupted load
+        // or owner switch already cleared active_owner.
+        if let Some(view) = current.as_ref() {
             deactivate_view(view);
         }
         return Ok(current
@@ -592,10 +588,7 @@ pub fn human_browser_destroy(
     let view = inner.views.remove(&request.owner_id);
     drop(inner);
     if let Some(view) = view {
-        if was_active {
-            let _ = set_native_browser_active(&view.webview, false);
-        }
-        let _ = view.webview.hide();
+        deactivate_view(&view);
         let _ = view.webview.close();
     }
     Ok(())
@@ -674,8 +667,7 @@ pub fn reset_all(app: &AppHandle) {
     inner.advance_generation();
     drop(inner);
     for view in views {
-        let _ = set_native_browser_active(&view.webview, false);
-        let _ = view.webview.hide();
+        deactivate_view(&view);
         let _ = view.webview.close();
     }
 }
