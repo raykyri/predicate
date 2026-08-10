@@ -114,16 +114,6 @@ fn resolve_binary_from(
         .find(|candidate| candidate.is_file())
 }
 
-fn child_path_from(
-    path: Option<&OsStr>,
-    home: Option<&Path>,
-    login_dirs: &[PathBuf],
-) -> Option<String> {
-    env::join_paths(launch_path_dirs(path, home, login_dirs))
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned())
-}
-
 fn child_path_from_with_prepend(
     path: Option<&OsStr>,
     home: Option<&Path>,
@@ -409,6 +399,17 @@ mod tests {
         fs::write(path, b"test").unwrap();
     }
 
+    fn joined_launch_path(
+        path: Option<&OsStr>,
+        home: Option<&Path>,
+        login_dirs: &[PathBuf],
+    ) -> String {
+        env::join_paths(launch_path_dirs(path, home, login_dirs))
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+
     #[test]
     fn resolves_binary_from_user_fallback_dirs_when_path_is_minimal() {
         let home = temp_root("home-fallback");
@@ -456,8 +457,7 @@ mod tests {
     #[test]
     fn child_path_appends_user_and_system_fallback_dirs() {
         let home = PathBuf::from("/Users/tester");
-        let child_path =
-            child_path_from(Some(OsStr::new("/usr/bin:/bin")), Some(&home), &[]).unwrap();
+        let child_path = joined_launch_path(Some(OsStr::new("/usr/bin:/bin")), Some(&home), &[]);
         let dirs = env::split_paths(OsStr::new(&child_path)).collect::<Vec<_>>();
 
         assert_eq!(dirs[0], PathBuf::from("/usr/bin"));
@@ -628,8 +628,7 @@ mod tests {
             PathBuf::from("/Users/tester/.bun/bin"),
             PathBuf::from("/custom/bin"),
         ];
-        let child_path =
-            child_path_from(Some(OsStr::new("/usr/bin")), Some(&home), &login_dirs).unwrap();
+        let child_path = joined_launch_path(Some(OsStr::new("/usr/bin")), Some(&home), &login_dirs);
         let dirs = env::split_paths(OsStr::new(&child_path)).collect::<Vec<_>>();
 
         // Process PATH still leads; the login-shell dirs follow before the

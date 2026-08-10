@@ -111,9 +111,8 @@ export async function detectAvailableBodyFonts(): Promise<BodyFontOption[]> {
 const MONO_FALLBACK =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
 
-// The small, curated list shown in the settings dropdown. JetBrains Mono,
-// Ioskeley Mono, and Iosevka are bundled; the rest are common system monospace
-// fonts.
+// The small, curated list shown in the settings dropdown. JetBrains Mono and
+// Ioskeley Mono are bundled; the rest are common system monospace fonts.
 export const FONT_OPTIONS: FontOption[] = [
   {
     id: "jetbrains-mono",
@@ -129,12 +128,6 @@ export const FONT_OPTIONS: FontOption[] = [
     // box-drawing glyphs, and ligatures. Its family name intentionally differs
     // from the matching webfont used by CSS surfaces.
     nativeFamily: "Ioskeley Mono Term",
-  },
-  {
-    id: "iosevka",
-    label: "Iosevka",
-    stack: `"Iosevka", ${MONO_FALLBACK}`,
-    nativeFamily: "Iosevka Term",
   },
   {
     id: "sf-mono",
