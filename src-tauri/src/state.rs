@@ -842,7 +842,21 @@ fn strip_grok_terminal_title_suffix(title: &str) -> &str {
     title
 }
 
-fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
+fn strip_opencode_terminal_title_prefix(title: &str) -> &str {
+    title
+        .strip_prefix("OC |")
+        .map(str::trim_start)
+        .unwrap_or(title)
+}
+
+fn sanitize_last_osc_title(raw_title: &str, adapter_id: Option<&str>) -> Option<String> {
+    // Leave room for OpenCode's prefix and separator so removing them does not
+    // shorten an otherwise valid 160-character title.
+    let input_limit = if adapter_id == Some("opencode") {
+        MAX_LAST_OSC_TITLE_CHARS + "OC | ".chars().count()
+    } else {
+        MAX_LAST_OSC_TITLE_CHARS
+    };
     let mut title = String::new();
     let mut chars = 0_usize;
     let mut pending_space = false;
@@ -856,7 +870,7 @@ fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
             continue;
         }
         if pending_space {
-            if chars >= MAX_LAST_OSC_TITLE_CHARS {
+            if chars >= input_limit {
                 truncated = true;
                 break;
             }
@@ -864,7 +878,7 @@ fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
             chars += 1;
             pending_space = false;
         }
-        if chars >= MAX_LAST_OSC_TITLE_CHARS {
+        if chars >= input_limit {
             truncated = true;
             break;
         }
@@ -872,13 +886,23 @@ fn sanitize_last_osc_title(raw_title: &str) -> Option<String> {
         chars += 1;
     }
 
+    // OpenCode's branding is a prefix, so remove it before applying the length
+    // cap. Otherwise a long title would retain the prefix after truncation.
+    if adapter_id == Some("opencode") {
+        let stripped = strip_opencode_terminal_title_prefix(&title);
+        if stripped.len() != title.len() {
+            title = stripped.to_string();
+        }
+    }
+
     if truncated {
         if title.ends_with(' ') {
             title.pop();
-            chars -= 1;
         }
-        if chars >= MAX_LAST_OSC_TITLE_CHARS {
+        chars = title.chars().count();
+        while chars >= MAX_LAST_OSC_TITLE_CHARS {
             title.pop();
+            chars -= 1;
         }
         title.push('…');
     } else {
@@ -8827,13 +8851,19 @@ impl AppState {
         pane_id: &str,
         raw_title: &str,
     ) -> Result<Option<String>, String> {
-        let title = sanitize_last_osc_title(raw_title);
-        let changed = {
+        let (title, changed) = {
             let mut model = self
                 .inner
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
+            let adapter_id = model
+                .panes
+                .get(pane_id)
+                .and_then(|pane| pane.info.agent_id.as_ref())
+                .and_then(|agent_id| model.agents.get(agent_id))
+                .map(|agent| agent.adapter.clone());
+            let title = sanitize_last_osc_title(raw_title, adapter_id.as_deref());
             let Some(pane) = model.panes.get_mut(pane_id) else {
                 // Native title callbacks can arrive after pane teardown. Treat
                 // that as a harmless late delivery rather than surfacing an
@@ -8841,10 +8871,10 @@ impl AppState {
                 return Ok(title);
             };
             if pane.info.last_osc_title == title {
-                false
+                (title, false)
             } else {
                 pane.info.last_osc_title = title.clone();
-                true
+                (title, true)
             }
         };
         if changed {
@@ -16648,20 +16678,20 @@ mod tests {
     #[test]
     fn osc_title_sanitization_matches_the_frontend_contract() {
         assert_eq!(
-            sanitize_last_osc_title("  Build\u{1b}\n  42%  ").as_deref(),
+            sanitize_last_osc_title("  Build\u{1b}\n  42%  ", None).as_deref(),
             Some("Build 42%")
         );
-        assert_eq!(sanitize_last_osc_title(" \n\t\u{7f} "), None);
+        assert_eq!(sanitize_last_osc_title(" \n\t\u{7f} ", None), None);
         let truncated = format!("{}…", "x".repeat(MAX_LAST_OSC_TITLE_CHARS - 1));
         assert_eq!(
-            sanitize_last_osc_title(&"x".repeat(MAX_LAST_OSC_TITLE_CHARS + 20)).as_deref(),
+            sanitize_last_osc_title(&"x".repeat(MAX_LAST_OSC_TITLE_CHARS + 20), None).as_deref(),
             Some(truncated.as_str())
         );
         assert_eq!(
-            sanitize_last_osc_title(&format!(
-                "{}   more",
-                "x".repeat(MAX_LAST_OSC_TITLE_CHARS - 1)
-            ))
+            sanitize_last_osc_title(
+                &format!("{}   more", "x".repeat(MAX_LAST_OSC_TITLE_CHARS - 1)),
+                None
+            )
             .expect("non-empty title")
             .chars()
             .count(),
@@ -16672,27 +16702,95 @@ mod tests {
     #[test]
     fn osc_title_sanitization_strips_grok_branding_suffix() {
         assert_eq!(
-            sanitize_last_osc_title("qmux - grok").as_deref(),
+            sanitize_last_osc_title("qmux - grok", None).as_deref(),
             Some("qmux")
         );
         assert_eq!(
-            sanitize_last_osc_title("  Fix the build  - Grok  ").as_deref(),
+            sanitize_last_osc_title("  Fix the build  - Grok  ", None).as_deref(),
             Some("Fix the build")
         );
         assert_eq!(
-            sanitize_last_osc_title("src/App.tsx\t-\tGROK").as_deref(),
+            sanitize_last_osc_title("src/App.tsx\t-\tGROK", None).as_deref(),
             Some("src/App.tsx")
         );
         // A title that is only the branding suffix collapses to empty.
-        assert_eq!(sanitize_last_osc_title("x - grok").as_deref(), Some("x"));
+        assert_eq!(
+            sanitize_last_osc_title("x - grok", None).as_deref(),
+            Some("x")
+        );
         // Only a trailing suffix is stripped.
         assert_eq!(
-            sanitize_last_osc_title("grok - tools - grok").as_deref(),
+            sanitize_last_osc_title("grok - tools - grok", None).as_deref(),
             Some("grok - tools")
         );
         assert_eq!(
-            sanitize_last_osc_title("keep - grok around").as_deref(),
+            sanitize_last_osc_title("keep - grok around", None).as_deref(),
             Some("keep - grok around")
+        );
+    }
+
+    #[test]
+    fn osc_title_sanitization_strips_opencode_branding_only_for_opencode() {
+        assert_eq!(
+            sanitize_last_osc_title("OC | Fix the build", Some("opencode")).as_deref(),
+            Some("Fix the build")
+        );
+        assert_eq!(
+            sanitize_last_osc_title("OC |", Some("opencode")).as_deref(),
+            None
+        );
+        assert_eq!(
+            sanitize_last_osc_title("OC | Fix the build", Some("claude")).as_deref(),
+            Some("OC | Fix the build")
+        );
+        assert_eq!(
+            sanitize_last_osc_title(&format!("OC | {}", "x".repeat(200)), Some("opencode"))
+                .expect("non-empty title")
+                .chars()
+                .count(),
+            MAX_LAST_OSC_TITLE_CHARS
+        );
+        let exact_title = "x".repeat(MAX_LAST_OSC_TITLE_CHARS);
+        assert_eq!(
+            sanitize_last_osc_title(&format!("OC | {exact_title}"), Some("opencode")).as_deref(),
+            Some(exact_title.as_str())
+        );
+    }
+
+    #[test]
+    fn opencode_osc_titles_are_normalized_before_storage_and_recovery() {
+        let workspace = temp_workspace();
+        let config = test_config(workspace.clone());
+
+        {
+            let state = AppState::new(config.clone());
+            assert!(state.restore_session().is_empty());
+            let mut agent = sample_agent("agent-1");
+            agent.adapter = "opencode".to_string();
+            agent.pane_id = Some("pane-1".to_string());
+            state.insert_agent(agent).unwrap();
+            let mut pane = sample_pane_runtime("pane-1");
+            pane.info.agent_id = Some("agent-1".to_string());
+            state.insert_pane(pane).unwrap();
+
+            assert_eq!(
+                state
+                    .update_last_osc_title("pane-1", "OC | Review the title path")
+                    .unwrap()
+                    .as_deref(),
+                Some("Review the title path")
+            );
+            assert_eq!(
+                state.list_panes().unwrap()[0].last_osc_title.as_deref(),
+                Some("Review the title path")
+            );
+        }
+
+        let restored = AppState::new(config);
+        let panes = restored.restore_session();
+        assert_eq!(
+            panes[0].last_osc_title.as_deref(),
+            Some("Review the title path")
         );
     }
 

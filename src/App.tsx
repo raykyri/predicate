@@ -197,6 +197,7 @@ import {
   statusLabel,
   upsertThreadGraphs,
 } from "./lib/appHelpers";
+import { sanitizeTerminalTitle } from "./lib/terminalTitle";
 import {
   agentTabStatusDotClass,
   agentTabStatusPill,
@@ -838,7 +839,6 @@ const GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT = 270;
 const SETTINGS_CONTEXT_MENU_WIDTH = 180;
 const SETTINGS_CONTEXT_MENU_TERMINAL_HEIGHT = 66;
 const SETTINGS_CONTEXT_MENU_RESEARCH_HEIGHT = 134;
-const MAX_TERMINAL_TITLE_CHARS = 160;
 const MAX_FIRST_MESSAGE_TITLE_CHARS = 80;
 const MAX_OPENROUTER_TITLE_SOURCE_CHARS = 4000;
 const OPENROUTER_TITLE_MAX_COMPLETION_TOKENS = 1000;
@@ -924,27 +924,6 @@ type TitleGenerationTestState =
   | { status: "running"; providerLabel: string }
   | { status: "success"; providerLabel: string; title: string }
   | { status: "error"; providerLabel: string; message: string };
-
-function sanitizeTerminalTitle(rawTitle: string): string | null {
-  let title = rawTitle
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!title) {
-    return null;
-  }
-  // Grok's CLI brands OSC 0/2 titles with a trailing " - grok". Drop it so the
-  // tab shows the meaningful title (directory, process, etc.) alone.
-  title = title.replace(/ - grok$/i, "").trimEnd();
-  if (!title) {
-    return null;
-  }
-  const chars = Array.from(title);
-  if (chars.length <= MAX_TERMINAL_TITLE_CHARS) {
-    return title;
-  }
-  return `${chars.slice(0, MAX_TERMINAL_TITLE_CHARS - 1).join("").trimEnd()}…`;
-}
 
 function normalizedMessagePreview(rawMessage: string): string | null {
   const normalized = rawMessage
@@ -3695,7 +3674,8 @@ function MainApp() {
   const terminalTitleTimersRef = useRef(new Map<string, number>());
   const pendingTerminalTitlesRef = useRef(new Map<string, string | null>());
   const handleTerminalTitleChange = useCallback((paneId: string, rawTitle: string) => {
-    pendingTerminalTitlesRef.current.set(paneId, sanitizeTerminalTitle(rawTitle));
+    const adapterId = agentsRef.current.find((agent) => agent.paneId === paneId)?.adapter;
+    pendingTerminalTitlesRef.current.set(paneId, sanitizeTerminalTitle(rawTitle, adapterId));
     if (terminalTitleTimersRef.current.has(paneId)) {
       return;
     }
@@ -3744,7 +3724,12 @@ function MainApp() {
     const terminalTitle = Object.prototype.hasOwnProperty.call(terminalTitleByPane, pane.id)
       ? terminalTitleByPane[pane.id]
       : pane.lastOscTitle;
-    return terminalTitle && paneUsesDefaultTitle(pane, agent) ? terminalTitle : pane.title;
+    const normalizedTerminalTitle = terminalTitle
+      ? sanitizeTerminalTitle(terminalTitle, agent?.adapter)
+      : null;
+    return normalizedTerminalTitle && paneUsesDefaultTitle(pane, agent)
+      ? normalizedTerminalTitle
+      : pane.title;
   }
 
   function queuedTurnsForAgent(agent: AgentInfo | undefined): QueuedTurn[] {
@@ -6540,8 +6525,14 @@ function MainApp() {
     : "";
   const contextMenuTerminalTitle = contextMenuPane
     ? Object.prototype.hasOwnProperty.call(terminalTitleByPane, contextMenuPane.id)
-      ? terminalTitleByPane[contextMenuPane.id]
-      : (contextMenuPane.lastOscTitle ?? null)
+      ? sanitizeTerminalTitle(
+          terminalTitleByPane[contextMenuPane.id] ?? "",
+          contextMenuAgent?.adapter,
+        )
+      : sanitizeTerminalTitle(
+          contextMenuPane.lastOscTitle ?? "",
+          contextMenuAgent?.adapter,
+        )
     : null;
   const groupMenuGroup = groupMenu ? groups.find((group) => group.id === groupMenu.groupId) : null;
   const appleFoundationTitleAvailable = appleFoundationModelsTitleAvailable(config);

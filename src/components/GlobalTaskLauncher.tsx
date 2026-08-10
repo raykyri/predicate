@@ -29,6 +29,7 @@ import {
 } from "../lib/appHelpers";
 import { formatRelativeTime } from "../lib/transcriptSessions";
 import { collapseImageMarkers } from "../lib/imageMarkers";
+import { sanitizeTerminalTitle } from "../lib/terminalTitle";
 import {
   stripTaggedInstructionBlocks,
   stripTaggedUserInstructionBlocks,
@@ -88,7 +89,9 @@ function resolveTargetTitle(
   agent: AgentInfo,
   config: RuntimeConfig | null,
 ): string {
-  const oscTitle = pane.lastOscTitle?.trim();
+  const oscTitle = pane.lastOscTitle
+    ? sanitizeTerminalTitle(pane.lastOscTitle, agent.adapter)
+    : null;
   const fallback = defaultPaneTitle(pane, agent, config);
   return oscTitle && fallback !== null && pane.title === fallback ? oscTitle : pane.title;
 }
