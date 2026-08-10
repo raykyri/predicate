@@ -2667,6 +2667,10 @@ function MainApp() {
   const [splitTranscriptExpandedByPane, setSplitTranscriptExpandedByPane] = useState<
     Record<string, boolean>
   >({});
+  const [focusedAssistantTurn, setFocusedAssistantTurn] = useState<{
+    paneId: string;
+    itemKey: string;
+  } | null>(null);
   // PiP is opt-in per pane. Keeping the flag separate from transcript expansion
   // lets a pane remember the choice across expand/restore and tab round trips.
   const [terminalPipEnabledByPane, setTerminalPipEnabledByPane] = useState<
@@ -4684,6 +4688,9 @@ function MainApp() {
     expanded: boolean,
     splitMode = splitRightPaneMode,
   ) {
+    if (!expanded) {
+      setFocusedAssistantTurn(null);
+    }
     if (splitMode) {
       const paneIds = paneSplitForPane(paneSplitsRef.current, paneId)?.paneIds ?? [paneId];
       setSplitTranscriptExpandedByPane((current) =>
@@ -4753,6 +4760,9 @@ function MainApp() {
       return;
     }
 
+    if (activeTranscriptExpanded) {
+      setFocusedAssistantTurn(null);
+    }
     toggleTranscriptExpandedForPane(paneId);
   }
 
@@ -5069,6 +5079,26 @@ function MainApp() {
     ? splitTranscriptExpanded && splitTurnPaneSurfaces.length > 0
     : Boolean(activePane && activePaneHasTurnSidebar && transcriptExpandedByPane[activePane.id]);
   const activeTranscriptVisibleExpanded = activeTranscriptExpanded && !rightBarCollapsed;
+  const focusedAssistantTurnSurface = focusedAssistantTurn
+    ? visibleRightBarSurfaces.find(
+        (surface) => surface.pane.id === focusedAssistantTurn.paneId,
+      )
+    : undefined;
+  const expandedRightBarSurfaces = focusedAssistantTurnSurface
+    ? [focusedAssistantTurnSurface]
+    : visibleRightBarSurfaces;
+  useEffect(() => {
+    if (
+      focusedAssistantTurn &&
+      (!activeTranscriptVisibleExpanded || !focusedAssistantTurnSurface)
+    ) {
+      setFocusedAssistantTurn(null);
+    }
+  }, [
+    activeTranscriptVisibleExpanded,
+    focusedAssistantTurn,
+    focusedAssistantTurnSurface,
+  ]);
   const terminalPipToggleVisible = shouldShowTerminalPipToggle({
     transcriptExpanded: activeTranscriptExpanded,
     rightPaneCollapsed: rightBarCollapsed,
@@ -5076,6 +5106,7 @@ function MainApp() {
   });
   const activeTerminalPipVisible = Boolean(
     activePane &&
+      !focusedAssistantTurn &&
       shouldShowTerminalPip({
         transcriptExpanded: activeTranscriptExpanded,
         toggledOn: Boolean(terminalPipEnabledByPane[activePane.id]),
@@ -12930,6 +12961,20 @@ function MainApp() {
         showActivityDetail={settings.showToolCalls}
         stickyUserMessages={settings.stickyUserMessages}
         showAssistantTimestamps={settings.showAssistantTimestamps}
+        assistantTurnFocusEnabled={activeTranscriptVisibleExpanded}
+        focusedAssistantTurnKey={
+          focusedAssistantTurn?.paneId === surface.pane.id
+            ? focusedAssistantTurn.itemKey
+            : null
+        }
+        onFocusAssistantTurn={(itemKey) => {
+          if (itemKey) {
+            activateTerminalPane(surface.pane.id);
+            setFocusedAssistantTurn({ paneId: surface.pane.id, itemKey });
+          } else {
+            setFocusedAssistantTurn(null);
+          }
+        }}
         reduceMotion={settings.reduceMotion}
         agentId={agent?.id ?? surface.pane.id}
         getTranscriptScroll={getTranscriptScroll}
@@ -15797,8 +15842,12 @@ function MainApp() {
           The vertical split order becomes left-to-right order here, and flex
           gives every transcript an equal-width column. */}
       {activeTranscriptVisibleExpanded && splitRightPaneMode ? (
-        <aside className="turn-pane is-expanded is-headerless-expanded is-split-expanded">
-          {visibleRightBarSurfaces.map((surface, index) => (
+        <aside
+          className={`turn-pane is-expanded is-headerless-expanded is-split-expanded${
+            focusedAssistantTurnSurface ? " is-reader-mode" : ""
+          }`}
+        >
+          {expandedRightBarSurfaces.map((surface, index) => (
             <section
               key={surface.pane.id}
               className={`turn-pane-expanded-split-cell${
@@ -15823,10 +15872,12 @@ function MainApp() {
               }}
             >
               {renderTurnPaneSurface(surface, false)}
-              {renderBtwFloatingPanes(surface.pane.id)}
-              {renderArtifactTray(surface, index === 0)}
-              {renderAgentDebugPanel(surface)}
-              {renderFloatingTurnPaneControls(surface, true)}
+              {focusedAssistantTurnSurface ? null : renderBtwFloatingPanes(surface.pane.id)}
+              {focusedAssistantTurnSurface ? null : renderArtifactTray(surface, index === 0)}
+              {focusedAssistantTurnSurface ? null : renderAgentDebugPanel(surface)}
+              {focusedAssistantTurnSurface
+                ? null
+                : renderFloatingTurnPaneControls(surface, true)}
             </section>
           ))}
         </aside>
@@ -15836,15 +15887,19 @@ function MainApp() {
            the same TurnOverlay instance instead of remounting it — a remount
            resets its scroll position and transient disclosure state. */
         <aside
-          className={activeTranscriptVisibleExpanded ? "turn-pane is-expanded" : "turn-pane"}
+          className={
+            activeTranscriptVisibleExpanded
+              ? `turn-pane is-expanded${focusedAssistantTurn ? " is-reader-mode" : ""}`
+              : "turn-pane"
+          }
           onPointerDownCapture={() => activateTerminalPane(activeTurnPaneSurface.pane.id)}
           onFocusCapture={() => activateTerminalPane(activeTurnPaneSurface.pane.id)}
         >
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
-          {renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
-          {renderArtifactTray(activeTurnPaneSurface)}
-          {renderAgentDebugPanel(activeTurnPaneSurface)}
+          {focusedAssistantTurn ? null : renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
+          {focusedAssistantTurn ? null : renderArtifactTray(activeTurnPaneSurface)}
+          {focusedAssistantTurn ? null : renderAgentDebugPanel(activeTurnPaneSurface)}
         </aside>
       ) : null}
       {/* Text-mode terminal mini-map while the transcript covers the stage:

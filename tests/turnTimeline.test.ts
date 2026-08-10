@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   assistantGroupTimestamp,
+  assistantRunForItemKey,
   annotationsForTimeline,
   assistantRunCopyTextByItemKey,
   assistantTextFromTimelineItems,
@@ -738,6 +739,30 @@ test("assistantGroupTimestamp picks the latest time in a trailing run", () => {
   assert.equal(assistantGroupTimestamp(items, lastIndex), 50);
   // Mid-group index still reports the latest time up through that index.
   assert.equal(assistantGroupTimestamp(items, lastIndex - 1), 40);
+});
+
+test("assistantRunForItemKey returns only the containing assistant response", () => {
+  nextIndex = 0;
+  const items = buildTimelineItems([
+    turn("assistant", [text("first")], { timestamp: 10 }),
+    turn("user", [text("question")], { timestamp: 20 }),
+    turn("assistant", [text("answer start")], { timestamp: 30 }),
+    turn("assistant", [toolUse("t1")], { timestamp: 40 }),
+    turn("assistant", [text("answer end")], { timestamp: 50 }),
+    turn("user", [text("next question")], { timestamp: 60 }),
+  ]);
+  const answerItems = items.filter(
+    (item) => item.role === "assistant" && item.timestamp !== 10,
+  );
+
+  assert.deepEqual(
+    assistantRunForItemKey(items, answerItems[answerItems.length - 1].key).map(
+      (item) => item.key,
+    ),
+    answerItems.map((item) => item.key),
+  );
+  assert.deepEqual(assistantRunForItemKey(items, items[1].key), []);
+  assert.deepEqual(assistantRunForItemKey(items, "missing"), []);
 });
 
 test("formatMessageTimestamp uses relative labels under 24 hours", () => {

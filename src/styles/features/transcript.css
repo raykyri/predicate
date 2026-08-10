@@ -280,6 +280,81 @@
   align-self: center;
 }
 
+.turn-pane.is-expanded.is-reader-mode {
+  padding: clamp(20px, 4vh, 44px) clamp(22px, 5vw, 72px);
+  background: color-mix(in srgb, #050708 82%, transparent);
+}
+
+.turn-pane.is-expanded.is-reader-mode .turn-pane-expanded-split-cell {
+  width: 100%;
+  background: transparent;
+}
+
+.turn-pane.is-expanded.is-reader-mode .turn-pane-expanded-split-cell.is-active::after {
+  display: none;
+}
+
+.turn-pane.is-expanded .turn-sidebar.is-reader-mode {
+  flex: 1 1 auto;
+  width: min(1120px, 100%);
+  height: 100%;
+  margin: auto;
+  overflow: hidden;
+  border: 1px solid var(--surface-border-strong);
+  border-radius: 16px;
+  background: var(--right-pane-bg);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.62);
+}
+
+.turn-sidebar.is-reader-mode .turn-timeline {
+  padding-top: 64px;
+  padding-bottom: 40px;
+}
+
+.turn-reader-header {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 48px;
+  padding: 0 12px 0 20px;
+  border-bottom: 1px solid var(--surface-divider);
+  background: var(--chrome-header-bg);
+}
+
+.turn-reader-title {
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.turn-reader-close-button {
+  width: 30px;
+  height: 30px;
+  color: var(--text-secondary);
+}
+
+.turn-reader-close-button:hover {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
+}
+
+.turn-reader-close-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
+.turn-sidebar.is-reader-mode .pane-search {
+  top: 8px;
+  --pane-search-right: 52px;
+}
+
 .turn-pane.is-expanded .turn-sidebar-input-rail {
   width: 100%;
   max-width: 700px;
@@ -309,6 +384,9 @@
    it reads as metadata rather than another message. */
 .turn-assistant-timestamp {
   align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   margin: 3px 0 4px;
   padding: 0 10px;
   color: var(--text-muted, #8b9490);
@@ -316,6 +394,32 @@
   line-height: 1.3;
   letter-spacing: 0.01em;
   user-select: none;
+}
+
+.turn-assistant-focus-button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.turn-assistant-focus-button:hover {
+  background: var(--control-bg-hover);
+  color: var(--text-primary);
+}
+
+.turn-assistant-focus-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+  color: var(--text-primary);
 }
 
 .turn-card.role-user {

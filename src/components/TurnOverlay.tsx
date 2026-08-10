@@ -15,7 +15,7 @@ import type {
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, Ellipsis } from "lucide-react";
+import { ArrowDown, ArrowUpRight, Ellipsis, X } from "lucide-react";
 import type {
   MessageAnchor,
   ThreadParticipant,
@@ -37,6 +37,7 @@ import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import {
   assistantGroupTimestamp,
+  assistantRunForItemKey,
   annotationsForTimeline,
   assistantRunCopyTextByItemKey,
   buildTimelineItems,
@@ -131,6 +132,11 @@ interface TurnOverlayProps {
   // When true, show a wall-clock timestamp after each consecutive run of
   // assistant messages (before the next non-assistant message, or at the tail).
   showAssistantTimestamps?: boolean;
+  // Expanded-reader state is owned by App so split panes still share one
+  // focused response. The key may point anywhere inside the assistant run.
+  assistantTurnFocusEnabled?: boolean;
+  focusedAssistantTurnKey?: string | null;
+  onFocusAssistantTurn?: (itemKey: string | null) => void;
   // When supplied, user-message headers get a small action that asks App to
   // regenerate the tab title from that message.
   onRegenerateTitleFromUserMessage?: (message: string) => void;
@@ -245,6 +251,9 @@ export default function TurnOverlay({
   showActivityDetail = true,
   stickyUserMessages = true,
   showAssistantTimestamps = false,
+  assistantTurnFocusEnabled = false,
+  focusedAssistantTurnKey = null,
+  onFocusAssistantTurn,
   onRegenerateTitleFromUserMessage,
   titleGenerationBusy = false,
   onForkFromMessage,
@@ -252,9 +261,14 @@ export default function TurnOverlay({
   searchHotkeyActive = false,
   reduceMotion = false,
 }: TurnOverlayProps) {
+  const readerModeRequested =
+    assistantTurnFocusEnabled && focusedAssistantTurnKey !== null;
   const sidebarRef = useRef<HTMLElement | null>(null);
   const inputWrapRef = useRef<HTMLDivElement | null>(null);
   const timelineRef = useRef<HTMLDivElement | null>(null);
+  const readerCloseRef = useRef<HTMLButtonElement | null>(null);
+  const readerScrollRestoreRef = useRef<TranscriptScrollPosition | null>(null);
+  const readerModeWasActiveRef = useRef(false);
   // Zero-height marker after the last timeline row; see the observer effect below.
   const bottomSentinelRef = useRef<HTMLDivElement | null>(null);
   const regenerateTitleFromUserMessageRef = useRef(onRegenerateTitleFromUserMessage);
@@ -327,7 +341,7 @@ export default function TurnOverlay({
 
   const handleTimelineScroll = () => {
     const timeline = timelineRef.current;
-    if (!timeline) {
+    if (!timeline || readerModeRequested || readerModeWasActiveRef.current) {
       return;
     }
     // Clamp/restore churn while switching agents is not user intent — leave
@@ -362,7 +376,7 @@ export default function TurnOverlay({
   // event. Registering before the switch avoids reading the shared timeline
   // after React has reconciled it with the incoming transcript.
   useLayoutEffect(() => {
-    if (!agentId || !registerScrollCapture) {
+    if (!agentId || !registerScrollCapture || readerModeRequested) {
       return;
     }
     return registerScrollCapture(() => {
@@ -371,7 +385,7 @@ export default function TurnOverlay({
         saveTranscriptScroll?.(agentId, currentTimelineScrollPosition(timeline));
       }
     });
-  }, [agentId, registerScrollCapture, saveTranscriptScroll]);
+  }, [agentId, readerModeRequested, registerScrollCapture, saveTranscriptScroll]);
 
   const jumpToLatest = () => {
     const timeline = timelineRef.current;
@@ -685,11 +699,65 @@ export default function TurnOverlay({
     () => buildTimelineItems(turns, showActivityDetail),
     [turns, showActivityDetail],
   );
+  const focusedAssistantItems = useMemo(
+    () =>
+      focusedAssistantTurnKey
+        ? assistantRunForItemKey(timelineItems, focusedAssistantTurnKey)
+        : [],
+    [focusedAssistantTurnKey, timelineItems],
+  );
+  const readerMode =
+    readerModeRequested && focusedAssistantItems.length > 0;
+  const displayedTimelineItems = readerMode ? focusedAssistantItems : timelineItems;
   const timelineAnnotations = useMemo(
     () => annotationsForTimeline(timelineItems, annotations),
     [annotations, timelineItems],
   );
-  const hasTimelineContent = timelineItems.length > 0 || annotations.length > 0 || thinking;
+  const hasTimelineContent = readerMode
+    ? displayedTimelineItems.length > 0
+    : timelineItems.length > 0 || annotations.length > 0 || thinking;
+
+  const focusAssistantTurn = useCallback(
+    (itemKey: string) => {
+      const timeline = timelineRef.current;
+      if (timeline) {
+        readerScrollRestoreRef.current = {
+          scrollTop: timeline.scrollTop,
+          stuck: stickToBottomRef.current,
+        };
+      }
+      onFocusAssistantTurn?.(itemKey);
+    },
+    [onFocusAssistantTurn],
+  );
+
+  useLayoutEffect(() => {
+    if (readerMode) {
+      readerModeWasActiveRef.current = true;
+      jumpingToLatestRef.current = false;
+      setJumpToLatestVisible(false);
+      timelineRef.current?.scrollTo({ top: 0 });
+      readerCloseRef.current?.focus();
+      return;
+    }
+    if (readerModeWasActiveRef.current) {
+      readerModeWasActiveRef.current = false;
+      const saved = readerScrollRestoreRef.current;
+      readerScrollRestoreRef.current = null;
+      const timeline = timelineRef.current;
+      if (timeline && saved) {
+        stickToBottomRef.current = saved.stuck;
+        timeline.scrollTop = saved.stuck ? timeline.scrollHeight : saved.scrollTop;
+        setJumpToLatestVisible(!saved.stuck);
+      }
+    }
+  }, [focusedAssistantTurnKey, readerMode]);
+
+  useEffect(() => {
+    if (readerModeRequested && focusedAssistantItems.length === 0) {
+      onFocusAssistantTurn?.(null);
+    }
+  }, [focusedAssistantItems.length, onFocusAssistantTurn, readerModeRequested]);
 
   const captureAnnotationSelection = useCallback(() => {
     if (!onSaveAnnotation) {
@@ -800,23 +868,23 @@ export default function TurnOverlay({
   // sentinel share the same physical end. Split mode already ends the
   // timeline above its queue and needs no tail reserve.
   const tailReserveHeight =
-    !queueSplit && input && hasTimelineContent
+    !readerMode && !queueSplit && input && hasTimelineContent
       ? composerHeight > 0
         ? composerHeight + COMPOSER_CLEARANCE
         : DEFAULT_COMPOSER_RESERVE
       : 0;
-  const timelineStyle: CSSProperties | undefined = queueSplit
+  const timelineStyle: CSSProperties | undefined = !readerMode && queueSplit
     ? { bottom: effectiveQueueSplitHeight, paddingBottom: 10 }
     : tailReserveHeight > 0
       ? { paddingBottom: 0 }
       : undefined;
-  const inputStyle: CSSProperties | undefined = queueSplit
+  const inputStyle: CSSProperties | undefined = !readerMode && queueSplit
     ? { height: effectiveQueueSplitHeight }
     : undefined;
   // Keep the floating affordance in the visible transcript strip: the composer
   // overlays the bottom in the normal layout, while split mode ends the
   // transcript above its separately-sized queue area.
-  const jumpToLatestBottom = queueSplit
+  const jumpToLatestBottom = !readerMode && queueSplit
     ? effectiveQueueSplitHeight + 12
     : input
       ? (composerHeight || DEFAULT_COMPOSER_RESERVE) + 10
@@ -979,13 +1047,61 @@ export default function TurnOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [stickyUserEnabled, timelineItems, composerHeight, effectiveQueueSplitHeight, agentId, thinking]);
 
+  const visibleHeader = readerMode ? null : header;
+
   return (
     <section
       ref={sidebarRef}
-      className={`turn-sidebar${header ? " has-header" : ""}${queueSplit ? " has-queue-split" : ""}`}
-      aria-label="Agent turns"
+      className={`turn-sidebar${visibleHeader ? " has-header" : ""}${
+        !readerMode && queueSplit ? " has-queue-split" : ""
+      }${readerMode ? " is-reader-mode" : ""}`}
+      role={readerMode ? "dialog" : undefined}
+      aria-modal={readerMode || undefined}
+      aria-label={readerMode ? "Focused assistant turn" : "Agent turns"}
+      onKeyDown={(event) => {
+        if (readerMode && event.key === "Tab" && !event.defaultPrevented) {
+          const focusable = Array.from(
+            event.currentTarget.querySelectorAll<HTMLElement>(
+              'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]',
+            ),
+          ).filter((element) => element.getClientRects().length > 0);
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+          if (first && last) {
+            const active = document.activeElement;
+            if (
+              (event.shiftKey && (active === first || !event.currentTarget.contains(active))) ||
+              (!event.shiftKey && (active === last || !event.currentTarget.contains(active)))
+            ) {
+              event.preventDefault();
+              (event.shiftKey ? last : first).focus();
+            }
+          }
+          return;
+        }
+        if (readerMode && event.key === "Escape" && !event.defaultPrevented) {
+          event.preventDefault();
+          event.stopPropagation();
+          onFocusAssistantTurn?.(null);
+        }
+      }}
     >
-      {header}
+      {visibleHeader}
+      {readerMode ? (
+        <div className="turn-reader-header">
+          <span className="turn-reader-title">Assistant response</span>
+          <button
+            ref={readerCloseRef}
+            type="button"
+            className="icon-button turn-reader-close-button"
+            title="Close reader"
+            aria-label="Close assistant response reader"
+            onClick={() => onFocusAssistantTurn?.(null)}
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+      ) : null}
       <DomSearchBar
         active={searchHotkeyActive}
         placeholder="Find in transcript"
@@ -993,7 +1109,7 @@ export default function TurnOverlay({
         hotkeyScopeRef={sidebarRef}
         resetKey={agentId}
       />
-      {queueSplit ? (
+      {!readerMode && queueSplit ? (
         <div
           className="turn-queue-resizer"
           role="separator"
@@ -1014,8 +1130,8 @@ export default function TurnOverlay({
       <TranscriptLinkActionsProvider actions={linkActions}>
         <div
           ref={timelineRef}
-          className={`turn-timeline${timelineItems.length === 0 && annotations.length === 0 && !thinking ? " is-empty" : ""}${
-            stickyUserEnabled ? " has-sticky-user" : ""
+          className={`turn-timeline${displayedTimelineItems.length === 0 && annotations.length === 0 && !thinking ? " is-empty" : ""}${
+            stickyUserEnabled && !readerMode ? " has-sticky-user" : ""
           }`}
           style={timelineStyle}
           onScroll={handleTimelineScroll}
@@ -1025,7 +1141,7 @@ export default function TurnOverlay({
           onMouseUp={captureAnnotationSelection}
           onKeyUp={captureAnnotationSelection}
         >
-        {timelineItems.length === 0 && annotations.length === 0 && !thinking ? (
+        {displayedTimelineItems.length === 0 && annotations.length === 0 && !thinking ? (
           <div className="empty-state turn-empty-state">
             <span>No activity yet</span>
             {/* Adapters emit both the bare "Transcript unavailable" and
@@ -1050,13 +1166,13 @@ export default function TurnOverlay({
             )}
           </div>
         ) : (
-          timelineItems.map((item, index) => {
+          displayedTimelineItems.map((item, index) => {
             // A continued agent turn — agent text, then a tool-call group, then
             // more agent text — is still the same speaker, so drop the repeated
             // name on the continuation. (Consecutive agent messages only stay
             // separate when activities sit between them; see buildTimelineItems.)
-            const previous = timelineItems[index - 1];
-            const next = timelineItems[index + 1];
+            const previous = displayedTimelineItems[index - 1];
+            const next = displayedTimelineItems[index + 1];
             const showName = !(
               item.role === "assistant" &&
               previous?.role === "assistant" &&
@@ -1069,13 +1185,16 @@ export default function TurnOverlay({
               showAssistantTimestamps &&
               item.role === "assistant" &&
               (next === undefined || next.role !== "assistant")
-                ? assistantGroupTimestamp(timelineItems, index)
+                ? assistantGroupTimestamp(displayedTimelineItems, index)
                 : null;
             const showGroupTimestamp =
               groupTimestamp !== null &&
               shouldShowAssistantGroupTimestamp(groupTimestamp, {
                 atTranscriptTail: next === undefined,
-                working: thinking,
+                // A focused historical response is its temporary visual tail,
+                // but a newer live response elsewhere must not suppress its
+                // timestamp as though this were the real working tail.
+                working: readerMode ? false : thinking,
               });
             // The candidate keeps its marker class even while sticky is
             // disarmed (the height measurement finds it by this class); the
@@ -1107,34 +1226,48 @@ export default function TurnOverlay({
                   onCopyHandoff={copyHandoff}
                 />
                 {showGroupTimestamp ? (
-                  <time
-                    className="turn-assistant-timestamp"
-                    dateTime={new Date(groupTimestamp).toISOString()}
-                    title={formatAbsoluteMessageTimestamp(groupTimestamp)}
-                  >
-                    {formatMessageTimestamp(groupTimestamp)}
-                  </time>
+                  <div className="turn-assistant-timestamp">
+                    <time
+                      dateTime={new Date(groupTimestamp).toISOString()}
+                      title={formatAbsoluteMessageTimestamp(groupTimestamp)}
+                    >
+                      {formatMessageTimestamp(groupTimestamp)}
+                    </time>
+                    {assistantTurnFocusEnabled && !readerMode && onFocusAssistantTurn ? (
+                      <button
+                        type="button"
+                        className="turn-assistant-focus-button"
+                        title="Read this assistant turn"
+                        aria-label="Read this assistant turn in focus mode"
+                        onClick={() => focusAssistantTurn(item.key)}
+                      >
+                        <ArrowUpRight size={13} aria-hidden="true" />
+                      </button>
+                    ) : null}
+                  </div>
                 ) : null}
-                {(timelineAnnotations.byItemKey.get(item.key) ?? []).map((annotation) => (
-                  <SavedAnnotationCard
-                    key={annotation.id}
-                    annotation={annotation}
-                    onRemove={onRemoveAnnotation}
-                  />
-                ))}
+                {!readerMode &&
+                  (timelineAnnotations.byItemKey.get(item.key) ?? []).map((annotation) => (
+                    <SavedAnnotationCard
+                      key={annotation.id}
+                      annotation={annotation}
+                      onRemove={onRemoveAnnotation}
+                    />
+                  ))}
               </Fragment>
             );
           })
         )}
-        {timelineAnnotations.orphaned.map((annotation) => (
-          <SavedAnnotationCard
-            key={annotation.id}
-            annotation={annotation}
-            sourceUnavailable
-            onRemove={onRemoveAnnotation}
-          />
-        ))}
-        {thinking ? (
+        {!readerMode &&
+          timelineAnnotations.orphaned.map((annotation) => (
+            <SavedAnnotationCard
+              key={annotation.id}
+              annotation={annotation}
+              sourceUnavailable
+              onRemove={onRemoveAnnotation}
+            />
+          ))}
+        {!readerMode && thinking ? (
           <div className="turn-thinking" aria-live="polite">
             <span className="turn-thinking-dot" aria-hidden="true" />
             <span className="turn-thinking-label">{thinkingLabel}</span>
@@ -1149,23 +1282,25 @@ export default function TurnOverlay({
         </div>
         </div>
       </TranscriptLinkActionsProvider>
-      <button
-        type="button"
-        className={`turn-jump-to-latest${jumpToLatestVisible ? " is-visible" : ""}`}
-        style={{ bottom: jumpToLatestBottom }}
-        aria-hidden={!jumpToLatestVisible}
-        tabIndex={jumpToLatestVisible ? 0 : -1}
-        onClick={(event) => {
-          // Once the pill slips away at the bottom, leaving focus on it would
-          // strand keyboard users on an invisible control.
-          event.currentTarget.blur();
-          jumpToLatest();
-        }}
-      >
-        <ArrowDown size={12} aria-hidden="true" />
-        Jump to latest
-      </button>
-      {input ? (
+      {!readerMode ? (
+        <button
+          type="button"
+          className={`turn-jump-to-latest${jumpToLatestVisible ? " is-visible" : ""}`}
+          style={{ bottom: jumpToLatestBottom }}
+          aria-hidden={!jumpToLatestVisible}
+          tabIndex={jumpToLatestVisible ? 0 : -1}
+          onClick={(event) => {
+            // Once the pill slips away at the bottom, leaving focus on it would
+            // strand keyboard users on an invisible control.
+            event.currentTarget.blur();
+            jumpToLatest();
+          }}
+        >
+          <ArrowDown size={12} aria-hidden="true" />
+          Jump to latest
+        </button>
+      ) : null}
+      {!readerMode && input ? (
         <div
           className={`turn-sidebar-input${queueSplit ? " is-split" : ""}`}
           ref={inputWrapRef}

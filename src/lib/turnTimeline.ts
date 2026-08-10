@@ -821,6 +821,33 @@ export function assistantGroupTimestamp(
   return latest;
 }
 
+/**
+ * The consecutive assistant run containing `itemKey`.
+ *
+ * Timestamp footers are attached to the last item in one of these runs. Focus
+ * mode stores that item's key, then resolves the full run again on every
+ * transcript update so a continued response can grow without dropping out of
+ * the reader.
+ */
+export function assistantRunForItemKey(
+  items: MessageItem[],
+  itemKey: string,
+): MessageItem[] {
+  const itemIndex = items.findIndex((item) => item.key === itemKey);
+  if (itemIndex < 0 || items[itemIndex].role !== "assistant") {
+    return [];
+  }
+  let startIndex = itemIndex;
+  while (startIndex > 0 && items[startIndex - 1].role === "assistant") {
+    startIndex -= 1;
+  }
+  let endIndex = itemIndex;
+  while (endIndex + 1 < items.length && items[endIndex + 1].role === "assistant") {
+    endIndex += 1;
+  }
+  return items.slice(startIndex, endIndex + 1);
+}
+
 /** Absolute wall-clock label (also used as the hover title on relative labels). */
 export function formatAbsoluteMessageTimestamp(
   ms: number,
