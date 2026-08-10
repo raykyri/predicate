@@ -6,7 +6,7 @@ use crate::adapters::{
 use crate::connection_limit::ConnectionLimiter;
 use crate::events::QmuxEvent;
 use crate::pty::{PaneWriteOptions, write_pane};
-use crate::state::AppState;
+use crate::state::{AppState, canonical_loopback_artifact_url};
 use crate::workspace::{
     LaunchOrigin, recover_shell_agent_from_session_start, validate_launch_workspace,
 };
@@ -468,35 +468,6 @@ fn validate_control_launch_workspace(state: &AppState, pane_id: &str) -> Result<
     Ok(())
 }
 
-/// The preview intentionally accepts only loopback HTTP origins. Files are
-/// served by qmux's token-scoped loopback server instead.
-fn is_loopback_http_url(url: &str) -> bool {
-    let Some((_scheme, rest)) = url.split_once("://") else {
-        return false;
-    };
-    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or(rest);
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-    let host = if let Some(after_bracket) = host_port.strip_prefix('[') {
-        match after_bracket.split_once(']') {
-            Some((inner, _)) => inner,
-            None => return false,
-        }
-    } else {
-        host_port.split(':').next().unwrap_or(host_port)
-    };
-
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    if let Ok(v4) = host.parse::<std::net::Ipv4Addr>() {
-        return v4.is_loopback();
-    }
-    if let Ok(v6) = host.parse::<std::net::Ipv6Addr>() {
-        return v6.is_loopback();
-    }
-    false
-}
-
 /// A browser-overlay target resolved for one pane. `path` carries the canonical
 /// filesystem path for file targets — the artifact tray persists that instead of
 /// `url`, whose file-server token goes stale across runs — and is None for
@@ -523,13 +494,13 @@ pub(crate) fn resolve_browser_target(
         return Err("nothing to open".to_string());
     }
     if target.starts_with("http://") || target.starts_with("https://") {
-        if !is_loopback_http_url(target) {
-            return Err(format!(
+        let url = canonical_loopback_artifact_url(target).ok_or_else(|| {
+            format!(
                 "refusing to open '{target}': the browser overlay only loads http(s) URLs on localhost/127.0.0.1"
-            ));
-        }
+            )
+        })?;
         return Ok(ResolvedBrowserTarget {
-            url: target.to_string(),
+            url,
             sandbox: false,
             path: None,
         });
@@ -691,14 +662,32 @@ mod tests {
     }
 
     #[test]
-    fn browser_target_accepts_loopback_and_rejects_authority_spoofs() {
-        assert!(is_loopback_http_url("http://localhost:3000/app"));
-        assert!(is_loopback_http_url("http://127.0.0.1:8080"));
-        assert!(is_loopback_http_url("http://[::1]:3000/"));
-        assert!(!is_loopback_http_url("http://example.com/"));
-        assert!(!is_loopback_http_url("http://127.0.0.1.evil.com/"));
-        assert!(!is_loopback_http_url("http://127.0.0.1@evil.com/"));
-        assert!(!is_loopback_http_url("http://evil.com\\@127.0.0.1/"));
+    fn browser_target_accepts_complete_loopback_urls_and_rejects_fragments() {
+        assert_eq!(
+            canonical_loopback_artifact_url("http://localhost:3000/app").as_deref(),
+            Some("http://localhost:3000/app")
+        );
+        assert!(canonical_loopback_artifact_url("http://127.0.0.1:8080").is_some());
+        assert!(canonical_loopback_artifact_url("http://[::1]:3000/").is_some());
+
+        for invalid in [
+            "http://example.com/",
+            "http://127.0.0.1.evil.com/",
+            "http://127.0.0.1@evil.com/",
+            "http://evil.com\\@127.0.0.1/",
+            "http://l",
+            "http://lo",
+            "http://localhos",
+            "http://127.0.0",
+            "http://localhost:5555|",
+            "http://localhost:5556|localhost:5555|",
+            "http://localhost:5557/\\",
+        ] {
+            assert!(
+                canonical_loopback_artifact_url(invalid).is_none(),
+                "accepted malformed loopback URL: {invalid}"
+            );
+        }
     }
 
     #[test]

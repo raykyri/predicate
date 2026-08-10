@@ -20,7 +20,7 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Url};
 
 pub type SharedChild = Arc<Mutex<Box<dyn Child + Send + Sync>>>;
 pub type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
@@ -423,6 +423,70 @@ pub struct ArtifactInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
     pub created_at: u128,
+}
+
+/// Parses the only URL form the artifact tray accepts: a complete HTTP(S)
+/// loopback URL. Returning the URL's canonical serialization both validates
+/// ports/authorities and keeps equivalent explicit opens deduplicated.
+pub(crate) fn canonical_loopback_artifact_url(raw: &str) -> Option<String> {
+    if raw.trim() != raw
+        || raw
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+        || raw.contains(['\\', '|'])
+    {
+        return None;
+    }
+    let parsed = Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str()?;
+    // `url` intentionally accepts legacy shortened IPv4 spellings such as
+    // `127.0.0` and canonicalizes them to `127.0.0.0`. For artifact detection
+    // that is indistinguishable from a truncated terminal redraw, so validate
+    // the original authority host text as well as the parsed URL.
+    let authority = raw.split_once("://")?.1.split(['/', '?', '#']).next()?;
+    let host_port = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, value)| value);
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        bracketed.split_once(']')?.0
+    } else {
+        host_port
+            .split_once(':')
+            .map_or(host_port, |(host, _)| host)
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    loopback.then(|| parsed.to_string())
+}
+
+/// Normalizes a persisted or restored artifact to the current target policy.
+/// File artifacts own only their path; URL artifacts must be complete loopback
+/// URLs. `Some(changed)` means the entry is valid, while `None` drops it.
+fn normalize_artifact_target(artifact: &mut ArtifactInfo) -> Option<bool> {
+    let mut changed = false;
+    if artifact
+        .path
+        .as_deref()
+        .is_some_and(|path| !path.trim().is_empty())
+    {
+        changed = artifact.url.take().is_some();
+        return Some(changed);
+    }
+    if artifact.path.take().is_some() {
+        changed = true;
+    }
+    let raw = artifact.url.as_deref()?;
+    let canonical = canonical_loopback_artifact_url(raw)?;
+    if canonical != raw {
+        artifact.url = Some(canonical);
+        changed = true;
+    }
+    Some(changed)
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -1893,6 +1957,7 @@ impl AppState {
             .collect::<HashSet<_>>();
 
         let mut hydrated_agents = Vec::new();
+        let mut artifacts_reconciled = false;
         if let Ok(mut model) = self.inner.model.lock() {
             for group in persisted.groups {
                 if !model.group_order.iter().any(|id| id == &group.id) {
@@ -1993,14 +2058,32 @@ impl AppState {
                     model.recent_sessions.insert(session.id.clone(), session);
                 }
             }
-            // Drop artifacts whose group is gone so deleted workspaces don't
-            // leave orphaned tray entries accumulating in state.json.
+            // Drop artifacts whose group is gone or whose legacy URL is not a
+            // complete loopback target. The removed workspace-intelligence
+            // scanner could persist external and redraw-truncated URLs; none of
+            // those should survive hydration into the explicit artifact tray.
             model.artifacts = persisted
                 .artifacts
                 .into_iter()
-                .filter(|artifact| match &artifact.group_id {
-                    Some(group_id) => model.groups.contains_key(group_id),
-                    None => true,
+                .filter_map(|mut artifact| {
+                    let group_exists = artifact
+                        .group_id
+                        .as_ref()
+                        .is_none_or(|group_id| model.groups.contains_key(group_id));
+                    if !group_exists {
+                        artifacts_reconciled = true;
+                        return None;
+                    }
+                    match normalize_artifact_target(&mut artifact) {
+                        Some(changed) => {
+                            artifacts_reconciled |= changed;
+                            Some(artifact)
+                        }
+                        None => {
+                            artifacts_reconciled = true;
+                            None
+                        }
+                    }
                 })
                 .collect();
             model.active_tab_id = active_tab_id;
@@ -2030,10 +2113,10 @@ impl AppState {
         // file, but before respawn so respawned panes get persisted.
         self.inner.persist_enabled.store(true, Ordering::Relaxed);
         self.spawn_persister();
-        if research_reconciled {
-            // Migration/reconciliation may have created durable workspace
-            // manifests. Commit the matching state snapshot before recovery
-            // continues so a crash cannot leave only half of that relationship.
+        if research_reconciled || artifacts_reconciled {
+            // Migration/reconciliation may have changed durable workspace
+            // relationships or discarded unsafe legacy artifacts. Commit the
+            // normalized snapshot before recovery continues.
             self.persist_now();
         }
 
@@ -2526,10 +2609,7 @@ impl AppState {
         path: Option<String>,
         url: Option<String>,
     ) -> Result<ArtifactInfo, String> {
-        if path.is_none() && url.is_none() {
-            return Err("an artifact needs a path or a url".to_string());
-        }
-        let artifact = ArtifactInfo {
+        let mut artifact = ArtifactInfo {
             id: self.next_id("artifact"),
             group_id: self.pane_group_id(pane_id)?,
             pane_id: pane_id.to_string(),
@@ -2537,6 +2617,8 @@ impl AppState {
             url,
             created_at: now_millis(),
         };
+        normalize_artifact_target(&mut artifact)
+            .ok_or_else(|| "an artifact needs a valid path or loopback URL".to_string())?;
         let removed_ids = {
             let mut model = self
                 .inner
@@ -2634,7 +2716,9 @@ impl AppState {
     /// Reinserts a previously removed artifact at its chronological position
     /// (tray undo). A duplicate id is a no-op so a double-undo can't clone rows.
     /// Emits `artifact.added`.
-    pub fn restore_artifact(&self, artifact: ArtifactInfo) -> Result<(), String> {
+    pub fn restore_artifact(&self, mut artifact: ArtifactInfo) -> Result<(), String> {
+        normalize_artifact_target(&mut artifact)
+            .ok_or_else(|| "an artifact needs a valid path or loopback URL".to_string())?;
         {
             let mut model = self
                 .inner
@@ -10524,6 +10608,68 @@ mod tests {
             reloaded.list_artifacts().unwrap().len(),
             MAX_ARTIFACTS_PER_GROUP - 1
         );
+    }
+
+    #[test]
+    fn restore_session_sanitizes_legacy_url_artifacts() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        assert!(state.restore_session().is_empty());
+        let mut group = sample_group();
+        group.dir = workspace.display().to_string();
+        group.managed_dir = workspace.join("managed").display().to_string();
+        group.agents.clear();
+        state.insert_group_after(group, None).unwrap();
+
+        let mut persisted = persistence::load_with_diagnostics(&workspace).state;
+        let artifact = |id: &str, path: Option<&str>, url: Option<&str>, created_at| ArtifactInfo {
+            id: id.to_string(),
+            group_id: Some("group-1".to_string()),
+            pane_id: "pane-legacy".to_string(),
+            path: path.map(str::to_string),
+            url: url.map(str::to_string),
+            created_at,
+        };
+        persisted.artifacts = vec![
+            artifact("file", Some("/tmp/report.html"), None, 1),
+            artifact("valid", None, Some("http://LOCALHOST:5173"), 2),
+            artifact("external", None, Some("https://example.com/result"), 3),
+            artifact("partial", None, Some("http://localhos"), 4),
+            artifact("redraw", None, Some("http://localhost:5555|"), 5),
+            artifact(
+                "file-with-stale-url",
+                Some("/tmp/preview.html"),
+                Some("https://example.com/stale"),
+                6,
+            ),
+        ];
+        persistence::save(&workspace, &persisted).unwrap();
+
+        let restored = AppState::new(test_config(workspace.clone()));
+        restored.restore_session();
+        let artifacts = restored.list_artifacts().unwrap();
+        assert_eq!(artifacts.len(), 3);
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.id == "valid")
+                .and_then(|artifact| artifact.url.as_deref()),
+            Some("http://localhost:5173/")
+        );
+        assert!(
+            artifacts
+                .iter()
+                .find(|artifact| artifact.id == "file-with-stale-url")
+                .is_some_and(|artifact| artifact.url.is_none())
+        );
+        assert!(artifacts.iter().all(|artifact| {
+            !matches!(artifact.id.as_str(), "external" | "partial" | "redraw")
+        }));
+
+        // Hydration commits the cleanup immediately, so a crash before another
+        // mutation cannot resurrect discarded workspace-intelligence rows.
+        let saved = persistence::load_with_diagnostics(&workspace).state;
+        assert_eq!(saved.artifacts, artifacts);
     }
 
     #[test]
