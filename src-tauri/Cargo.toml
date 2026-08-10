@@ -37,6 +37,7 @@ libc = "0.2"
 # webview. `default-features = false` + `json` keeps this additive to the reqwest
 # (rustls) build already pulled in transitively by tauri-plugin-updater.
 reqwest = { version = "0.13", default-features = false, features = ["form", "json"] }
+regex = "1"
 # The updater intentionally enables reqwest's provider-neutral rustls feature.
 # Select one provider for every reqwest client in the process; otherwise client
 # construction panics before either publishing or title generation can connect.

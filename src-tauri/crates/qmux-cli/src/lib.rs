@@ -8,6 +8,7 @@
 mod acp;
 mod mcp;
 mod muse;
+mod public_cli;
 
 use qmux_proto::{ControlRequest, ControlResponse};
 use serde::Deserialize;
@@ -20,6 +21,21 @@ use std::process::Command;
 use std::time::Duration;
 
 const MCP_USAGE_HINT: &str = "Add `qmux mcp` as a stdio MCP server in your agent CLI.\nRun it inside a qmux agent pane so it inherits the authenticated environment.";
+const SYNTAX_ERROR_PREFIX: &str = "\u{1d}qmux-syntax:";
+
+fn syntax_error(message: String) -> String {
+    format!("{SYNTAX_ERROR_PREFIX}{message}")
+}
+
+pub fn error_report(error: &str) -> (&str, i32) {
+    if let Some(message) = error.strip_prefix(SYNTAX_ERROR_PREFIX) {
+        (message, 2)
+    } else if error.starts_with("usage:") {
+        (error, 2)
+    } else {
+        (error, 1)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +62,15 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         return Ok(false);
     };
+    if command == "--skill" {
+        print!("{}", public_cli::SKILL);
+        return Ok(true);
+    }
+    let remaining = args.collect::<Vec<_>>();
+    if public_cli::run(&command, remaining.clone())? {
+        return Ok(true);
+    }
+    let mut args = remaining.into_iter();
 
     match command.as_str() {
         "notify" => {
@@ -212,10 +237,11 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             Ok(true)
         }
         "help" | "--help" | "-h" => {
-            println!(
-                "usage: qmux [ping|notify|muse-notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|muse|acp|mcp|fork|open]"
-            );
+            println!("{}", public_cli::HELP);
             Ok(true)
+        }
+        _ if env::var("QMUX_ENV").ok().as_deref() == Some("1") => {
+            Err(syntax_error(format!("unknown qmux command '{command}'")))
         }
         _ => Ok(false),
     }
@@ -260,6 +286,9 @@ fn run_agent_exec(adapter_id: String, args: Vec<String>) -> Result<(), String> {
     for env in launch.envs {
         command.env(env.key, env.value);
     }
+    // The containing shell is a user principal. The agent process receives the
+    // pane token needed by hooks/MCP, but never inherits cross-pane user power.
+    command.env_remove("QMUX_USER_TOKEN");
     // Lifecycle notifications normally resolve their adapter through the bound
     // agent id. Preserve an explicit hint as well so an authenticated SessionStart
     // can reconstruct that binding if preparation state was lost.
@@ -358,6 +387,61 @@ pub(crate) fn request_value_with_timeout(
     }
 }
 
+pub(crate) fn request_public(
+    operation: &str,
+    arguments: Value,
+) -> Result<qmux_proto::PublicControlResponse, String> {
+    let socket_path = env::var("QMUX_SOCK").map_err(|_| "QMUX_SOCK is not set".to_string())?;
+    let token = env::var("QMUX_USER_TOKEN")
+        .or_else(|_| env::var("QMUX_TOKEN"))
+        .map_err(|_| "neither QMUX_USER_TOKEN nor QMUX_TOKEN is set".to_string())?;
+    let timeout = public_request_timeout(operation, &arguments);
+    let raw = send_request_with_timeout(
+        &socket_path,
+        &token,
+        "cli.call",
+        json!({ "operation": operation, "arguments": arguments }),
+        timeout,
+    )?;
+    let outer = serde_json::from_str::<ControlResponse>(&raw)
+        .map_err(|error| format!("invalid qmux response: {error}"))?;
+    if !outer.ok {
+        return Err(outer
+            .error
+            .unwrap_or_else(|| "qmux request failed".to_string()));
+    }
+    decode_public_response(outer.data)
+}
+
+fn decode_public_response(data: Value) -> Result<qmux_proto::PublicControlResponse, String> {
+    let response = serde_json::from_value::<qmux_proto::PublicControlResponse>(data)
+        .map_err(|error| format!("invalid qmux public response: {error}"))?;
+    if response.api_version != qmux_proto::PUBLIC_API_VERSION {
+        return Err(format!(
+            "unsupported qmux public API version {}; this CLI supports version {}",
+            response.api_version,
+            qmux_proto::PUBLIC_API_VERSION
+        ));
+    }
+    Ok(response)
+}
+
+fn public_request_timeout(operation: &str, arguments: &Value) -> Duration {
+    const MAX_WAIT_MS: u64 = 600_000;
+    const RESPONSE_GRACE_MS: u64 = 5_000;
+    if matches!(operation, "pane.waitOutput" | "agent.wait") {
+        let wait_ms = arguments
+            .get("timeoutMs")
+            .and_then(Value::as_u64)
+            .unwrap_or(30_000)
+            .min(MAX_WAIT_MS);
+        return Duration::from_millis(wait_ms + RESPONSE_GRACE_MS);
+    }
+    // Agent launches and native-pane creation can legitimately take longer than
+    // the two-second hook/control fast path. Public calls still stay bounded.
+    Duration::from_secs(30)
+}
+
 fn request(command: &str, payload: Value) -> Result<String, String> {
     request_with_timeout(command, payload, Duration::from_secs(2))
 }
@@ -433,5 +517,41 @@ mod tests {
         assert!(MCP_USAGE_HINT.lines().count() <= 2);
         assert!(MCP_USAGE_HINT.contains("qmux mcp"));
         assert!(MCP_USAGE_HINT.contains("stdio"));
+    }
+
+    #[test]
+    fn public_parser_failures_are_syntax_errors() {
+        let error = public_cli::run("pane", vec!["wat".into()]).unwrap_err();
+        let (message, exit_code) = error_report(&error);
+        assert_eq!(exit_code, 2);
+        assert_eq!(message, "unknown pane command 'wat'");
+    }
+
+    #[test]
+    fn public_wait_timeout_includes_the_requested_wait_and_response_grace() {
+        assert_eq!(
+            public_request_timeout("pane.waitOutput", &json!({ "timeoutMs": 120_000 })),
+            Duration::from_secs(125)
+        );
+        assert_eq!(
+            public_request_timeout("agent.wait", &json!({ "timeoutMs": 900_000 })),
+            Duration::from_secs(605)
+        );
+        assert_eq!(
+            public_request_timeout("pane.list", &json!({})),
+            Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn public_response_rejects_an_unknown_api_version() {
+        let error = decode_public_response(json!({
+            "ok": true,
+            "apiVersion": qmux_proto::PUBLIC_API_VERSION + 1,
+            "result": {},
+            "error": null
+        }))
+        .unwrap_err();
+        assert!(error.contains("unsupported qmux public API version"));
     }
 }

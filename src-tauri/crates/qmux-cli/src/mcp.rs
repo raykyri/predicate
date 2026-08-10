@@ -55,10 +55,15 @@ where
         let params = request.get("params").cloned().unwrap_or(Value::Null);
         let response = match method {
             "initialize" => {
-                let protocol = params
+                let requested_protocol = params
                     .get("protocolVersion")
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL_VERSION);
+                let protocol = if requested_protocol == PROTOCOL_VERSION {
+                    requested_protocol
+                } else {
+                    PROTOCOL_VERSION
+                };
                 rpc_result(
                     id,
                     json!({
@@ -212,7 +217,7 @@ fn tool_definitions() -> Vec<Value> {
         ),
         tool(
             "release_agent",
-            "Terminate and close one live direct child agent after its work is collected.",
+            "Terminate and close one live direct child agent after its work is collected. Refuses while that child has live descendants.",
             object(
                 json!({
                     "agentId": { "type": "string" }
@@ -275,7 +280,7 @@ mod tests {
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0]["result"]["protocolVersion"], "test");
+        assert_eq!(rows[0]["result"]["protocolVersion"], PROTOCOL_VERSION);
         assert_eq!(rows[1]["result"]["tools"].as_array().unwrap().len(), 10);
         assert_eq!(rows[2]["result"]["structuredContent"]["called"], "whoami");
     }
@@ -291,5 +296,14 @@ mod tests {
         let response: Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(response["result"]["isError"], true);
         assert_eq!(response["result"]["content"][0]["text"], "denied");
+    }
+
+    #[test]
+    fn initialize_keeps_the_supported_protocol_when_the_client_requests_an_unknown_one() {
+        let input = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"future\"}}\n";
+        let mut output = Vec::new();
+        serve(Cursor::new(input), &mut output, |_, _, _| unreachable!()).unwrap();
+        let response: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
     }
 }

@@ -17,7 +17,7 @@ use crate::transcript::{Turn, TurnBlock};
 pub(crate) use crate::transcript::string_field;
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
-    mark_agent_spawn_failed, prepare_agent_workspace,
+    mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
 };
 use acp::AcpAdapter;
 use claude::ClaudeAdapter;
@@ -594,6 +594,10 @@ pub struct SpawnAgentRequest {
     pub use_worktree: Option<bool>,
     #[serde(default)]
     pub options: Value,
+    /// Qmux lineage to persist before the new process is allowed to start.
+    /// User launches omit it; orchestration surfaces set it to their caller.
+    #[serde(default)]
+    pub parent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -955,7 +959,7 @@ fn fork_agent_in_shell(
             )
         })?
         .to_string();
-    let mut agent = prepare_agent_workspace(
+    let mut agent = prepare_agent_workspace_with_parent(
         state,
         PrepareAgentWorkspaceRequest {
             group_id: Some(source.group_id.clone()),
@@ -970,8 +974,8 @@ fn fork_agent_in_shell(
             effort: source.effort.clone(),
             use_worktree,
         },
+        Some(&source.id),
     )?;
-    agent.parent_id = Some(source.id.clone());
     agent.fork_point = Some(session_id.clone());
     agent.root_session_id = source
         .root_session_id
@@ -1270,6 +1274,7 @@ pub fn spawn_sibling_agent_session(
                 initial_size: None,
                 use_worktree: Some(false),
                 options: Value::Null,
+                parent_id: Some(source.id.clone()),
             },
         )?;
     if let Some(source_pane) = source.pane_id.as_deref() {

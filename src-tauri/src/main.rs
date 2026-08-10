@@ -4,6 +4,7 @@ mod browser_backend;
 mod browser_engine;
 mod config;
 mod connection_limit;
+mod control;
 mod control_socket;
 mod events;
 mod file_server;
@@ -1270,6 +1271,7 @@ fn launch_fresh_research_run(
         initial_size: None,
         use_worktree: Some(false),
         options,
+        parent_id: None,
     };
     match spawn_agent_pane(state, spawn) {
         Ok(pane) => {
@@ -2882,8 +2884,9 @@ fn main() {
         Ok(true) => return,
         Ok(false) => {}
         Err(err) => {
-            eprintln!("{err}");
-            std::process::exit(1);
+            let (message, exit_code) = qmux_cli::error_report(&err);
+            eprintln!("{message}");
+            std::process::exit(exit_code);
         }
     }
 

@@ -9026,6 +9026,17 @@ function MainApp() {
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
     onAcpAuthEvent: handleAcpAuthEvent,
     onArtifactEvent: handleArtifactEvent,
+    onPaneFocusRequested: (paneId: string) => {
+      if (!panesRef.current.some((pane) => pane.id === paneId)) {
+        return;
+      }
+      setActivePaneId(paneId);
+      requestAnimationFrame(() => terminalPaneRefs.current.get(paneId)?.focus());
+    },
+    onPaneSplitsChanged: (splits: PaneSplitInfo[]) => {
+      paneSplitsRef.current = splits;
+      setPaneSplitsState(splits);
+    },
     onTerminalSearchRequested: openNativeTerminalSearch,
     onTerminalPasteRequested: requestNativeTerminalPaste,
     onTerminalUserInput: reportNativeTerminalInput,

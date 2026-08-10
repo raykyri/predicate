@@ -16,7 +16,7 @@ use crate::transcript::{Turn, TurnBlock, start_transcript_tail};
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
-    mark_agent_spawn_failed, prepare_agent_workspace,
+    mark_agent_spawn_failed, prepare_agent_workspace, prepare_agent_workspace_with_parent,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -191,7 +191,7 @@ impl MuseAdapter {
             .or_else(|| request.model.clone())
             .map(|model| model.trim().to_string())
             .filter(|model| !model.is_empty());
-        let agent = prepare_agent_workspace(
+        let agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: request.group_id,
@@ -202,6 +202,7 @@ impl MuseAdapter {
                 effort: options.reasoning_effort.clone(),
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
+            request.parent_id.as_deref(),
         )?;
         // `prepare_agent_workspace` carries model and effort but knows nothing
         // adapter-specific, so the approval policy is recorded here — otherwise

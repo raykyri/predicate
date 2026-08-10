@@ -1,0 +1,1407 @@
+//! Shared public control surface for the human CLI and restricted agent CLI.
+//!
+//! The Unix-socket token is resolved before this module is entered. Callers
+//! receive an immutable context derived from live qmux state; no public payload
+//! may claim a different principal, pane, agent, or workspace.
+
+use crate::events::QmuxEvent;
+use crate::state::{AppState, PaneSplitInfo};
+use crate::workspace::{AgentInfo, CreateGroupRequest, create_group, rename_group};
+use qmux_proto::{PUBLIC_API_VERSION, PublicControlError, PublicControlResponse};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const MAX_CONCURRENT_PUBLIC_WAITS: usize = 16;
+const MIN_SPLIT_FRACTION: f64 = 0.12;
+static ACTIVE_PUBLIC_WAITS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ControlPrincipal {
+    User,
+    Agent,
+}
+
+#[derive(Clone, Debug)]
+pub struct ControlContext {
+    pub principal: ControlPrincipal,
+    pub pane_id: String,
+    pub workspace_id: String,
+    pub agent: Option<AgentInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ControlFailure {
+    pub code: &'static str,
+    pub message: String,
+    pub details: Value,
+}
+
+impl ControlFailure {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            details: Value::Null,
+        }
+    }
+}
+
+type ControlResult = Result<Value, ControlFailure>;
+
+pub fn handle_call(
+    state: &AppState,
+    pane_id: &str,
+    user_credential: bool,
+    operation: &str,
+    arguments: Value,
+) -> Value {
+    let result = context_for(state, pane_id, user_credential)
+        .and_then(|context| dispatch(state, &context, operation, arguments));
+    match result {
+        Ok(result) => serde_json::to_value(PublicControlResponse {
+            ok: true,
+            api_version: PUBLIC_API_VERSION,
+            result,
+            error: None,
+        })
+        .unwrap_or_else(|_| json!({ "ok": false, "apiVersion": PUBLIC_API_VERSION })),
+        Err(error) => serde_json::to_value(PublicControlResponse {
+            ok: false,
+            api_version: PUBLIC_API_VERSION,
+            result: Value::Null,
+            error: Some(PublicControlError {
+                code: error.code.to_string(),
+                message: error.message,
+                details: error.details,
+            }),
+        })
+        .unwrap_or_else(|_| json!({ "ok": false, "apiVersion": PUBLIC_API_VERSION })),
+    }
+}
+
+fn context_for(
+    state: &AppState,
+    pane_id: &str,
+    user_credential: bool,
+) -> Result<ControlContext, ControlFailure> {
+    let workspace_id = state
+        .pane_group_id(pane_id)
+        .map_err(internal)?
+        .ok_or_else(|| {
+            ControlFailure::new("pane_not_found", format!("pane {pane_id} was not found"))
+        })?;
+    let agent = state.agent_by_pane(pane_id).map_err(internal)?;
+    let principal = if user_credential {
+        ControlPrincipal::User
+    } else if agent.is_some() {
+        ControlPrincipal::Agent
+    } else {
+        return Err(ControlFailure::new(
+            "user_credential_required",
+            "public control from a shell pane requires QMUX_USER_TOKEN",
+        ));
+    };
+    Ok(ControlContext {
+        principal,
+        pane_id: pane_id.to_string(),
+        workspace_id,
+        agent,
+    })
+}
+
+fn dispatch(
+    state: &AppState,
+    context: &ControlContext,
+    operation: &str,
+    arguments: Value,
+) -> ControlResult {
+    match operation {
+        "ping" => {
+            ensure_no_arguments(arguments, "ping")?;
+            Ok(json!({ "status": "ok", "principal": context.principal }))
+        }
+        "context" => {
+            ensure_no_arguments(arguments, "context")?;
+            context_snapshot(state, context)
+        }
+        "workspace.list" => {
+            ensure_no_arguments(arguments, "workspace.list")?;
+            workspace_list(state, context)
+        }
+        "workspace.get" => workspace_get(state, context, arguments),
+        "workspace.create" => workspace_create(state, context, arguments),
+        "workspace.rename" => workspace_rename(state, context, arguments),
+        "pane.list" => {
+            ensure_no_arguments(arguments, "pane.list")?;
+            pane_list(state, context)
+        }
+        "pane.current" => {
+            ensure_no_arguments(arguments, "pane.current")?;
+            pane_get_by_id(state, context, &context.pane_id)
+        }
+        "pane.get" => {
+            let args: IdArgs = parse(arguments, "pane.get")?;
+            pane_get_by_id(state, context, &args.id)
+        }
+        "pane.read" => pane_read(state, context, arguments),
+        "pane.create" => pane_create(state, context, arguments),
+        "pane.send" => pane_send(state, context, arguments, false),
+        "pane.run" => pane_send(state, context, arguments, true),
+        "pane.waitOutput" => pane_wait_output(state, context, arguments),
+        "pane.rename" => pane_rename(state, context, arguments),
+        "pane.focus" => pane_focus(state, context, arguments),
+        "pane.close" => pane_close(state, context, arguments),
+        "agent.list" => {
+            ensure_no_arguments(arguments, "agent.list")?;
+            agent_list(state, context)
+        }
+        "agent.get" => {
+            let args: IdArgs = parse(arguments, "agent.get")?;
+            agent_get_by_id(state, context, &args.id)
+        }
+        "agent.read" => agent_read(state, context, arguments),
+        "agent.start" => agent_start(state, context, arguments),
+        "agent.fork" => agent_fork(state, context, arguments),
+        "agent.prompt" => agent_prompt(state, context, arguments),
+        "agent.wait" => agent_wait(state, context, arguments),
+        "agent.focus" => agent_focus(state, context, arguments),
+        "agent.release" => agent_release(state, context, arguments),
+        "artifact.list" => {
+            ensure_no_arguments(arguments, "artifact.list")?;
+            artifact_list(state, context)
+        }
+        "artifact.open" => artifact_open(state, context, arguments),
+        "split.list" => {
+            ensure_no_arguments(arguments, "split.list")?;
+            split_list(state, context)
+        }
+        "split.join" => split_join(state, context, arguments),
+        "split.leave" => split_leave(state, context, arguments),
+        "split.resize" => split_resize(state, context, arguments),
+        other => Err(ControlFailure::new(
+            "unknown_operation",
+            format!("unknown public control operation '{other}'"),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IdArgs {
+    id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReadArgs {
+    id: String,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    lines: Option<usize>,
+    #[serde(default)]
+    turns: Option<usize>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkspaceCreateArgs {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameArgs {
+    id: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PaneCreateArgs {
+    #[serde(default)]
+    workspace_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaneSendArgs {
+    id: String,
+    text: String,
+    #[serde(default)]
+    submit: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplitJoinArgs {
+    id: String,
+    other: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplitResizeArgs {
+    id: String,
+    pane: String,
+    fraction: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WaitOutputArgs {
+    id: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    regex: Option<String>,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentStartArgs {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    adapter: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    use_worktree: bool,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentForkArgs {
+    id: String,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    use_worktree: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentPromptArgs {
+    id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentWaitArgs {
+    id: String,
+    #[serde(default = "default_agent_until")]
+    until: String,
+    #[serde(default = "default_wait_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_agent_until() -> String {
+    "settled".to_string()
+}
+
+fn default_wait_timeout_ms() -> u64 {
+    30_000
+}
+
+fn context_snapshot(state: &AppState, context: &ControlContext) -> ControlResult {
+    let pane = find_pane(state, &context.pane_id)?;
+    let workspace = state
+        .group(&context.workspace_id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("workspace", &context.workspace_id))?;
+    Ok(json!({
+        "principal": context.principal,
+        "pane": pane,
+        "workspace": workspace,
+        "agent": context.agent,
+        "capabilities": match context.principal {
+            ControlPrincipal::User => json!({
+                "read": "all workspaces; panes and agents in the current workspace",
+                "write": "current terminal workspace"
+            }),
+            ControlPrincipal::Agent => json!({
+                "read": "self and live descendants in this workspace",
+                "write": "direct parent and direct children only"
+            }),
+        }
+    }))
+}
+
+fn workspace_list(state: &AppState, context: &ControlContext) -> ControlResult {
+    let mut workspaces = state.list_groups().map_err(internal)?;
+    if context.principal == ControlPrincipal::Agent {
+        workspaces.retain(|workspace| workspace.id == context.workspace_id);
+    }
+    Ok(json!({ "workspaces": workspaces, "count": workspaces.len() }))
+}
+
+fn workspace_get(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: IdArgs = parse(arguments, "workspace.get")?;
+    if context.principal == ControlPrincipal::Agent && args.id != context.workspace_id {
+        return Err(denied("agents may inspect only their current workspace"));
+    }
+    let workspace = state
+        .group(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("workspace", &args.id))?;
+    Ok(json!({ "workspace": workspace }))
+}
+
+fn workspace_create(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: WorkspaceCreateArgs = parse(arguments, "workspace.create")?;
+    let workspace = create_group(
+        state,
+        CreateGroupRequest {
+            name: args.name,
+            dir: args.dir,
+            after_group_id: Some(context.workspace_id.clone()),
+            base_repo: None,
+            base_ref: None,
+            remote: None,
+            remote_id: None,
+        },
+    )
+    .map_err(internal)?;
+    Ok(json!({ "workspace": workspace }))
+}
+
+fn workspace_rename(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: RenameArgs = parse(arguments, "workspace.rename")?;
+    if args.id != context.workspace_id {
+        return Err(denied(
+            "the interactive credential may rename only its current workspace",
+        ));
+    }
+    let workspace = rename_group(state, &args.id, Some(args.name)).map_err(internal)?;
+    Ok(json!({ "workspace": workspace }))
+}
+
+fn pane_list(state: &AppState, context: &ControlContext) -> ControlResult {
+    let allowed = allowed_pane_ids(state, context)?;
+    let panes = state
+        .list_panes()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|pane| allowed.contains(&pane.id))
+        .collect::<Vec<_>>();
+    Ok(json!({ "panes": panes, "count": panes.len() }))
+}
+
+fn pane_get_by_id(state: &AppState, context: &ControlContext, pane_id: &str) -> ControlResult {
+    ensure_pane_read(state, context, pane_id)?;
+    Ok(json!({ "pane": find_pane(state, pane_id)? }))
+}
+
+fn pane_read(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: ReadArgs = parse(arguments, "pane.read")?;
+    ensure_pane_read(state, context, &args.id)?;
+    let source = args.source.as_deref().unwrap_or("terminal");
+    let lines = args.lines.unwrap_or(100).clamp(1, 1000);
+    let output = match source {
+        "terminal" => {
+            let raw =
+                crate::scrollback::read_pane_scrollback(&state.config().workspace_root, &args.id)
+                    .map_err(internal)?;
+            crate::mcp::terminal_text_tail(&raw, lines)
+        }
+        "viewport" => crate::native_terminal::native_terminal_read_viewport_text(args.id.clone())
+            .map_err(internal)?,
+        _ => {
+            return Err(ControlFailure::new(
+                "invalid_argument",
+                "pane.read source must be terminal or viewport",
+            ));
+        }
+    };
+    Ok(json!({ "paneId": args.id, "source": source, "lines": lines, "output": output }))
+}
+
+fn pane_create(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: PaneCreateArgs = parse(arguments, "pane.create")?;
+    let workspace_id = args
+        .workspace_id
+        .as_deref()
+        .unwrap_or(&context.workspace_id);
+    if workspace_id != context.workspace_id {
+        return Err(denied(
+            "the interactive credential may create panes only in its current workspace",
+        ));
+    }
+    let pane = crate::pty::spawn_shell_pane_at(
+        state,
+        None,
+        Some(&context.pane_id),
+        Some(workspace_id),
+        args.cwd.as_deref(),
+    )
+    .map_err(internal)?;
+    state.emit(QmuxEvent::new(
+        "pane.created",
+        Some(pane.id.clone()),
+        None,
+        json!({ "pane": pane }),
+    ));
+    Ok(json!({ "pane": pane }))
+}
+
+fn pane_send(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+    run: bool,
+) -> ControlResult {
+    require_user(context)?;
+    let args: PaneSendArgs = parse(arguments, if run { "pane.run" } else { "pane.send" })?;
+    ensure_pane_read(state, context, &args.id)?;
+    let submit = if run {
+        true
+    } else {
+        args.submit.unwrap_or(false)
+    };
+    crate::pty::write_pane(
+        state,
+        crate::pty::PaneWriteOptions {
+            pane_id: args.id.clone(),
+            data: args.text,
+            paste: true,
+            submit,
+        },
+    )
+    .map_err(internal)?;
+    Ok(json!({ "paneId": args.id, "written": true, "submitted": submit }))
+}
+
+fn pane_wait_output(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: WaitOutputArgs = parse(arguments, "pane.waitOutput")?;
+    ensure_pane_read(state, context, &args.id)?;
+    if args.text.is_some() == args.regex.is_some() {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            "pane wait-output requires exactly one of --match or --regex",
+        ));
+    }
+    let pattern = args
+        .regex
+        .as_deref()
+        .map(regex::Regex::new)
+        .transpose()
+        .map_err(|error| ControlFailure::new("invalid_regex", error.to_string()))?;
+    let timeout_ms = args.timeout_ms.min(600_000);
+    let _wait_slot = PublicWaitSlot::acquire()?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let raw = crate::scrollback::read_pane_scrollback(&state.config().workspace_root, &args.id)
+            .map_err(internal)?;
+        let searchable_output = crate::mcp::terminal_text_tail(&raw, usize::MAX);
+        let complete = args
+            .text
+            .as_ref()
+            .is_some_and(|text| searchable_output.contains(text))
+            || pattern
+                .as_ref()
+                .is_some_and(|regex| regex.is_match(&searchable_output));
+        if complete || Instant::now() >= deadline {
+            let output = searchable_output
+                .lines()
+                .rev()
+                .take(200)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Ok(json!({
+                "paneId": args.id,
+                "complete": complete,
+                "timedOut": !complete,
+                "timeoutMs": timeout_ms,
+                "output": output
+            }));
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn pane_rename(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: RenameArgs = parse(arguments, "pane.rename")?;
+    ensure_pane_read(state, context, &args.id)?;
+    let pane = state.rename_pane(&args.id, args.name).map_err(internal)?;
+    state.emit(QmuxEvent::new(
+        "pane.renamed",
+        Some(pane.id.clone()),
+        pane.agent_id.clone(),
+        json!({ "pane": pane }),
+    ));
+    Ok(json!({ "pane": pane }))
+}
+
+fn pane_focus(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: IdArgs = parse(arguments, "pane.focus")?;
+    ensure_pane_read(state, context, &args.id)?;
+    request_pane_focus(state, &args.id);
+    Ok(json!({ "paneId": args.id, "focusRequested": true }))
+}
+
+fn pane_close(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: IdArgs = parse(arguments, "pane.close")?;
+    ensure_pane_read(state, context, &args.id)?;
+    state.close_pane_for_user(&args.id).map_err(internal)?;
+    Ok(json!({ "paneId": args.id, "closed": true }))
+}
+
+fn agent_list(state: &AppState, context: &ControlContext) -> ControlResult {
+    let allowed = allowed_agent_ids(state, context)?;
+    let agents = state
+        .list_agents()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|agent| allowed.contains(&agent.id))
+        .collect::<Vec<_>>();
+    Ok(json!({ "agents": agents, "count": agents.len() }))
+}
+
+fn agent_get_by_id(state: &AppState, context: &ControlContext, agent_id: &str) -> ControlResult {
+    ensure_agent_read(state, context, agent_id)?;
+    let agent = state
+        .agent(agent_id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", agent_id))?;
+    Ok(json!({ "agent": agent }))
+}
+
+fn agent_read(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: ReadArgs = parse(arguments, "agent.read")?;
+    ensure_agent_read(state, context, &args.id)?;
+    let agent = state
+        .agent(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", &args.id))?;
+    let source = args.source.as_deref().unwrap_or("transcript");
+    match source {
+        "transcript" => {
+            let count = args.turns.unwrap_or(4).clamp(1, 100);
+            let turns = state.list_turns(Some(&args.id)).map_err(internal)?;
+            let start = turns.len().saturating_sub(count);
+            Ok(json!({ "agent": agent, "source": source, "turns": &turns[start..] }))
+        }
+        "terminal" => {
+            let pane_id = agent
+                .pane_id
+                .as_deref()
+                .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
+            pane_read(
+                state,
+                context,
+                json!({ "id": pane_id, "source": "terminal", "lines": args.lines }),
+            )
+        }
+        _ => Err(ControlFailure::new(
+            "invalid_argument",
+            "agent.read source must be transcript or terminal",
+        )),
+    }
+}
+
+fn agent_start(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentStartArgs = parse(arguments, "agent.start")?;
+    if context.principal == ControlPrincipal::Agent {
+        if args.name.is_some()
+            || args.model.is_some()
+            || args.effort.is_some()
+            || args.cwd.is_some()
+        {
+            return Err(ControlFailure::new(
+                "invalid_argument",
+                "agent principals cannot set name, model, effort, or cwd when starting a child",
+            ));
+        }
+        return crate::mcp::handle_call(
+            state,
+            &context.pane_id,
+            "spawn_agent",
+            json!({
+                "adapter": args.adapter,
+                "prompt": args.prompt,
+                "useWorktree": args.use_worktree
+            }),
+        )
+        .map_err(internal);
+    }
+    let adapter = args.adapter.unwrap_or_else(|| "claude".to_string());
+    let options = match (adapter.as_str(), args.effort.as_deref()) {
+        ("claude", Some(effort)) => json!({ "effort": effort }),
+        ("codex", Some(effort)) => json!({ "reasoningEffort": effort }),
+        _ => Value::Null,
+    };
+    let workspace = state
+        .group(&context.workspace_id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("workspace", &context.workspace_id))?;
+    let pane = crate::adapters::agent_spawn(
+        state,
+        crate::adapters::SpawnAgentRequest {
+            adapter_id: adapter,
+            prompt: args.prompt.unwrap_or_default(),
+            group_id: Some(context.workspace_id.clone()),
+            base_repo: Some(args.cwd.clone().unwrap_or(workspace.dir)),
+            base_ref: Some("HEAD".to_string()),
+            cwd: args.cwd,
+            model: args.model,
+            initial_size: None,
+            use_worktree: Some(args.use_worktree),
+            options,
+            parent_id: None,
+        },
+    )
+    .map_err(internal)?;
+    let pane = if let Some(name) = args.name {
+        state.rename_pane(&pane.id, name).map_err(internal)?
+    } else {
+        pane
+    };
+    let agent = state.agent_by_pane(&pane.id).map_err(internal)?;
+    Ok(json!({ "pane": pane, "agent": agent }))
+}
+
+fn agent_fork(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentForkArgs = parse(arguments, "agent.fork")?;
+    ensure_agent_read(state, context, &args.id)?;
+    if context.principal == ControlPrincipal::Agent
+        && context.agent.as_ref().map(|agent| agent.id.as_str()) != Some(args.id.as_str())
+    {
+        return Err(denied("agent principals may fork only themselves"));
+    }
+    let target = state
+        .agent(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", &args.id))?;
+    let pane_id = target
+        .pane_id
+        .as_deref()
+        .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
+    let pane = crate::adapters::agent_fork(
+        state,
+        pane_id,
+        args.use_worktree,
+        true,
+        args.prompt,
+        None,
+        false,
+    )
+    .map_err(internal)?;
+    let agent = state.agent_by_pane(&pane.id).map_err(internal)?;
+    Ok(json!({ "pane": pane, "agent": agent }))
+}
+
+fn agent_prompt(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentPromptArgs = parse(arguments, "agent.prompt")?;
+    if context.principal == ControlPrincipal::Agent {
+        return crate::mcp::handle_call(
+            state,
+            &context.pane_id,
+            "send_prompt",
+            json!({ "agentId": args.id, "text": args.text }),
+        )
+        .map_err(internal);
+    }
+    ensure_agent_read(state, context, &args.id)?;
+    let delivery = crate::turn_queue::submit_agent_turn(
+        state,
+        crate::turn_queue::SubmitAgentTurnRequest {
+            agent_id: args.id,
+            data: args.text,
+            mode: Some(crate::turn_queue::SubmitAgentTurnMode::Auto),
+        },
+    )
+    .map_err(internal)?;
+    serde_json::to_value(delivery).map_err(|error| internal(error.to_string()))
+}
+
+fn agent_wait(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentWaitArgs = parse(arguments, "agent.wait")?;
+    ensure_agent_read(state, context, &args.id)?;
+    if !matches!(
+        args.until.as_str(),
+        "settled" | "input" | "permission" | "done" | "failed" | "exited"
+    ) {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            "agent wait state must be settled, input, permission, done, failed, or exited",
+        ));
+    }
+    let timeout_ms = args.timeout_ms.min(600_000);
+    let _wait_slot = PublicWaitSlot::acquire()?;
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        let agent = state.agent(&args.id).map_err(internal)?;
+        let complete = match (args.until.as_str(), agent.as_ref()) {
+            ("exited", None) => true,
+            ("settled" | "done", None) => true,
+            ("exited", Some(agent)) => agent.pane_id.is_none(),
+            ("settled" | "done", Some(agent)) if agent.pane_id.is_none() => true,
+            ("settled", Some(agent)) => {
+                agent.status.is_at_rest() || agent.status == crate::workspace::AgentStatus::Failed
+            }
+            ("input", Some(agent)) => agent.status == crate::workspace::AgentStatus::AwaitingInput,
+            ("permission", Some(agent)) => {
+                agent.status == crate::workspace::AgentStatus::AwaitingPermission
+            }
+            ("done", Some(agent)) => matches!(
+                agent.status,
+                crate::workspace::AgentStatus::Done | crate::workspace::AgentStatus::Idle
+            ),
+            ("failed", Some(agent)) => agent.status == crate::workspace::AgentStatus::Failed,
+            _ => false,
+        };
+        if complete || Instant::now() >= deadline {
+            return Ok(json!({
+                "agentId": args.id,
+                "agent": agent,
+                "until": args.until,
+                "complete": complete,
+                "timedOut": !complete,
+                "timeoutMs": timeout_ms
+            }));
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+}
+
+fn agent_focus(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: IdArgs = parse(arguments, "agent.focus")?;
+    ensure_agent_read(state, context, &args.id)?;
+    let agent = state
+        .agent(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", &args.id))?;
+    let pane_id = agent
+        .pane_id
+        .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
+    request_pane_focus(state, &pane_id);
+    Ok(json!({ "agentId": args.id, "paneId": pane_id, "focusRequested": true }))
+}
+
+fn agent_release(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: IdArgs = parse(arguments, "agent.release")?;
+    if context.principal == ControlPrincipal::Agent {
+        return crate::mcp::handle_call(
+            state,
+            &context.pane_id,
+            "release_agent",
+            json!({ "agentId": args.id }),
+        )
+        .map_err(internal);
+    }
+    ensure_agent_read(state, context, &args.id)?;
+    let agents = state.list_agents().map_err(internal)?;
+    let mut pending = VecDeque::from([args.id.clone()]);
+    let mut seen = HashSet::from([args.id.clone()]);
+    let mut descendants = Vec::new();
+    while let Some(parent) = pending.pop_front() {
+        for child in agents
+            .iter()
+            .filter(|agent| agent.parent_id.as_deref() == Some(parent.as_str()))
+        {
+            if seen.insert(child.id.clone()) {
+                if child.pane_id.is_some() {
+                    descendants.push(child.id.clone());
+                }
+                pending.push_back(child.id.clone());
+            }
+        }
+    }
+    if !descendants.is_empty() {
+        return Ok(json!({
+            "agentId": args.id,
+            "released": false,
+            "blockedByLiveDescendants": true,
+            "liveDescendantAgentIds": descendants
+        }));
+    }
+    let agent = state
+        .agent(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", &args.id))?;
+    let pane_id = agent
+        .pane_id
+        .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
+    state.close_pane_for_user(&pane_id).map_err(internal)?;
+    state.clear_last_closed_pane_for_pane(&pane_id);
+    Ok(json!({
+        "agentId": args.id,
+        "released": true,
+        "blockedByLiveDescendants": false,
+        "liveDescendantAgentIds": []
+    }))
+}
+
+fn artifact_list(state: &AppState, context: &ControlContext) -> ControlResult {
+    let allowed = allowed_pane_ids(state, context)?;
+    let artifacts = state
+        .list_artifacts()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|artifact| allowed.contains(&artifact.pane_id))
+        .collect::<Vec<_>>();
+    Ok(json!({ "artifacts": artifacts, "count": artifacts.len() }))
+}
+
+fn artifact_open(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: IdArgs = parse(arguments, "artifact.open")?;
+    let artifact = state
+        .list_artifacts()
+        .map_err(internal)?
+        .into_iter()
+        .find(|artifact| artifact.id == args.id)
+        .ok_or_else(|| not_found("artifact", &args.id))?;
+    ensure_pane_read(state, context, &artifact.pane_id)?;
+    let target = artifact
+        .path
+        .as_deref()
+        .or(artifact.url.as_deref())
+        .ok_or_else(|| ControlFailure::new("invalid_artifact", "artifact has no target"))?;
+    let resolved =
+        crate::control_socket::resolve_browser_target(state, &artifact.pane_id, target, None)
+            .map_err(internal)?;
+    state.emit(QmuxEvent::new(
+        "browser.open",
+        Some(artifact.pane_id.clone()),
+        None,
+        json!({
+            "url": resolved.url,
+            "sandbox": resolved.sandbox,
+            "artifactId": artifact.id
+        }),
+    ));
+    Ok(json!({
+        "artifact": artifact,
+        "url": resolved.url,
+        "sandbox": resolved.sandbox,
+        "openRequested": true
+    }))
+}
+
+fn split_list(state: &AppState, context: &ControlContext) -> ControlResult {
+    require_user(context)?;
+    let allowed = allowed_pane_ids(state, context)?;
+    let splits = state
+        .pane_splits()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|split| {
+            split
+                .pane_ids
+                .iter()
+                .all(|pane_id| allowed.contains(pane_id))
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "splits": splits, "count": splits.len() }))
+}
+
+fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: SplitJoinArgs = parse(arguments, "split.join")?;
+    if args.id == args.other {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            "split join requires two different panes",
+        ));
+    }
+    ensure_pane_read(state, context, &args.id)?;
+    ensure_pane_read(state, context, &args.other)?;
+    let panes = state.list_panes().map_err(internal)?;
+    let left = panes
+        .iter()
+        .find(|pane| pane.id == args.id)
+        .ok_or_else(|| not_found("pane", &args.id))?;
+    let right = panes
+        .iter()
+        .find(|pane| pane.id == args.other)
+        .ok_or_else(|| not_found("pane", &args.other))?;
+    if left.group_id != right.group_id {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            "a split cannot span workspaces",
+        ));
+    }
+
+    let mut splits = state.pane_splits().map_err(internal)?;
+    let mut consumed = HashSet::new();
+    let mut pane_ids = vec![args.id.clone(), args.other.clone()];
+    let mut sizes = HashMap::new();
+    let mut split_id = None;
+    for split in &splits {
+        if split.pane_ids.contains(&args.id) || split.pane_ids.contains(&args.other) {
+            consumed.insert(split.id.clone());
+            split_id.get_or_insert_with(|| split.id.clone());
+            for pane_id in &split.pane_ids {
+                if !pane_ids.contains(pane_id) {
+                    pane_ids.push(pane_id.clone());
+                }
+                let size = split
+                    .sizes
+                    .get(pane_id)
+                    .copied()
+                    .unwrap_or(1.0 / split.pane_ids.len() as f64);
+                sizes.insert(pane_id.clone(), size);
+            }
+        }
+    }
+    let positions = panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| (pane.id.as_str(), index))
+        .collect::<HashMap<_, _>>();
+    pane_ids.sort_by_key(|pane_id| {
+        positions
+            .get(pane_id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+    let candidate_default = positive_size_total(&sizes) / sizes.len().max(1) as f64;
+    let default_size = if candidate_default.is_finite() && candidate_default > 0.0 {
+        candidate_default
+    } else {
+        1.0
+    };
+    for pane_id in &pane_ids {
+        sizes.entry(pane_id.clone()).or_insert(default_size);
+    }
+    let sizes = allocate_split_sizes(&sizes, &pane_ids, 1.0, MIN_SPLIT_FRACTION);
+    let joined = PaneSplitInfo {
+        id: split_id.unwrap_or_else(|| state.next_id("split")),
+        pane_ids,
+        sizes,
+        intent: HashMap::new(),
+        btw_pane_ids: Vec::new(),
+    };
+    splits.retain(|split| !consumed.contains(&split.id));
+    splits.push(joined.clone());
+    let persisted = state.set_pane_splits(splits).map_err(invalid_argument)?;
+    let split = persisted
+        .into_iter()
+        .find(|split| split.id == joined.id)
+        .ok_or_else(|| ControlFailure::new("invalid_argument", "split requires adjacent panes"))?;
+    Ok(json!({ "split": split }))
+}
+
+fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: IdArgs = parse(arguments, "split.leave")?;
+    ensure_pane_read(state, context, &args.id)?;
+    let mut found = false;
+    let mut splits = Vec::new();
+    for split in state.pane_splits().map_err(internal)? {
+        let Some(segments) = remaining_split_segments(&split.pane_ids, &args.id) else {
+            splits.push(split);
+            continue;
+        };
+        found = true;
+        for (segment_index, segment) in segments.into_iter().enumerate() {
+            let pane_ids = segment;
+            let sizes = allocate_split_sizes(&split.sizes, &pane_ids, 1.0, MIN_SPLIT_FRACTION);
+            let btw_pane_ids = split
+                .btw_pane_ids
+                .iter()
+                .filter(|pane_id| pane_ids.contains(pane_id))
+                .cloned()
+                .collect();
+            splits.push(PaneSplitInfo {
+                id: if segment_index == 0 {
+                    split.id.clone()
+                } else {
+                    state.next_id("split")
+                },
+                pane_ids,
+                sizes,
+                intent: HashMap::new(),
+                btw_pane_ids,
+            });
+        }
+    }
+    if !found {
+        return Err(ControlFailure::new(
+            "split_not_found",
+            format!("pane {} does not belong to a split", args.id),
+        ));
+    }
+    let splits = state.set_pane_splits(splits).map_err(invalid_argument)?;
+    Ok(json!({ "paneId": args.id, "left": true, "splits": splits }))
+}
+
+fn split_resize(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    require_user(context)?;
+    let args: SplitResizeArgs = parse(arguments, "split.resize")?;
+    if !args.fraction.is_finite() {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            "split fraction must be finite",
+        ));
+    }
+    let mut splits = state.pane_splits().map_err(internal)?;
+    let split = splits
+        .iter_mut()
+        .find(|split| split.id == args.id)
+        .ok_or_else(|| not_found("split", &args.id))?;
+    if !split.pane_ids.contains(&args.pane) {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            format!("pane {} does not belong to split {}", args.pane, args.id),
+        ));
+    }
+    ensure_pane_read(state, context, &args.pane)?;
+    let minimum = MIN_SPLIT_FRACTION.min(1.0 / split.pane_ids.len() as f64);
+    let maximum = 1.0 - minimum * (split.pane_ids.len() - 1) as f64;
+    if args.fraction < minimum || args.fraction > maximum {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            format!("split fraction must be between {minimum} and {maximum}"),
+        ));
+    }
+    let other_pane_ids = split
+        .pane_ids
+        .iter()
+        .filter(|pane_id| *pane_id != &args.pane)
+        .cloned()
+        .collect::<Vec<_>>();
+    split.sizes = allocate_split_sizes(&split.sizes, &other_pane_ids, 1.0 - args.fraction, minimum);
+    split.sizes.insert(args.pane.clone(), args.fraction);
+    let split_id = split.id.clone();
+    let persisted = state.set_pane_splits(splits).map_err(invalid_argument)?;
+    let split = persisted
+        .into_iter()
+        .find(|split| split.id == split_id)
+        .ok_or_else(|| not_found("split", &split_id))?;
+    Ok(json!({ "split": split }))
+}
+
+fn request_pane_focus(state: &AppState, pane_id: &str) {
+    state.touch_pane_active(pane_id);
+    state.emit(QmuxEvent::new(
+        "pane.focus_requested",
+        Some(pane_id.to_string()),
+        None,
+        json!({}),
+    ));
+}
+
+fn positive_size_total(sizes: &HashMap<String, f64>) -> f64 {
+    sizes
+        .values()
+        .filter(|size| size.is_finite() && **size > 0.0)
+        .sum()
+}
+
+fn remaining_split_segments(pane_ids: &[String], removed: &str) -> Option<Vec<Vec<String>>> {
+    let index = pane_ids.iter().position(|pane_id| pane_id == removed)?;
+    Some(
+        [&pane_ids[..index], &pane_ids[index + 1..]]
+            .into_iter()
+            .filter(|segment| segment.len() >= 2)
+            .map(<[String]>::to_vec)
+            .collect(),
+    )
+}
+
+fn allocate_split_sizes(
+    weights: &HashMap<String, f64>,
+    pane_ids: &[String],
+    total: f64,
+    minimum: f64,
+) -> HashMap<String, f64> {
+    if pane_ids.is_empty() {
+        return HashMap::new();
+    }
+    let minimum = minimum.min(total / pane_ids.len() as f64);
+    let mut pending = pane_ids
+        .iter()
+        .map(|pane_id| {
+            let weight = weights
+                .get(pane_id)
+                .copied()
+                .filter(|weight| weight.is_finite() && *weight > 0.0)
+                .unwrap_or(1.0);
+            (pane_id.clone(), weight)
+        })
+        .collect::<Vec<_>>();
+    let mut result = HashMap::new();
+    let mut remaining = total;
+    while !pending.is_empty() {
+        let weight_total = pending.iter().map(|(_, weight)| *weight).sum::<f64>();
+        let below_minimum = pending
+            .iter()
+            .filter(|(_, weight)| remaining * *weight / weight_total < minimum)
+            .map(|(pane_id, _)| pane_id.clone())
+            .collect::<HashSet<_>>();
+        if below_minimum.is_empty() {
+            for (pane_id, weight) in pending {
+                result.insert(pane_id, remaining * weight / weight_total);
+            }
+            break;
+        }
+        for pane_id in &below_minimum {
+            result.insert(pane_id.clone(), minimum);
+            remaining -= minimum;
+        }
+        pending.retain(|(pane_id, _)| !below_minimum.contains(pane_id));
+    }
+    result
+}
+
+struct PublicWaitSlot;
+
+impl PublicWaitSlot {
+    fn acquire() -> Result<Self, ControlFailure> {
+        let acquired = ACTIVE_PUBLIC_WAITS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_CONCURRENT_PUBLIC_WAITS).then_some(active + 1)
+            })
+            .is_ok();
+        if acquired {
+            Ok(Self)
+        } else {
+            Err(ControlFailure::new(
+                "too_many_waits",
+                "too many qmux CLI waits are already active",
+            ))
+        }
+    }
+}
+
+impl Drop for PublicWaitSlot {
+    fn drop(&mut self) {
+        ACTIVE_PUBLIC_WAITS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn allowed_agent_ids(
+    state: &AppState,
+    context: &ControlContext,
+) -> Result<HashSet<String>, ControlFailure> {
+    let mut agents = state.list_agents().map_err(internal)?;
+    if context.principal == ControlPrincipal::User {
+        return Ok(agents
+            .into_iter()
+            .filter(|agent| agent.group_id == context.workspace_id)
+            .map(|agent| agent.id)
+            .collect());
+    }
+    let caller = context
+        .agent
+        .as_ref()
+        .ok_or_else(|| denied("agent principal has no live agent"))?;
+    agents.retain(|agent| agent.group_id == caller.group_id);
+    let by_parent = agents
+        .iter()
+        .fold(HashMap::<String, Vec<String>>::new(), |mut map, agent| {
+            if let Some(parent) = agent.parent_id.as_ref() {
+                map.entry(parent.clone())
+                    .or_default()
+                    .push(agent.id.clone());
+            }
+            map
+        });
+    let mut allowed = HashSet::from([caller.id.clone()]);
+    let mut pending = VecDeque::from([caller.id.clone()]);
+    while let Some(parent) = pending.pop_front() {
+        for child in by_parent.get(&parent).into_iter().flatten() {
+            if allowed.insert(child.clone()) {
+                pending.push_back(child.clone());
+            }
+        }
+    }
+    Ok(allowed)
+}
+
+fn allowed_pane_ids(
+    state: &AppState,
+    context: &ControlContext,
+) -> Result<HashSet<String>, ControlFailure> {
+    if context.principal == ControlPrincipal::User {
+        return Ok(state
+            .list_panes()
+            .map_err(internal)?
+            .into_iter()
+            .filter(|pane| pane.group_id == context.workspace_id)
+            .map(|pane| pane.id)
+            .collect());
+    }
+    let allowed_agents = allowed_agent_ids(state, context)?;
+    Ok(state
+        .list_agents()
+        .map_err(internal)?
+        .into_iter()
+        .filter(|agent| allowed_agents.contains(&agent.id))
+        .filter_map(|agent| agent.pane_id)
+        .collect())
+}
+
+fn ensure_pane_read(
+    state: &AppState,
+    context: &ControlContext,
+    pane_id: &str,
+) -> Result<(), ControlFailure> {
+    if allowed_pane_ids(state, context)?.contains(pane_id) {
+        Ok(())
+    } else {
+        Err(denied("pane is outside the caller's readable scope"))
+    }
+}
+
+fn ensure_agent_read(
+    state: &AppState,
+    context: &ControlContext,
+    agent_id: &str,
+) -> Result<(), ControlFailure> {
+    if allowed_agent_ids(state, context)?.contains(agent_id) {
+        Ok(())
+    } else {
+        Err(denied("agent is outside the caller's readable scope"))
+    }
+}
+
+fn find_pane(state: &AppState, pane_id: &str) -> Result<crate::state::PaneInfo, ControlFailure> {
+    state
+        .list_panes()
+        .map_err(internal)?
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+        .ok_or_else(|| not_found("pane", pane_id))
+}
+
+fn parse<T: for<'de> Deserialize<'de>>(value: Value, operation: &str) -> Result<T, ControlFailure> {
+    serde_json::from_value(value).map_err(|error| {
+        ControlFailure::new(
+            "invalid_argument",
+            format!("invalid {operation} arguments: {error}"),
+        )
+    })
+}
+
+fn ensure_no_arguments(value: Value, operation: &str) -> Result<(), ControlFailure> {
+    if value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty) {
+        Ok(())
+    } else {
+        Err(ControlFailure::new(
+            "invalid_argument",
+            format!("{operation} does not accept arguments"),
+        ))
+    }
+}
+
+fn denied(message: impl Into<String>) -> ControlFailure {
+    ControlFailure::new("permission_denied", message)
+}
+
+fn require_user(context: &ControlContext) -> Result<(), ControlFailure> {
+    if context.principal == ControlPrincipal::User {
+        Ok(())
+    } else {
+        Err(denied(
+            "this operation requires an interactive user credential",
+        ))
+    }
+}
+
+fn not_found(kind: &str, id: &str) -> ControlFailure {
+    ControlFailure::new(format_code(kind), format!("{kind} {id} was not found"))
+}
+
+fn format_code(kind: &str) -> &'static str {
+    match kind {
+        "pane" => "pane_not_found",
+        "agent" => "agent_not_found",
+        "workspace" => "workspace_not_found",
+        "artifact" => "artifact_not_found",
+        "split" => "split_not_found",
+        _ => "not_found",
+    }
+}
+
+fn invalid_argument(message: String) -> ControlFailure {
+    ControlFailure::new("invalid_argument", message)
+}
+
+fn internal(message: String) -> ControlFailure {
+    ControlFailure::new("internal_error", message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failures_have_stable_codes_and_details() {
+        let failure = ControlFailure {
+            code: "denied",
+            message: "no".into(),
+            details: json!({ "scope": "workspace" }),
+        };
+        assert_eq!(failure.code, "denied");
+        assert_eq!(failure.details["scope"], "workspace");
+    }
+
+    #[test]
+    fn public_arguments_reject_unknown_fields() {
+        let error = parse::<IdArgs>(json!({ "id": "pane-1", "idd": "typo" }), "pane.get")
+            .err()
+            .expect("unknown fields must fail closed");
+        assert_eq!(error.code, "invalid_argument");
+        assert!(error.message.contains("unknown field `idd`"));
+        assert!(ensure_no_arguments(json!({ "unexpected": true }), "pane.list").is_err());
+    }
+
+    #[test]
+    fn removing_a_middle_split_pane_preserves_each_contiguous_side() {
+        let pane_ids = ["a", "b", "c", "d", "e"].map(str::to_string).to_vec();
+        assert_eq!(
+            remaining_split_segments(&pane_ids, "c").unwrap(),
+            vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["d".to_string(), "e".to_string()]
+            ]
+        );
+        assert!(remaining_split_segments(&pane_ids, "missing").is_none());
+    }
+
+    #[test]
+    fn split_allocation_preserves_weight_while_flooring_small_members() {
+        let pane_ids = ["a", "b", "c"].map(str::to_string).to_vec();
+        let weights = HashMap::from([
+            ("a".to_string(), 0.85),
+            ("b".to_string(), 0.10),
+            ("c".to_string(), 0.05),
+        ]);
+        let sizes = allocate_split_sizes(&weights, &pane_ids, 1.0, MIN_SPLIT_FRACTION);
+        assert!((sizes.values().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!(sizes.values().all(|size| *size >= MIN_SPLIT_FRACTION));
+        assert!(sizes["a"] > sizes["b"]);
+    }
+}

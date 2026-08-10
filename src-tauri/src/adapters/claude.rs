@@ -23,7 +23,7 @@ use crate::transcript::TurnBlock;
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
-    mark_agent_spawn_failed, prepare_agent_workspace,
+    mark_agent_spawn_failed, prepare_agent_workspace, prepare_agent_workspace_with_parent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -275,7 +275,7 @@ impl ClaudeAdapter {
         let binary = self.ensure_binary()?;
         let options = ClaudeLaunchOptions::from_value(request.options)?;
 
-        let agent = prepare_agent_workspace(
+        let agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: request.group_id,
@@ -286,6 +286,7 @@ impl ClaudeAdapter {
                 effort: options.effort.clone(),
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
+            request.parent_id.as_deref(),
         )?;
         let cwd = request
             .cwd
@@ -399,7 +400,7 @@ impl ClaudeAdapter {
                     .to_string()
             })?;
 
-        let mut agent = prepare_agent_workspace(
+        let mut agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: Some(source.group_id.clone()),
@@ -416,13 +417,13 @@ impl ClaudeAdapter {
                 effort: source.effort.clone(),
                 use_worktree,
             },
+            Some(&source.id),
         )?;
 
         // Record fork lineage and the no-prompt idle status before the process starts,
         // so the fork's own hooks (SessionStart, or the first turn's hooks via
         // adopt_forked_session_identity, which record the new session_id) can't race
         // ahead of the lineage write — the stale-payload guards key off fork_point.
-        agent.parent_id = Some(source.id.clone());
         agent.fork_point = Some(session_id.clone());
         agent.root_session_id = source
             .root_session_id
@@ -1457,6 +1458,7 @@ impl SpawnClaudeRequest {
             initial_size: self.initial_size,
             use_worktree: self.use_worktree,
             options,
+            parent_id: None,
         }
     }
 }

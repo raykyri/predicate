@@ -146,6 +146,10 @@ pub struct AppState {
 struct AppStateInner {
     config: QmuxConfig,
     pane_tokens: Mutex<HashMap<String, String>>,
+    // Credentials injected only into interactive shell panes. Agent launches
+    // strip them before exec, keeping cross-pane user control distinct from
+    // the pane-scoped token inherited by hooks and MCP servers.
+    user_tokens: Mutex<HashMap<String, String>>,
     // Separate read-only credentials used in file-preview URLs.
     file_tokens: Mutex<HashMap<String, String>>,
     // Exact, canonical files outside a pane's normal project roots that the
@@ -1182,6 +1186,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
+                user_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
@@ -2218,6 +2223,30 @@ impl AppState {
             .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
     }
 
+    pub fn pane_user_token(&self, pane_id: &str) -> Result<String, String> {
+        let mut tokens = self
+            .inner
+            .user_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(existing) = tokens.get(pane_id) {
+            return Ok(existing.clone());
+        }
+        let token = random_token()?;
+        Ok(tokens.entry(pane_id.to_string()).or_insert(token).clone())
+    }
+
+    pub fn pane_for_user_token(&self, token: &str) -> Option<String> {
+        let tokens = self
+            .inner
+            .user_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        tokens
+            .iter()
+            .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
+    }
+
     pub fn attach_app(&self, app_handle: AppHandle) -> Result<(), String> {
         let mut handle = self
             .inner
@@ -2363,6 +2392,12 @@ impl AppState {
             model.pane_splits.clone()
         };
         self.persist();
+        self.emit(QmuxEvent::new(
+            "pane.splits_changed",
+            None,
+            None,
+            serde_json::json!({ "splits": normalized }),
+        ));
         Ok(normalized)
     }
 
@@ -6231,6 +6266,9 @@ impl AppState {
         // again, so drop it rather than leave a live credential resolving (via
         // `pane_for_token`) to a pane that no longer exists. Separate lock from `model`.
         if let Ok(mut tokens) = self.inner.pane_tokens.lock() {
+            tokens.remove(pane_id);
+        }
+        if let Ok(mut tokens) = self.inner.user_tokens.lock() {
             tokens.remove(pane_id);
         }
         if let Ok(mut tokens) = self.inner.file_tokens.lock() {
@@ -16219,6 +16257,19 @@ mod tests {
         // The captured QMUX_TOKEN must not outlive its pane.
         state.remove_pane("pane-1").unwrap();
         assert!(state.pane_for_token(&token).is_none());
+    }
+
+    #[test]
+    fn remove_pane_reclaims_its_interactive_user_token() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
+        let token = state.pane_user_token("pane-1").unwrap();
+        assert_eq!(state.pane_for_user_token(&token).as_deref(), Some("pane-1"));
+
+        state.remove_pane("pane-1").unwrap();
+
+        assert!(state.pane_for_user_token(&token).is_none());
     }
 
     #[test]

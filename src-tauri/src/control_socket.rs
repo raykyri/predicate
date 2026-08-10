@@ -10,7 +10,7 @@ use crate::state::AppState;
 use crate::workspace::{
     LaunchOrigin, recover_shell_agent_from_session_start, validate_launch_workspace,
 };
-use qmux_proto::{ControlRequest, ControlResponse};
+use qmux_proto::{ControlRequest, ControlResponse, PublicControlRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
@@ -160,12 +160,31 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
     // A control token authorizes exactly one pane. Resolving it here means every
     // command below acts only on the caller's own pane: a process in one pane cannot
     // write to, or impersonate hooks for, any other pane.
-    let authed_pane = state
-        .pane_for_token(&request.token)
-        .ok_or_else(|| "invalid QMUX_TOKEN".to_string())?;
+    let pane_auth = state.pane_for_token(&request.token);
+    let user_auth = state.pane_for_user_token(&request.token);
+    let (authed_pane, user_credential) = match (pane_auth, user_auth) {
+        (Some(pane), _) => (pane, false),
+        (None, Some(pane)) => (pane, true),
+        (None, None) => return Err("invalid QMUX_TOKEN".to_string()),
+    };
+
+    if user_credential && request.command != "cli.call" {
+        return Err("QMUX_USER_TOKEN is valid only for public CLI operations".to_string());
+    }
 
     match request.command.as_str() {
         "ping" => Ok(json!({ "status": "ok" })),
+        "cli.call" => {
+            let payload = serde_json::from_value::<PublicControlRequest>(request.payload)
+                .map_err(|err| format!("invalid cli.call payload: {err}"))?;
+            Ok(crate::control::handle_call(
+                state,
+                &authed_pane,
+                user_credential,
+                &payload.operation,
+                payload.arguments,
+            ))
+        }
         "pane.write" => {
             let options = serde_json::from_value::<PaneWriteOptions>(request.payload)
                 .map_err(|err| format!("invalid pane.write payload: {err}"))?;
@@ -723,6 +742,29 @@ mod tests {
         let token = state.pane_token("pane-1").unwrap();
         let data = handle_line(&state, &request_line(&token, "ping", Value::Null)).unwrap();
         assert_eq!(data, json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn interactive_user_token_is_confined_to_the_public_cli() {
+        let state = test_state();
+        let token = state.pane_user_token("pane-1").unwrap();
+
+        let err = handle_line(&state, &request_line(&token, "ping", Value::Null)).unwrap_err();
+        assert!(err.contains("valid only for public CLI operations"));
+
+        let data = handle_line(
+            &state,
+            &request_line(
+                &token,
+                "cli.call",
+                json!({ "operation": "ping", "arguments": {} }),
+            ),
+        )
+        .unwrap();
+        // The token reaches the public dispatcher. This synthetic test pane is
+        // absent from the model, so context derivation then fails closed.
+        assert_eq!(data["ok"], false);
+        assert_eq!(data["error"]["code"], "pane_not_found");
     }
 
     #[test]

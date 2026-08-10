@@ -29,3 +29,51 @@ pub struct ControlResponse {
     pub data: Value,
     pub error: Option<String>,
 }
+
+pub const PUBLIC_API_VERSION: u32 = 1;
+
+/// Public command invocation carried inside `cli.call`. Authentication and
+/// caller identity stay in the outer control request and are never accepted
+/// from these arguments.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PublicControlRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicControlError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub details: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicControlResponse {
+    pub ok: bool,
+    pub api_version: u32,
+    #[serde(default)]
+    pub result: Value,
+    pub error: Option<PublicControlError>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_requests_reject_unknown_envelope_fields() {
+        let error = serde_json::from_value::<PublicControlRequest>(serde_json::json!({
+            "operation": "pane.list",
+            "argument": {}
+        }))
+        .err()
+        .expect("unknown envelope fields must fail closed");
+        assert!(error.to_string().contains("unknown field `argument`"));
+    }
+}

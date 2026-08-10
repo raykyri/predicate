@@ -3028,6 +3028,7 @@ dependencies = [
  "pulldown-cmark",
  "qmux-cli",
  "qmux-proto",
+ "regex",
  "reqwest",
  "rustls",
  "serde",

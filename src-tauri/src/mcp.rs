@@ -38,7 +38,10 @@ pub fn handle_call(
     let graph = Lineage::new(&agents);
 
     match name {
-        "whoami" => whoami(&caller, &graph),
+        "whoami" => {
+            ensure_no_arguments(arguments, "whoami")?;
+            whoami(&caller, &graph)
+        }
         "spawn_agent" => spawn_child(state, &caller, arguments),
         "fork_self" => fork_self(state, authed_pane, arguments),
         "list_children" => list_children(&caller, &graph, arguments),
@@ -72,7 +75,7 @@ fn whoami(caller: &AgentInfo, graph: &Lineage) -> Result<Value, String> {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SpawnChildArgs {
     #[serde(default)]
     adapter: Option<String>,
@@ -113,17 +116,12 @@ fn spawn_child(state: &AppState, caller: &AgentInfo, arguments: Value) -> Result
             initial_size: None,
             use_worktree: Some(args.use_worktree),
             options,
+            parent_id: Some(caller.id.clone()),
         },
     )?;
     let child = state
         .agent_by_pane(&pane.id)?
         .ok_or_else(|| format!("spawned pane {} has no agent", pane.id))?;
-    let child = state
-        .mutate_agent(&child.id, |agent| {
-            agent.parent_id = Some(caller.id.clone());
-        })?
-        .ok_or_else(|| format!("spawned agent {} disappeared", child.id))?;
-
     if let Some(parent_pane) = caller.pane_id.as_deref()
         && let Err(err) = state.nest_pane_under(&pane.id, parent_pane)
     {
@@ -158,7 +156,7 @@ fn spawn_child(state: &AppState, caller: &AgentInfo, arguments: Value) -> Result
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ForkArgs {
     #[serde(default)]
     prompt: Option<String>,
@@ -182,7 +180,7 @@ fn fork_self(state: &AppState, pane_id: &str, arguments: Value) -> Result<Value,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ListChildrenArgs {
     #[serde(default)]
     recursive: bool,
@@ -205,7 +203,7 @@ fn list_children(caller: &AgentInfo, graph: &Lineage, arguments: Value) -> Resul
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SendPromptArgs {
     agent_id: String,
     text: String,
@@ -231,7 +229,7 @@ fn send_prompt(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WaitArgs {
     #[serde(default)]
     agent_ids: Vec<String>,
@@ -295,7 +293,7 @@ fn wait_for_children(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SummarizeArgs {
     #[serde(default)]
     agent_ids: Vec<String>,
@@ -347,7 +345,7 @@ fn summarize_children(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReleaseArgs {
     agent_id: String,
 }
@@ -376,11 +374,21 @@ fn release_agent(
         .filter(|agent| agent.pane_id.is_some())
         .map(|agent| agent.id)
         .collect::<Vec<_>>();
+    if !live_descendants.is_empty() {
+        return Ok(json!({
+            "agentId": target.id,
+            "released": false,
+            "alreadyExited": false,
+            "blockedByLiveDescendants": true,
+            "liveDescendantAgentIds": live_descendants
+        }));
+    }
     let Some(pane_id) = target.pane_id.clone() else {
         return Ok(json!({
             "agentId": target.id,
             "released": false,
             "alreadyExited": true,
+            "blockedByLiveDescendants": false,
             "liveDescendantAgentIds": live_descendants
         }));
     };
@@ -391,12 +399,13 @@ fn release_agent(
         "agentId": target.id,
         "released": true,
         "alreadyExited": false,
+        "blockedByLiveDescendants": false,
         "liveDescendantAgentIds": live_descendants
     }))
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ArtifactsArgs {
     #[serde(default)]
     agent_id: Option<String>,
@@ -424,7 +433,7 @@ fn get_artifacts(
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ReportArgs {
     #[serde(default = "default_report_status")]
     status: String,
@@ -525,7 +534,7 @@ fn owned_artifacts(
         .collect())
 }
 
-fn terminal_text_tail(raw: &[u8], lines: usize) -> String {
+pub(crate) fn terminal_text_tail(raw: &[u8], lines: usize) -> String {
     let replay = crate::scrollback::sanitize_scrollback_replay(raw);
     let plain = strip_terminal_sequences(&replay);
     String::from_utf8_lossy(&plain)
@@ -601,7 +610,7 @@ fn selected_direct_child_ids(
         })
         .map(|agent| (agent.created_at, agent.id.clone()))
         .collect::<Vec<_>>();
-    direct.sort_by(|left, right| left.cmp(right));
+    direct.sort();
     if requested.is_empty() {
         return Ok(direct.into_iter().map(|(_, id)| id).collect());
     }
@@ -653,6 +662,14 @@ impl Drop for WaitSlot {
 
 fn parse<T: for<'de> Deserialize<'de>>(value: Value, tool: &str) -> Result<T, String> {
     serde_json::from_value(value).map_err(|err| format!("invalid {tool} arguments: {err}"))
+}
+
+fn ensure_no_arguments(value: Value, tool: &str) -> Result<(), String> {
+    if value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty) {
+        Ok(())
+    } else {
+        Err(format!("{tool} does not accept arguments"))
+    }
 }
 
 struct Lineage {
@@ -781,5 +798,17 @@ mod tests {
             &["cargo test".to_string(), "  ".to_string()],
         );
         assert_eq!(text, "Summary: ready\n\nProof:\n- cargo test");
+    }
+
+    #[test]
+    fn mcp_arguments_reject_unknown_fields() {
+        let error = parse::<ListChildrenArgs>(
+            json!({ "recursive": true, "recusrive": false }),
+            "list_children",
+        )
+        .err()
+        .expect("unknown fields must fail closed");
+        assert!(error.contains("unknown field `recusrive`"));
+        assert!(ensure_no_arguments(json!({ "unexpected": true }), "whoami").is_err());
     }
 }

@@ -12,8 +12,9 @@ fn main() {
             std::process::exit(2);
         }
         Err(err) => {
-            eprintln!("qmux-cli: {err}");
-            std::process::exit(1);
+            let (message, exit_code) = qmux_cli::error_report(&err);
+            eprintln!("qmux-cli: {message}");
+            std::process::exit(exit_code);
         }
     }
 }

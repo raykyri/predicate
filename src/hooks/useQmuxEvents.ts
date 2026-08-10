@@ -24,6 +24,7 @@ import type {
   GlobalDraft,
   GroupInfo,
   PaneInfo,
+  PaneSplitInfo,
   QmuxEvent,
   QueuedTurn,
   ShellAgentJobInfo,
@@ -123,6 +124,8 @@ export interface UseQmuxEventsHandlers {
   onAcpAuthEvent?: (event: QmuxEvent) => void;
   /** Artifact tray: `artifact.added` / `artifact.removed`. App owns the state. */
   onArtifactEvent?: (event: QmuxEvent) => void;
+  onPaneFocusRequested?: (paneId: string) => void;
+  onPaneSplitsChanged?: (splits: PaneSplitInfo[]) => void;
   onTerminalSearchRequested?: (paneId: string) => void;
   onTerminalPasteRequested?: (paneId: string, text: string | null) => void;
   onTerminalUserInput?: (paneId: string) => void;
@@ -181,6 +184,8 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onAgentPromptSubmitted,
     onAcpAuthEvent,
     onArtifactEvent,
+    onPaneFocusRequested,
+    onPaneSplitsChanged,
     onTerminalSearchRequested,
     onTerminalPasteRequested,
     onTerminalUserInput,
@@ -257,6 +262,22 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
           return nextPanes;
         });
         setPaneContextMenu((current) => (current?.paneId === exitedPaneId ? null : current));
+      }
+      if (event.type === "pane.focus_requested" && event.paneId) {
+        onPaneFocusRequested?.(event.paneId);
+      }
+      if (event.type === "pane.splits_changed" && Array.isArray(event.payload.splits)) {
+        onPaneSplitsChanged?.(event.payload.splits as PaneSplitInfo[]);
+      }
+      if (event.type === "pane.created" || event.type === "pane.renamed") {
+        const seq = (panesRefreshSeq += 1);
+        void listPanes()
+          .then((latest) => {
+            if (!disposed && seq === panesRefreshSeq) {
+              setPanes(latest);
+            }
+          })
+          .catch(() => undefined);
       }
       if (event.type === "pane.cwd_changed" && event.paneId) {
         // A shell tab reported a directory change (the user cd'd). The backend has
@@ -455,7 +476,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (
         event.type === "agent.forked" ||
         (event.type === "agent.spawned" &&
-          (event.payload.source === "queue" || event.payload.source === "research"))
+          event.payload.source !== "shell")
       ) {
         const sourcePaneId = stringField(event.payload, "sourcePaneId");
         if (

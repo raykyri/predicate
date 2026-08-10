@@ -1031,6 +1031,54 @@ pub fn prepare_agent_workspace(
     prepare_agent_workspace_locked(state, request, None)
 }
 
+/// Prepares a new agent and records its lineage before returning to the adapter
+/// that will start the process. Keeping both mutations under the workspace
+/// creation lock prevents a newly-execed child from observing itself without
+/// the parent capability boundary its launcher requested.
+pub fn prepare_agent_workspace_with_parent(
+    state: &AppState,
+    mut request: PrepareAgentWorkspaceRequest,
+    parent_id: Option<&str>,
+) -> Result<AgentInfo, String> {
+    let _guard = AGENT_WORKSPACE_CREATION_LOCK
+        .lock()
+        .map_err(|_| "agent workspace creation lock poisoned".to_string())?;
+    let parent = match parent_id.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(parent_id) => {
+            let parent = state
+                .agent(parent_id)?
+                .ok_or_else(|| format!("parent agent {parent_id} was not found"))?;
+            if request
+                .group_id
+                .as_deref()
+                .is_some_and(|group_id| group_id != parent.group_id)
+            {
+                return Err(format!(
+                    "parent agent {parent_id} belongs to workspace {}, not {}",
+                    parent.group_id,
+                    request.group_id.as_deref().unwrap_or_default()
+                ));
+            }
+            if request.group_id.is_none() {
+                request.group_id = Some(parent.group_id.clone());
+            }
+            Some(parent)
+        }
+        None => None,
+    };
+    let agent = prepare_agent_workspace_locked(state, request, None)?;
+    let Some(parent) = parent else {
+        return Ok(agent);
+    };
+    let parent_id = parent.id;
+    debug_assert_eq!(parent.group_id, agent.group_id);
+    state
+        .mutate_agent(&agent.id, |agent| {
+            agent.parent_id = Some(parent_id.clone());
+        })?
+        .ok_or_else(|| format!("prepared agent {} disappeared", agent.id))
+}
+
 fn prepare_agent_workspace_locked(
     state: &AppState,
     request: PrepareAgentWorkspaceRequest,

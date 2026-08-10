@@ -407,6 +407,16 @@ pub fn spawn_shell_pane(
     source_pane_id: Option<&str>,
     group_id: Option<&str>,
 ) -> Result<PaneInfo, String> {
+    spawn_shell_pane_at(state, initial_size, source_pane_id, group_id, None)
+}
+
+pub fn spawn_shell_pane_at(
+    state: &AppState,
+    initial_size: Option<InitialPaneSize>,
+    source_pane_id: Option<&str>,
+    group_id: Option<&str>,
+    cwd_override: Option<&str>,
+) -> Result<PaneInfo, String> {
     // A user-opened shell inherits the focused shell's current directory when one is
     // given and still valid (matching how terminal emulators open a "new tab here");
     // otherwise it opens in the target group directory / home, never the bare `/` a
@@ -439,18 +449,22 @@ pub fn spawn_shell_pane(
     // panes yet, so fall back to its creation-time seed dir (`group.dir`) — the
     // directory the group was opened for — before the default home dir; otherwise the
     // first terminal would land in ~ and every sibling would copy that.
-    let cwd = source_pane_id
-        .filter(|&id| {
-            state
-                .pane_group_id(id)
-                .ok()
-                .flatten()
-                .is_some_and(|gid| gid == group.id)
-        })
-        .and_then(|id| state.inheritable_shell_cwd(id))
-        .or_else(|| state.group_spawn_cwd(&group.id))
-        .or_else(|| group_recoverable_dir(group.remote.as_ref(), &group.dir))
-        .unwrap_or_else(|| state.default_open_dir());
+    let cwd = match cwd_override.map(str::trim).filter(|cwd| !cwd.is_empty()) {
+        Some(cwd) => group_recoverable_dir(group.remote.as_ref(), cwd)
+            .ok_or_else(|| format!("shell working directory {cwd} does not exist"))?,
+        None => source_pane_id
+            .filter(|&id| {
+                state
+                    .pane_group_id(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|gid| gid == group.id)
+            })
+            .and_then(|id| state.inheritable_shell_cwd(id))
+            .or_else(|| state.group_spawn_cwd(&group.id))
+            .or_else(|| group_recoverable_dir(group.remote.as_ref(), &group.dir))
+            .unwrap_or_else(|| state.default_open_dir()),
+    };
     let pane_id = state.next_id("pane");
     spawn_pty(
         state,
@@ -757,6 +771,7 @@ pub fn qmux_pane_envs(state: &AppState, pane_id: &str) -> Result<Vec<(String, St
             "QMUX_WORKSPACE_ROOT".to_string(),
             state.config().workspace_root.display().to_string(),
         ),
+        ("QMUX_ENV".to_string(), "1".to_string()),
     ];
     // Expose the qmux executable so in-pane tooling (hooks, agent wrappers, the
     // fork skill) can call back without depending on `qmux` being on PATH. The
@@ -786,6 +801,10 @@ pub fn agent_pane_envs(
 
 fn shell_pane_envs(state: &AppState, pane_id: &str) -> Result<Vec<(String, String)>, String> {
     let mut envs = qmux_pane_envs(state, pane_id)?;
+    envs.push((
+        "QMUX_USER_TOKEN".to_string(),
+        state.pane_user_token(pane_id)?,
+    ));
     envs.push(("QMUX_SHELL_INTEGRATION".to_string(), "1".to_string()));
     Ok(envs)
 }
@@ -1288,6 +1307,7 @@ fn spawn_portable_pty(
     let mut command = CommandBuilder::new(spec.program);
     command.args(spec.args);
     command.cwd(spec.cwd.clone());
+    scrub_inherited_qmux_context(&mut command);
     for (key, value) in base_child_envs() {
         command.env(key, value);
     }
@@ -1377,6 +1397,47 @@ fn spawn_portable_pty(
     start_child_watcher(state.clone(), pane_id, child, root_pid);
 
     Ok(pane)
+}
+
+/// A qmux process can itself be launched from inside another qmux pane. The PTY
+/// command builder inherits that outer process environment, so remove every
+/// pane/session credential before applying this pane's freshly-derived envs.
+/// Shell panes receive their new user credential below; agent panes never do.
+fn scrub_inherited_qmux_context(command: &mut CommandBuilder) {
+    const CONTEXT_KEYS: &[&str] = &[
+        "QMUX_ENV",
+        "QMUX_PANE_ID",
+        "QMUX_AGENT_ID",
+        "QMUX_ADAPTER_ID",
+        "QMUX_TOKEN",
+        "QMUX_USER_TOKEN",
+        "QMUX_SOCK",
+        "QMUX_CLI",
+        "QMUX_WORKSPACE_ROOT",
+        "QMUX_SHELL_INTEGRATION",
+        "QMUX_PREPARED_AGENT_ID",
+        "QMUX_FORK_POINT",
+        "QMUX_ROOT_SESSION_ID",
+        "QMUX_AGENT_FUNCTIONS",
+        "QMUX_AGENT_FUNCTIONS_ERROR",
+        "QMUX_ORIGINAL_ZDOTDIR",
+        "QMUX_ORIGINAL_BASHRC",
+        "QMUX_ACP_AGENT",
+        "QMUX_ACP_ARGS",
+        "QMUX_ACP_AUTH_METHOD",
+        "QMUX_ACP_COMMAND",
+        "QMUX_ACP_CWD",
+        "QMUX_ACP_ENV",
+        "QMUX_ACP_LOAD_SESSION",
+        "QMUX_ACP_LOG",
+        "QMUX_ACP_NAME",
+        "QMUX_ACP_PROMPT",
+        "QMUX_ACP_TRANSCRIPT",
+        "QMUX_ACP_TRANSCRIPT_STREAM",
+    ];
+    for key in CONTEXT_KEYS {
+        command.env_remove(key);
+    }
 }
 
 /// Marks a pane's frontend listener as live and flushes any output buffered
@@ -3288,6 +3349,7 @@ mod tests {
         let base = qmux_pane_envs(&state, "pane-a").unwrap();
         assert_eq!(envs[..base.len()], base[..]);
         assert_eq!(env_value(&envs, "QMUX_AGENT_ID").unwrap(), "agent-7");
+        assert!(env_value(&envs, "QMUX_USER_TOKEN").is_none());
     }
 
     #[test]
@@ -3726,6 +3788,25 @@ mod tests {
         assert_eq!(
             env_value(&envs, "QMUX_WORKSPACE_ROOT"),
             Some("/tmp/qmux-workspaces".to_string())
+        );
+    }
+
+    #[test]
+    fn child_context_scrub_removes_outer_qmux_identity_before_fresh_envs() {
+        let mut command = CommandBuilder::new("/usr/bin/true");
+        command.env("QMUX_USER_TOKEN", "outer-user-token");
+        command.env("QMUX_AGENT_ID", "outer-agent");
+        command.env("QMUX_ACP_PROMPT", "outer-prompt");
+
+        scrub_inherited_qmux_context(&mut command);
+
+        assert!(command.get_env("QMUX_USER_TOKEN").is_none());
+        assert!(command.get_env("QMUX_AGENT_ID").is_none());
+        assert!(command.get_env("QMUX_ACP_PROMPT").is_none());
+        command.env("QMUX_TOKEN", "fresh-pane-token");
+        assert_eq!(
+            command.get_env("QMUX_TOKEN"),
+            Some("fresh-pane-token".as_ref())
         );
     }
 

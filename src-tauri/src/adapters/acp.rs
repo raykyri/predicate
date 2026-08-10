@@ -36,7 +36,7 @@ use crate::transcript::{Turn, TurnBlock, start_transcript_tail, string_field};
 use crate::turn_queue::{IdleResolution, advance_after_idle};
 use crate::workspace::{
     AcpConfigOption, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
-    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
+    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -229,7 +229,7 @@ impl AcpAdapter {
             self.resolve(state, &host, options.agent.as_deref())?;
         let bridge = crate::launch_path::qmux_cli_path()?;
 
-        let agent = prepare_agent_workspace(
+        let agent = prepare_agent_workspace_with_parent(
             state,
             PrepareAgentWorkspaceRequest {
                 group_id: request.group_id,
@@ -240,6 +240,7 @@ impl AcpAdapter {
                 effort: None,
                 use_worktree: request.use_worktree.unwrap_or(false),
             },
+            request.parent_id.as_deref(),
         )?;
         let cwd = request
             .cwd
