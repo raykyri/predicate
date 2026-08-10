@@ -928,13 +928,17 @@ header + .turn-blocks {
   font-weight: 600;
 }
 
+/* Block rhythm is keyed to the type, not a fixed pixel gap: at 14px/1.5 a line
+   box is 21px, so the old flat 8px was a third of a line and consecutive
+   paragraphs ran together. 0.72em reads as a paragraph break and tracks the
+   transcript font-size setting instead of shrinking against it. */
 .turn-markdown p,
 .turn-markdown ul,
 .turn-markdown ol,
 .turn-markdown blockquote,
 .turn-markdown pre,
 .turn-markdown table {
-  margin: 0 0 8px;
+  margin: 0 0 0.72em;
 }
 
 /* Heading scale. Without an explicit size per level react-markdown's h1–h6 all
@@ -997,7 +1001,7 @@ header + .turn-blocks {
 }
 
 .turn-markdown li {
-  margin: 2px 0;
+  margin: 3px 0;
 }
 
 .turn-markdown li > p {
@@ -1059,8 +1063,11 @@ header + .turn-blocks {
   color: var(--text-secondary);
 }
 
+/* No outline on either inline or fenced code: a hairline box around every
+   inline token speckles the line it sits in, and the darker fill already
+   separates code from prose on its own. */
 .turn-markdown code {
-  border: 1px solid var(--surface-border-strong);
+  border: 0;
   border-radius: var(--radius-sm);
   background: var(--transcript-code-bg);
   padding: 1px 4px;
@@ -1071,7 +1078,7 @@ header + .turn-blocks {
 
 .turn-markdown pre {
   overflow: auto;
-  border: 1px solid var(--surface-border-strong);
+  border: 0;
   border-radius: var(--radius-md);
   background: var(--transcript-code-bg);
   padding: 8px;

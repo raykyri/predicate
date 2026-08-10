@@ -12591,6 +12591,14 @@ function MainApp() {
     const paneTopQueueWaitsOnOtherPane = paneWaitsOnOtherPane(paneAgent);
     const paneDotClass = agentTabStatusDotClass(paneAgent?.status, paneTopQueueWaitsOnOtherPane);
     const paneStatus = paneTabStatusLabel(pane, paneAgent);
+    const paneStatusQueueClass =
+      paneAgent &&
+      (paneAgent.status === "running" || paneAgent.status === "idle") &&
+      queuedTurnsForAgent(paneAgent).length > 0
+        ? paneTopQueueWaitsOnOtherPane
+          ? " pane-tab-status-waiting"
+          : " pane-tab-status-queued"
+        : "";
     const paneSplit = paneSplitForPane(paneSplits, pane.id);
     const isBtwPane = Boolean(paneSplit?.btwPaneIds?.includes(pane.id));
     // The panes of the active split render as one connected card in the sidebar.
@@ -12762,7 +12770,9 @@ function MainApp() {
                     {paneStatus}
                   </small>
                 ) : (
-                  <small className="pane-tab-status">{paneStatus}</small>
+                  <small className={`pane-tab-status${paneStatusQueueClass}`}>
+                    {paneStatus}
+                  </small>
                 )
               ) : null}
             </span>

@@ -820,6 +820,21 @@
   text-overflow: ellipsis;
 }
 
+/* Queue-count pills echo the queue itself without competing with the pane title:
+   ordinary queued work uses its amber activity tone, while a cross-pane wait
+   uses the blue wait treatment from the gated queue card. */
+.pane-tab-row .pane-tab .pane-tab-status.pane-tab-status-queued {
+  background: color-mix(in srgb, var(--status-active-fg) 8%, var(--pane-tab-status-bg));
+  color: color-mix(in srgb, var(--status-active-fg) 70%, var(--text-subtle));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--status-active-fg) 18%, transparent);
+}
+
+.pane-tab-row .pane-tab .pane-tab-status.pane-tab-status-waiting {
+  background: color-mix(in srgb, var(--status-info-fg) 8%, var(--pane-tab-status-bg));
+  color: color-mix(in srgb, var(--status-info-fg) 70%, var(--text-subtle));
+  box-shadow: inset 0 0 0 1px var(--status-info-border);
+}
+
 .pane-tab-status-clickable {
   /* Clickable to dismiss. */
   cursor: pointer;
