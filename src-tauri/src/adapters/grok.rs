@@ -709,14 +709,9 @@ impl GrokAdapter {
                         agent.status = AgentStatus::Running;
                         state.set_agent_status(&agent.id, agent.status)?;
                     }
-                    // A new main-agent turn supersedes the previous one, so
-                    // subagents tracked for it can no longer gate completion.
-                    // Clearing here also self-heals a counter wedged by a lost
-                    // SubagentStop, which would otherwise suppress every future
-                    // Stop.
-                    if super::subagent_id(&notification.payload).is_none() {
-                        state.clear_agent_subagents(&agent.id);
-                    }
+                    // Root prompts can steer an in-flight turn. Keep any known
+                    // child live until SubagentStop or the next authoritative
+                    // empty background-task snapshot reconciles it.
                     send_tracking =
                         Some(state.match_agent_prompt_submit(&agent.id, prompt.as_deref())?);
                 }
@@ -797,17 +792,21 @@ impl GrokAdapter {
             }
             "Stop" | "StopFailure" => {
                 let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
-                    if grok_stop_has_active_subagents(&notification.payload) {
+                    let reported_active = grok_stop_active_subagents(&notification.payload);
+                    if reported_active == Some(false) {
+                        // A present, empty snapshot is authoritative. Reconcile
+                        // the advisory hook tracker so one lost SubagentStop
+                        // cannot suppress every future idle boundary.
+                        state.clear_agent_subagents(&agent.id);
+                    }
+                    if reported_active == Some(true)
+                        || (reported_active.is_none()
+                            && state.agent_has_active_subagents(&agent.id)?)
+                    {
                         agent.status = AgentStatus::Running;
                         state.set_agent_status(&agent.id, agent.status)?;
                         true
                     } else {
-                        // Grok's Stop payload is the authoritative snapshot of work
-                        // that can still wake this turn. Reconcile the advisory
-                        // SubagentStart/SubagentStop tracker here so one lost stop
-                        // hook cannot suppress this and every future idle boundary,
-                        // stranding the qMux queue behind a permanently Running tab.
-                        state.clear_agent_subagents(&agent.id);
                         false
                     }
                 } else {
@@ -878,16 +877,17 @@ impl GrokAdapter {
     }
 }
 
-/// Grok includes the currently live background work in every main-agent Stop
-/// payload. Prefer that point-in-time snapshot over qMux's hook-derived tracker:
-/// the latter is useful between events, but a missing SubagentStop must not veto an
-/// authoritative idle boundary forever.
-fn grok_stop_has_active_subagents(payload: &Value) -> bool {
+/// Reads Grok's currently live background work from a main-agent Stop payload.
+/// Prefer a present point-in-time snapshot over qMux's hook-derived tracker: an
+/// explicit empty list reconciles a missing SubagentStop. Preserve `None` for an
+/// absent or malformed field, though, so schema/version gaps fail closed to the
+/// tracker instead of becoming a false parent-completion boundary.
+fn grok_stop_active_subagents(payload: &Value) -> Option<bool> {
     payload
         .get("backgroundTasks")
         .or_else(|| payload.get("background_tasks"))
         .and_then(Value::as_array)
-        .is_some_and(|tasks| {
+        .map(|tasks| {
             tasks.iter().any(|task| {
                 task.get("type").and_then(Value::as_str) == Some("subagent")
                     && !matches!(
@@ -2532,18 +2532,62 @@ mod tests {
 
     #[test]
     fn grok_stop_background_task_snapshot_ignores_settled_subagents() {
-        assert!(!grok_stop_has_active_subagents(&json!({
-            "backgroundTasks": [
-                { "type": "shell", "status": "running" },
-                { "type": "subagent", "status": "completed" },
-                { "type": "subagent", "status": "cancelled" }
-            ]
-        })));
-        assert!(grok_stop_has_active_subagents(&json!({
-            "background_tasks": [
-                { "type": "subagent", "status": "running" }
-            ]
-        })));
+        assert_eq!(grok_stop_active_subagents(&json!({})), None);
+        assert_eq!(
+            grok_stop_active_subagents(&json!({
+                "backgroundTasks": [
+                    { "type": "shell", "status": "running" },
+                    { "type": "subagent", "status": "completed" },
+                    { "type": "subagent", "status": "cancelled" }
+                ]
+            })),
+            Some(false)
+        );
+        assert_eq!(
+            grok_stop_active_subagents(&json!({
+                "background_tasks": [
+                    { "type": "subagent", "status": "running" }
+                ]
+            })),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn snapshotless_stop_falls_back_to_subagent_hooks_without_draining() {
+        let state = test_state();
+        let mut agent = sample_agent();
+        agent.status = AgentStatus::Running;
+        state.insert_agent(agent).unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "after synthesis".to_string())
+            .unwrap();
+        ingest(
+            &state,
+            hook_for_agent(
+                "SubagentStart",
+                "agent-1",
+                json!({ "subagentId": "child-1" }),
+            ),
+        );
+        ingest(
+            &state,
+            hook_for_agent(
+                "UserPromptSubmit",
+                "agent-1",
+                json!({ "prompt": "steer while child runs" }),
+            ),
+        );
+        assert!(state.agent_has_active_subagents("agent-1").unwrap());
+
+        // Missing is not empty: a version/schema gap must fail closed to the
+        // hook tracker rather than reinterpret child launch as parent completion.
+        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(event.event_type, "agent.running");
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["after synthesis".to_string()]
+        );
     }
 
     #[test]

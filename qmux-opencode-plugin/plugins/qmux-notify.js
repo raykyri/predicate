@@ -184,27 +184,60 @@ export const QmuxNotifyPlugin = async () => {
     return true;
   }
 
+  const activeSubagentSessions = new Set();
+
+  function activeSubagentSnapshot() {
+    return [...activeSubagentSessions].sort();
+  }
+
+  function rootSessionId() {
+    return lastSessionId ?? ROOT_SESSION_ID ?? null;
+  }
+
   async function notifyIdle(sessionId) {
-    if (!reserveStopNotification(sessionId)) return;
-    await notify("Stop", { session_id: sessionId });
+    const activeSubagents = activeSubagentSnapshot();
+    // An idle edge while descendants are live is a non-terminal wait marker,
+    // not the completion Stop that the one-second duplicate guard protects.
+    // Reserving it would suppress a real root completion if the descendants
+    // finish quickly and OpenCode emits the final idle within that second.
+    if (!activeSubagents.length && !reserveStopNotification(sessionId)) return;
+    await notify("Stop", {
+      session_id: sessionId,
+      active_subagents: activeSubagents,
+    });
   }
 
   async function notifyInterrupted(sessionId, reason) {
     if (!reserveStopNotification(sessionId)) return;
+    // Interrupt is itself a terminal boundary. Child idle notifications can
+    // race behind it, but they must not keep the canceled turn (or its queue)
+    // alive waiting for another root idle that may never arrive.
+    activeSubagentSessions.clear();
     await writeTranscriptEvent(sessionId, {
       type: "turn_aborted",
       reason: reason ?? "interrupted",
     });
-    await notify("Stop", { session_id: sessionId, reason: reason ?? "interrupted" });
+    await notify("Stop", {
+      session_id: sessionId,
+      reason: reason ?? "interrupted",
+      active_subagents: activeSubagentSnapshot(),
+    });
   }
 
   async function notifyFailure(sessionId, reason) {
     if (!reserveStopNotification(sessionId)) return;
+    // A failed session/prompt has completed just as definitively as an
+    // interrupted one; descendants are abandoned with that failed turn.
+    activeSubagentSessions.clear();
     await writeTranscriptEvent(sessionId, {
       type: "turn_aborted",
       reason,
     });
-    await notify("StopFailure", { session_id: sessionId, reason });
+    await notify("StopFailure", {
+      session_id: sessionId,
+      reason,
+      active_subagents: activeSubagentSnapshot(),
+    });
   }
 
   function tracksSession(sessionId) {
@@ -221,6 +254,24 @@ export const QmuxNotifyPlugin = async () => {
     }
   }
 
+  async function startSubagentSession(sessionId, parentSessionId) {
+    if (!sessionId || activeSubagentSessions.has(sessionId)) return;
+    activeSubagentSessions.add(sessionId);
+    await notify("SubagentStart", {
+      session_id: rootSessionId(),
+      subagent_id: sessionId,
+      parent_session_id: parentSessionId,
+    });
+  }
+
+  async function stopSubagentSession(sessionId) {
+    if (!sessionId || !activeSubagentSessions.delete(sessionId)) return;
+    await notify("SubagentStop", {
+      session_id: rootSessionId(),
+      subagent_id: sessionId,
+    });
+  }
+
   async function handleEvent(input) {
     const event = input?.event;
     const type = event?.type;
@@ -233,15 +284,51 @@ export const QmuxNotifyPlugin = async () => {
       // qMux passes that known source id so this one lineage edge becomes the pane
       // root, while ordinary child/subagent sessions remain excluded.
       if (ROOT_SESSION_ID) {
-        if (sid !== ROOT_SESSION_ID) return;
+        if (sid === ROOT_SESSION_ID) {
+          if (lastSessionId === sid) return;
+        } else {
+          if (parentID === rootSessionId() || activeSubagentSessions.has(parentID)) {
+            await startSubagentSession(sid, parentID);
+          }
+          return;
+        }
       } else if (FORK_POINT) {
-        if (sid === FORK_POINT) return;
-        if (parentID !== FORK_POINT) return;
+        if (!lastSessionId) {
+          if (sid === FORK_POINT || parentID !== FORK_POINT) return;
+        } else if (parentID === lastSessionId || activeSubagentSessions.has(parentID)) {
+          await startSubagentSession(sid, parentID);
+          return;
+        } else {
+          return;
+        }
+      } else if (lastSessionId) {
+        if (parentID === lastSessionId || activeSubagentSessions.has(parentID)) {
+          await startSubagentSession(sid, parentID);
+        }
+        return;
       } else if (parentID) {
         return;
       }
       lastSessionId = sid;
       await notify("SessionStart", { session_id: sid });
+      return;
+    }
+
+    // OpenCode gives every subagent its own child session. The root can report
+    // idle while one of those sessions is still working, so observe child
+    // settlement before filtering child traffic out of the root transcript.
+    // Descendants count too: a child may itself launch another child, and the
+    // root turn is not complete until the whole descendant set has settled.
+    if (activeSubagentSessions.has(sid)) {
+      const status = properties?.status?.type ?? properties?.info?.status ?? null;
+      if (
+        type === "session.idle" ||
+        type === "session.deleted" ||
+        type === "session.error" ||
+        (type === "session.status" && status === "idle")
+      ) {
+        await stopSubagentSession(sid);
+      }
       return;
     }
 
@@ -390,6 +477,11 @@ export const QmuxNotifyPlugin = async () => {
       const sid = input?.sessionID ?? lastSessionId;
       await establishSession(sid);
       if (!tracksSession(sid)) return;
+      // Stop deduplication is per turn, not per session. Without this reset, a
+      // second short turn finishing within one second of the previous one can
+      // lose its only completion edge. Keep child tracking intact here: native
+      // TUI input may queue/steer while a child from the active turn still runs.
+      stopNotifiedAt.delete(sid ?? "__unknown__");
       const content = normalizeContent(output?.parts ?? []);
       const prompt = promptTextFromContent(content);
       await notify("UserPromptSubmit", {

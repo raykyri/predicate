@@ -337,3 +337,137 @@ test("treats an expected resumed fork as root despite its parent lineage", async
   delete process.env.QMUX_ROOT_SESSION_ID;
   await rm(workspace, { recursive: true, force: true });
 });
+
+test("reports descendant sessions and keeps them on root idle snapshots", async () => {
+  const workspace = await mkdtemp(join(tmpdir(), "qmux-opencode-subagents-"));
+  const cli = join(workspace, "qmux-test-cli");
+  const notifications = join(workspace, "notifications.txt");
+  await writeFile(
+    cli,
+    '#!/bin/sh\npayload=$(cat)\nprintf "%s\\t%s\\n" "$*" "$payload" >> "$QMUX_NOTIFY_LOG"\n',
+    "utf8",
+  );
+  await chmod(cli, 0o755);
+  Object.assign(process.env, {
+    QMUX_SOCK: join(workspace, "qmux.sock"),
+    QMUX_TOKEN: "test-token",
+    QMUX_PANE_ID: "pane-subagents",
+    QMUX_AGENT_ID: "agent-subagents",
+    QMUX_CLI: cli,
+    QMUX_WORKSPACE_ROOT: workspace,
+    QMUX_NOTIFY_LOG: notifications,
+  });
+  delete process.env.QMUX_FORK_POINT;
+  delete process.env.QMUX_ROOT_SESSION_ID;
+
+  const { QmuxNotifyPlugin } = await import(`../plugins/qmux-notify.js?subagents=${Date.now()}`);
+  const hooks = await QmuxNotifyPlugin();
+  await hooks.event({
+    event: { type: "session.created", properties: { info: { id: "root-session" } } },
+  });
+  await hooks.event({
+    event: {
+      type: "session.created",
+      properties: { info: { id: "child-session", parentID: "root-session" } },
+    },
+  });
+  await hooks.event({
+    event: {
+      type: "session.created",
+      properties: { info: { id: "grandchild-session", parentID: "child-session" } },
+    },
+  });
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "root-session" } },
+  });
+  // A native root prompt can arrive while descendants still run. It resets
+  // per-turn deduplication but must not erase descendant tracking.
+  await hooks["chat.message"](
+    { sessionID: "root-session" },
+    {
+      message: { id: "next-message", role: "user" },
+      parts: [{ type: "text", text: "next turn" }],
+    },
+  );
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "root-session" } },
+  });
+  // Child completion is lifecycle bookkeeping only: it must not masquerade as
+  // completion of the root turn, and the grandchild remains active.
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "child-session" } },
+  });
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "grandchild-session" } },
+  });
+  // This lands inside the ordinary one-second duplicate window. The earlier
+  // non-terminal root idle must not suppress this real completion edge.
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "root-session" } },
+  });
+  // A new short turn after real completion must get its own completion edge
+  // without waiting out the previous turn's one-second dedup window.
+  await hooks["chat.message"](
+    { sessionID: "root-session" },
+    {
+      message: { id: "third-message", role: "user" },
+      parts: [{ type: "text", text: "third turn" }],
+    },
+  );
+  await hooks.event({
+    event: { type: "session.idle", properties: { sessionID: "root-session" } },
+  });
+
+  const lines = (await readFile(notifications, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => {
+      const separator = line.indexOf("\t");
+      return {
+        command: line.slice(0, separator),
+        payload: JSON.parse(line.slice(separator + 1)),
+      };
+    });
+  assert.deepEqual(
+    lines.filter((line) => line.command === "notify SubagentStart").map((line) => line.payload),
+    [
+      {
+        session_id: "root-session",
+        subagent_id: "child-session",
+        parent_session_id: "root-session",
+      },
+      {
+        session_id: "root-session",
+        subagent_id: "grandchild-session",
+        parent_session_id: "child-session",
+      },
+    ],
+  );
+  const rootStops = lines.filter(
+    (line) => line.command === "notify Stop" && line.payload.session_id === "root-session",
+  );
+  assert.deepEqual(
+    rootStops.map((line) => line.payload.active_subagents),
+    [
+      ["child-session", "grandchild-session"],
+      ["child-session", "grandchild-session"],
+      [],
+      [],
+    ],
+  );
+  assert.deepEqual(
+    lines.filter((line) => line.command === "notify SubagentStop").map((line) => line.payload),
+    [
+      { session_id: "root-session", subagent_id: "child-session" },
+      { session_id: "root-session", subagent_id: "grandchild-session" },
+    ],
+  );
+  assert.equal(
+    lines.filter(
+      (line) => line.command === "notify Stop" && line.payload.session_id === "child-session",
+    ).length,
+    0,
+  );
+
+  await rm(workspace, { recursive: true, force: true });
+});

@@ -668,6 +668,10 @@ impl OpencodeAdapter {
                         agent.status = AgentStatus::Running;
                         state.set_agent_status(&agent.id, agent.status)?;
                     }
+                    // Native TUI input can queue or steer a root prompt while a
+                    // descendant is still running. Keep lifecycle bookkeeping
+                    // until SubagentStop or an authoritative empty Stop snapshot
+                    // proves that the descendant set has settled.
                     send_tracking =
                         Some(state.match_agent_prompt_submit(&agent.id, prompt.as_deref())?);
                 }
@@ -715,13 +719,63 @@ impl OpencodeAdapter {
                 }
                 "agent.running"
             }
+            "SubagentStart" => {
+                if let Some(agent) = agent.as_mut() {
+                    state.agent_subagent_started(
+                        &agent.id,
+                        super::subagent_id(&notification.payload),
+                    )?;
+                    agent.status = AgentStatus::Running;
+                    state.set_agent_status(&agent.id, agent.status)?;
+                }
+                "agent.subagent_started"
+            }
+            "SubagentStop" => {
+                if let Some(agent) = agent.as_mut() {
+                    let tracked = state
+                        .agent_subagent_stopped(
+                            &agent.id,
+                            super::subagent_id(&notification.payload),
+                        )?
+                        .is_some();
+                    if tracked {
+                        agent.status = AgentStatus::Running;
+                        state.set_agent_status(&agent.id, agent.status)?;
+                    }
+                }
+                "agent.subagent_stopped"
+            }
             "Stop" | "StopFailure" => {
-                let drained = if let Some(agent) = agent.as_mut() {
+                let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
+                    let reported_active = reported_active_subagents(&notification.payload);
+                    if let Some(active) = reported_active {
+                        if !active {
+                            // The producer's complete snapshot reconciles a
+                            // lost/late child-stop notification instead of
+                            // wedging all future queue drains.
+                            state.clear_agent_subagents(&agent.id);
+                        }
+                    }
+                    if reported_active == Some(true)
+                        || state.agent_has_active_subagents(&agent.id)?
+                    {
+                        agent.status = AgentStatus::Running;
+                        state.set_agent_status(&agent.id, agent.status)?;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                let drained = if waiting_on_subagents {
+                    false
+                } else if let Some(agent) = agent.as_mut() {
                     finish_agent_after_stop(state, agent)?
                 } else {
                     false
                 };
-                if drained {
+                if waiting_on_subagents || drained {
                     "agent.running"
                 } else {
                     "agent.done"
@@ -1081,6 +1135,17 @@ fn opencode_session_argument_id(args: &[String]) -> Option<&str> {
     None
 }
 
+/// The OpenCode plugin includes a complete, point-in-time descendant-session
+/// list on every root Stop. `None` preserves compatibility with older plugins;
+/// an empty list is authoritative and clears stale hook-derived tracking.
+fn reported_active_subagents(payload: &Value) -> Option<bool> {
+    payload
+        .get("active_subagents")
+        .or_else(|| payload.get("activeSubagents"))
+        .and_then(Value::as_array)
+        .map(|subagents| !subagents.is_empty())
+}
+
 fn opencode_value_flag(arg: &str) -> bool {
     matches!(
         arg,
@@ -1283,9 +1348,12 @@ mod tests {
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
         MuseAdapterConfig, OpencodeAdapterConfig,
     };
-    use crate::state::AppState;
+    use crate::state::{AppState, PaneInfo, PaneRuntime, PaneStatus};
+    use portable_pty::{Child, ChildKiller, ExitStatus, PtySize, native_pty_system};
     use std::fs;
+    use std::io::{self, Write};
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
 
     fn test_config() -> QmuxConfig {
         QmuxConfig {
@@ -1345,6 +1413,53 @@ mod tests {
             paused: false,
             created_at: 1,
         }
+    }
+
+    fn install_agent_pane(state: &AppState) -> Arc<Mutex<Vec<u8>>> {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        drop(pair.slave);
+
+        let mut agent = sample_agent();
+        agent.pane_id = Some("pane-1".to_string());
+        agent.status = AgentStatus::Running;
+        state.insert_agent(agent).unwrap();
+        state
+            .insert_pane(PaneRuntime {
+                info: PaneInfo {
+                    id: "pane-1".to_string(),
+                    title: "OpenCode".to_string(),
+                    last_osc_title: None,
+                    kind: PaneKind::Agent,
+                    agent_id: Some("agent-1".to_string()),
+                    group_id: "group-1".to_string(),
+                    cwd: "/tmp/qmux-opencode-tests".to_string(),
+                    cols: 80,
+                    rows: 24,
+                    status: PaneStatus::Running,
+                    last_active_at: 0,
+                    recovered: false,
+                    depth: 0,
+                },
+                backend: crate::state::PaneBackend::HostPty {
+                    child: Arc::new(Mutex::new(Box::new(FakeChild))),
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(Box::new(RecordingWriter {
+                        bytes: bytes.clone(),
+                    }))),
+                    backlog: Default::default(),
+                    native_surface: false,
+                },
+            })
+            .unwrap();
+        bytes
     }
 
     fn hook_for_agent(event: &str, agent_id: &str, payload: Value) -> AdapterNotification {
@@ -1794,6 +1909,68 @@ mod tests {
     }
 
     #[test]
+    fn root_idle_snapshot_cannot_drain_while_descendants_are_active() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "queued after synthesis".to_string())
+            .unwrap();
+
+        // The producer snapshot closes the launch-to-SubagentStart race: even
+        // before the start notification arrives, root idle is not completion.
+        let event = ingest(
+            &state,
+            hook_for_agent(
+                "Stop",
+                "agent-1",
+                json!({ "active_subagents": ["child-1"] }),
+            ),
+        );
+        assert_eq!(event.event_type, "agent.running");
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["queued after synthesis".to_string()]
+        );
+        assert!(bytes.lock().unwrap().is_empty());
+
+        // Also model notification reordering: a late start must survive a
+        // queued/steered root prompt instead of being mistaken for stale state.
+        ingest(
+            &state,
+            hook_for_agent(
+                "SubagentStart",
+                "agent-1",
+                json!({ "subagent_id": "child-1" }),
+            ),
+        );
+        ingest(
+            &state,
+            hook_for_agent(
+                "UserPromptSubmit",
+                "agent-1",
+                json!({ "prompt": "steer while child runs" }),
+            ),
+        );
+        assert!(state.agent_has_active_subagents("agent-1").unwrap());
+
+        // A producer snapshot remains authoritative even if the individual
+        // child-stop notification is lost, so stale tracking cannot wedge the
+        // queue on the true completion edge.
+        let event = ingest(
+            &state,
+            hook_for_agent("Stop", "agent-1", json!({ "active_subagents": [] })),
+        );
+        assert_eq!(event.event_type, "agent.running");
+        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
+        assert!(!state.agent_has_active_subagents("agent-1").unwrap());
+        assert!(
+            String::from_utf8(bytes.lock().unwrap().clone())
+                .unwrap()
+                .contains("queued after synthesis")
+        );
+    }
+
+    #[test]
     fn permission_request_marks_agent_awaiting_permission() {
         let state = test_state();
         let mut agent = sample_agent();
@@ -1987,5 +2164,47 @@ mod tests {
         let state = test_state();
         let path = OpencodeAdapter::transcript_path_for(&state, "agent-42", "../outside");
         assert!(path.ends_with(".qmux/opencode/agent-42/pending.jsonl"));
+    }
+
+    #[derive(Debug)]
+    struct FakeChild;
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeChild)
+        }
+    }
+
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    struct RecordingWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

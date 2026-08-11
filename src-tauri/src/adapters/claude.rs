@@ -861,12 +861,10 @@ impl ClaudeAdapter {
                         state.set_agent_status(&agent.id, agent.status)?;
                     }
                     if !is_subagent {
-                        // A new main-agent turn supersedes the previous one, so
-                        // subagents tracked for it can no longer gate completion.
-                        // Clearing here also self-heals a counter wedged by a lost
-                        // SubagentStop (interrupt, hook timeout, dropped socket),
-                        // which would otherwise suppress every future Stop.
-                        state.clear_agent_subagents(&agent.id);
+                        // A root prompt can steer the current turn while a
+                        // background child is still live. Preserve the hook
+                        // tracker until its stop hook or an authoritative empty
+                        // background-task snapshot proves it has settled.
                         send_tracking =
                             Some(state.match_agent_prompt_submit(&agent.id, prompt.as_deref())?);
                     }
@@ -988,6 +986,12 @@ impl ClaudeAdapter {
                     // (a snapshot-less Stop leaves the previous verdict alone).
                     if let Some(active) = reported_background_tasks_active(&notification.payload) {
                         state.set_agent_background_tasks_reported(&agent.id, active)?;
+                        if !active {
+                            // The complete registry also reconciles a dropped
+                            // SubagentStop, so preserving child state across
+                            // steered prompts cannot wedge later turns.
+                            state.clear_agent_subagents(&agent.id);
+                        }
                     }
                     if state.agent_has_reported_background_tasks(&agent.id)?
                         || state.agent_has_active_subagents(&agent.id)?
@@ -3352,7 +3356,10 @@ mod tests {
     #[test]
     fn stop_waits_for_reported_background_tasks_without_subagent_hooks() {
         let state = test_state();
-        install_agent_pane(&state);
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "after synthesis".to_string())
+            .unwrap();
 
         let event = ingest(
             &state,
@@ -3372,12 +3379,19 @@ mod tests {
             state.agent("agent-1").unwrap().unwrap().status,
             AgentStatus::Running
         ));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["after synthesis".to_string()]
+        );
+        assert!(bytes.lock().unwrap().is_empty());
 
         let event = ingest(&state, hook("Stop", json!({ "background_tasks": [] })));
-        assert_eq!(event.event_type, "agent.done");
+        assert_eq!(event.event_type, "agent.running");
+        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
+        assert!(written_text(&bytes).contains("after synthesis"));
         assert!(matches!(
             state.agent("agent-1").unwrap().unwrap().status,
-            AgentStatus::Done
+            AgentStatus::Running
         ));
     }
 
@@ -3465,6 +3479,44 @@ mod tests {
 
         let event = ingest(&state, hook("SessionEnd", json!({})));
         assert_eq!(event.event_type, "agent.session_end");
+    }
+
+    #[test]
+    fn steered_prompt_preserves_subagent_gate_until_authoritative_empty_snapshot() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "after synthesis".to_string())
+            .unwrap();
+
+        ingest(
+            &state,
+            hook("SubagentStart", json!({ "agent_id": "child-1" })),
+        );
+        ingest(
+            &state,
+            hook(
+                "UserPromptSubmit",
+                json!({ "prompt": "steer while child runs" }),
+            ),
+        );
+        assert!(state.agent_has_active_subagents("agent-1").unwrap());
+
+        let event = ingest(&state, hook("Stop", json!({})));
+        assert_eq!(event.event_type, "agent.running");
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["after synthesis".to_string()]
+        );
+        assert!(bytes.lock().unwrap().is_empty());
+
+        // A complete empty registry heals a lost child-stop hook and permits
+        // the real completion boundary to drain exactly one queued turn.
+        let event = ingest(&state, hook("Stop", json!({ "background_tasks": [] })));
+        assert_eq!(event.event_type, "agent.running");
+        assert!(!state.agent_has_active_subagents("agent-1").unwrap());
+        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
+        assert!(written_text(&bytes).contains("after synthesis"));
     }
 
     #[test]

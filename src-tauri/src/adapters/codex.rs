@@ -711,14 +711,9 @@ impl CodexAdapter {
                         agent.status = AgentStatus::Running;
                         state.set_agent_status(&agent.id, agent.status)?;
                     }
-                    // A new main-agent turn supersedes the previous one, so
-                    // subagents tracked for it can no longer gate completion.
-                    // Clearing here also self-heals a counter wedged by a lost
-                    // SubagentStop, which would otherwise suppress every future
-                    // Stop.
-                    if super::subagent_id(&notification.payload).is_none() {
-                        state.clear_agent_subagents(&agent.id);
-                    }
+                    // Codex accepts prompts while Running, so this may be a
+                    // steer rather than a clean turn boundary. Preserve known
+                    // children until their lifecycle stop arrives.
                     send_tracking =
                         Some(state.match_agent_prompt_submit(&agent.id, prompt.as_deref())?);
                 }
@@ -3982,6 +3977,68 @@ trusted_hash = "sha256:trusted"
 
         let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.stop_observed");
+    }
+
+    #[test]
+    fn deferred_stop_cannot_drain_a_queue_after_subagent_launch() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "after synthesis".to_string())
+            .unwrap();
+
+        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(event.event_type, "agent.stop_observed");
+        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
+
+        ingest(
+            &state,
+            hook_for_agent("SubagentStart", "agent-1", json!({ "agent_id": "child-1" })),
+        );
+        ingest(
+            &state,
+            hook_for_agent(
+                "UserPromptSubmit",
+                "agent-1",
+                json!({ "prompt": "steer while child runs" }),
+            ),
+        );
+        assert!(state.agent_has_active_subagents("agent-1").unwrap());
+        assert!(
+            resolve_agent_after_stop_grace(&state, "agent-1", baseline)
+                .unwrap()
+                .is_none()
+        );
+
+        // Even a later parent Stop cannot arm a queue drain while that known
+        // child remains live.
+        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(event.event_type, "agent.running");
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["after synthesis".to_string()]
+        );
+        assert!(bytes.lock().unwrap().is_empty());
+
+        // Once the child settles, the next synthesis Stop follows the normal
+        // deferred completion path and drains the queue after its grace check.
+        ingest(
+            &state,
+            hook_for_agent("SubagentStop", "agent-1", json!({ "agent_id": "child-1" })),
+        );
+        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(event.event_type, "agent.stop_observed");
+        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
+        let event = resolve_agent_after_stop_grace(&state, "agent-1", baseline)
+            .unwrap()
+            .expect("settled child should permit completion");
+        assert_eq!(event.event_type, "agent.running");
+        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
+        assert!(
+            String::from_utf8(bytes.lock().unwrap().clone())
+                .unwrap()
+                .contains("after synthesis")
+        );
     }
 
     #[test]
