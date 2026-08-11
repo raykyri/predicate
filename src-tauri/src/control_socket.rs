@@ -519,12 +519,8 @@ pub(crate) fn resolve_browser_target(
     };
 
     let roots = state.pane_file_roots(authed_pane);
-    let canonical =
-        crate::file_server::resolve_under_roots(&requested, &roots).ok_or_else(|| {
-            format!(
-                "'{target}' was not found under this pane's working directory and cannot be opened"
-            )
-        })?;
+    let canonical = crate::file_server::resolve_under_roots(&requested, &roots)
+        .ok_or_else(|| format!("'{target}' was not found"))?;
     let port = state
         .file_server_port()
         .ok_or_else(|| "the file server is not running".to_string())?;
@@ -702,9 +698,9 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(
-            err.contains("was not found under this pane's working directory"),
-            "unexpected error: {err}"
+        assert_eq!(
+            err,
+            "'/Users/raymond/Code/multitool/dev/menubar-design-variants.html' was not found"
         );
     }
 
