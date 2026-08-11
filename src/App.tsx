@@ -2652,9 +2652,11 @@ function MainApp() {
   // user restores it.
   const [artifactUndo, setArtifactUndo] = useState<ArtifactInfo | null>(null);
   const artifactUndoTimerRef = useRef<number | null>(null);
-  // Per-pane tray chrome: closed (paperclip toggle / titlebar ×), collapsed to
-  // the titlebar, and the dragged position (null = default top-right anchor).
-  const [artifactTrayUiByPane, setArtifactTrayUiByPane] = useState<
+  // Per-workspace tray chrome: closed (paperclip toggle / titlebar ×), collapsed
+  // to the titlebar, and the dragged position (null = default top-right anchor).
+  // This is intentionally a hard cutover from pane-keyed state: every tab in a
+  // workspace reads and updates the same entry.
+  const [artifactTrayUiByWorkspace, setArtifactTrayUiByWorkspace] = useState<
     Record<string, { closed?: boolean; collapsed?: boolean; pos?: ArtifactTrayPosition | null }>
   >({});
   // The panel is globally enabled from Display settings, but each pane remembers
@@ -13136,10 +13138,10 @@ function MainApp() {
               browserOpen={surface.browserOverlay?.open ?? false}
               onToggleBrowser={toggleActiveBrowserOverlay}
               artifactCount={artifactsForGroup(surface.pane.groupId).length}
-              artifactTrayOpen={!artifactTrayUiByPane[surface.pane.id]?.closed}
+              artifactTrayOpen={!artifactTrayUiByWorkspace[surface.pane.groupId]?.closed}
               onToggleArtifactTray={() =>
-                patchArtifactTrayUi(surface.pane.id, {
-                  closed: !artifactTrayUiByPane[surface.pane.id]?.closed,
+                patchArtifactTrayUi(surface.pane.groupId, {
+                  closed: !artifactTrayUiByWorkspace[surface.pane.groupId]?.closed,
                 })
               }
               transcriptExpanded={activeTranscriptExpanded}
@@ -13319,39 +13321,40 @@ function MainApp() {
   }
 
   function patchArtifactTrayUi(
-    paneId: string,
+    workspaceId: string,
     patch: Partial<{
       closed: boolean;
       collapsed: boolean;
       pos: ArtifactTrayPosition | null;
     }>,
   ) {
-    setArtifactTrayUiByPane((current) => ({
+    setArtifactTrayUiByWorkspace((current) => ({
       ...current,
-      [paneId]: { ...current[paneId], ...patch },
+      [workspaceId]: { ...current[workspaceId], ...patch },
     }));
   }
 
-  // The floating artifact tray for one right-pane cell. A single pane and the
-  // top visible split show it by default; lower splits require an explicit
-  // reopen so a split workspace does not repeat the same draggable card.
-  function renderArtifactTray(surface: TurnPaneSurface, defaultVisible = true) {
+  // The floating artifact tray for a workspace. A single pane and the top
+  // visible split host the shared tray; lower split cells never repeat it.
+  function renderArtifactTray(surface: TurnPaneSurface, workspaceHost = true) {
     const trayArtifacts = artifactsForGroup(surface.pane.groupId);
-    const ui = artifactTrayUiByPane[surface.pane.id];
-    if (!artifactTrayVisible(trayArtifacts.length > 0, ui?.closed, defaultVisible)) {
+    const ui = artifactTrayUiByWorkspace[surface.pane.groupId];
+    if (!artifactTrayVisible(trayArtifacts.length > 0, ui?.closed, workspaceHost)) {
       return null;
     }
     return (
       <ArtifactTray
-        key={`artifact-tray-${surface.pane.id}`}
+        key={`artifact-tray-${surface.pane.groupId}`}
         paneId={surface.pane.id}
         artifacts={trayArtifacts}
         paneExists={(paneId) => panes.some((pane) => pane.id === paneId)}
         collapsed={ui?.collapsed ?? false}
         position={ui?.pos ?? null}
-        onPositionChange={(pos) => patchArtifactTrayUi(surface.pane.id, { pos })}
-        onSetCollapsed={(collapsed) => patchArtifactTrayUi(surface.pane.id, { collapsed })}
-        onClose={() => patchArtifactTrayUi(surface.pane.id, { closed: true })}
+        onPositionChange={(pos) => patchArtifactTrayUi(surface.pane.groupId, { pos })}
+        onSetCollapsed={(collapsed) =>
+          patchArtifactTrayUi(surface.pane.groupId, { collapsed })
+        }
+        onClose={() => patchArtifactTrayUi(surface.pane.groupId, { closed: true })}
         onOpen={(artifact) => openArtifact(artifact, surface.pane.id)}
         onOpenExternal={openArtifactExternally}
         onReveal={revealArtifact}
