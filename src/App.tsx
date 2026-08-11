@@ -1539,8 +1539,8 @@ function MainApp() {
   // Per-agent transcript scroll positions, so switching tabs — or away to Home /
   // Research (which unmounts the docked right pane) and back — restores where each
   // transcript was left instead of snapping to the latest turn. Same ephemeral
-  // shape as the queue scroll above; the `stuck` flag re-pins a transcript that
-  // grew while hidden to its new bottom.
+  // shape as the queue scroll above; true-tail snapshots follow growth while
+  // hidden, while near-tail snapshots retain their exact offset.
   const transcriptScrollByAgentRef = useRef<Record<string, TranscriptScrollPosition>>({});
   // The active TurnOverlay registers a DOM-backed snapshot here. Pane selection
   // invokes it before scheduling a tab change, preserving expanded geometry.

@@ -36,6 +36,11 @@ import { requestSaveDraftAsPrompt } from "../lib/promptLibrary";
 import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import {
+  captureTranscriptScrollPosition,
+  transcriptScrollRestoreTop,
+  type TranscriptScrollPosition,
+} from "../lib/transcriptScroll";
+import {
   assistantGroupTimestamp,
   assistantRunForItemKey,
   annotationsForTimeline,
@@ -69,13 +74,10 @@ import {
 
 export type { LinkActions } from "./TranscriptMarkdown";
 
-// A remembered transcript scroll position. `stuck` records that the view was
-// pinned to the bottom when it was saved, so a transcript that grew while
-// hidden re-pins to its new latest turn instead of freezing at a stale offset.
-export interface TranscriptScrollPosition {
-  scrollTop: number;
-  stuck: boolean;
-}
+// A remembered transcript scroll position. `stuck` retains live-follow intent,
+// while `atEnd` separately decides whether a tab restore targets the physical
+// tail or the exact saved offset.
+export type { TranscriptScrollPosition } from "../lib/transcriptScroll";
 
 interface TurnOverlayProps {
   turns: Turn[];
@@ -331,14 +333,12 @@ export default function TurnOverlay({
 
   const currentTimelineScrollPosition = (
     timeline: HTMLDivElement,
-  ): TranscriptScrollPosition => {
-    const distanceFromBottom =
-      timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-    return {
-      scrollTop: timeline.scrollTop,
-      stuck: jumpingToLatestRef.current || distanceFromBottom <= STICK_TO_BOTTOM_THRESHOLD,
-    };
-  };
+  ): TranscriptScrollPosition =>
+    captureTranscriptScrollPosition(
+      timeline,
+      jumpingToLatestRef.current,
+      STICK_TO_BOTTOM_THRESHOLD,
+    );
 
   const handleTimelineScroll = () => {
     const timeline = timelineRef.current;
@@ -491,13 +491,15 @@ export default function TurnOverlay({
 
   // When a different transcript loads (or this pane remounts after switching
   // away to Home/Research), restore that agent's remembered scroll position.
-  // Absent one — or if the view was pinned to the bottom when it was saved —
-  // start at the latest turn. A scrolled-up offset is restored verbatim: new
-  // turns only append below, so the same offset still lands on the same
-  // content. useLayoutEffect runs before paint, so the pane never flashes at
-  // the wrong spot first; the rAF re-assert catches the composer's measured
-  // tail-spacer reflow, most visibly on a fresh remount where the composer
-  // measures from zero.
+  // Absent one — or if the view was physically at the end when it was saved —
+  // start at the latest turn. Every other offset is restored verbatim, even if
+  // it was inside the wider live-follow threshold. That distinction matters
+  // when the latest user card is sticky: it can be pinned while the viewport is
+  // near the tail, but tabbing must not turn "near" into "at the end".
+  // useLayoutEffect runs before paint, so the pane never flashes at the wrong
+  // spot first; the rAF re-assert catches the composer's measured tail-spacer
+  // reflow, most visibly on a fresh remount where the composer measures from
+  // zero.
   //
   // The restore target is snapshotted during render (pendingRestoreRef), not
   // re-read from the store here: content-swap scroll events can poison the
@@ -520,15 +522,17 @@ export default function TurnOverlay({
       handleTimelineScroll();
     };
 
-    if (saved && !saved.stuck) {
-      stickToBottomRef.current = false;
+    if (saved && !saved.atEnd) {
+      stickToBottomRef.current = saved.stuck;
       const restore = () => {
         const timeline = timelineRef.current;
         if (timeline) {
-          timeline.scrollTop = saved.scrollTop;
+          timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
           const distanceFromBottom =
             timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-          setJumpToLatestVisible(distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD);
+          setJumpToLatestVisible(
+            !saved.stuck && distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD,
+          );
         }
       };
       restore();
@@ -560,7 +564,7 @@ export default function TurnOverlay({
   // queued message), but only while the user is already near the bottom — instant,
   // so reading older turns is never interrupted.
   useLayoutEffect(() => {
-    if (stickToBottomRef.current) {
+    if (!restoringScrollRef.current && stickToBottomRef.current) {
       scrollToBottom();
     }
   }, [turns, composerHeight, effectiveQueueSplitHeight, queueSplit, thinking]);
@@ -600,6 +604,7 @@ export default function TurnOverlay({
               lastScrollHeight = timeline.scrollHeight;
               if (
                 grew &&
+                !restoringScrollRef.current &&
                 stickToBottomRef.current &&
                 performance.now() >= suppressAutoPinUntil
               ) {
@@ -614,7 +619,7 @@ export default function TurnOverlay({
     }
     const resizeObserver = new ResizeObserver(() => {
       lastScrollHeight = timeline.scrollHeight;
-      if (stickToBottomRef.current) {
+      if (!restoringScrollRef.current && stickToBottomRef.current) {
         scrollToBottom();
       }
     });
@@ -722,10 +727,7 @@ export default function TurnOverlay({
     (itemKey: string) => {
       const timeline = timelineRef.current;
       if (timeline) {
-        readerScrollRestoreRef.current = {
-          scrollTop: timeline.scrollTop,
-          stuck: stickToBottomRef.current,
-        };
+        readerScrollRestoreRef.current = currentTimelineScrollPosition(timeline);
       }
       onFocusAssistantTurn?.(itemKey);
     },
@@ -748,8 +750,8 @@ export default function TurnOverlay({
       const timeline = timelineRef.current;
       if (timeline && saved) {
         stickToBottomRef.current = saved.stuck;
-        timeline.scrollTop = saved.stuck ? timeline.scrollHeight : saved.scrollTop;
-        setJumpToLatestVisible(!saved.stuck);
+        timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
+        handleTimelineScroll();
       }
     }
   }, [focusedAssistantTurnKey, readerMode]);
