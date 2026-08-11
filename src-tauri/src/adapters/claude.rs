@@ -511,9 +511,7 @@ impl ClaudeAdapter {
         };
 
         let forked = if has_prompt {
-            state
-                .agent(&agent.id)?
-                .ok_or_else(|| format!("forked agent {} disappeared during spawn", agent.id))?
+            state.agent(&agent.id)?.unwrap_or_else(|| agent.clone())
         } else {
             // Restore Idle after the early pane bind (attach promotes to Running, but a
             // resumed fork with no prompt is simply ready). Use a field-scoped status
@@ -522,7 +520,7 @@ impl ClaudeAdapter {
             // stale snapshot write here would wipe them.
             state
                 .set_agent_status(&agent.id, AgentStatus::Idle)?
-                .ok_or_else(|| format!("forked agent {} disappeared during spawn", agent.id))?
+                .unwrap_or_else(|| agent.clone())
         };
 
         Ok((pane, forked))

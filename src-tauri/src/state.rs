@@ -262,6 +262,19 @@ struct ActiveSubagents {
     anonymous: usize,
 }
 
+#[derive(Clone, Debug)]
+struct AgentForkBarrier {
+    child_agent_id: String,
+    ready: bool,
+    resume_queue: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleasedAgentForkBarrier {
+    pub source_agent_id: String,
+    pub resume_queue: bool,
+}
+
 impl ActiveSubagents {
     fn count(&self) -> usize {
         self.identified.len().saturating_add(self.anonymous)
@@ -358,6 +371,13 @@ struct Model {
     /// the first send marks the agent Running. Cleared once the send settles. Transient
     /// (not persisted).
     agent_draining: HashSet<String>,
+    /// Source agents whose queue is held while a just-spawned native fork finishes
+    /// adopting an independent session and accepts its launch prompt. Keyed by the
+    /// source agent id, with the child agent id as the value. This is deliberately
+    /// transient: it synchronizes two live PTYs, which cannot be adopted across an
+    /// app restart. Persisting it would instead strand a restored source waiting for
+    /// a startup hook the old child process can no longer deliver.
+    agent_fork_barriers: HashMap<String, AgentForkBarrier>,
     /// Agent-session resumes queued at restore, keyed by the recovered shell pane id;
     /// each is drained by that pane's respawn. Transient (not persisted).
     shell_agent_resumes: HashMap<String, ShellAgentResume>,
@@ -7811,6 +7831,9 @@ impl AppState {
             if model.agent_draining.contains(agent_id) {
                 return Ok(AgentTurnClaim::Draining);
             }
+            if model.agent_fork_barriers.contains_key(agent_id) {
+                return Ok(AgentTurnClaim::Idle);
+            }
             match pop_ready_locked(&mut model, agent_id) {
                 Some((turn, pending)) => {
                     model.agent_draining.insert(agent_id.to_string());
@@ -7857,7 +7880,13 @@ impl AppState {
                 // agent untouched (do not persist) so we can't clobber its Running.
                 return Ok(IdleAdvance::Busy);
             }
-            if model.agent_typing.contains(agent_id) {
+            if model.agent_fork_barriers.contains_key(agent_id) {
+                let settled_agent = model.agents.get_mut(agent_id).map(|agent| {
+                    agent.status = settled_status;
+                    agent.clone()
+                });
+                (IdleAdvance::Idle, settled_agent)
+            } else if model.agent_typing.contains(agent_id) {
                 // User is mid-keystroke: hold the queue and settle atomically with
                 // reading the typing flag (see the doc comment).
                 let settled_agent = model.agents.get_mut(agent_id).map(|agent| {
@@ -7914,8 +7943,208 @@ impl AppState {
         if model.agent_draining.contains(agent_id) {
             return Ok(false);
         }
+        if let Some(barrier) = model.agent_fork_barriers.get_mut(agent_id) {
+            // `send_next` deliberately installs a non-resuming barrier so it still
+            // dispatches exactly one item. A later direct/Auto send is fresh user
+            // intent to run after the fork, so remember that intent while returning
+            // false and letting the caller append it safely to the source queue.
+            barrier.resume_queue = true;
+            return Ok(false);
+        }
         model.agent_draining.insert(agent_id.to_string());
         Ok(true)
+    }
+
+    /// Installs the live fork barrier after the child process has spawned but before
+    /// the source's ordinary drain guard is released. The readiness check and insert
+    /// share the model lock with prompt-hook accounting, closing both orderings of the
+    /// race: a fast child that accepted its prompt before spawn returned needs no
+    /// barrier, while a later hook observes the inserted barrier and releases it.
+    /// Returns whether the source is now blocked.
+    pub fn begin_agent_fork_barrier(
+        &self,
+        source_agent_id: &str,
+        child_agent_id: &str,
+        resume_queue: bool,
+    ) -> Result<bool, String> {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        // The child id comes from the PaneInfo returned by the internal fork spawn,
+        // never caller input. If its record has already vanished, the pane's teardown
+        // won the race and the child process is dead; treating that as already safe
+        // consumes the at-most-once fork instead of reporting an error that would
+        // requeue and potentially spawn a duplicate.
+        let Some(child) = model.agents.get(child_agent_id) else {
+            return Ok(false);
+        };
+        let has_independent_session = child
+            .session_id
+            .as_deref()
+            .zip(child.fork_point.as_deref())
+            .is_some_and(|(session_id, fork_point)| session_id != fork_point);
+        let accepted_initial_prompt = model
+            .agent_send_tracking
+            .get(child_agent_id)
+            .is_some_and(|tracking| tracking.ups_seq > 0);
+        if has_independent_session && accepted_initial_prompt {
+            return Ok(false);
+        }
+        if let Some(existing) = model.agent_fork_barriers.get(source_agent_id) {
+            if existing.child_agent_id == child_agent_id {
+                return Ok(true);
+            }
+            return Err(format!(
+                "agent {source_agent_id} is already waiting for forked agent {}",
+                existing.child_agent_id
+            ));
+        }
+        model.agent_fork_barriers.insert(
+            source_agent_id.to_string(),
+            AgentForkBarrier {
+                child_agent_id: child_agent_id.to_string(),
+                ready: false,
+                resume_queue,
+            },
+        );
+        Ok(true)
+    }
+
+    /// Atomically hands fork-dispatch ownership back after the child spawn has been
+    /// fully recorded. A ready hook that arrived while the ordinary drain guard was
+    /// held marks the barrier ready instead of removing it; this method then consumes
+    /// it and tells the dispatching caller to continue. If readiness has not arrived,
+    /// the barrier remains for the hook-side resume path.
+    pub fn finish_agent_fork_dispatch(&self, source_agent_id: &str) -> Result<bool, String> {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        model.agent_draining.remove(source_agent_id);
+        let ready = model
+            .agent_fork_barriers
+            .get(source_agent_id)
+            .is_none_or(|barrier| barrier.ready);
+        if ready {
+            model.agent_fork_barriers.remove(source_agent_id);
+        }
+        Ok(ready)
+    }
+
+    pub fn agent_fork_barrier_active(&self, source_agent_id: &str) -> Result<bool, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model.agent_fork_barriers.contains_key(source_agent_id))
+    }
+
+    /// Removes a barrier only when the child has both a distinct native-session id
+    /// and at least one authenticated prompt-submit hook. Either signal alone is too
+    /// early for native forks: startup may briefly report the source identity, while
+    /// merely allocating the child session does not prove its launch prompt was
+    /// accepted. Returns the source whose queue may now resume.
+    pub fn take_ready_agent_fork_barrier(
+        &self,
+        child_agent_id: &str,
+    ) -> Result<Option<ReleasedAgentForkBarrier>, String> {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let Some(source_agent_id) =
+            model
+                .agent_fork_barriers
+                .iter()
+                .find_map(|(source_agent_id, barrier)| {
+                    (barrier.child_agent_id == child_agent_id).then(|| source_agent_id.clone())
+                })
+        else {
+            return Ok(None);
+        };
+        let Some(child) = model.agents.get(child_agent_id) else {
+            return Ok(None);
+        };
+        let has_independent_session = child
+            .session_id
+            .as_deref()
+            .zip(child.fork_point.as_deref())
+            .is_some_and(|(session_id, fork_point)| session_id != fork_point);
+        let accepted_initial_prompt = model
+            .agent_send_tracking
+            .get(child_agent_id)
+            .is_some_and(|tracking| tracking.ups_seq > 0);
+        if !has_independent_session || !accepted_initial_prompt {
+            return Ok(None);
+        }
+        if model.agent_draining.contains(&source_agent_id) {
+            if let Some(barrier) = model.agent_fork_barriers.get_mut(&source_agent_id) {
+                barrier.ready = true;
+            }
+            return Ok(None);
+        }
+        let barrier = model
+            .agent_fork_barriers
+            .remove(&source_agent_id)
+            .expect("barrier located above");
+        Ok(Some(ReleasedAgentForkBarrier {
+            source_agent_id,
+            resume_queue: barrier.resume_queue,
+        }))
+    }
+
+    /// Releases the barrier after the child process has definitively exited. Once the
+    /// process is dead it cannot read more source transcript, so resuming the source
+    /// is safe even though child initialization never completed.
+    pub fn abort_agent_fork_barrier(
+        &self,
+        child_agent_id: &str,
+    ) -> Result<Option<ReleasedAgentForkBarrier>, String> {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let source_agent_id =
+            model
+                .agent_fork_barriers
+                .iter()
+                .find_map(|(source_agent_id, barrier)| {
+                    (barrier.child_agent_id == child_agent_id).then(|| source_agent_id.clone())
+                });
+        let Some(source_agent_id) = source_agent_id else {
+            return Ok(None);
+        };
+        if model.agent_draining.contains(&source_agent_id) {
+            let resume_queue = model
+                .agent_fork_barriers
+                .get_mut(&source_agent_id)
+                .map(|barrier| {
+                    // Use the same owner handoff as normal readiness. The abort-side
+                    // resume attempt below observes the still-held drain guard and is a
+                    // no-op; finish_agent_fork_dispatch then consumes this marker and
+                    // lets its caller continue, closing the status-settlement race.
+                    barrier.ready = true;
+                    barrier.resume_queue
+                })
+                .unwrap_or(false);
+            return Ok(Some(ReleasedAgentForkBarrier {
+                source_agent_id,
+                resume_queue,
+            }));
+        }
+        Ok(model
+            .agent_fork_barriers
+            .remove(&source_agent_id)
+            .map(|barrier| ReleasedAgentForkBarrier {
+                source_agent_id,
+                resume_queue: barrier.resume_queue,
+            }))
     }
 
     /// Clears a delivered turn's in-flight record. Called once its bytes reach the PTY,

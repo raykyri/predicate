@@ -5,7 +5,7 @@ use crate::state::{
     AppState, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus, SharedBacklog, SharedChild,
     SharedWriter, ShellAgentResume,
 };
-use crate::turn_queue::release_waiters_for_agent;
+use crate::turn_queue::{abort_fork_barrier_for_child, release_waiters_for_agent};
 use crate::workspace::{
     CreateGroupRequest, WorkspaceScope, capture_agent_worktree_removal, create_group,
     group_recoverable_dir, remove_captured_worktree,
@@ -2274,6 +2274,15 @@ pub fn kill_pane(state: &AppState, pane_id: String) -> Result<(), String> {
             "qmux: kill for pane {pane_id} errored but the child has exited; reclaiming: {err}"
         );
     }
+    if let Some(agent_id) = pane_agent_id.as_deref()
+        && let Err(err) = abort_fork_barrier_for_child(
+            state,
+            agent_id,
+            "Forked terminal exited before its initial prompt was accepted",
+        )
+    {
+        eprintln!("qmux: failed to release fork barrier for closed agent {agent_id}: {err}");
+    }
     state.remove_pane(&pane_id)?;
     if native_surface {
         let _ = crate::native_terminal::remove(&pane_id);
@@ -2453,6 +2462,15 @@ fn start_reader_thread(
             .ok()
             .flatten()
             .map(|agent| agent.id);
+        if let Some(agent_id) = pane_agent_id.as_deref()
+            && let Err(err) = abort_fork_barrier_for_child(
+                &state,
+                agent_id,
+                "Forked terminal exited before its initial prompt was accepted",
+            )
+        {
+            eprintln!("qmux: failed to release fork barrier for exited agent {agent_id}: {err}");
+        }
         // A natural exit normally leaves no undo snapshot (unlike `kill_pane`), but if this
         // is the group's last pane and the group still has queued turns, removing it would
         // prune that pending work with no way back. Capture a close snapshot first so it

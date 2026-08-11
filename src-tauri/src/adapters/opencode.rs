@@ -480,9 +480,7 @@ impl OpencodeAdapter {
         .and_then(|spec| spawn_pty(state, spec));
         match spawn_result {
             Ok(pane) => {
-                let forked = state
-                    .agent(&agent.id)?
-                    .ok_or_else(|| format!("forked agent {} disappeared during spawn", agent.id))?;
+                let forked = state.agent(&agent.id)?.unwrap_or_else(|| agent.clone());
                 Ok((pane, forked))
             }
             Err(err) => {

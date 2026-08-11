@@ -328,9 +328,29 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
                     return Err(format!("agent {agent_id} was not found"));
                 }
             }
+            // Older hook shims may omit agentId and rely on their authenticated pane.
+            // Resolve the same fallback the adapter uses so those notifications can
+            // still complete a queued fork barrier.
+            let notified_agent_id = match notification.agent_id.clone() {
+                Some(agent_id) => Some(agent_id),
+                None => state.agent_by_pane(&authed_pane)?.map(|agent| agent.id),
+            };
             let outcome = ingest_adapter_notification(state, notification)?;
             for event in outcome.into_events() {
                 state.emit(event);
+            }
+            // Adapter ingestion records session identity and UserPromptSubmit activity
+            // before returning. Re-check every hook so either arrival order (identity
+            // first or prompt first) can release a queued-fork barrier without a lost
+            // wakeup. A resume failure must not make the agent's best-effort hook call
+            // fail; surface it through the queue event/log path instead.
+            if let Some(agent_id) = notified_agent_id
+                && let Err(err) =
+                    crate::turn_queue::release_ready_fork_barrier_for_child(state, &agent_id)
+            {
+                eprintln!(
+                    "qmux: failed to release fork barrier after hook from agent {agent_id}: {err}"
+                );
             }
             Ok(json!({ "notified": true }))
         }

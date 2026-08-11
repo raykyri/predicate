@@ -1374,6 +1374,19 @@ fn detach_known_pane_agent(
     pane_id: &str,
     current: AgentInfo,
 ) -> Result<Option<AgentInfo>, String> {
+    // Every caller reaches this only after the supervised adapter process has exited
+    // (the host shell may remain). A queued fork that never reached its prompt hook can
+    // therefore release its source safely; no live child remains to copy more context.
+    if let Err(err) = crate::turn_queue::abort_fork_barrier_for_child(
+        state,
+        &current.id,
+        "Forked terminal exited before its initial prompt was accepted",
+    ) {
+        eprintln!(
+            "qmux: failed to release fork barrier for detached agent {}: {err}",
+            current.id
+        );
+    }
     let has_queue = !state.list_agent_turn_queue(&current.id)?.is_empty();
     let orphaned_queue_pane_id = has_queue.then(|| pane_id.to_string());
     let detached = state.mutate_agent(&current.id, |agent| {
