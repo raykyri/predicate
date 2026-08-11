@@ -11,6 +11,7 @@ use crate::state::{
 use crate::workspace::{AgentInfo, AgentStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::{HashSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -614,30 +615,87 @@ pub fn reorder_queued_agent_turn(
 /// new panes and leave it idle, so they don't count, keeping callers'
 /// `agent.running` emissions and `sent` flags truthful.
 pub fn drain_agent_turn_queue(state: &AppState, agent_id: &str) -> Result<bool, String> {
+    let result = drain_agent_turn_queue_inner(state, agent_id)?;
+    if result.completed_idle_delivery {
+        // Delivery turns can resolve agents without a later Stop hook. Wake their
+        // dependents through the iterative release path below rather than recursively
+        // entering another public drain for every edge in a long wait chain.
+        release_waiters_for_agent(state, agent_id)?;
+    }
+    Ok(result.source_running)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct DrainAgentTurnQueueResult {
+    source_running: bool,
+    completed_idle_delivery: bool,
+}
+
+/// Drain implementation used by waiter release. It reports an idle delivery
+/// completion to its caller but never wakes waiters itself, which keeps dependency
+/// chains on the heap-backed worklist in `release_waiters_for_agent` instead of the
+/// call stack.
+fn drain_agent_turn_queue_inner(
+    state: &AppState,
+    agent_id: &str,
+) -> Result<DrainAgentTurnQueueResult, String> {
+    let mut completed_idle_delivery = false;
     loop {
         // Claim under the model lock so two concurrent triggers can't each pop a ready
         // turn and double-send (the agent isn't marked Running until the send below).
         match state.claim_ready_agent_turn(agent_id)? {
             AgentTurnClaim::Ready { turn, pending } => {
                 match send_claimed_turn(state, agent_id, turn, pending, true)? {
-                    DispatchOutcome::Ran => return Ok(true),
+                    DispatchOutcome::Ran => {
+                        return Ok(DrainAgentTurnQueueResult {
+                            source_running: true,
+                            // The source is busy again, so it has not resolved even if
+                            // preceding delivery turns left it idle momentarily.
+                            completed_idle_delivery: false,
+                        });
+                    }
                     DispatchOutcome::ForkPending => {
-                        let ready = state.finish_agent_fork_dispatch(agent_id)?;
-                        if !ready || state.agent_is_paused(agent_id)? {
-                            return Ok(false);
+                        let finish = state.finish_agent_fork_dispatch(agent_id)?;
+                        if !finish.ready {
+                            return Ok(DrainAgentTurnQueueResult::default());
+                        }
+                        completed_idle_delivery = true;
+                        if state.agent_is_paused(agent_id)?
+                            || state
+                                .agent(agent_id)?
+                                .is_none_or(|agent| agent.pane_id.is_none())
+                        {
+                            return Ok(DrainAgentTurnQueueResult {
+                                source_running: false,
+                                completed_idle_delivery,
+                            });
                         }
                     }
-                    DispatchOutcome::StayedIdle => {
+                    DispatchOutcome::StayedIdle { .. } => {
                         // The turn went to a new pane, not into this agent — it is
                         // still idle, so keep draining (a pause-after delivery turn
                         // pauses it instead; see send_claimed_turn).
-                        if state.agent_is_paused(agent_id)? {
-                            return Ok(false);
+                        completed_idle_delivery = true;
+                        if state.agent_is_paused(agent_id)?
+                            || state
+                                .agent(agent_id)?
+                                .is_none_or(|agent| agent.pane_id.is_none())
+                        {
+                            return Ok(DrainAgentTurnQueueResult {
+                                source_running: false,
+                                completed_idle_delivery,
+                            });
                         }
                     }
                 }
             }
-            AgentTurnClaim::Draining | AgentTurnClaim::Idle => return Ok(false),
+            AgentTurnClaim::Draining => return Ok(DrainAgentTurnQueueResult::default()),
+            AgentTurnClaim::Idle => {
+                return Ok(DrainAgentTurnQueueResult {
+                    source_running: false,
+                    completed_idle_delivery,
+                });
+            }
         }
     }
 }
@@ -654,7 +712,12 @@ enum DispatchOutcome {
     ForkPending,
     /// The turn was delivered to a new pane (fork / new session); the agent
     /// stays idle.
-    StayedIdle,
+    StayedIdle {
+        /// A direct send was queued while this delivery owned the drain guard.
+        /// Automatic drains already loop; explicit send-next uses this to honor the
+        /// separate fresh send without losing its wakeup.
+        resume_queue: bool,
+    },
 }
 
 /// Sends a turn already claimed via [`AppState::claim_ready_agent_turn`] /
@@ -748,9 +811,16 @@ fn send_claimed_turn(
             state.mark_agent_pending_pause(agent_id)?;
         }
     }
-    if outcome != DispatchOutcome::ForkPending {
-        state.finish_agent_drain(agent_id);
-    }
+    let outcome = match outcome {
+        DispatchOutcome::ForkPending => DispatchOutcome::ForkPending,
+        DispatchOutcome::StayedIdle { .. } => DispatchOutcome::StayedIdle {
+            resume_queue: state.finish_agent_drain(agent_id),
+        },
+        DispatchOutcome::Ran => {
+            state.finish_agent_drain(agent_id);
+            DispatchOutcome::Ran
+        }
+    };
     let queued_turns = state.agent_queued_turns(agent_id)?;
     state.emit(QmuxEvent::new(
         "agent.queued_turn_sent",
@@ -852,8 +922,12 @@ fn advance_after_settlement(
                         // finish then atomically hands ownership either back to this
                         // loop or to the later hook-side resume path.
                         state.set_agent_status(agent_id, settled_status)?;
-                        let ready = state.finish_agent_fork_dispatch(agent_id)?;
-                        if ready {
+                        let finish = state.finish_agent_fork_dispatch(agent_id)?;
+                        if finish.ready
+                            && state
+                                .agent(agent_id)?
+                                .is_some_and(|agent| agent.pane_id.is_some())
+                        {
                             continue;
                         }
                         if release_waiters {
@@ -861,7 +935,19 @@ fn advance_after_settlement(
                         }
                         return Ok(IdleResolution::Idle);
                     }
-                    Ok(DispatchOutcome::StayedIdle) => continue,
+                    Ok(DispatchOutcome::StayedIdle { .. }) => {
+                        // A source can detach while its fork/new-session child is being
+                        // spawned. Do not loop into a parked queue that no longer owns a
+                        // pane; the detach path leaves it recoverable and releases any
+                        // now-resolved dependents.
+                        if state
+                            .agent(agent_id)?
+                            .is_none_or(|agent| agent.pane_id.is_none())
+                        {
+                            return Ok(IdleResolution::Idle);
+                        }
+                        continue;
+                    }
                     Err(err) => {
                         if is_delivery {
                             // A failed delivery leaves this agent genuinely idle;
@@ -893,43 +979,54 @@ fn advance_after_settlement(
 }
 
 pub fn release_waiters_for_agent(state: &AppState, target_agent_id: &str) -> Result<usize, String> {
-    let waiting_agent_ids = state.agents_with_front_wait_for(target_agent_id)?;
+    let mut resolved_targets = VecDeque::from([target_agent_id.to_string()]);
+    let mut scheduled_targets = HashSet::from([target_agent_id.to_string()]);
     let mut drained_count = 0;
 
-    for source_agent_id in waiting_agent_ids {
-        if source_agent_id == target_agent_id {
-            continue;
-        }
-        let Some(source) = state.agent(&source_agent_id)? else {
-            continue;
-        };
-        if source.paused || state.agent_is_typing(&source.id)? {
-            continue;
-        }
-        let policy = agent_composer_policy(state, &source)?;
-        if !policy.can_send(source.status) {
-            continue;
-        }
-        match drain_agent_turn_queue(state, &source.id) {
-            Ok(true) => {
-                drained_count += 1;
-                if let Some(updated) = state.agent(&source.id)? {
+    while let Some(resolved_target_id) = resolved_targets.pop_front() {
+        let waiting_agent_ids = state.agents_with_front_wait_for(&resolved_target_id)?;
+        for source_agent_id in waiting_agent_ids {
+            if source_agent_id == resolved_target_id {
+                continue;
+            }
+            let Some(source) = state.agent(&source_agent_id)? else {
+                continue;
+            };
+            if source.paused || state.agent_is_typing(&source.id)? {
+                continue;
+            }
+            let policy = agent_composer_policy(state, &source)?;
+            if !policy.can_send(source.status) {
+                continue;
+            }
+            match drain_agent_turn_queue_inner(state, &source.id) {
+                Ok(result) => {
+                    if result.source_running {
+                        drained_count += 1;
+                    }
+                    if result.completed_idle_delivery && scheduled_targets.insert(source.id.clone())
+                    {
+                        resolved_targets.push_back(source.id.clone());
+                    }
+                    if result.source_running
+                        && let Some(updated) = state.agent(&source.id)?
+                    {
+                        state.emit(QmuxEvent::new(
+                            "agent.running",
+                            updated.pane_id.clone(),
+                            Some(updated.id.clone()),
+                            json!({ "agent": updated }),
+                        ));
+                    }
+                }
+                Err(err) => {
                     state.emit(QmuxEvent::new(
-                        "agent.running",
-                        updated.pane_id.clone(),
-                        Some(updated.id.clone()),
-                        json!({ "agent": updated }),
+                        "agent.queue_error",
+                        source.pane_id.clone(),
+                        Some(source.id.clone()),
+                        json!({ "error": err }),
                     ));
                 }
-            }
-            Ok(false) => {}
-            Err(err) => {
-                state.emit(QmuxEvent::new(
-                    "agent.queue_error",
-                    source.pane_id.clone(),
-                    Some(source.id.clone()),
-                    json!({ "error": err }),
-                ));
             }
         }
     }
@@ -989,6 +1086,10 @@ fn resume_source_after_fork_barrier(
 ) -> Result<(), String> {
     let queued_turns = state.agent_queued_turns(source_agent_id)?;
     let Some(source) = state.agent(source_agent_id)? else {
+        // The source was closed while the child initialized. A waiter targeting the
+        // vanished source is now resolved, and this child lifecycle signal is the
+        // final deterministic wakeup available to it.
+        release_waiters_for_agent(state, source_agent_id)?;
         return Ok(());
     };
     let event_type = if failure.is_some() {
@@ -1008,23 +1109,44 @@ fn resume_source_after_fork_barrier(
         }),
     ));
 
-    if !resume_queue
-        || source.paused
-        || state.agent_is_typing(source_agent_id)?
-        || !agent_composer_policy(state, &source)?.can_send(source.status)
-    {
-        return Ok(());
+    let should_resume = resume_queue
+        && source.pane_id.is_some()
+        && !source.paused
+        && !state.agent_is_typing(source_agent_id)?
+        && agent_composer_policy(state, &source)?.can_send(source.status);
+    if should_resume {
+        match drain_agent_turn_queue(state, source_agent_id) {
+            Ok(true) => {
+                if let Some(updated) = state.agent(source_agent_id)? {
+                    state.emit(QmuxEvent::new(
+                        "agent.running",
+                        updated.pane_id.clone(),
+                        Some(updated.id.clone()),
+                        json!({ "agent": updated }),
+                    ));
+                }
+            }
+            Ok(false) => {}
+            Err(err) => {
+                let queued_turns = state.agent_queued_turns(source_agent_id)?;
+                state.emit(QmuxEvent::new(
+                    "agent.queue_error",
+                    source.pane_id.clone(),
+                    Some(source.id.clone()),
+                    json!({ "error": err, "queuedTurns": queued_turns }),
+                ));
+                // Still notify dependents below. The failed drain normally requeues
+                // its turn, so the wait predicate keeps them blocked rather than
+                // silently treating the source as complete.
+            }
+        }
     }
-    if drain_agent_turn_queue(state, source_agent_id)?
-        && let Some(updated) = state.agent(source_agent_id)?
-    {
-        state.emit(QmuxEvent::new(
-            "agent.running",
-            updated.pane_id.clone(),
-            Some(updated.id.clone()),
-            json!({ "agent": updated }),
-        ));
-    }
+
+    // Barrier completion is itself a target-state transition. This must run even
+    // when manual send-next disabled source queue resumption, or when pause/typing
+    // intentionally held it: an empty source queue is complete, while a non-empty
+    // one remains blocked by the ordinary wait predicate.
+    release_waiters_for_agent(state, source_agent_id)?;
     Ok(())
 }
 
@@ -1107,10 +1229,20 @@ pub fn send_next_queued_agent_turn(
     let sent = match state.claim_ready_agent_turn(agent_id)? {
         AgentTurnClaim::Ready { turn, pending } => {
             let outcome = send_claimed_turn(state, agent_id, turn, pending, false)?;
-            if outcome == DispatchOutcome::ForkPending {
-                // Explicit send-next owns exactly one item. Finalize the barrier
-                // handoff, but never cascade even if the child became ready inline.
-                state.finish_agent_fork_dispatch(agent_id)?;
+            match outcome {
+                DispatchOutcome::ForkPending => {
+                    // Explicit send-next owns exactly one item. Finalize the barrier
+                    // handoff; the barrier remains non-resuming unless a separate
+                    // direct send raced this dispatch and requested its own wakeup.
+                    finish_send_next_fork_dispatch(state, agent_id)?;
+                }
+                DispatchOutcome::StayedIdle { resume_queue: true } => {
+                    // The manual action still dispatched exactly its one selected item;
+                    // this follow-up belongs to a distinct direct-send request that
+                    // queued while that dispatch held the guard.
+                    drain_agent_turn_queue(state, agent_id)?;
+                }
+                DispatchOutcome::Ran | DispatchOutcome::StayedIdle { .. } => {}
             }
             true
         }
@@ -1124,10 +1256,44 @@ pub fn send_next_queued_agent_turn(
     })
 }
 
+fn finish_send_next_fork_dispatch(state: &AppState, agent_id: &str) -> Result<(), String> {
+    let finish = state.finish_agent_fork_dispatch(agent_id)?;
+    if finish.ready && finish.resume_queue {
+        // The child became ready inline while dispatch still owned the source.
+        // Preserve the separate direct-send wakeup carried by the barrier instead of
+        // dropping it with the handoff record.
+        drain_agent_turn_queue(state, agent_id)?;
+    }
+    if finish.ready {
+        // Inline readiness/exit cannot run the hook-side wakeup while the dispatch
+        // guard is held. A still-pending barrier is released by its child hook, which
+        // performs this wakeup then; doing it now is both redundant and misleading.
+        release_waiters_for_agent(state, agent_id)?;
+    }
+    Ok(())
+}
+
 fn queue_agent_turn(
     state: &AppState,
     agent: &AgentInfo,
     turn: QueuedTurn,
+) -> Result<SubmitAgentTurnResult, String> {
+    queue_agent_turn_with_admission(state, agent, turn, false)
+}
+
+fn queue_agent_turn_after_direct_contention(
+    state: &AppState,
+    agent: &AgentInfo,
+    turn: QueuedTurn,
+) -> Result<SubmitAgentTurnResult, String> {
+    queue_agent_turn_with_admission(state, agent, turn, true)
+}
+
+fn queue_agent_turn_with_admission(
+    state: &AppState,
+    agent: &AgentInfo,
+    turn: QueuedTurn,
+    direct_contention: bool,
 ) -> Result<SubmitAgentTurnResult, String> {
     // Direct sends are gated by write_pane's research check, but queueing skips
     // the pane entirely — and a research run never drains a queue (it takes one
@@ -1136,7 +1302,11 @@ fn queue_agent_turn(
     if state.agent_is_research_run(&agent.id)? {
         return Err("research runs are read-only; create a follow-up branch instead".to_string());
     }
-    let pending_turns = state.enqueue_agent_queued_turn(&agent.id, turn)?;
+    let pending_turns = if direct_contention {
+        state.enqueue_agent_queued_turn_after_direct_contention(&agent.id, turn)?
+    } else {
+        state.enqueue_agent_queued_turn(&agent.id, turn)?
+    };
     let queued_turns = state.agent_queued_turns(&agent.id)?;
     state.emit(QmuxEvent::new(
         "agent.turn_queued",
@@ -1207,7 +1377,9 @@ fn deliver_queued_turn_to_new_pane(
         }
         QueuedTurnDelivery::NewSession => {
             spawn_sibling_agent_session(state, source, text)?;
-            Ok(DispatchOutcome::StayedIdle)
+            Ok(DispatchOutcome::StayedIdle {
+                resume_queue: false,
+            })
         }
     }
 }
@@ -1250,7 +1422,9 @@ fn begin_queued_fork_barrier(
     if state.begin_agent_fork_barrier(&source.id, child_agent_id, resume_queue_after_fork)? {
         Ok(DispatchOutcome::ForkPending)
     } else {
-        Ok(DispatchOutcome::StayedIdle)
+        Ok(DispatchOutcome::StayedIdle {
+            resume_queue: false,
+        })
     }
 }
 
@@ -1647,7 +1821,12 @@ fn send_direct_or_queue(
     data: String,
 ) -> Result<SubmitAgentTurnResult, String> {
     if !state.begin_direct_send(&agent.id)? {
-        return queue_agent_turn(state, agent, QueuedTurn::new(data));
+        let turn = QueuedTurn::new(data);
+        let queued = queue_agent_turn_after_direct_contention(state, agent, turn.clone())?;
+        // The owner may have completed between the failed reservation and the
+        // atomic enqueue. A guarded retry either sends this newly-ready turn or
+        // observes the still-active owner/barrier and leaves it safely queued.
+        return drain_after_enqueue(state, &agent.id, queued, &turn);
     }
     let result = send_agent_turn(
         state,
@@ -3167,6 +3346,187 @@ mod tests {
     }
 
     #[test]
+    fn waiter_stays_blocked_from_fork_claim_through_child_readiness() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("target", AgentStatus::Done, None))
+            .unwrap();
+        state
+            .insert_agent(sample_agent_with_id("waiter", AgentStatus::Done, None))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("target".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        state
+            .enqueue_agent_turn("target", "/fork delegated work".to_string())
+            .unwrap();
+        state
+            .enqueue_agent_wait_turn_with_target_label(
+                "waiter",
+                "after target".to_string(),
+                "target",
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            state.claim_ready_agent_turn("target").unwrap(),
+            AgentTurnClaim::Ready { .. }
+        ));
+        // The target queue is visibly empty here, but its claimed fork has not even
+        // installed the child barrier yet.
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_none());
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child", true)
+                .unwrap()
+        );
+        assert!(!state.finish_agent_fork_dispatch("target").unwrap().ready);
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_none());
+
+        state
+            .mutate_agent("child", |agent| {
+                agent.session_id = Some("child-session".to_string())
+            })
+            .unwrap();
+        state
+            .match_agent_prompt_submit("child", Some("delegated work"))
+            .unwrap();
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child")
+                .unwrap()
+                .is_some()
+        );
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_some());
+    }
+
+    #[test]
+    fn waiter_created_during_fork_initialization_stays_blocked() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("target", AgentStatus::Done, None))
+            .unwrap();
+        state
+            .insert_agent(sample_agent_with_id("waiter", AgentStatus::Done, None))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("target".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child", true)
+                .unwrap()
+        );
+
+        state
+            .enqueue_agent_wait_turn_with_target_label(
+                "waiter",
+                "created during fork".to_string(),
+                "target",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_none());
+
+        state
+            .mutate_agent("child", |agent| {
+                agent.session_id = Some("child-session".to_string())
+            })
+            .unwrap();
+        state
+            .match_agent_prompt_submit("child", Some("prompt"))
+            .unwrap();
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child")
+                .unwrap()
+                .is_some()
+        );
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_some());
+    }
+
+    #[test]
+    fn waiter_remains_blocked_across_back_to_back_forks() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("target", AgentStatus::Done, None))
+            .unwrap();
+        state
+            .insert_agent(sample_agent_with_id("waiter", AgentStatus::Done, None))
+            .unwrap();
+        for child_id in ["child-1", "child-2"] {
+            let mut child = sample_agent_with_id(child_id, AgentStatus::Running, None);
+            child.parent_id = Some("target".to_string());
+            child.fork_point = Some("source-session".to_string());
+            state.insert_agent(child).unwrap();
+        }
+        state
+            .enqueue_agent_turn("target", "/fork second".to_string())
+            .unwrap();
+        state
+            .enqueue_agent_wait_turn_with_target_label(
+                "waiter",
+                "after both forks".to_string(),
+                "target",
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child-1", true)
+                .unwrap()
+        );
+        state
+            .mutate_agent("child-1", |agent| {
+                agent.session_id = Some("child-1-session".to_string())
+            })
+            .unwrap();
+        state
+            .match_agent_prompt_submit("child-1", Some("first prompt"))
+            .unwrap();
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child-1")
+                .unwrap()
+                .is_some()
+        );
+        assert!(matches!(
+            state.claim_ready_agent_turn("target").unwrap(),
+            AgentTurnClaim::Ready { .. }
+        ));
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_none());
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child-2", true)
+                .unwrap()
+        );
+        assert!(!state.finish_agent_fork_dispatch("target").unwrap().ready);
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_none());
+        state
+            .mutate_agent("child-2", |agent| {
+                agent.session_id = Some("child-2-session".to_string())
+            })
+            .unwrap();
+        state
+            .match_agent_prompt_submit("child-2", Some("second prompt"))
+            .unwrap();
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child-2")
+                .unwrap()
+                .is_some()
+        );
+        assert!(state.pop_ready_agent_turn("waiter").unwrap().is_some());
+    }
+
+    #[test]
     fn already_ready_child_does_not_install_a_late_fork_barrier() {
         let state = test_state();
         state
@@ -3226,7 +3586,7 @@ mod tests {
                 .is_none()
         );
         assert!(state.agent_fork_barrier_active("source").unwrap());
-        assert!(state.finish_agent_fork_dispatch("source").unwrap());
+        assert!(state.finish_agent_fork_dispatch("source").unwrap().ready);
         assert!(!state.agent_fork_barrier_active("source").unwrap());
         assert!(state.begin_direct_send("source").unwrap());
     }
@@ -3254,6 +3614,121 @@ mod tests {
                 resume_queue: false,
             })
         );
+    }
+
+    #[test]
+    fn manual_fork_readiness_wakes_an_otherwise_resolved_waiter() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("target", AgentStatus::Done, None))
+            .unwrap();
+        state
+            .insert_agent(sample_agent_with_id(
+                "waiter",
+                AgentStatus::Done,
+                Some("waiter-pane"),
+            ))
+            .unwrap();
+        state
+            .insert_pane(sample_pane_runtime("waiter-pane", Some("waiter")))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("target".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        state
+            .enqueue_agent_wait_turn_with_target_label(
+                "waiter",
+                "run after manual fork".to_string(),
+                "target",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child", false)
+                .unwrap()
+        );
+
+        state
+            .mutate_agent("child", |agent| {
+                agent.session_id = Some("child-session".to_string())
+            })
+            .unwrap();
+        state
+            .match_agent_prompt_submit("child", Some("prompt"))
+            .unwrap();
+        assert!(release_ready_fork_barrier_for_child(&state, "child").unwrap());
+
+        assert!(state.list_agent_turn_queue("waiter").unwrap().is_empty());
+        assert!(matches!(
+            state.agent("waiter").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
+    }
+
+    #[test]
+    fn inline_manual_fork_readiness_wakes_waiter_after_owner_handoff() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("target", AgentStatus::Done, None))
+            .unwrap();
+        state
+            .insert_agent(sample_agent_with_id(
+                "waiter",
+                AgentStatus::Done,
+                Some("waiter-pane"),
+            ))
+            .unwrap();
+        state
+            .insert_pane(sample_pane_runtime("waiter-pane", Some("waiter")))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("target".to_string());
+        child.fork_point = Some("source-session".to_string());
+        child.session_id = Some("child-session".to_string());
+        state.insert_agent(child).unwrap();
+        state
+            .enqueue_agent_turn("target", "/fork prompt".to_string())
+            .unwrap();
+        state
+            .enqueue_agent_wait_turn_with_target_label(
+                "waiter",
+                "after inline readiness".to_string(),
+                "target",
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            state.claim_ready_agent_turn("target").unwrap(),
+            AgentTurnClaim::Ready { .. }
+        ));
+        assert!(
+            state
+                .begin_agent_fork_barrier("target", "child", false)
+                .unwrap()
+        );
+        state
+            .match_agent_prompt_submit("child", Some("prompt"))
+            .unwrap();
+        // Readiness arrives while the manual dispatch still owns the target, so the
+        // hook can only mark the barrier ready and cannot wake the waiter itself.
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child")
+                .unwrap()
+                .is_none()
+        );
+
+        finish_send_next_fork_dispatch(&state, "target").unwrap();
+
+        assert!(state.list_agent_turn_queue("waiter").unwrap().is_empty());
+        assert!(matches!(
+            state.agent("waiter").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
     }
 
     #[test]
@@ -3290,7 +3765,7 @@ mod tests {
         // Abort reports the failure immediately but leaves the ready marker for the
         // dispatch owner, which atomically clears its guard and consumes the barrier.
         assert!(state.agent_fork_barrier_active("source").unwrap());
-        assert!(state.finish_agent_fork_dispatch("source").unwrap());
+        assert!(state.finish_agent_fork_dispatch("source").unwrap().ready);
         assert!(!state.agent_fork_barrier_active("source").unwrap());
         assert!(state.begin_direct_send("source").unwrap());
     }
@@ -3311,13 +3786,149 @@ mod tests {
                 .unwrap()
         );
 
-        assert!(!state.begin_direct_send("source").unwrap());
+        let result = submit_agent_turn(
+            &state,
+            SubmitAgentTurnRequest {
+                agent_id: "source".to_string(),
+                data: "fresh direct send".to_string(),
+                mode: Some(SubmitAgentTurnMode::Send),
+            },
+        )
+        .unwrap();
+        assert!(result.queued);
         assert_eq!(
             state.abort_agent_fork_barrier("child").unwrap(),
             Some(crate::state::ReleasedAgentForkBarrier {
                 source_agent_id: "source".to_string(),
                 resume_queue: true,
             })
+        );
+    }
+
+    #[test]
+    fn failed_direct_enqueue_does_not_enable_manual_barrier_resume() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("source", AgentStatus::Done, None))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("source".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        for index in 0..500 {
+            state
+                .enqueue_agent_turn("source", format!("queued-{index}"))
+                .unwrap();
+        }
+        assert!(
+            state
+                .begin_agent_fork_barrier("source", "child", false)
+                .unwrap()
+        );
+
+        let err = submit_agent_turn(
+            &state,
+            SubmitAgentTurnRequest {
+                agent_id: "source".to_string(),
+                data: "cannot fit".to_string(),
+                mode: Some(SubmitAgentTurnMode::Send),
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("queue is full"));
+        assert_eq!(
+            state.abort_agent_fork_barrier("child").unwrap(),
+            Some(crate::state::ReleasedAgentForkBarrier {
+                source_agent_id: "source".to_string(),
+                resume_queue: false,
+            })
+        );
+    }
+
+    #[test]
+    fn direct_send_in_pre_barrier_spawn_window_requests_resume_atomically() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id("source", AgentStatus::Done, None))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("source".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        state
+            .enqueue_agent_turn("source", "/fork prompt".to_string())
+            .unwrap();
+        assert!(matches!(
+            state.claim_ready_agent_turn("source").unwrap(),
+            AgentTurnClaim::Ready { .. }
+        ));
+        assert!(!state.begin_direct_send("source").unwrap());
+        state
+            .enqueue_agent_queued_turn_after_direct_contention(
+                "source",
+                QueuedTurn::new("racing direct send".to_string()),
+            )
+            .unwrap();
+
+        assert!(
+            state
+                .begin_agent_fork_barrier("source", "child", false)
+                .unwrap()
+        );
+        assert_eq!(
+            state.abort_agent_fork_barrier("child").unwrap(),
+            Some(crate::state::ReleasedAgentForkBarrier {
+                source_agent_id: "source".to_string(),
+                resume_queue: true,
+            })
+        );
+        assert_eq!(
+            state.finish_agent_fork_dispatch("source").unwrap(),
+            crate::state::FinishedAgentForkDispatch {
+                ready: true,
+                resume_queue: true,
+            }
+        );
+    }
+
+    #[test]
+    fn detaching_fork_source_cancels_barrier_and_parks_followups() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id(
+                "source",
+                AgentStatus::Done,
+                Some("source-pane"),
+            ))
+            .unwrap();
+        state
+            .insert_pane(sample_pane_runtime("source-pane", Some("source")))
+            .unwrap();
+        let mut child = sample_agent_with_id("child", AgentStatus::Running, None);
+        child.parent_id = Some("source".to_string());
+        child.fork_point = Some("source-session".to_string());
+        state.insert_agent(child).unwrap();
+        state
+            .enqueue_agent_turn("source", "park this followup".to_string())
+            .unwrap();
+        assert!(
+            state
+                .begin_agent_fork_barrier("source", "child", true)
+                .unwrap()
+        );
+
+        let detached = detach_pane_agent(&state, "source-pane").unwrap().unwrap();
+        assert!(detached.pane_id.is_none());
+        assert!(!state.agent_fork_barrier_active("source").unwrap());
+        assert_eq!(
+            state.list_agent_turn_queue("source").unwrap(),
+            vec!["park this followup".to_string()]
+        );
+        assert!(
+            state
+                .take_ready_agent_fork_barrier("child")
+                .unwrap()
+                .is_none()
         );
     }
 
