@@ -110,6 +110,7 @@
 .sidebar-mode-toggle button {
   position: relative;
   display: flex;
+  flex-wrap: nowrap;
   min-width: 0;
   min-height: 27px;
   align-items: center;
