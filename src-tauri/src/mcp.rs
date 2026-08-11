@@ -123,10 +123,10 @@ fn spawn_child(state: &AppState, caller: &AgentInfo, arguments: Value) -> Result
         .agent_by_pane(&pane.id)?
         .ok_or_else(|| format!("spawned pane {} has no agent", pane.id))?;
     if let Some(parent_pane) = caller.pane_id.as_deref()
-        && let Err(err) = state.nest_pane_under(&pane.id, parent_pane)
+        && let Err(err) = state.place_pane_after(&pane.id, parent_pane)
     {
         eprintln!(
-            "qmux: MCP child {} could not be nested under {parent_pane}: {err}",
+            "qmux: MCP child {} could not be placed after {parent_pane}: {err}",
             child.id
         );
     }
@@ -166,15 +166,7 @@ struct ForkArgs {
 
 fn fork_self(state: &AppState, pane_id: &str, arguments: Value) -> Result<Value, String> {
     let args: ForkArgs = parse(arguments, "fork_self")?;
-    let pane = agent_fork(
-        state,
-        pane_id,
-        args.use_worktree,
-        true,
-        args.prompt,
-        None,
-        false,
-    )?;
+    let pane = agent_fork(state, pane_id, args.use_worktree, args.prompt, None, false)?;
     let agent = state.agent_by_pane(&pane.id)?;
     Ok(json!({ "agent": agent, "pane": pane }))
 }

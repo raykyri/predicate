@@ -900,16 +900,14 @@ pub fn agent_spawn(state: &AppState, request: SpawnAgentRequest) -> Result<PaneI
         .launch(state, request)
 }
 
-/// Forks the agent running in `authed_pane` into a new tab and resumes its session.
-/// With `nest`, the new tab is nested under the source (a child); otherwise it lands
-/// immediately after the source as a sibling. The source is resolved from the
+/// Forks the agent running in `authed_pane` into a new tab immediately after it and
+/// resumes its session. The source is resolved from the
 /// authenticated pane (never caller input), so a pane can only fork its own session.
 /// When `prompt` is set, the fork is launched with that initial user message.
 pub fn agent_fork(
     state: &AppState,
     authed_pane: &str,
     use_worktree: bool,
-    nest: bool,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
     btw: bool,
@@ -921,7 +919,6 @@ pub fn agent_fork(
         state,
         &source,
         use_worktree,
-        nest,
         prompt.as_deref(),
         anchor.as_ref(),
         btw,
@@ -936,7 +933,6 @@ fn fork_agent_in_shell(
     state: &AppState,
     source: &AgentInfo,
     use_worktree: bool,
-    nest: bool,
     prompt: Option<&str>,
     anchor: Option<&MessageAnchor>,
     btw: bool,
@@ -1061,7 +1057,7 @@ fn fork_agent_in_shell(
             return Err(err);
         }
     };
-    finish_fork_spawn(state, source, pane, agent, nest, btw)
+    finish_fork_spawn(state, source, pane, agent, btw)
 }
 
 /// Adapters with a native fork command. Owns the fork-eligibility check (and its
@@ -1163,28 +1159,25 @@ pub fn fork_agent_source(
     state: &AppState,
     source: &AgentInfo,
     use_worktree: bool,
-    nest: bool,
     prompt: Option<&str>,
 ) -> Result<PaneInfo, String> {
-    fork_agent_source_with_placement(state, source, use_worktree, nest, prompt, false)
+    fork_agent_source_with_placement(state, source, use_worktree, prompt, false)
 }
 
-/// Queue-dispatched `/btw` fork. It uses the same nested backend placement as an
-/// immediate `/btw`, while tagging the fork event so the frontend can build the
-/// split and keep focus on the source pane.
+/// Queue-dispatched `/btw` fork, tagged so the frontend can build the split and keep
+/// focus on the source pane.
 pub fn fork_agent_source_btw(
     state: &AppState,
     source: &AgentInfo,
     prompt: Option<&str>,
 ) -> Result<PaneInfo, String> {
-    fork_agent_source_with_placement(state, source, false, true, prompt, true)
+    fork_agent_source_with_placement(state, source, false, prompt, true)
 }
 
 fn fork_agent_source_with_placement(
     state: &AppState,
     source: &AgentInfo,
     use_worktree: bool,
-    nest: bool,
     prompt: Option<&str>,
     btw: bool,
 ) -> Result<PaneInfo, String> {
@@ -1203,7 +1196,7 @@ fn fork_agent_source_with_placement(
         }
         _ => return Err(FORK_UNSUPPORTED_ERROR.to_string()),
     };
-    finish_fork_spawn(state, source, pane, agent, nest, btw)
+    finish_fork_spawn(state, source, pane, agent, btw)
 }
 
 fn finish_fork_spawn(
@@ -1211,7 +1204,6 @@ fn finish_fork_spawn(
     source: &AgentInfo,
     pane: PaneInfo,
     agent: AgentInfo,
-    nest: bool,
     btw: bool,
 ) -> Result<PaneInfo, String> {
     if let Some(source_pane) = source.pane_id.as_deref() {
@@ -1222,11 +1214,7 @@ fn finish_fork_spawn(
         // propagating the placement error would report failure for a live
         // pane+agent the caller then can neither see nor clean up. Leave the
         // new pane at the end of the order instead.
-        let placed = if nest {
-            state.nest_pane_under(&pane.id, source_pane)
-        } else {
-            state.place_pane_after(&pane.id, source_pane)
-        };
+        let placed = state.place_pane_after(&pane.id, source_pane);
         if let Err(err) = placed {
             eprintln!(
                 "qmux: fork of agent {} spawned but could not be placed relative to pane {source_pane}: {err}",
@@ -1250,8 +1238,8 @@ fn finish_fork_spawn(
 }
 
 /// Starts a fresh session of `source`'s adapter in the source's own directory,
-/// launched with `prompt` as its first message, and nests the new pane under the
-/// source's. Used by the queue engine for new-session-delivery turns. Emits
+/// launched with `prompt` as its first message, and places the new pane after the
+/// source. Used by the queue engine for new-session-delivery turns. Emits
 /// `agent.spawned` with source "queue" so the frontend refreshes its pane list
 /// (unlike launcher spawns, no frontend caller holds the returned pane).
 pub fn spawn_sibling_agent_session(
@@ -1282,9 +1270,9 @@ pub fn spawn_sibling_agent_session(
         // Best-effort, like fork placement above: the session has already
         // spawned, and a source pane closed in the meantime must not turn a
         // live pane into a reported failure.
-        if let Err(err) = state.nest_pane_under(&pane.id, source_pane) {
+        if let Err(err) = state.place_pane_after(&pane.id, source_pane) {
             eprintln!(
-                "qmux: sibling session for agent {} spawned but could not be nested under pane {source_pane}: {err}",
+                "qmux: sibling session for agent {} spawned but could not be placed after pane {source_pane}: {err}",
                 source.id
             );
         }
@@ -1507,7 +1495,7 @@ mod tests {
         let state = AppState::new(test_config());
 
         // No agent bound to the pane: nothing to fork.
-        let err = agent_fork(&state, "pane-1", false, true, None, None, false).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None, false).unwrap_err();
         assert!(err.contains("no agent"), "unexpected error: {err}");
 
         // An adapter without a native fork command is rejected before any spawn is attempted.
@@ -1537,7 +1525,7 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
-        let err = agent_fork(&state, "pane-1", false, true, None, None, false).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None, false).unwrap_err();
         assert_eq!(err, FORK_UNSUPPORTED_ERROR);
     }
 

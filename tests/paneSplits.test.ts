@@ -2,11 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { cycleTabId, selectPaneAfterClose } from "../src/lib/appHelpers";
 import {
-  movePaneAfterSubtree,
-  movePanePromotingChildrenAdjacentToPane,
-  movePaneSubtreeAcrossGroups,
-  movePaneSubtreeBy,
-  subtreeIsShellOnly,
+  movePaneAdjacentToPane,
+  movePaneAfter,
+  movePaneAcrossGroups,
+  movePaneBy,
+  paneCanMoveAcrossGroups,
 } from "../src/lib/paneTree";
 import {
   canToggleTurnSidebar,
@@ -79,14 +79,14 @@ function assertApprox(actual: number, expected: number) {
   );
 }
 
-test("Option-Command-Arrow pane moves stay within sibling and group boundaries", () => {
+test("Option-Command-Arrow pane moves stay within flat group boundaries", () => {
   const flat = panes(["a", "b", "c"]);
-  assert.deepEqual(movePaneSubtreeBy(flat, "b", -1).map((item) => item.id), ["b", "a", "c"]);
-  assert.deepEqual(movePaneSubtreeBy(flat, "b", 1).map((item) => item.id), ["a", "c", "b"]);
-  assert.equal(movePaneSubtreeBy(flat, "a", -1), flat);
-  assert.equal(movePaneSubtreeBy(flat, "c", 1), flat);
+  assert.deepEqual(movePaneBy(flat, "b", -1).map((item) => item.id), ["b", "a", "c"]);
+  assert.deepEqual(movePaneBy(flat, "b", 1).map((item) => item.id), ["a", "c", "b"]);
+  assert.equal(movePaneBy(flat, "a", -1), flat);
+  assert.equal(movePaneBy(flat, "c", 1), flat);
 
-  const nested = [
+  const legacyDepths = [
     pane("root"),
     pane("a", 1),
     pane("a-child", 2),
@@ -94,10 +94,16 @@ test("Option-Command-Arrow pane moves stay within sibling and group boundaries",
     pane("next-root"),
   ];
   assert.deepEqual(
-    movePaneSubtreeBy(nested, "a", 1).map((item) => item.id),
-    ["root", "b", "a", "a-child", "next-root"],
+    movePaneBy(legacyDepths, "a", 1).map((item) => item.id),
+    ["root", "a-child", "a", "b", "next-root"],
   );
-  assert.equal(movePaneSubtreeBy(nested, "b", 1), nested);
+  assert.deepEqual(movePaneBy(legacyDepths, "b", 1).map((item) => item.id), [
+    "root",
+    "a",
+    "a-child",
+    "next-root",
+    "b",
+  ]);
 });
 
 test("normalizePaneSplitsForPanes preserves a split after its top pane closes", () => {
@@ -327,8 +333,8 @@ test("cycleTabId stays put when a split is the only cycle target", () => {
   assert.equal(cycleTabId(tabIds, "pane-2", -1, paneSplits), "pane-2");
 });
 
-test("movePanePromotingChildrenAdjacentToPane moves a leaf below a target at the target depth", () => {
-  const moved = movePanePromotingChildrenAdjacentToPane(
+test("movePaneAdjacentToPane moves one pane below a target", () => {
+  const moved = movePaneAdjacentToPane(
     [pane("pane-1"), pane("pane-2", 1), pane("pane-3"), pane("pane-4")],
     "pane-4",
     "pane-2",
@@ -339,15 +345,15 @@ test("movePanePromotingChildrenAdjacentToPane moves a leaf below a target at the
     moved.map((candidate) => [candidate.id, candidate.depth ?? 0]),
     [
       ["pane-1", 0],
-      ["pane-2", 1],
-      ["pane-4", 1],
+      ["pane-2", 0],
+      ["pane-4", 0],
       ["pane-3", 0],
     ],
   );
 });
 
-test("movePanePromotingChildrenAdjacentToPane promotes dragged pane descendants in place", () => {
-  const moved = movePanePromotingChildrenAdjacentToPane(
+test("movePaneAdjacentToPane does not move legacy descendants with a pane", () => {
+  const moved = movePaneAdjacentToPane(
     [
       pane("pane-1"),
       pane("pane-2"),
@@ -365,24 +371,26 @@ test("movePanePromotingChildrenAdjacentToPane promotes dragged pane descendants 
     [
       ["pane-1", 0],
       ["pane-2-child", 0],
-      ["pane-2-grandchild", 1],
+      ["pane-2-grandchild", 0],
       ["pane-3", 0],
       ["pane-2", 0],
     ],
   );
 });
 
-test("movePanePromotingChildrenAdjacentToPane refuses to drop onto a descendant", () => {
+test("movePaneAdjacentToPane treats legacy descendants as ordinary rows", () => {
   const panes = [pane("pane-1"), pane("pane-2", 1), pane("pane-3")];
 
-  assert.strictEqual(
-    movePanePromotingChildrenAdjacentToPane(panes, "pane-1", "pane-2", "below"),
-    panes,
+  assert.deepEqual(
+    movePaneAdjacentToPane(panes, "pane-1", "pane-2", "below").map(
+      (candidate) => candidate.id,
+    ),
+    ["pane-2", "pane-1", "pane-3"],
   );
 });
 
 test("joinPaneSplit inserts a dragged pane into an existing split after reordering", () => {
-  const orderedPanes = movePanePromotingChildrenAdjacentToPane(
+  const orderedPanes = movePaneAdjacentToPane(
     panes(["pane-1", "pane-2", "pane-3"]),
     "pane-3",
     "pane-1",
@@ -523,8 +531,8 @@ test("joinPaneSplit preserves each split's proportions when merging split groups
   assertApprox(sizes["pane-4"], 0.2);
 });
 
-test("joinPaneSplit joins a dragged parent after promoting its descendants", () => {
-  const orderedPanes = movePanePromotingChildrenAdjacentToPane(
+test("joinPaneSplit joins one dragged pane and leaves legacy rows in place", () => {
+  const orderedPanes = movePaneAdjacentToPane(
     [pane("pane-1"), pane("pane-2"), pane("pane-2-child", 1), pane("pane-3")],
     "pane-2",
     "pane-3",
@@ -545,7 +553,7 @@ test("joinPaneSplit joins a dragged parent after promoting its descendants", () 
 });
 
 test("detachPaneFromSplitMemberships lets a pane reorder within its existing split", () => {
-  const orderedPanes = movePanePromotingChildrenAdjacentToPane(
+  const orderedPanes = movePaneAdjacentToPane(
     panes(["pane-1", "pane-2", "pane-3"]),
     "pane-3",
     "pane-1",
@@ -582,8 +590,8 @@ test("detachPaneFromSplitMemberships drops intent for detached panes and detache
   });
 });
 
-test("movePaneAfterSubtree lifts a middle tab to just below the block", () => {
-  const moved = movePaneAfterSubtree(panes(["pane-1", "pane-2", "pane-3"]), "pane-2", "pane-3");
+test("movePaneAfter lifts a middle tab to just below the target", () => {
+  const moved = movePaneAfter(panes(["pane-1", "pane-2", "pane-3"]), "pane-2", "pane-3");
 
   assert.deepEqual(
     moved.map((candidate) => candidate.id),
@@ -591,8 +599,8 @@ test("movePaneAfterSubtree lifts a middle tab to just below the block", () => {
   );
 });
 
-test("movePaneAfterSubtree keeps trailing tabs after the moved tab", () => {
-  const moved = movePaneAfterSubtree(
+test("movePaneAfter keeps trailing tabs after the moved tab", () => {
+  const moved = movePaneAfter(
     panes(["x", "pane-1", "pane-2", "pane-3", "y"]),
     "pane-2",
     "pane-3",
@@ -604,29 +612,29 @@ test("movePaneAfterSubtree keeps trailing tabs after the moved tab", () => {
   );
 });
 
-test("movePaneAfterSubtree places the moved tab after the target's whole subtree", () => {
+test("movePaneAfter places the moved tab directly after the target", () => {
   const tree = [pane("a"), pane("b"), pane("c"), pane("c-child", 1), pane("d")];
-  const moved = movePaneAfterSubtree(tree, "b", "c");
+  const moved = movePaneAfter(tree, "b", "c");
 
   assert.deepEqual(
     moved.map((candidate) => ({ id: candidate.id, depth: candidate.depth })),
     [
       { id: "a", depth: 0 },
       { id: "c", depth: 0 },
-      { id: "c-child", depth: 1 },
       { id: "b", depth: 0 },
+      { id: "c-child", depth: 0 },
       { id: "d", depth: 0 },
     ],
   );
 });
 
-test("movePaneAfterSubtree is a no-op when the target lies inside the dragged subtree", () => {
+test("movePaneAfter treats legacy descendants as ordinary rows", () => {
   const tree = [pane("a"), pane("b"), pane("b-child", 1)];
-  const moved = movePaneAfterSubtree(tree, "b", "b-child");
+  const moved = movePaneAfter(tree, "b", "b-child");
 
   assert.deepEqual(
     moved.map((candidate) => candidate.id),
-    ["a", "b", "b-child"],
+    ["a", "b-child", "b"],
   );
 });
 
@@ -636,7 +644,7 @@ test("detaching a middle member keeps the remaining tabs as a contiguous split",
 
   // Mirror removePaneFromSplit: drop the tab from the split, then relocate it.
   const detached = detachPaneFromSplitMemberships(splits, "pane-2");
-  const reordered = movePaneAfterSubtree(before, "pane-2", "pane-3");
+  const reordered = movePaneAfter(before, "pane-2", "pane-3");
   const normalized = normalizePaneSplitsForPanes(detached, reordered);
 
   assert.deepEqual(
@@ -667,89 +675,53 @@ function agentPane(id: string, depth = 0, groupId = "group-1"): PaneInfo {
   return { ...pane(id, depth, groupId), kind: "agent", agentId: `agent-${id}` };
 }
 
-test("subtreeIsShellOnly accepts shell subtrees and rejects any agent member", () => {
+test("paneCanMoveAcrossGroups checks only the selected pane", () => {
   const tree = [pane("a"), pane("a-child", 1), pane("b"), agentPane("b-child", 1)];
 
-  assert.equal(subtreeIsShellOnly(tree, "a"), true);
-  // The subtree root is fine, but its nested child is an agent tab.
-  assert.equal(subtreeIsShellOnly(tree, "b"), false);
-  assert.equal(subtreeIsShellOnly(tree, "b-child"), false);
-  assert.equal(subtreeIsShellOnly(tree, "missing"), false);
+  assert.equal(paneCanMoveAcrossGroups(tree, "a"), true);
+  assert.equal(paneCanMoveAcrossGroups(tree, "b"), true);
+  assert.equal(paneCanMoveAcrossGroups(tree, "b-child"), false);
+  assert.equal(paneCanMoveAcrossGroups(tree, "missing"), false);
 });
 
-test("movePaneSubtreeAcrossGroups drops a subtree at a gap in another group", () => {
+test("movePaneAcrossGroups drops one pane at a gap in another group", () => {
   const source = [pane("a"), pane("a-child", 1), pane("b")];
   const target = [pane("x", 0, "group-2"), pane("y", 0, "group-2")];
 
-  const moved = movePaneSubtreeAcrossGroups(source, target, "a", "group-2", {
-    kind: "gap",
-    index: 1,
-  });
+  const moved = movePaneAcrossGroups(source, target, "a", "group-2", 1);
 
   assert.ok(moved);
   assert.deepEqual(
     moved.source.map((candidate) => [candidate.id, candidate.depth]),
-    [["b", 0]],
+    [
+      ["a-child", 0],
+      ["b", 0],
+    ],
   );
   assert.deepEqual(
     moved.target.map((candidate) => [candidate.id, candidate.groupId, candidate.depth]),
     [
       ["x", "group-2", 0],
       ["a", "group-2", 0],
-      ["a-child", "group-2", 1],
       ["y", "group-2", 0],
     ],
   );
 });
 
-test("movePaneSubtreeAcrossGroups nests a subtree under another group's tab", () => {
-  const source = [pane("a"), pane("a-child", 1)];
-  const target = [pane("x", 0, "group-2"), pane("x-child", 1, "group-2")];
-
-  const moved = movePaneSubtreeAcrossGroups(source, target, "a", "group-2", {
-    kind: "nest",
-    paneId: "x-child",
-  });
-
-  assert.ok(moved);
-  assert.deepEqual(moved.source, []);
-  assert.deepEqual(
-    moved.target.map((candidate) => [candidate.id, candidate.groupId, candidate.depth]),
-    [
-      ["x", "group-2", 0],
-      ["x-child", "group-2", 1],
-      ["a", "group-2", 2],
-      ["a-child", "group-2", 3],
-    ],
-  );
-});
-
-test("movePaneSubtreeAcrossGroups re-roots into an empty target and refuses over-deep nests", () => {
-  const intoEmpty = movePaneSubtreeAcrossGroups(
+test("movePaneAcrossGroups clamps an empty-target gap and moves only one pane", () => {
+  const intoEmpty = movePaneAcrossGroups(
     [pane("a", 0), pane("a-child", 1)],
     [],
     "a",
     "group-2",
-    { kind: "gap", index: 5 },
+    5,
   );
   assert.ok(intoEmpty);
   assert.deepEqual(
     intoEmpty.target.map((candidate) => [candidate.id, candidate.groupId, candidate.depth]),
     [
       ["a", "group-2", 0],
-      ["a-child", "group-2", 1],
     ],
   );
-
-  // Nesting under a tab already at the depth cap is refused outright.
-  const deepTarget = Array.from({ length: 9 }, (_, depth) =>
-    pane(`deep-${depth}`, depth, "group-2"),
-  );
-  assert.equal(
-    movePaneSubtreeAcrossGroups([pane("a")], deepTarget, "a", "group-2", {
-      kind: "nest",
-      paneId: "deep-8",
-    }),
-    null,
-  );
+  assert.deepEqual(intoEmpty.source.map((candidate) => candidate.id), ["a-child"]);
 });

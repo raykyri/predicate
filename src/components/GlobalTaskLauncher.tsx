@@ -650,7 +650,6 @@ export default function GlobalTaskLauncher() {
     if ((plan.kind === "fork" || plan.kind === "btw") && mode !== "queue") {
       void finishSubmission(() =>
         forkAgent(selected.pane.id, {
-          nest: true,
           useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
           prompt: plan.prompt,
           btw: plan.kind === "btw",

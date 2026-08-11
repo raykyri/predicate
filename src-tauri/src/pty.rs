@@ -1345,8 +1345,7 @@ fn spawn_portable_pty(
         // stamp round-trips. Every real pane (shell and agent) flows through here.
         last_active_at: crate::state::now_millis(),
         recovered: spec.recovered,
-        // Real depth is stamped from Model.pane_depth by ordered_panes; the runtime
-        // copy is never consulted for it.
+        // Deprecated compatibility field; flat tab layouts always use zero.
         depth: 0,
     };
 

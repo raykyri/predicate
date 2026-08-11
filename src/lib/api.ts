@@ -246,7 +246,6 @@ export interface MenuBarTab {
   paneId: string;
   title: string;
   path?: string | null;
-  depth: number;
   statusTone: MenuBarStatusTone;
   statusLabel?: string | null;
   waitingOnPane: boolean;
@@ -747,9 +746,8 @@ export function spawnAgent(request: SpawnAgentRequest) {
   return invoke<PaneInfo>("agent_spawn", { request });
 }
 
-// Forks the session in `paneId` into a new tab and resumes it. With `nest`, the
-// fork lands as a child of the source pane; otherwise it lands as a sibling
-// immediately after it. `prompt` is submitted as the fork's launch message.
+// Forks the session in `paneId` into a new tab immediately after it and resumes
+// the session. `prompt` is submitted as the fork's launch message.
 //
 // `anchor` forks from a chosen message instead of the session head: the backend
 // synthesizes a transcript ending just before it and resumes that. The anchor is
@@ -759,7 +757,6 @@ export function forkAgent(
   paneId: string,
   options?: {
     useWorktree?: boolean;
-    nest?: boolean;
     prompt?: string;
     anchor?: MessageAnchor;
     btw?: boolean;
@@ -768,7 +765,6 @@ export function forkAgent(
   return invoke<PaneInfo>("agent_fork", {
     paneId,
     useWorktree: options?.useWorktree ?? false,
-    nest: options?.nest ?? false,
     prompt: options?.prompt,
     anchor: options?.anchor,
     btw: options?.btw ?? false,
@@ -1447,13 +1443,13 @@ export function generateFoundationTabTitle(message: string) {
   return invoke<string>("generate_foundation_tab_title", { message });
 }
 
-/** Atomically sets the sidebar tab tree (order + nesting depth) in one call. */
+/** Atomically sets the flat sidebar tab order in one call. */
 export function setPaneLayout(items: PaneLayoutItem[]) {
   return invoke<PaneInfo[]>("pane_set_layout", { items });
 }
 
-/** Moves `paneId` (with its nested subtree) into `targetGroupId`, applying `items`
- * as the resulting full tab tree in the same backend mutation. Shell tabs only —
+/** Moves `paneId` into `targetGroupId`, applying `items` as the resulting flat tab
+ * order in the same backend mutation. Shell tabs only —
  * the backend rejects agent tabs, whose worktrees are bound to their group. */
 export function movePaneToGroup(
   paneId: string,
@@ -1463,7 +1459,7 @@ export function movePaneToGroup(
   return invoke<PaneInfo[]>("pane_move_to_group", { paneId, targetGroupId, items });
 }
 
-/** Moves `paneId` immediately after `siblingPaneId` at the same sidebar depth. */
+/** Moves `paneId` immediately after `siblingPaneId` in the flat sidebar order. */
 export function placePaneAfter(paneId: string, siblingPaneId: string) {
   return invoke<PaneInfo[]>("pane_place_after", { paneId, siblingPaneId });
 }

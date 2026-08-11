@@ -705,16 +705,9 @@ fn agent_fork(state: &AppState, context: &ControlContext, arguments: Value) -> C
         .pane_id
         .as_deref()
         .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
-    let pane = crate::adapters::agent_fork(
-        state,
-        pane_id,
-        args.use_worktree,
-        true,
-        args.prompt,
-        None,
-        false,
-    )
-    .map_err(internal)?;
+    let pane =
+        crate::adapters::agent_fork(state, pane_id, args.use_worktree, args.prompt, None, false)
+            .map_err(internal)?;
     let agent = state.agent_by_pane(&pane.id).map_err(internal)?;
     Ok(json!({ "pane": pane, "agent": agent }))
 }

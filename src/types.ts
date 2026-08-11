@@ -105,7 +105,7 @@ export interface PaneInfo {
   lastActiveAt?: number;
   // True for panes recreated from persisted state after a qmux restart.
   recovered?: boolean;
-  // Sidebar nesting depth (0 = root). Stamped by the backend.
+  // Deprecated compatibility field. Flat tab layouts always use zero.
   depth?: number;
 }
 

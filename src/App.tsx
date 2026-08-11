@@ -17,7 +17,6 @@ import type {
 import {
   Check,
   ChevronLeft,
-  ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
   Eye,
@@ -46,8 +45,6 @@ import {
   Plus,
   RotateCcw,
   Settings,
-  SquareChevronLeft,
-  SquareChevronRight,
   SquareTerminal,
   X,
 } from "lucide-react";
@@ -263,20 +260,13 @@ import type {
   PaneTabPointerDrag,
 } from "./appTypes";
 import {
-  canIndent,
-  canOutdent,
-  indentAt,
-  isLeafPane,
-  movePaneAfterSubtree,
-  movePanePromotingChildrenAdjacentToPane,
-  movePaneSubtreeAcrossGroups,
-  movePaneSubtreeBy,
-  moveToGap,
-  nestUnder,
-  outdentAt,
+  movePaneAdjacentToPane,
+  movePaneAfter,
+  movePaneAcrossGroups,
+  movePaneBy,
+  movePaneToGap,
+  paneCanMoveAcrossGroups,
   type PaneLayoutItem,
-  subtreeEnd,
-  subtreeIsShellOnly,
   toLayout,
 } from "./lib/paneTree";
 import {
@@ -614,8 +604,8 @@ const GLOBAL_TASK_LAUNCHER_HOTKEY_OPTIONS: ReadonlyArray<{
   },
 ];
 // Sentinel "active pane" value for the fixed Home tab. It's not a real pane, so it
-// lives outside the `panes` list — it can't be closed, reordered, or nested, and
-// selecting it shows the empty content placeholder (the launcher).
+// lives outside the `panes` list and can't be closed or reordered. Selecting it
+// shows the empty content placeholder (the launcher).
 const HOME_TAB_ID = "__home__";
 const RESEARCH_HOME_TAB_ID = "__research_home__";
 const ACTIVE_RESEARCH_TREE_KEY = "qmux.active-research-tree.v1";
@@ -743,8 +733,6 @@ function paneDropTargetsEqual(
   switch (a.kind) {
     case "gap":
       return b.kind === "gap" && a.groupId === b.groupId && a.index === b.index;
-    case "nest":
-      return b.kind === "nest" && a.groupId === b.groupId && a.paneId === b.paneId;
     case "terminal-split":
       return (
         b.kind === "terminal-split" &&
@@ -838,7 +826,7 @@ const MIN_INITIAL_ROWS = 5;
 const MAX_INITIAL_COLS = 500;
 const MAX_INITIAL_ROWS = 200;
 const PANE_CONTEXT_MENU_WIDTH = 320;
-const PANE_CONTEXT_MENU_ESTIMATED_HEIGHT = 400;
+const PANE_CONTEXT_MENU_ESTIMATED_HEIGHT = 340;
 const GROUP_CONTEXT_MENU_WIDTH = 220;
 const GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT = 270;
 const SETTINGS_CONTEXT_MENU_WIDTH = 180;
@@ -5370,7 +5358,6 @@ function MainApp() {
         path: settings.codeMode && settings.showTabDirectories && paneDir
           ? formatPaneDir(paneDir)
           : null,
-        depth: pane.depth ?? 0,
         statusTone: paneTabStatusTone(paneAgent),
         statusLabel: paneTabStatusMetaLabel(pane, paneAgent),
         waitingOnPane: paneWaitsOnOtherPane(paneAgent),
@@ -5675,10 +5662,7 @@ function MainApp() {
         .then((orderedPanes) => setPanesPreservingRecoveredDismissals(orderedPanes))
         .catch(() => undefined);
     }
-    // Mirror the backend's placement: directly after the sibling, at the
-    // sibling's nesting depth.
-    const placed = { ...pane, depth: current[siblingIndex].depth };
-    return [...current.slice(0, siblingIndex + 1), placed, ...current.slice(siblingIndex + 1)];
+    return [...current.slice(0, siblingIndex + 1), pane, ...current.slice(siblingIndex + 1)];
   }
 
   async function refreshGroups() {
@@ -5872,7 +5856,7 @@ function MainApp() {
     // lift it just below the remaining block before persisting.
     const lastRemainingId = split.paneIds[split.paneIds.length - 1];
     const groupPanes = panes.filter((candidate) => candidate.groupId === pane.groupId);
-    const nextGroupPanes = movePaneAfterSubtree(groupPanes, pane.id, lastRemainingId);
+    const nextGroupPanes = movePaneAfter(groupPanes, pane.id, lastRemainingId);
     const nextPanes = panesWithGroupOrder(pane.groupId, nextGroupPanes);
     const nextLayout = toLayout(nextPanes);
     const requestSeq = paneReorderRequestSeqRef.current + 1;
@@ -6607,25 +6591,6 @@ function MainApp() {
     settings.tabTitleProvider === "openRouter" ||
     settings.tabTitleProvider === "appleFoundationModels";
   const titleGenerationTestRunning = titleGenerationTest?.status === "running";
-  const draggingPaneGroup = draggingPaneId
-    ? panes.find((pane) => pane.id === draggingPaneId)?.groupId
-    : undefined;
-  const draggingGroupPanes = draggingPaneGroup
-    ? panes.filter((pane) => pane.groupId === draggingPaneGroup)
-    : [];
-  const draggingPaneIndex = draggingPaneId
-    ? draggingGroupPanes.findIndex((pane) => pane.id === draggingPaneId)
-    : -1;
-  // The dragged tab moves with its whole subtree, so dim that contiguous range.
-  const draggingSubtreeEnd =
-    draggingPaneIndex >= 0 ? subtreeEnd(draggingGroupPanes, draggingPaneIndex) : -1;
-  // Context-menu pane index, for enabling/disabling Indent/Outdent.
-  const contextMenuGroupPanes = contextMenuPane
-    ? panes.filter((pane) => pane.groupId === contextMenuPane.groupId)
-    : [];
-  const contextMenuPaneIndex = paneContextMenu
-    ? contextMenuGroupPanes.findIndex((pane) => pane.id === paneContextMenu.paneId)
-    : -1;
   const contextMenuPaneSplit = paneSplitForPane(paneSplits, contextMenuPane?.id);
   const contextMenuPaneHasSplit = Boolean(
     contextMenuPaneSplit && contextMenuPaneSplit.paneIds.length >= 2,
@@ -9338,13 +9303,13 @@ function MainApp() {
         id: "action:fork",
         section: "Actions",
         title: "Fork session",
-        action: () => void forkActivePane({ nest: true, useWorktree: false }),
+        action: () => void forkActivePane({ useWorktree: false }),
       });
       commands.push({
         id: "action:fork-worktree",
         section: "Actions",
         title: "Fork session in worktree",
-        action: () => void forkActivePane({ nest: true, useWorktree: true }),
+        action: () => void forkActivePane({ useWorktree: true }),
       });
     }
     if (activeBrowserOwnerId) {
@@ -9638,10 +9603,8 @@ function MainApp() {
     setGroupDropTarget(null);
   }
 
-  // Classifies a pointer position during a drag into a drop target: the top/bottom
-  // ~30% of a row is a reorder gap, the middle ~40% nests into that row. Rows inside
-  // the dragged tab's own subtree are never targets (can't nest into self), and gaps
-  // adjacent to that block are suppressed (would be a no-op move).
+  // Classifies a pointer position during a drag into a gap before or after a row.
+  // Gaps adjacent to the dragged tab are suppressed because they are no-op moves.
   function computePaneDragDropTarget(
     clientX: number,
     clientY: number,
@@ -9720,9 +9683,9 @@ function MainApp() {
       return null;
     }
     const dragGroupPanes = panes.filter((pane) => pane.groupId === dragPane.groupId);
-    // A shell-only subtree may drop into any other terminal group's rows; a subtree
-    // holding an agent tab stays within its own group (agents are group-bound).
-    const allowCrossGroup = subtreeIsShellOnly(dragGroupPanes, dragId);
+    // Ordinary shell tabs may drop into another terminal group. Agent tabs stay
+    // within their workspace because their worktree and queue state are group-bound.
+    const allowCrossGroup = paneCanMoveAcrossGroups(dragGroupPanes, dragId);
     const rows = Array.from(container.querySelectorAll(".pane-tab-row")).filter(
       (child): child is HTMLElement =>
         child instanceof HTMLElement &&
@@ -9730,7 +9693,7 @@ function MainApp() {
         typeof child.dataset.groupId === "string" &&
         (allowCrossGroup || child.dataset.groupId === dragPane.groupId) &&
         child.dataset.paneDragDisabled !== "true" &&
-        // The fixed Home row isn't a reorder/nest target and isn't in `panes`, so
+        // The fixed Home row isn't a reorder target and isn't in `panes`, so
         // excluding it keeps row indexes aligned with the group pane arrays below.
         !child.classList.contains("pane-home-row"),
     );
@@ -9738,12 +9701,8 @@ function MainApp() {
       return null;
     }
     const dragIndex = dragGroupPanes.findIndex((pane) => pane.id === dragId);
-    const dragEnd = dragIndex >= 0 ? subtreeEnd(dragGroupPanes, dragIndex) : -1;
-    const inDraggedSubtree = (groupId: string, index: number) =>
-      groupId === dragPane.groupId && dragIndex >= 0 && index >= dragIndex && index < dragEnd;
-
     const gapTarget = (groupId: string, index: number): PaneDropTarget | null =>
-      groupId === dragPane.groupId && dragIndex >= 0 && index >= dragIndex && index <= dragEnd
+      groupId === dragPane.groupId && dragIndex >= 0 && (index === dragIndex || index === dragIndex + 1)
         ? null // dropping into/adjacent to its own block is a no-op
         : { kind: "gap", groupId, index };
 
@@ -9758,22 +9717,7 @@ function MainApp() {
       if (clientY >= rect.bottom) {
         continue;
       }
-      const fraction = (clientY - rect.top) / rect.height;
-      if (fraction < 0.3) {
-        return gapTarget(groupId, index);
-      }
-      if (fraction > 0.7) {
-        return gapTarget(groupId, index + 1);
-      }
-      const groupPanes =
-        groupId === dragPane.groupId
-          ? dragGroupPanes
-          : panes.filter((pane) => pane.groupId === groupId);
-      const pane = groupPanes[index];
-      if (!pane || inDraggedSubtree(groupId, index)) {
-        return null;
-      }
-      return { kind: "nest", groupId, paneId: pane.id };
+      return gapTarget(groupId, clientY < rect.top + rect.height / 2 ? index : index + 1);
     }
     const lastGroupId = rows[rows.length - 1].dataset.groupId as string;
     return gapTarget(lastGroupId, rowCountByGroup.get(lastGroupId) ?? 0);
@@ -9789,14 +9733,6 @@ function MainApp() {
       return null;
     }
 
-    const groupPanes = panes.filter((pane) => pane.groupId === dragPane.groupId);
-    const dragIndex = groupPanes.findIndex((pane) => pane.id === dragId);
-    const dragEnd = dragIndex >= 0 ? subtreeEnd(groupPanes, dragIndex) : -1;
-    const targetInDraggedSubtree = (paneId: string) => {
-      const targetIndex = groupPanes.findIndex((pane) => pane.id === paneId);
-      return targetIndex >= dragIndex && targetIndex < dragEnd;
-    };
-
     let topFraction = 0;
     for (const [index, pane] of visibleTerminalPanes.entries()) {
       const heightFraction = activePaneSplit ? (activeSplitFractions[index] ?? 0) : 1;
@@ -9807,12 +9743,7 @@ function MainApp() {
         topFraction += heightFraction;
         continue;
       }
-      if (
-        pane.id === dragId ||
-        pane.groupId !== dragPane.groupId ||
-        targetInDraggedSubtree(pane.id) ||
-        !isLeafPane(groupPanes, pane.id)
-      ) {
+      if (pane.id === dragId || pane.groupId !== dragPane.groupId) {
         return null;
       }
       return {
@@ -9840,39 +9771,34 @@ function MainApp() {
       return;
     }
     const groupPanes = panes.filter((pane) => pane.groupId === target.groupId);
-    const next =
-      target.kind === "nest"
-        ? nestUnder(groupPanes, dragId, target.paneId)
-        : moveToGap(groupPanes, dragId, target.index);
+    const next = movePaneToGap(groupPanes, dragId, target.index);
     applyPaneLayout(target.groupId, next);
   }
 
-  // Moves a shell tab (and its subtree) into another terminal group. Optimistically
-  // reorders both groups locally, then persists order, depth, and the group change
+  // Moves a shell tab into another terminal group. Optimistically reorders both
+  // groups locally, then persists order and the group change
   // as one backend mutation; the backend removes the source group if this emptied it.
   function applyCrossGroupDropTarget(
     dragPane: PaneInfo,
-    target: Extract<PaneDropTarget, { kind: "gap" | "nest" }>,
+    target: Extract<PaneDropTarget, { kind: "gap" }>,
   ) {
     const paneSnapshot = panes;
     const sourceGroupPanes = paneSnapshot.filter((pane) => pane.groupId === dragPane.groupId);
     const scopeOf = (groupId: string) => groups.find((group) => group.id === groupId)?.scope;
     if (
-      !subtreeIsShellOnly(sourceGroupPanes, dragPane.id) ||
+      !paneCanMoveAcrossGroups(sourceGroupPanes, dragPane.id) ||
       scopeOf(dragPane.groupId) !== "terminal" ||
       scopeOf(target.groupId) !== "terminal"
     ) {
       return;
     }
     const targetGroupPanes = paneSnapshot.filter((pane) => pane.groupId === target.groupId);
-    const moved = movePaneSubtreeAcrossGroups(
+    const moved = movePaneAcrossGroups(
       sourceGroupPanes,
       targetGroupPanes,
       dragPane.id,
       target.groupId,
-      target.kind === "nest"
-        ? { kind: "nest", paneId: target.paneId }
-        : { kind: "gap", index: target.index },
+      target.index,
     );
     if (!moved) {
       return;
@@ -9884,8 +9810,8 @@ function MainApp() {
       ]),
       paneSnapshot,
     );
-    // No sameLayout no-op check here: a cross-group move can keep the flat
-    // order/depth identical while still changing group membership.
+    // No sameLayout no-op check here: a cross-group move can keep the flat order
+    // identical while still changing group membership.
     commitPaneLayout(next, () => movePaneToGroup(dragPane.id, target.groupId, toLayout(next)));
   }
 
@@ -9927,11 +9853,7 @@ function MainApp() {
     }
 
     const groupPanes = panes.filter((pane) => pane.groupId === target.groupId);
-    if (!isLeafPane(groupPanes, target.targetPaneId)) {
-      return;
-    }
-
-    const nextGroupPanes = movePanePromotingChildrenAdjacentToPane(
+    const nextGroupPanes = movePaneAdjacentToPane(
       groupPanes,
       dragId,
       target.targetPaneId,
@@ -10019,7 +9941,7 @@ function MainApp() {
     return next;
   }
 
-  // Optimistically applies a new tab layout (order + depth) and persists it, with the
+  // Optimistically applies a new flat tab order and persists it, with the
   // same request-sequence guard the old reorder used so stale responses never clobber
   // a newer local state.
   function applyPaneLayout(
@@ -10091,7 +10013,7 @@ function MainApp() {
       return;
     }
     const groupPanes = currentPanes.filter((candidate) => candidate.groupId === pane.groupId);
-    const nextGroupPanes = movePaneSubtreeBy(groupPanes, paneId, direction);
+    const nextGroupPanes = movePaneBy(groupPanes, paneId, direction);
     if (nextGroupPanes !== groupPanes) {
       applyPaneLayout(pane.groupId, nextGroupPanes, currentPanes);
     }
@@ -10134,36 +10056,12 @@ function MainApp() {
   function sameLayout(a: PaneLayoutItem[], b: PaneLayoutItem[]) {
     return (
       a.length === b.length &&
-      a.every(
-        (item, index) => item.paneId === b[index].paneId && item.depth === b[index].depth,
-      )
+      a.every((item, index) => item.paneId === b[index].paneId)
     );
   }
 
   function sameStringList(a: string[], b: string[]) {
     return a.length === b.length && a.every((item, index) => item === b[index]);
-  }
-
-  function indentContextMenuPane() {
-    if (contextMenuPaneIndex < 0) {
-      return;
-    }
-    const groupId = contextMenuPane?.groupId;
-    if (!groupId) {
-      return;
-    }
-    applyPaneLayout(groupId, indentAt(contextMenuGroupPanes, contextMenuPaneIndex));
-  }
-
-  function outdentContextMenuPane() {
-    if (contextMenuPaneIndex < 0) {
-      return;
-    }
-    const groupId = contextMenuPane?.groupId;
-    if (!groupId) {
-      return;
-    }
-    applyPaneLayout(groupId, outdentAt(contextMenuGroupPanes, contextMenuPaneIndex));
   }
 
   function openPaneContextMenu(event: ReactMouseEvent, pane: PaneInfo) {
@@ -10913,15 +10811,14 @@ function MainApp() {
     }
   }
 
-  // Forks the active session into a new tab (resuming it) — as a sibling right
-  // after the current tab, nested under it when `nest` is set, or joined into a
-  // split directly below it when `splitBelow` is set — and focuses the fork. The
+  // Forks the active session into a new tab (resuming it) immediately after the
+  // current tab, or joins it into a split directly below when `splitBelow` is set,
+  // and focuses the fork. The
   // backend also emits agent.forked, which refetches the ordered pane list, so the
   // optimistic placement below is just to avoid a flicker.
   async function forkPane(
     pane: PaneInfo,
     options: {
-      nest: boolean;
       useWorktree: boolean;
       prompt?: string;
       anchor?: MessageAnchor;
@@ -10936,13 +10833,7 @@ function MainApp() {
       // backend event untagged so the global event handler doesn't build /btw twice.
       const fork = await forkAgent(pane.id, { ...options, btw: false });
       if (options.btw || options.splitBelow) {
-        // A split fork is already placed as a sibling by the backend. Immediate
-        // /btw forks start nested and still need the sibling-placement mutation.
-        const orderedPanes = placePaneAfterOptimistically(
-          fork,
-          pane.id,
-          !options.splitBelow,
-        );
+        const orderedPanes = placePaneAfterOptimistically(fork, pane.id, false);
         setPanesPreservingRecoveredDismissals(orderedPanes);
         savePaneSplits(
           joinPaneSplit(paneSplitsRef.current, orderedPanes, pane.id, fork.id, {
@@ -10964,9 +10855,7 @@ function MainApp() {
           });
         }
       } else {
-        setPanesPreservingRecoveredDismissals((current) =>
-          current.some((existing) => existing.id === fork.id) ? current : [...current, fork],
-        );
+        setPanesPreservingRecoveredDismissals(placePaneAfterOptimistically(fork, pane.id, false));
         setActivePaneId(fork.id);
       }
       expandNewAgentTranscriptByDefault(fork);
@@ -10984,7 +10873,7 @@ function MainApp() {
     }
   }
 
-  async function forkActivePane(options: { nest: boolean; useWorktree: boolean }) {
+  async function forkActivePane(options: { useWorktree: boolean }) {
     if (!activePane || !activeAgent) {
       return;
     }
@@ -12641,17 +12530,7 @@ function MainApp() {
       allowDrag && paneDropTarget?.kind === "gap" && paneDropTarget.groupId === groupId
         ? paneDropTarget.index
         : null;
-    const isNestTarget =
-      allowDrag &&
-      paneDropTarget?.kind === "nest" &&
-      paneDropTarget.groupId === groupId &&
-      paneDropTarget.paneId === pane.id;
-    const isDraggingRow =
-      allowDrag &&
-      draggingPaneGroup === groupId &&
-      draggingPaneIndex >= 0 &&
-      index >= draggingPaneIndex &&
-      index < draggingSubtreeEnd;
+    const isDraggingRow = allowDrag && draggingPaneId === pane.id;
     const shortcutIndex = sidebarPaneIndexById.get(pane.id) ?? -1;
     const className = [
       "pane-tab-row",
@@ -12666,7 +12545,6 @@ function MainApp() {
       isDraggingRow ? "is-dragging" : "",
       dropGap === index ? "is-drop-before" : "",
       dropGap === groupPanes.length && index === groupPanes.length - 1 ? "is-drop-after" : "",
-      isNestTarget ? "is-drop-nest" : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -12678,7 +12556,6 @@ function MainApp() {
         data-pane-id={pane.id}
         data-group-id={groupId}
         data-pane-drag-disabled={allowDrag ? undefined : "true"}
-        style={{ "--pane-depth": pane.depth ?? 0 } as CSSProperties}
         onContextMenu={
           allowDrag
             ? (event) => openPaneContextMenu(event, pane)
@@ -12691,13 +12568,6 @@ function MainApp() {
         onClick={() => handlePaneTabClick(pane.id)}
         onDoubleClick={allowDrag ? () => handlePaneTabDoubleClick(pane) : undefined}
       >
-        {isNestTarget ? (
-          <div className="pane-tab-nest-indicator" aria-hidden="true">
-            <span className="pane-tab-nest-gutter">
-              <ChevronRight size={12} aria-hidden="true" />
-            </span>
-          </div>
-        ) : null}
         <button
           type="button"
           className="control-button pane-tab"
@@ -13107,7 +12977,7 @@ function MainApp() {
         onForkFromMessage={
           agent && !researchBound && agentSupportsForkAtMessage(agent)
             ? (anchor) =>
-                void forkPane(surface.pane, { nest: true, useWorktree: false, anchor })
+                void forkPane(surface.pane, { useWorktree: false, anchor })
             : undefined
         }
         // Where the handed-off work lives. The pane's cwd is what the user is
@@ -13251,7 +13121,6 @@ function MainApp() {
                 onWaitTargetHover={setWaitTargetHoverAgentId}
                 onForkWithPrompt={({ useWorktree, prompt, btw, titlePrompt }) =>
                   forkPane(surface.pane, {
-                    nest: true,
                     useWorktree,
                     prompt,
                     btw,
@@ -14268,31 +14137,6 @@ function MainApp() {
                   : "Show browser"}
               </span>
             </button>
-            <div className="context-menu-divider" role="separator" />
-            <button className="control-button"
-              type="button"
-              role="menuitem"
-              disabled={!canOutdent(contextMenuGroupPanes, contextMenuPaneIndex)}
-              onClick={() => {
-                outdentContextMenuPane();
-                setPaneContextMenu(null);
-              }}
-            >
-              <SquareChevronLeft size={13} aria-hidden="true" />
-              <span>Outdent</span>
-            </button>
-            <button className="control-button"
-              type="button"
-              role="menuitem"
-              disabled={!canIndent(contextMenuGroupPanes, contextMenuPaneIndex)}
-              onClick={() => {
-                indentContextMenuPane();
-                setPaneContextMenu(null);
-              }}
-            >
-              <SquareChevronRight size={13} aria-hidden="true" />
-              <span>Indent</span>
-            </button>
             {canForkContextMenuPane ? (
               <>
                 <div className="context-menu-divider" role="separator" />
@@ -14301,7 +14145,7 @@ function MainApp() {
                   role="menuitem"
                   onClick={() => {
                     setPaneContextMenu(null);
-                    void forkPane(contextMenuPane, { nest: true, useWorktree: false });
+                    void forkPane(contextMenuPane, { useWorktree: false });
                   }}
                 >
                   <GitBranch size={13} aria-hidden="true" />
@@ -14314,7 +14158,6 @@ function MainApp() {
                   onClick={() => {
                     setPaneContextMenu(null);
                     void forkPane(contextMenuPane, {
-                      nest: false,
                       useWorktree: false,
                       splitBelow: true,
                     });
@@ -14328,7 +14171,7 @@ function MainApp() {
                   role="menuitem"
                   onClick={() => {
                     setPaneContextMenu(null);
-                    void forkPane(contextMenuPane, { nest: true, useWorktree: true });
+                    void forkPane(contextMenuPane, { useWorktree: true });
                   }}
                 >
                   <GitBranch size={13} aria-hidden="true" />

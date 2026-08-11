@@ -489,7 +489,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         }
         // The fork — or a queue-dispatched new-session or research-root spawn —
         // created a new pane backend-side with no frontend caller holding it;
-        // refetch the ordered list so the nested tab appears (with its depth)
+        // refetch the ordered list so the newly placed tab appears
         // without stealing focus from the source.
         const seq = (panesRefreshSeq += 1);
         void listPanes()

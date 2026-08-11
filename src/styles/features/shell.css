@@ -223,8 +223,6 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  /* Horizontal step applied per nesting level (sidebar tab indentation). */
-  --pane-indent: 14px;
 }
 
 /* Keep the left sidebar's scrollbars compact so they don't crowd its narrow
@@ -258,7 +256,7 @@
   position: relative;
   min-width: 0;
   --pane-tab-left-rail-width: 3px;
-  --pane-tab-left-offset: calc(9px + var(--pane-depth, 0) * var(--pane-indent, 14px));
+  --pane-tab-left-offset: 9px;
 }
 
 .pane-tab {
@@ -270,8 +268,8 @@
   column-gap: 6px;
   width: 100%;
   min-height: 30px;
-  /* Nested tabs indent via the shared content offset. The left rail is subtracted
-     from padding so selected and unselected tabs keep their contents aligned. */
+  /* The left rail is subtracted from padding so selected and unselected tabs keep
+     their contents aligned. */
   padding: 5px 9px 5px calc(var(--pane-tab-left-offset) - var(--pane-tab-left-rail-width));
   border: 1px solid transparent;
   border-left: var(--pane-tab-left-rail-width) solid transparent;
@@ -597,45 +595,6 @@
 
 .pane-group.is-group-drop-after::after {
   bottom: -3px;
-}
-
-/* Nest drop indicator: a solid rounded outline over the target tab whose left edge
-   is one indent step in, with the remaining left gutter drawn as a dashed border and
-   a → arrow centered in it — signaling the dragged tab will land as a child. */
-.pane-tab-nest-indicator {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  pointer-events: none;
-}
-
-/* Anchored to the target tab's own content, so the gutter
-   marks the one extra step the child indents and the solid outline sits where the
-   child's content will start — correct even when the target is already nested. */
-.pane-tab-nest-indicator::before {
-  content: "";
-  position: absolute;
-  left: calc(var(--pane-tab-left-offset) + var(--pane-indent, 14px));
-  right: 0;
-  top: 0;
-  bottom: 0;
-  border: 1px solid var(--accent-color);
-  border-radius: var(--radius-sm);
-}
-
-.pane-tab-nest-gutter {
-  position: absolute;
-  left: var(--pane-tab-left-offset);
-  top: 0;
-  bottom: 0;
-  width: var(--pane-indent, 14px);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px dashed var(--accent-color);
-  border-right: none;
-  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
-  color: var(--accent-color);
 }
 
 .pane-list.is-dragging,

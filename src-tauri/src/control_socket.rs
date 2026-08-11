@@ -396,7 +396,6 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
                 state,
                 &authed_pane,
                 payload.use_worktree,
-                true,
                 payload.prompt,
                 None,
                 false,

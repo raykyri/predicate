@@ -77,11 +77,10 @@ export type GroupPointerDrag = {
   active: boolean;
 };
 
-// Where a tab drag will land: a gap between rows (reorder), onto a row (nest), or
-// into the visible terminal stack (split above/below the target pane).
+// Where a tab drag will land: a gap between rows (reorder), or into the visible
+// terminal stack (split above/below the target pane).
 export type PaneDropTarget =
   | { kind: "gap"; groupId: string; index: number }
-  | { kind: "nest"; groupId: string; paneId: string }
   | {
       kind: "terminal-split";
       groupId: string;

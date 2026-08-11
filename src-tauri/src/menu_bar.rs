@@ -27,8 +27,6 @@ pub struct MenuBarTab {
     pub pane_id: String,
     pub title: String,
     pub path: Option<String>,
-    #[serde(default)]
-    pub depth: u16,
     #[serde(default = "default_status_tone")]
     pub status_tone: String,
     pub status_label: Option<String>,
@@ -322,7 +320,6 @@ fn tab_menu_label(tab: &MenuBarTab) -> String {
     if tab.selected {
         label.push_str("* ");
     }
-    label.push_str(&"  ".repeat(tab.depth.min(8) as usize));
     label.push_str(
         &sanitize_menu_text(&tab.title, 96)
             .filter(|title| !title.is_empty())

@@ -214,7 +214,7 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             } else {
                 ""
             };
-            println!("Forked {title} into a new tab nested under this one{suffix}{prompt_suffix}.");
+            println!("Forked {title} into a new tab after this one{suffix}{prompt_suffix}.");
             Ok(true)
         }
         "open" => {

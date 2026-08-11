@@ -140,8 +140,7 @@ fn restore_closed_pane_snapshot(
     }
 
     state.set_pane_recovered(&snapshot.pane.id, false)?;
-    let panes =
-        state.place_restored_pane(&snapshot.pane.id, snapshot.index, snapshot.pane.depth)?;
+    let panes = state.place_restored_pane(&snapshot.pane.id, snapshot.index)?;
     panes
         .into_iter()
         .find(|pane| pane.id == snapshot.pane.id)

@@ -1694,7 +1694,7 @@ fn launch_research_child_run(
     // The follow-up runs at the child's (inherited) effort, applied by the
     // adapter's fork path the same way `model` is re-applied.
     source.effort = child.effort.clone();
-    match fork_agent_source(state, &source, false, true, Some(&question)) {
+    match fork_agent_source(state, &source, false, Some(&question)) {
         Ok(pane) => {
             let association = pane
                 .agent_id
@@ -2190,16 +2190,14 @@ async fn spawn_claude(
     .map_err(|err| format!("spawn_claude task failed: {err}"))?
 }
 
-/// Forks the session in `pane_id` into a new tab and resumes it. `nest` places the
-/// fork as a child of the source; otherwise it lands as a sibling immediately after
-/// it. When `prompt` is set, it is submitted as the fork's launch message. `btw`
+/// Forks the session in `pane_id` into a new tab immediately after it and resumes it.
+/// When `prompt` is set, it is submitted as the fork's launch message. `btw`
 /// tags the fork event so the main window can present the pane in a BTW split.
 #[tauri::command]
 async fn agent_fork(
     state: tauri::State<'_, AppState>,
     pane_id: String,
     use_worktree: bool,
-    nest: bool,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
     btw: bool,
@@ -2209,7 +2207,7 @@ async fn agent_fork(
         if let Some(group_id) = state.pane_group_id(&pane_id)? {
             validate_launch_workspace(&state, Some(&group_id), LaunchOrigin::Terminal)?;
         }
-        fork_agent_pane(&state, &pane_id, use_worktree, nest, prompt, anchor, btw)
+        fork_agent_pane(&state, &pane_id, use_worktree, prompt, anchor, btw)
     })
     .await
     .map_err(|err| format!("agent_fork task failed: {err}"))?

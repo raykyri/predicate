@@ -1063,7 +1063,7 @@ fn deliver_queued_turn_to_new_pane(
 ) -> Result<(), String> {
     match delivery {
         QueuedTurnDelivery::Fork { use_worktree } => {
-            fork_agent_source(state, source, *use_worktree, true, Some(text))?;
+            fork_agent_source(state, source, *use_worktree, Some(text))?;
         }
         QueuedTurnDelivery::NewSession => {
             spawn_sibling_agent_session(state, source, text)?;
@@ -1085,7 +1085,7 @@ fn deliver_queued_composer_command(
             prompt,
             use_worktree,
         } => {
-            fork_agent_source(state, source, use_worktree, true, Some(prompt))?;
+            fork_agent_source(state, source, use_worktree, Some(prompt))?;
         }
         QueuedComposerCommand::Btw { prompt } => {
             let prompt = format!("{BTW_SAFETY_INSTRUCTION}\n\n{prompt}");

@@ -276,9 +276,6 @@ impl ActiveSubagents {
 struct Model {
     panes: HashMap<String, PaneRuntime>,
     pane_order: Vec<String>,
-    /// Sidebar nesting depth per pane (0 = root). Source of truth for the tab tree;
-    /// `ordered_panes` stamps it onto each returned `PaneInfo`. Absent id == depth 0.
-    pane_depth: HashMap<String, u16>,
     pane_splits: Vec<PaneSplitInfo>,
     groups: HashMap<String, GroupInfo>,
     group_order: Vec<String>,
@@ -1225,15 +1222,11 @@ pub struct PaneInfo {
     /// time only; the persisted value is never consulted when reloading.
     #[serde(default)]
     pub recovered: bool,
-    /// Sidebar nesting depth (0 = root). Stamped from `Model.pane_depth` by
-    /// `ordered_panes`; persisted so the tree survives a restart.
+    /// Deprecated wire field retained so older persisted snapshots and clients can
+    /// still deserialize pane records. New versions always return and persist zero.
     #[serde(default)]
     pub depth: u16,
 }
-
-/// Hard cap on nesting depth so a deep chain can never make the sidebar unusable.
-/// Mirrored by `MAX_PANE_DEPTH` in the frontend's pane-tree helpers.
-pub const MAX_PANE_DEPTH: u16 = 8;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1259,8 +1252,8 @@ pub struct PaneSplitIntent {
     pub created_at: f64,
 }
 
-/// One entry in a `set_pane_layout` request: a pane and its target nesting depth,
-/// in sidebar order.
+/// One entry in a `set_pane_layout` request. `depth` remains for rolling upgrade
+/// compatibility, but nonzero values are no longer supported.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneLayoutEntry {
@@ -1753,6 +1746,12 @@ impl AppState {
         }
         let (mut research_reconciled, mut migration_warnings) =
             migrate_legacy_research_workspaces(self, &mut persisted);
+        // Pane nesting was removed. Flatten the recovery snapshot before it is
+        // returned for respawn; inserting the recovered runtimes persists the
+        // normalized records during the normal recovery pass.
+        for pane in &mut persisted.panes {
+            pane.depth = 0;
+        }
         if source_version == Some(2)
             && let Err(err) =
                 persistence::backup_v2_state_for_migration(&self.inner.config.workspace_root)
@@ -2089,14 +2088,6 @@ impl AppState {
             model.active_tab_id = active_tab_id;
             model.pane_splits = persisted.pane_splits;
             hydrated_agents = model.agents.values().cloned().collect::<Vec<_>>();
-            // Seed nesting depth from the persisted panes. Panes are re-inserted by
-            // the respawn pass that follows; depths for panes that don't come back
-            // (e.g. already-exited panes) are pruned by the post-respawn normalize.
-            for pane in &persisted.panes {
-                if pane.depth != 0 {
-                    model.pane_depth.insert(pane.id.clone(), pane.depth);
-                }
-            }
         }
 
         // Backfill recent-session entries for the hydrated agents after the
@@ -5995,7 +5986,7 @@ impl AppState {
                 .unwrap_or(ordered_ids.len());
 
             let mut pane = runtime.info.clone();
-            pane.depth = model.pane_depth.get(pane_id).copied().unwrap_or(0);
+            pane.depth = 0;
             let group = model.groups.get(&pane.group_id).cloned();
 
             let group_pane_count = model
@@ -6198,7 +6189,6 @@ impl AppState {
         &self,
         pane_id: &str,
         index: usize,
-        depth: u16,
     ) -> Result<Vec<PaneInfo>, String> {
         let panes = {
             let mut model = self
@@ -6214,12 +6204,6 @@ impl AppState {
             ids.retain(|id| id != pane_id);
             ids.insert(index.min(ids.len()), pane_id.to_string());
             model.pane_order = ids;
-            if depth == 0 {
-                model.pane_depth.remove(pane_id);
-            } else {
-                model.pane_depth.insert(pane_id.to_string(), depth);
-            }
-            normalize_pane_depths(&mut model);
             normalize_pane_splits_locked(&mut model);
             ordered_panes(&model)
         };
@@ -6378,9 +6362,6 @@ impl AppState {
                 }
             }
 
-            // Re-level any children orphaned by the removal so the tree stays valid
-            // (a closed parent must not leave its children at an unreachable depth).
-            normalize_pane_depths(&mut model);
             normalize_pane_splits_locked(&mut model);
             removed_group_id.filter(|group_id| {
                 remove_group_without_open_panes_locked(&mut model, group_id, true)
@@ -6458,9 +6439,6 @@ impl AppState {
             }
 
             model.pane_order = pane_ids;
-            // A bare reorder can move a nested pane to a position its depth no longer
-            // fits (e.g. a child to the top), so re-level depths to stay a valid tree.
-            normalize_pane_depths(&mut model);
             normalize_pane_splits_locked(&mut model);
             ordered_panes(&model)
         };
@@ -6468,12 +6446,9 @@ impl AppState {
         Ok(panes)
     }
 
-    /// Atomically replaces the full sidebar tab tree: order + nesting depth. The
-    /// `layout` must list exactly the current panes (no missing/duplicate/unknown id)
-    /// and form a valid tree (first depth 0; each depth <= previous + 1; capped at
-    /// `MAX_PANE_DEPTH`). Every structural tab operation — reorder, indent, outdent,
-    /// nest — is expressed as one of these layouts so a multi-pane indent applies in
-    /// a single locked mutation.
+    /// Atomically replaces the flat sidebar tab order. The layout must list exactly
+    /// the current panes (no missing/duplicate/unknown id). The legacy depth field
+    /// must be zero.
     pub fn set_pane_layout(&self, layout: Vec<PaneLayoutEntry>) -> Result<Vec<PaneInfo>, String> {
         let panes = {
             let mut model = self
@@ -6486,38 +6461,19 @@ impl AppState {
             }
 
             let mut seen = HashSet::with_capacity(layout.len());
-            let mut prev_depth_by_group: HashMap<String, u16> = HashMap::new();
             for entry in &layout {
                 if !seen.insert(entry.pane_id.clone()) {
                     return Err("pane layout contains a duplicate pane".to_string());
                 }
-                let Some(pane) = model.panes.get(&entry.pane_id) else {
+                if !model.panes.contains_key(&entry.pane_id) {
                     return Err(format!("pane {} was not found", entry.pane_id));
-                };
-                if entry.depth > MAX_PANE_DEPTH {
-                    return Err(format!(
-                        "pane depth {} exceeds the maximum of {MAX_PANE_DEPTH}",
-                        entry.depth
-                    ));
                 }
-                let group_id = pane.info.group_id.clone();
-                let ceiling = prev_depth_by_group
-                    .get(&group_id)
-                    .map_or(0, |prev| prev + 1);
-                if entry.depth > ceiling {
-                    return Err(
-                        "pane layout is not a valid tree (a depth skips a level)".to_string()
-                    );
+                if entry.depth != 0 {
+                    return Err("pane indentation is no longer supported".to_string());
                 }
-                prev_depth_by_group.insert(group_id, entry.depth);
             }
 
             model.pane_order = layout.iter().map(|entry| entry.pane_id.clone()).collect();
-            model.pane_depth = layout
-                .iter()
-                .filter(|entry| entry.depth != 0)
-                .map(|entry| (entry.pane_id.clone(), entry.depth))
-                .collect();
             normalize_pane_splits_locked(&mut model);
             ordered_panes(&model)
         };
@@ -6525,9 +6481,8 @@ impl AppState {
         Ok(panes)
     }
 
-    /// Moves a plain shell tab (and its nested subtree) into another terminal group,
-    /// applying `layout` as the resulting full tab tree (order + depth) in the same
-    /// locked mutation. Agent tabs — or subtrees containing one — are rejected: an
+    /// Moves a plain shell tab into another terminal group, applying `layout` as the
+    /// resulting flat tab order in the same locked mutation. Agent tabs are rejected: an
     /// agent's worktree, branch, and queue bookkeeping are bound to its group, and
     /// this move deliberately doesn't touch them. When the move empties the source
     /// group it is removed, mirroring the close-last-pane path.
@@ -6565,82 +6520,35 @@ impl AppState {
                 return Err("tabs can only move between terminal groups".to_string());
             }
 
-            // The moved unit is the pane's whole sidebar subtree: the contiguous run
-            // of following same-group panes nested deeper than it.
-            let group_panes = ordered_panes(&model)
-                .into_iter()
-                .filter(|candidate| candidate.group_id == source_group_id)
-                .collect::<Vec<_>>();
-            let start = group_panes
-                .iter()
-                .position(|candidate| candidate.id == pane_id)
+            let moved = model
+                .panes
+                .get(pane_id)
                 .ok_or_else(|| format!("pane {pane_id} was not found"))?;
-            let root_depth = group_panes[start].depth;
-            let moved_ids = std::iter::once(&group_panes[start])
-                .chain(
-                    group_panes[start + 1..]
-                        .iter()
-                        .take_while(|candidate| candidate.depth > root_depth),
-                )
-                .map(|candidate| candidate.id.clone())
-                .collect::<HashSet<_>>();
-            for moved_id in &moved_ids {
-                let moved = model
-                    .panes
-                    .get(moved_id)
-                    .ok_or_else(|| format!("pane {moved_id} was not found"))?;
-                if !matches!(moved.info.kind, PaneKind::Shell) || moved.info.agent_id.is_some() {
-                    return Err("agent tabs can't move to another group".to_string());
-                }
+            if !matches!(moved.info.kind, PaneKind::Shell) || moved.info.agent_id.is_some() {
+                return Err("agent tabs can't move to another group".to_string());
             }
-
-            // Same validation as `set_pane_layout`, with the moved subtree counted
+            // Same validation as `set_pane_layout`, with the moved pane counted
             // against its prospective group.
             if layout.len() != model.panes.len() {
                 return Err("pane layout is stale; refresh before updating".to_string());
             }
             let mut seen = HashSet::with_capacity(layout.len());
-            let mut prev_depth_by_group: HashMap<String, u16> = HashMap::new();
             for entry in &layout {
                 if !seen.insert(entry.pane_id.clone()) {
                     return Err("pane layout contains a duplicate pane".to_string());
                 }
-                let Some(pane) = model.panes.get(&entry.pane_id) else {
+                if !model.panes.contains_key(&entry.pane_id) {
                     return Err(format!("pane {} was not found", entry.pane_id));
-                };
-                if entry.depth > MAX_PANE_DEPTH {
-                    return Err(format!(
-                        "pane depth {} exceeds the maximum of {MAX_PANE_DEPTH}",
-                        entry.depth
-                    ));
                 }
-                let group_id = if moved_ids.contains(&entry.pane_id) {
-                    target_group_id.to_string()
-                } else {
-                    pane.info.group_id.clone()
-                };
-                let ceiling = prev_depth_by_group
-                    .get(&group_id)
-                    .map_or(0, |prev| prev + 1);
-                if entry.depth > ceiling {
-                    return Err(
-                        "pane layout is not a valid tree (a depth skips a level)".to_string()
-                    );
+                if entry.depth != 0 {
+                    return Err("pane indentation is no longer supported".to_string());
                 }
-                prev_depth_by_group.insert(group_id, entry.depth);
             }
 
-            for moved_id in &moved_ids {
-                if let Some(moved) = model.panes.get_mut(moved_id) {
-                    moved.info.group_id = target_group_id.to_string();
-                }
+            if let Some(moved) = model.panes.get_mut(pane_id) {
+                moved.info.group_id = target_group_id.to_string();
             }
             model.pane_order = layout.iter().map(|entry| entry.pane_id.clone()).collect();
-            model.pane_depth = layout
-                .iter()
-                .filter(|entry| entry.depth != 0)
-                .map(|entry| (entry.pane_id.clone(), entry.depth))
-                .collect();
             // A moved pane's split memberships can't survive the group change; the
             // normalizer drops it from any split it belonged to.
             normalize_pane_splits_locked(&mut model);
@@ -6661,50 +6569,7 @@ impl AppState {
         Ok(panes)
     }
 
-    /// Moves `pane_id` to sit immediately after `parent_pane_id` at one level deeper
-    /// (its first child), then re-levels the tree. Used when a fork should appear
-    /// nested under the session it forked from.
-    pub fn nest_pane_under(
-        &self,
-        pane_id: &str,
-        parent_pane_id: &str,
-    ) -> Result<Vec<PaneInfo>, String> {
-        let panes = {
-            let mut model = self
-                .inner
-                .model
-                .lock()
-                .map_err(|_| "model lock poisoned".to_string())?;
-            if !model.panes.contains_key(pane_id) {
-                return Err(format!("pane {pane_id} was not found"));
-            }
-            if !model.panes.contains_key(parent_pane_id) {
-                return Err(format!("pane {parent_pane_id} was not found"));
-            }
-
-            let mut ids = ordered_pane_ids(&model);
-            ids.retain(|id| id != pane_id);
-            let parent_index = ids
-                .iter()
-                .position(|id| id == parent_pane_id)
-                .ok_or_else(|| format!("pane {parent_pane_id} was not found"))?;
-            ids.insert(parent_index + 1, pane_id.to_string());
-
-            let parent_depth = model.pane_depth.get(parent_pane_id).copied().unwrap_or(0);
-            let new_depth = (parent_depth + 1).min(MAX_PANE_DEPTH);
-            model.pane_order = ids;
-            model.pane_depth.insert(pane_id.to_string(), new_depth);
-            normalize_pane_depths(&mut model);
-            normalize_pane_splits_locked(&mut model);
-            ordered_panes(&model)
-        };
-        self.persist();
-        Ok(panes)
-    }
-
-    /// Moves `pane_id` to sit immediately after `sibling_pane_id` at the same depth
-    /// (a sibling, not a child), then re-levels the tree. Used when a fork should
-    /// appear as a new tab right after the session it forked from.
+    /// Moves `pane_id` to sit immediately after `sibling_pane_id`.
     pub fn place_pane_after(
         &self,
         pane_id: &str,
@@ -6731,10 +6596,7 @@ impl AppState {
                 .ok_or_else(|| format!("pane {sibling_pane_id} was not found"))?;
             ids.insert(sibling_index + 1, pane_id.to_string());
 
-            let sibling_depth = model.pane_depth.get(sibling_pane_id).copied().unwrap_or(0);
             model.pane_order = ids;
-            model.pane_depth.insert(pane_id.to_string(), sibling_depth);
-            normalize_pane_depths(&mut model);
             normalize_pane_splits_locked(&mut model);
             ordered_panes(&model)
         };
@@ -6742,15 +6604,13 @@ impl AppState {
         Ok(panes)
     }
 
-    /// Clamps persisted nesting depths to a valid tree over the panes that actually
-    /// exist. Called once after session restore/respawn, since some persisted panes
-    /// (already-exited ones) are intentionally not recreated.
+    /// Finalizes the pane layout after session restore/respawn. Legacy persisted
+    /// depths are intentionally discarded during hydration.
     pub fn normalize_pane_layout(&self) {
         {
             let Ok(mut model) = self.inner.model.lock() else {
                 return;
             };
-            normalize_pane_depths(&mut model);
             normalize_pane_splits_locked(&mut model);
         }
         self.persist();
@@ -9555,8 +9415,7 @@ fn preview_text(raw: &str) -> Option<String> {
 }
 
 /// The effective sidebar order: every live pane id, `pane_order` first, then any
-/// panes missing from it (sorted by id for determinism). Shared by `ordered_panes`
-/// and depth normalization so they always agree on ordering.
+/// panes missing from it (sorted by id for determinism).
 fn ordered_pane_ids(model: &Model) -> Vec<String> {
     let mut ids = Vec::with_capacity(model.panes.len());
     let mut seen = HashSet::with_capacity(model.panes.len());
@@ -10148,41 +10007,11 @@ fn ordered_panes(model: &Model) -> Vec<PaneInfo> {
         .filter_map(|pane_id| {
             model.panes.get(&pane_id).map(|pane| {
                 let mut info = pane.info.clone();
-                info.depth = model.pane_depth.get(&pane_id).copied().unwrap_or(0);
+                info.depth = 0;
                 info
             })
         })
         .collect()
-}
-
-/// Clamps `pane_depth` to the validity invariant along the effective order (first
-/// pane depth 0; each depth <= previous + 1; capped at `MAX_PANE_DEPTH`) and drops
-/// entries for panes that no longer exist. Idempotent. This is what re-levels
-/// orphaned children when their parent pane is removed.
-fn normalize_pane_depths(model: &mut Model) {
-    let ids = ordered_pane_ids(model);
-    let id_set: HashSet<&String> = ids.iter().collect();
-    model.pane_depth.retain(|id, _| id_set.contains(id));
-
-    let mut prev_depth_by_group: HashMap<String, u16> = HashMap::new();
-    for id in ids.iter() {
-        let group_id = model
-            .panes
-            .get(id)
-            .map(|pane| pane.info.group_id.clone())
-            .unwrap_or_default();
-        let raw = model.pane_depth.get(id).copied().unwrap_or(0);
-        let ceiling = prev_depth_by_group
-            .get(&group_id)
-            .map_or(0, |prev| (prev + 1).min(MAX_PANE_DEPTH));
-        let depth = raw.min(ceiling);
-        if depth == 0 {
-            model.pane_depth.remove(id);
-        } else {
-            model.pane_depth.insert(id.clone(), depth);
-        }
-        prev_depth_by_group.insert(group_id, depth);
-    }
 }
 
 fn normalize_pane_splits_locked(model: &mut Model) {
@@ -15789,7 +15618,7 @@ mod tests {
     }
 
     #[test]
-    fn set_pane_layout_applies_and_round_trips_depth() {
+    fn set_pane_layout_applies_and_round_trips_flat_order() {
         let workspace = temp_workspace();
         let config = test_config(workspace.clone());
 
@@ -15801,27 +15630,27 @@ mod tests {
             state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
 
             let panes = state
-                .set_pane_layout(layout(&[("pane-3", 0), ("pane-1", 1), ("pane-2", 2)]))
+                .set_pane_layout(layout(&[("pane-3", 0), ("pane-1", 0), ("pane-2", 0)]))
                 .unwrap();
             assert_eq!(
                 id_depths(&panes),
                 vec![
                     ("pane-3".to_string(), 0),
-                    ("pane-1".to_string(), 1),
-                    ("pane-2".to_string(), 2),
+                    ("pane-1".to_string(), 0),
+                    ("pane-2".to_string(), 0),
                 ]
             );
         }
 
-        // Depth and order survive a restart via the persisted pane list.
+        // Flat order survives a restart via the persisted pane list.
         let state = AppState::new(config);
         let recovered = state.restore_session();
         assert_eq!(
             id_depths(&recovered),
             vec![
                 ("pane-3".to_string(), 0),
-                ("pane-1".to_string(), 1),
-                ("pane-2".to_string(), 2),
+                ("pane-1".to_string(), 0),
+                ("pane-2".to_string(), 0),
             ]
         );
     }
@@ -15833,26 +15662,13 @@ mod tests {
         state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
 
-        // The first pane must be at the root.
+        // Legacy clients can still deserialize the field, but nonzero depth is
+        // rejected so indentation cannot be reintroduced after the cutover.
         assert!(
             state
                 .set_pane_layout(layout(&[("pane-1", 1), ("pane-2", 1)]))
                 .unwrap_err()
-                .contains("valid tree")
-        );
-        // A depth may not skip a level.
-        assert!(
-            state
-                .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 2)]))
-                .unwrap_err()
-                .contains("valid tree")
-        );
-        // Depth is capped.
-        assert!(
-            state
-                .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", MAX_PANE_DEPTH + 1)]))
-                .unwrap_err()
-                .contains("maximum")
+                .contains("no longer supported")
         );
         // Membership must match the live panes exactly.
         assert!(
@@ -15870,7 +15686,7 @@ mod tests {
     }
 
     #[test]
-    fn move_pane_to_group_moves_shell_subtree_and_removes_emptied_group() {
+    fn move_pane_to_group_moves_shell_pane_and_removes_emptied_group() {
         let workspace = temp_workspace();
         let config = test_config(workspace.clone());
 
@@ -15884,29 +15700,20 @@ mod tests {
                 .insert_group_after(sample_group_with_id("group-2"), Some("group-1"))
                 .unwrap();
             state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
-            state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
             let mut other = sample_pane_runtime("pane-3");
             other.info.group_id = "group-2".to_string();
             state.insert_pane(other).unwrap();
             state
-                .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 1), ("pane-3", 0)]))
+                .set_pane_layout(layout(&[("pane-1", 0), ("pane-3", 0)]))
                 .unwrap();
 
-            // The whole subtree re-homes to the target group with the given layout.
+            // The pane re-homes to the target group with the given layout.
             let panes = state
-                .move_pane_to_group(
-                    "pane-1",
-                    "group-2",
-                    layout(&[("pane-3", 0), ("pane-1", 0), ("pane-2", 1)]),
-                )
+                .move_pane_to_group("pane-1", "group-2", layout(&[("pane-3", 0), ("pane-1", 0)]))
                 .unwrap();
             assert_eq!(
                 id_depths(&panes),
-                vec![
-                    ("pane-3".to_string(), 0),
-                    ("pane-1".to_string(), 0),
-                    ("pane-2".to_string(), 1),
-                ]
+                vec![("pane-3".to_string(), 0), ("pane-1".to_string(), 0),]
             );
             assert!(panes.iter().all(|pane| pane.group_id == "group-2"));
 
@@ -15926,11 +15733,7 @@ mod tests {
         let recovered = state.restore_session();
         assert_eq!(
             id_depths(&recovered),
-            vec![
-                ("pane-3".to_string(), 0),
-                ("pane-1".to_string(), 0),
-                ("pane-2".to_string(), 1),
-            ]
+            vec![("pane-3".to_string(), 0), ("pane-1".to_string(), 0),]
         );
         assert!(recovered.iter().all(|pane| pane.group_id == "group-2"));
         assert_eq!(state.list_groups().unwrap().len(), 1);
@@ -15957,24 +15760,17 @@ mod tests {
         state.insert_pane(agent).unwrap();
         state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
         state
-            .set_pane_layout(layout(&[("pane-1", 0), ("pane-agent", 1), ("pane-2", 0)]))
+            .set_pane_layout(layout(&[("pane-1", 0), ("pane-agent", 0), ("pane-2", 0)]))
             .unwrap();
-        let full = || layout(&[("pane-1", 0), ("pane-agent", 1), ("pane-2", 0)]);
+        let full = || layout(&[("pane-1", 0), ("pane-agent", 0), ("pane-2", 0)]);
 
-        // An agent tab can't move, and neither can a shell tab whose subtree holds one.
+        // An agent tab can't move.
         assert!(
             state
                 .move_pane_to_group("pane-agent", "group-2", full())
                 .unwrap_err()
                 .contains("agent tabs")
         );
-        assert!(
-            state
-                .move_pane_to_group("pane-1", "group-2", full())
-                .unwrap_err()
-                .contains("agent tabs")
-        );
-
         // Only terminal-to-terminal moves are valid, and both groups must exist.
         assert!(
             state
@@ -16006,21 +15802,20 @@ mod tests {
     }
 
     #[test]
-    fn remove_pane_relevels_orphaned_children() {
+    fn remove_pane_keeps_remaining_layout_flat() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
         state
-            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 1), ("pane-3", 2)]))
+            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 0), ("pane-3", 0)]))
             .unwrap();
 
-        // Closing the root parent promotes its subtree so the tree stays valid.
         state.remove_pane("pane-1").unwrap();
         assert_eq!(
             id_depths(&state.list_panes().unwrap()),
-            vec![("pane-2".to_string(), 0), ("pane-3".to_string(), 1)]
+            vec![("pane-2".to_string(), 0), ("pane-3".to_string(), 0)]
         );
     }
 
@@ -16091,7 +15886,7 @@ mod tests {
         state.insert_pane(pane_2).unwrap();
         state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
         state
-            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 1), ("pane-3", 1)]))
+            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 0), ("pane-3", 0)]))
             .unwrap();
         let mut agent = sample_agent("agent-1");
         agent.pane_id = Some("pane-2".to_string());
@@ -16108,7 +15903,7 @@ mod tests {
 
         let snapshot = state.take_last_closed_pane().unwrap().unwrap();
         assert_eq!(snapshot.pane.id, "pane-2");
-        assert_eq!(snapshot.pane.depth, 1);
+        assert_eq!(snapshot.pane.depth, 0);
         assert_eq!(snapshot.group.as_ref().map(|group| group.id.as_str()), None);
         assert_eq!(snapshot.index, 1);
         assert_eq!(snapshot.scrollback, b"old output");
@@ -16281,7 +16076,7 @@ mod tests {
         state.insert_pane(pane_2).unwrap();
         state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
         state
-            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 1), ("pane-3", 1)]))
+            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 0), ("pane-3", 0)]))
             .unwrap();
         let mut agent = sample_agent("agent-1");
         agent.pane_id = Some("pane-2".to_string());
@@ -16300,15 +16095,15 @@ mod tests {
         restored_pane.info = snapshot.pane.clone();
         state.insert_pane(restored_pane).unwrap();
         state
-            .place_restored_pane(&snapshot.pane.id, snapshot.index, snapshot.pane.depth)
+            .place_restored_pane(&snapshot.pane.id, snapshot.index)
             .unwrap();
 
         assert_eq!(
             id_depths(&state.list_panes().unwrap()),
             vec![
                 ("pane-1".to_string(), 0),
-                ("pane-2".to_string(), 1),
-                ("pane-3".to_string(), 1),
+                ("pane-2".to_string(), 0),
+                ("pane-3".to_string(), 0),
             ]
         );
         let restored_agent = state.agent("agent-1").unwrap().unwrap();
@@ -16449,7 +16244,7 @@ mod tests {
         restored_pane.info = snapshot.pane.clone();
         state.insert_pane(restored_pane).unwrap();
         state
-            .place_restored_pane(&snapshot.pane.id, snapshot.index, snapshot.pane.depth)
+            .place_restored_pane(&snapshot.pane.id, snapshot.index)
             .unwrap();
 
         assert_eq!(state.list_groups().unwrap()[0].id, "group-1");
@@ -16489,7 +16284,7 @@ mod tests {
         restored_pane.info = snapshot.pane.clone();
         state.insert_pane(restored_pane).unwrap();
         state
-            .place_restored_pane(&snapshot.pane.id, snapshot.index, snapshot.pane.depth)
+            .place_restored_pane(&snapshot.pane.id, snapshot.index)
             .unwrap();
 
         assert_eq!(state.list_groups().unwrap()[0].id, "group-1");
@@ -16610,32 +16405,30 @@ mod tests {
     }
 
     #[test]
-    fn nest_pane_under_moves_and_indents_beneath_parent() {
+    fn place_pane_after_moves_a_pane_without_indenting() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
 
-        // Nest the last pane under the first; it moves directly after it at depth 1.
-        let panes = state.nest_pane_under("pane-3", "pane-1").unwrap();
+        let panes = state.place_pane_after("pane-3", "pane-1").unwrap();
         assert_eq!(
             id_depths(&panes),
             vec![
                 ("pane-1".to_string(), 0),
-                ("pane-3".to_string(), 1),
+                ("pane-3".to_string(), 0),
                 ("pane-2".to_string(), 0),
             ]
         );
 
-        // Nesting under a deeper parent indents one further (a child of the child).
-        let panes = state.nest_pane_under("pane-2", "pane-3").unwrap();
+        let panes = state.place_pane_after("pane-2", "pane-3").unwrap();
         assert_eq!(
             id_depths(&panes),
             vec![
                 ("pane-1".to_string(), 0),
-                ("pane-3".to_string(), 1),
-                ("pane-2".to_string(), 2),
+                ("pane-3".to_string(), 0),
+                ("pane-2".to_string(), 0),
             ]
         );
     }
@@ -16873,18 +16666,16 @@ mod tests {
     }
 
     #[test]
-    fn reorder_panes_renormalizes_depth() {
+    fn reorder_panes_preserves_flat_depth() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
         state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-2")).unwrap();
         state.insert_pane(sample_pane_runtime("pane-3")).unwrap();
         state
-            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 1), ("pane-3", 0)]))
+            .set_pane_layout(layout(&[("pane-1", 0), ("pane-2", 0), ("pane-3", 0)]))
             .unwrap();
 
-        // Moving the nested child to the front would leave it at depth 1 with no
-        // parent above; the reorder must re-level it to a valid tree.
         let panes = state
             .reorder_panes(vec![
                 "pane-2".to_string(),
@@ -16908,11 +16699,13 @@ mod tests {
         let config = test_config(workspace.clone());
 
         // Stand in for a previous process having persisted a full session.
+        let mut legacy_pane = sample_pane("pane-7", Some("agent-1"));
+        legacy_pane.depth = 3;
         let persisted = PersistedState {
             next_id: 99,
             groups: vec![sample_terminal_group()],
             agents: vec![sample_agent("agent-1")],
-            panes: vec![sample_pane("pane-7", Some("agent-1"))],
+            panes: vec![legacy_pane],
             queues: HashMap::from([(
                 "agent-1".to_string(),
                 vec![QueuedTurn::new("queued turn".to_string())],
@@ -16931,6 +16724,7 @@ mod tests {
         assert_eq!(pane.cwd, "/tmp/work/agent-1");
         assert_eq!(pane.cols, 132);
         assert_eq!(pane.rows, 43);
+        assert_eq!(pane.depth, 0);
 
         // ...but the stale runtime is NOT trusted: no live pane exists until respawn.
         assert!(state.list_panes().unwrap().is_empty());
