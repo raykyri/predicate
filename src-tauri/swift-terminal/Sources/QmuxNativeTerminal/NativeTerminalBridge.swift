@@ -25,6 +25,13 @@ private func onTerminalMain<T: Sendable>(
     }
 }
 
+@_cdecl("qmux_native_application_is_active")
+public func qmuxNativeApplicationIsActive() -> Int32 {
+    onTerminalMain {
+        NSApp.isActive ? 1 : 0
+    }
+}
+
 @_cdecl("qmux_native_terminal_register_font")
 public func qmuxNativeTerminalRegisterFont(
     _ bytes: UnsafePointer<UInt8>?,

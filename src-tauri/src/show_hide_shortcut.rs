@@ -464,9 +464,22 @@ pub fn toggle_qmux_visibility<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<(
         return Ok(());
     };
 
-    let should_hide = window.is_visible().unwrap_or(false)
-        && !window.is_minimized().unwrap_or(false)
-        && window.is_focused().unwrap_or(false);
+    // A human-browser page can temporarily give key-window status to WebKit's
+    // own AppKit UI (for example a popup or panel) while qmux remains the active
+    // application. Tauri's window focus check then reports false and turns a
+    // requested hide into a no-op show. Application activation is the stable
+    // macOS boundary: it still distinguishes qmux from whichever external app
+    // should be replaced when the global shortcut is pressed there.
+    #[cfg(target_os = "macos")]
+    let app_is_active = crate::native_terminal::application_is_active();
+    #[cfg(not(target_os = "macos"))]
+    let app_is_active = window.is_focused().unwrap_or(false);
+
+    let should_hide = should_hide_qmux_window(
+        window.is_visible().unwrap_or(false),
+        window.is_minimized().unwrap_or(false),
+        app_is_active,
+    );
 
     if should_hide {
         hide_qmux_window(app)?;
@@ -475,6 +488,10 @@ pub fn toggle_qmux_visibility<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<(
     }
 
     Ok(())
+}
+
+fn should_hide_qmux_window(is_visible: bool, is_minimized: bool, app_is_active: bool) -> bool {
+    is_visible && !is_minimized && app_is_active
 }
 
 pub fn show_qmux_window<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
@@ -757,6 +774,22 @@ mod tests {
 
         state.inner.lock().unwrap().capture_active = true;
         assert!(!state.handles(&registered));
+    }
+
+    #[test]
+    fn active_app_hides_even_when_an_auxiliary_browser_window_is_key() {
+        assert!(should_hide_qmux_window(true, false, true));
+    }
+
+    #[test]
+    fn inactive_visible_app_is_shown_instead_of_hidden() {
+        assert!(!should_hide_qmux_window(true, false, false));
+    }
+
+    #[test]
+    fn hidden_or_minimized_active_app_is_shown() {
+        assert!(!should_hide_qmux_window(false, false, true));
+        assert!(!should_hide_qmux_window(true, true, true));
     }
 
     #[test]
