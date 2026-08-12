@@ -21,12 +21,23 @@ function callString(target, method) {
   }
 }
 
+function callLeafId(manager) {
+  try {
+    const value = manager?.getLeafId?.();
+    return value === null ? null : nonEmptyString(value);
+  } catch {
+    return undefined;
+  }
+}
+
 function sessionPayload(ctx, extra = {}) {
   const manager = ctx?.sessionManager;
   return compact({
     session_id: callString(manager, "getSessionId"),
     session_file: callString(manager, "getSessionFile"),
-    leaf_id: callString(manager, "getLeafId"),
+    // Pi uses null for the tree root before the first entry. Preserve that
+    // distinction; omitting it would make qmux fall back to the file's last leaf.
+    leaf_id: callLeafId(manager),
     ...modelPayload(ctx?.model),
     thinking_level: nonEmptyString(ctx?.thinkingLevel),
     ...extra,
@@ -141,7 +152,10 @@ export function createQmuxPiExtension({
       notifier.send(
         "PiSessionTree",
         sessionPayload(ctx, {
-          leaf_id: nonEmptyString(event?.newLeafId) ?? callString(ctx?.sessionManager, "getLeafId"),
+          leaf_id:
+            event?.newLeafId === null
+              ? null
+              : nonEmptyString(event?.newLeafId) ?? callLeafId(ctx?.sessionManager),
           previous_leaf_id: nonEmptyString(event?.oldLeafId),
         }),
       ),

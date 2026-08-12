@@ -316,8 +316,13 @@ pub fn start_transcript_tail(
                 // or in-place rewrite) so our timeline no longer prefixes it.
                 raw_lines = complete_lines(&snapshot.data);
                 raw_line_offset = snapshot.start_line_index;
-                let turns =
-                    adapter.resolve_transcript_turns(&agent_id, raw_line_offset, &raw_lines);
+                let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
+                let turns = adapter.resolve_transcript_turns_at_leaf(
+                    &agent_id,
+                    raw_line_offset,
+                    &raw_lines,
+                    native_leaf_id.as_deref(),
+                );
                 // Bound-checked write: a rebind can land between this tail's
                 // loop-top binding check and here, and an unconditional replace
                 // would swap the new transcript's timeline for this dead file's
@@ -351,8 +356,13 @@ pub fn start_transcript_tail(
                 if should_refresh_turns {
                     raw_lines.extend(lines.iter().cloned());
                     trim_transcript_window(&mut raw_lines, &mut raw_line_offset);
-                    let turns =
-                        adapter.resolve_transcript_turns(&agent_id, raw_line_offset, &raw_lines);
+                    let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
+                    let turns = adapter.resolve_transcript_turns_at_leaf(
+                        &agent_id,
+                        raw_line_offset,
+                        &raw_lines,
+                        native_leaf_id.as_deref(),
+                    );
                     match state.replace_turns_for_transcript(
                         &agent_id,
                         &transcript_path,
@@ -442,6 +452,48 @@ pub fn start_transcript_tail(
             thread::sleep(Duration::from_millis(350));
         }
     });
+}
+
+/// Re-resolves the currently bound transcript without waiting for another file
+/// append. Tree-shaped agents use this after moving their in-memory active leaf:
+/// Pi can navigate to an existing entry without writing a new JSONL record, so
+/// the lifecycle notification itself is the only signal that the visible path
+/// changed.
+pub fn refresh_transcript_turns(
+    state: &AppState,
+    agent_id: &str,
+    transcript_path: &str,
+    adapter_id: &str,
+) -> Result<(), String> {
+    let snapshot = read_transcript_from(Path::new(transcript_path), 0)
+        .map_err(|err| format!("failed to read {transcript_path}: {err}"))?;
+    let lines = complete_lines(&snapshot.data);
+    let registry = adapter_registry(state.config());
+    let adapter = registry.get(adapter_id)?;
+    let native_leaf_id = agent_native_leaf_id(state, agent_id);
+    let turns = adapter.resolve_transcript_turns_at_leaf(
+        agent_id,
+        snapshot.start_line_index,
+        &lines,
+        native_leaf_id.as_deref(),
+    );
+    if state.replace_turns_for_transcript(agent_id, transcript_path, turns.clone())? {
+        state.emit(QmuxEvent::new(
+            "turn.updated",
+            None,
+            Some(agent_id.to_string()),
+            json!({ "reset": true, "turns": turns }),
+        ));
+    }
+    Ok(())
+}
+
+fn agent_native_leaf_id(state: &AppState, agent_id: &str) -> Option<String> {
+    state
+        .agent(agent_id)
+        .ok()
+        .flatten()
+        .and_then(|agent| agent.native_leaf_id)
 }
 
 /// Consecutive failed reads (at 500ms each, ~3s) before the bound transcript file

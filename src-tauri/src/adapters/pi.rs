@@ -12,7 +12,9 @@ use crate::pty::{
     spawn_pty,
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
-use crate::transcript::{Turn, start_transcript_tail, string_field};
+use crate::transcript::{
+    Turn, TurnBlock, refresh_transcript_turns, start_transcript_tail, string_field,
+};
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
@@ -20,6 +22,7 @@ use crate::workspace::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -361,7 +364,7 @@ impl PiAdapter {
                                 candidate,
                             )
                         });
-                    let leaf_id = string_field(&notification.payload, "leaf_id");
+                    let leaf_id = pi_leaf_marker(&notification.payload);
                     let model = pi_model_from_payload(&notification.payload);
                     let effort = string_field(&notification.payload, "thinking_level");
                     let updated = state.mutate_agent(&current.id, |agent| {
@@ -371,7 +374,9 @@ impl PiAdapter {
                         if let Some(transcript_path) = transcript_path.clone() {
                             agent.transcript_path = Some(transcript_path);
                         }
-                        agent.native_leaf_id = leaf_id.clone();
+                        if let Some(leaf_id) = leaf_id.clone() {
+                            agent.native_leaf_id = Some(leaf_id);
+                        }
                         if model.is_some() {
                             agent.model = model.clone();
                         }
@@ -440,10 +445,25 @@ impl PiAdapter {
             }
             "PiSessionTree" | "PiSessionCompact" => {
                 if let Some(agent) = agent.as_ref() {
-                    let leaf_id = string_field(&notification.payload, "leaf_id");
-                    state.mutate_agent(&agent.id, |agent| {
-                        agent.native_leaf_id = leaf_id.clone();
+                    let leaf_id = pi_leaf_marker(&notification.payload);
+                    let model = pi_model_from_payload(&notification.payload);
+                    let effort = string_field(&notification.payload, "thinking_level");
+                    let updated = state.mutate_agent(&agent.id, |agent| {
+                        if let Some(leaf_id) = leaf_id.clone() {
+                            agent.native_leaf_id = Some(leaf_id);
+                        }
+                        if model.is_some() {
+                            agent.model = model.clone();
+                        }
+                        if effort.is_some() {
+                            agent.effort = effort.clone();
+                        }
                     })?;
+                    if let Some(updated) = updated
+                        && let Some(path) = updated.transcript_path
+                    {
+                        refresh_transcript_turns(state, &updated.id, &path, self.id())?;
+                    }
                 }
                 "agent.updated"
             }
@@ -568,6 +588,27 @@ impl AgentAdapter for PiAdapter {
     ) -> Option<Turn> {
         // Phase 4 resolves Pi's tree-shaped session as a whole.
         None
+    }
+
+    fn resolve_transcript_turns_at_leaf(
+        &self,
+        agent_id: &str,
+        source_index_offset: usize,
+        lines: &[String],
+        native_leaf_id: Option<&str>,
+    ) -> Vec<Turn> {
+        resolve_pi_transcript_turns(agent_id, source_index_offset, lines, native_leaf_id)
+    }
+
+    fn transcript_line_can_update_turn_status(&self, line: &str) -> bool {
+        serde_json::from_str::<Value>(line).is_ok_and(|value| {
+            value.get("id").and_then(Value::as_str).is_some() && value.get("parentId").is_some()
+        })
+    }
+
+    fn transcript_line_model(&self, line: &str) -> Option<String> {
+        let value = serde_json::from_str::<Value>(line).ok()?;
+        pi_model_from_transcript_value(&value)
     }
 
     fn composer_policy(&self) -> ComposerPolicy {
@@ -808,6 +849,314 @@ fn pi_model_from_payload(payload: &Value) -> Option<String> {
     }
 }
 
+/// `Some("")` represents Pi's explicit null leaf (the tree root before any
+/// entry). `None` means an older/unknown notification omitted leaf state.
+fn pi_leaf_marker(payload: &Value) -> Option<String> {
+    match payload.get("leaf_id")? {
+        Value::Null => Some(String::new()),
+        Value::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PiTranscriptEntry {
+    id: String,
+    parent_id: Option<String>,
+    source_index: usize,
+    value: Value,
+}
+
+fn resolve_pi_transcript_turns(
+    agent_id: &str,
+    source_index_offset: usize,
+    lines: &[String],
+    native_leaf_id: Option<&str>,
+) -> Vec<Turn> {
+    let mut session_id = None;
+    let mut entries = Vec::new();
+    for (relative_index, line) in lines.iter().enumerate() {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) == Some("session") {
+            session_id = string_field(&value, "id");
+            continue;
+        }
+        let Some(id) = string_field(&value, "id") else {
+            continue;
+        };
+        entries.push(PiTranscriptEntry {
+            id,
+            parent_id: string_field(&value, "parentId"),
+            source_index: source_index_offset + relative_index,
+            value,
+        });
+    }
+
+    let selected = pi_context_entries(&entries, native_leaf_id);
+    selected
+        .into_iter()
+        .filter_map(|entry| pi_entry_turn(agent_id, session_id.as_deref(), entry))
+        .collect()
+}
+
+/// Mirrors Pi 0.80's `SessionManager.buildContextEntries`: follow the selected
+/// leaf to the root, then have the latest compaction replace summarized history
+/// while retaining the explicitly kept suffix.
+fn pi_context_entries<'a>(
+    entries: &'a [PiTranscriptEntry],
+    native_leaf_id: Option<&str>,
+) -> Vec<&'a PiTranscriptEntry> {
+    if native_leaf_id == Some("") {
+        return Vec::new();
+    }
+    let by_id = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect::<HashMap<_, _>>();
+    let mut current = native_leaf_id
+        .and_then(|leaf_id| by_id.get(leaf_id).copied())
+        .or_else(|| entries.last());
+    let mut reversed = Vec::new();
+    let mut visited = HashSet::new();
+    while let Some(entry) = current {
+        if !visited.insert(entry.id.as_str()) {
+            break;
+        }
+        reversed.push(entry);
+        current = entry
+            .parent_id
+            .as_deref()
+            .and_then(|parent_id| by_id.get(parent_id).copied());
+    }
+    reversed.reverse();
+
+    let Some(compaction) = reversed
+        .iter()
+        .rev()
+        .find(|entry| entry.value.get("type").and_then(Value::as_str) == Some("compaction"))
+        .copied()
+    else {
+        return reversed;
+    };
+    let Some(compaction_index) = reversed.iter().position(|entry| entry.id == compaction.id) else {
+        return reversed;
+    };
+    let first_kept_id = string_field(&compaction.value, "firstKeptEntryId");
+    let mut selected = vec![compaction];
+    let mut keeping = false;
+    for entry in &reversed[..compaction_index] {
+        if first_kept_id.as_deref() == Some(entry.id.as_str()) {
+            keeping = true;
+        }
+        if keeping {
+            selected.push(*entry);
+        }
+    }
+    selected.extend_from_slice(&reversed[compaction_index + 1..]);
+    selected
+}
+
+fn pi_entry_turn(
+    agent_id: &str,
+    session_id: Option<&str>,
+    entry: &PiTranscriptEntry,
+) -> Option<Turn> {
+    let entry_type = entry
+        .value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let (role, blocks) = match entry_type {
+        "message" => pi_message_turn_parts(entry.value.get("message")?)?,
+        "compaction" => (
+            "system".to_string(),
+            vec![TurnBlock::Text {
+                text: format!(
+                    "Conversation compacted\n\n{}",
+                    string_field(&entry.value, "summary").unwrap_or_default()
+                ),
+            }],
+        ),
+        "branch_summary" => (
+            "system".to_string(),
+            vec![TurnBlock::Text {
+                text: format!(
+                    "Branch summary\n\n{}",
+                    string_field(&entry.value, "summary").unwrap_or_default()
+                ),
+            }],
+        ),
+        "custom_message" => {
+            if entry.value.get("display").and_then(Value::as_bool) == Some(false) {
+                return None;
+            }
+            (
+                "system".to_string(),
+                vec![TurnBlock::Raw {
+                    value: entry.value.clone(),
+                }],
+            )
+        }
+        // These are native session state, not visible conversation content.
+        "model_change" | "thinking_level_change" | "session_info" | "label" | "custom" => {
+            return None;
+        }
+        // Extensions may append future entry kinds. Keep them visible and
+        // lossless without guessing at semantics.
+        _ => (
+            "system".to_string(),
+            vec![TurnBlock::Raw {
+                value: entry.value.clone(),
+            }],
+        ),
+    };
+    if blocks.is_empty() {
+        return None;
+    }
+    Some(Turn {
+        id: format!("{agent_id}-{}", entry.source_index),
+        agent_id: agent_id.to_string(),
+        session_id: session_id.map(str::to_string),
+        role,
+        blocks,
+        source_index: entry.source_index,
+        timestamp: super::native_timestamp_ms(&entry.value),
+        status: None,
+        status_reason: None,
+        context_status: None,
+        native_id: Some(entry.id.clone()),
+        parent_native_id: entry.parent_id.clone(),
+        native_message_id: entry
+            .value
+            .get("message")
+            .and_then(|message| string_field(message, "id")),
+    })
+}
+
+fn pi_message_turn_parts(message: &Value) -> Option<(String, Vec<TurnBlock>)> {
+    let role = string_field(message, "role").unwrap_or_else(|| "system".to_string());
+    match role.as_str() {
+        "toolResult" => Some((
+            "assistant".to_string(),
+            vec![TurnBlock::ToolResult {
+                tool_use_id: string_field(message, "toolCallId"),
+                content: message.get("content").cloned().unwrap_or(Value::Null),
+                is_error: message
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }],
+        )),
+        "bashExecution" => Some((
+            "user".to_string(),
+            vec![TurnBlock::Text {
+                text: pi_bash_execution_text(message),
+            }],
+        )),
+        "custom" => {
+            if message.get("display").and_then(Value::as_bool) == Some(false) {
+                None
+            } else {
+                Some((
+                    "system".to_string(),
+                    vec![TurnBlock::Raw {
+                        value: message.clone(),
+                    }],
+                ))
+            }
+        }
+        "branchSummary" | "compactionSummary" => Some((
+            "system".to_string(),
+            vec![TurnBlock::Text {
+                text: string_field(message, "summary").unwrap_or_default(),
+            }],
+        )),
+        "user" | "assistant" => Some((role, pi_content_blocks(message.get("content")))),
+        // A future extension-defined message role may not use `content` at all.
+        // Preserve the complete value instead of silently dropping it.
+        _ => Some((
+            role,
+            vec![TurnBlock::Raw {
+                value: message.clone(),
+            }],
+        )),
+    }
+}
+
+fn pi_content_blocks(content: Option<&Value>) -> Vec<TurnBlock> {
+    match content {
+        Some(Value::String(text)) => vec![TurnBlock::Text { text: text.clone() }],
+        Some(Value::Array(items)) => items.iter().filter_map(pi_content_block).collect(),
+        Some(Value::Null) | None => Vec::new(),
+        Some(value) => vec![TurnBlock::Raw {
+            value: value.clone(),
+        }],
+    }
+}
+
+fn pi_content_block(value: &Value) -> Option<TurnBlock> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("text") => string_field(value, "text").map(|text| TurnBlock::Text { text }),
+        Some("toolCall") => Some(TurnBlock::ToolUse {
+            id: string_field(value, "id"),
+            name: string_field(value, "name").unwrap_or_else(|| "tool".to_string()),
+            input: value.get("arguments").cloned().unwrap_or(Value::Null),
+        }),
+        // Thinking, images, and extension-defined blocks remain raw. The
+        // frontend recognizes standard thinking shapes and renders their prose;
+        // unfamiliar objects fall back to formatted JSON.
+        _ => Some(TurnBlock::Raw {
+            value: value.clone(),
+        }),
+    }
+}
+
+fn pi_bash_execution_text(message: &Value) -> String {
+    let command = string_field(message, "command").unwrap_or_default();
+    let output = string_field(message, "output").unwrap_or_default();
+    let mut text = format!("Ran `{command}`");
+    if !output.is_empty() {
+        text.push_str("\n```\n");
+        text.push_str(&output);
+        if !output.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str("```");
+    }
+    if message.get("cancelled").and_then(Value::as_bool) == Some(true) {
+        text.push_str("\n\n(command cancelled)");
+    } else if let Some(exit_code) = message.get("exitCode").and_then(Value::as_i64)
+        && exit_code != 0
+    {
+        text.push_str(&format!("\n\nCommand exited with code {exit_code}"));
+    }
+    text
+}
+
+fn pi_model_from_transcript_value(value: &Value) -> Option<String> {
+    match value.get("type").and_then(Value::as_str) {
+        Some("model_change") => {
+            let provider = string_field(value, "provider")?;
+            let model = string_field(value, "modelId")?;
+            Some(format!("{provider}/{model}"))
+        }
+        Some("message") => {
+            let message = value.get("message")?;
+            if message.get("role").and_then(Value::as_str) != Some("assistant") {
+                return None;
+            }
+            let model = string_field(message, "model")?;
+            match string_field(message, "provider") {
+                Some(provider) => Some(format!("{provider}/{model}")),
+                None => Some(model),
+            }
+        }
+        _ => None,
+    }
+}
+
 fn pi_version_is_compatible(version: &str) -> bool {
     let mut components = version.trim().trim_start_matches('v').split('.');
     let Some(major) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
@@ -900,5 +1249,80 @@ mod tests {
             "--",
             "--looks-like-a-flag"
         ])));
+    }
+
+    #[test]
+    fn transcript_follows_the_extension_reported_leaf() {
+        let lines = vec![
+            r#"{"type":"session","version":3,"id":"session-1","timestamp":"2026-01-01T00:00:00Z","cwd":"/work"}"#.to_string(),
+            r#"{"type":"message","id":"user-1","parentId":null,"timestamp":"2026-01-01T00:00:01Z","message":{"role":"user","content":[{"type":"text","text":"one"}]}}"#.to_string(),
+            r#"{"type":"message","id":"answer-a","parentId":"user-1","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"branch A"}]}}"#.to_string(),
+            r#"{"type":"message","id":"answer-b","parentId":"user-1","timestamp":"2026-01-01T00:00:03Z","message":{"role":"assistant","content":[{"type":"text","text":"branch B"}]}}"#.to_string(),
+        ];
+
+        let turns = resolve_pi_transcript_turns("agent-1", 0, &lines, Some("answer-a"));
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].native_id.as_deref(), Some("user-1"));
+        assert_eq!(turns[1].native_id.as_deref(), Some("answer-a"));
+        assert_eq!(turns[1].session_id.as_deref(), Some("session-1"));
+
+        assert!(resolve_pi_transcript_turns("agent-1", 0, &lines, Some("")).is_empty());
+    }
+
+    #[test]
+    fn transcript_applies_pi_compaction_context_order() {
+        let lines = vec![
+            r#"{"type":"session","version":3,"id":"session-1"}"#.to_string(),
+            r#"{"type":"message","id":"old","parentId":null,"message":{"role":"user","content":"old"}}"#.to_string(),
+            r#"{"type":"message","id":"kept","parentId":"old","message":{"role":"user","content":"kept"}}"#.to_string(),
+            r#"{"type":"compaction","id":"compact","parentId":"kept","summary":"summary","firstKeptEntryId":"kept","tokensBefore":10}"#.to_string(),
+            r#"{"type":"message","id":"new","parentId":"compact","message":{"role":"assistant","content":[{"type":"text","text":"new"}]}}"#.to_string(),
+        ];
+
+        let turns = resolve_pi_transcript_turns("agent-1", 0, &lines, Some("new"));
+        assert_eq!(
+            turns
+                .iter()
+                .filter_map(|turn| turn.native_id.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["compact", "kept", "new"]
+        );
+    }
+
+    #[test]
+    fn transcript_maps_tools_thinking_and_unknown_extension_content() {
+        let lines = vec![
+            r#"{"type":"session","version":3,"id":"session-1"}"#.to_string(),
+            r#"{"type":"message","id":"assistant","parentId":null,"message":{"role":"assistant","provider":"p","model":"m","content":[{"type":"thinking","thinking":"hmm","signature":"opaque"},{"type":"toolCall","id":"call-1","name":"bash","arguments":{"command":"pwd"}}]}}"#.to_string(),
+            r#"{"type":"message","id":"result","parentId":"assistant","message":{"role":"toolResult","toolCallId":"call-1","toolName":"bash","content":[{"type":"text","text":"/work"}],"isError":false}}"#.to_string(),
+            r#"{"type":"message","id":"unknown-message","parentId":"result","message":{"role":"extensionFuture","payload":{"answer":41}}}"#.to_string(),
+            r#"{"type":"extension_future","id":"future","parentId":"unknown-message","payload":{"answer":42}}"#.to_string(),
+        ];
+
+        let turns = resolve_pi_transcript_turns("agent-1", 0, &lines, Some("future"));
+        assert!(matches!(turns[0].blocks[0], TurnBlock::Raw { .. }));
+        assert!(matches!(turns[0].blocks[1], TurnBlock::ToolUse { .. }));
+        assert!(matches!(turns[1].blocks[0], TurnBlock::ToolResult { .. }));
+        assert_eq!(turns[2].role, "extensionFuture");
+        assert!(matches!(turns[2].blocks[0], TurnBlock::Raw { .. }));
+        assert_eq!(turns[3].role, "system");
+        assert!(matches!(turns[3].blocks[0], TurnBlock::Raw { .. }));
+        assert_eq!(
+            pi_model_from_transcript_value(&serde_json::from_str(&lines[1]).unwrap()).as_deref(),
+            Some("p/m")
+        );
+    }
+
+    #[test]
+    fn null_leaf_is_distinct_from_an_omitted_leaf() {
+        assert_eq!(
+            pi_leaf_marker(&json!({ "leaf_id": null })).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            pi_leaf_marker(&json!({ "leaf_id": "leaf-1" })).as_deref(),
+            Some("leaf-1")
+        );
+        assert_eq!(pi_leaf_marker(&json!({})), None);
     }
 }

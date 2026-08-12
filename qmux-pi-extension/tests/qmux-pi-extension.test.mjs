@@ -129,6 +129,17 @@ test("reports the submitted prompt without transforming it", async () => {
   assert.equal(records[1].payload.prompt, "keep this exact");
 });
 
+test("preserves Pi's explicit root leaf", async () => {
+  const pi = fakePi();
+  const records = [];
+  await createQmuxPiExtension({ env: qmuxEnv(), spawn: recordingSpawn(records) })(pi);
+  const ctx = piContext();
+  ctx.sessionManager.getLeafId = () => null;
+  await pi.handlers.get("session_tree")({ newLeafId: null, oldLeafId: "leaf-1" }, ctx);
+
+  assert.equal(records[1].payload.leaf_id, null);
+});
+
 test("does nothing when it is not running inside qmux", async () => {
   const pi = fakePi();
   const records = [];

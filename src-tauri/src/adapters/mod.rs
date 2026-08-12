@@ -828,6 +828,19 @@ pub trait AgentAdapter: Send + Sync {
             .collect()
     }
 
+    /// Resolves a transcript with adapter-owned session-tree state. Linear
+    /// adapters ignore the leaf and retain their existing resolver; tree-shaped
+    /// adapters such as Pi override this to select the native active ancestry.
+    fn resolve_transcript_turns_at_leaf(
+        &self,
+        agent_id: &str,
+        source_index_offset: usize,
+        lines: &[String],
+        _native_leaf_id: Option<&str>,
+    ) -> Vec<Turn> {
+        self.resolve_transcript_turns(agent_id, source_index_offset, lines)
+    }
+
     fn transcript_line_can_update_turn_status(&self, _line: &str) -> bool {
         false
     }
