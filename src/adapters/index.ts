@@ -5,6 +5,7 @@ import { codexUiAdapter } from "./codex";
 import { grokUiAdapter } from "./grok";
 import { museUiAdapter } from "./muse";
 import { opencodeUiAdapter } from "./opencode";
+import { piUiAdapter } from "./pi";
 import type { AgentInfo, PaneInfo, RuntimeConfig, Turn, TurnBlock } from "../types";
 
 export type AgentStatus = AgentInfo["status"];
@@ -39,6 +40,7 @@ export interface AgentUiAdapter {
   composerPolicy: (agent: AgentInfo) => ComposerPolicy;
   supportsFork?: boolean;
   supportsForkAtMessage?: boolean;
+  canFork?: (agent: AgentInfo) => boolean;
   contextRows?: (agent: AgentInfo, pane: PaneInfo) => Array<{ label: string; value: string }>;
 }
 
@@ -48,6 +50,7 @@ export const agentUiAdapters = [
   opencodeUiAdapter,
   grokUiAdapter,
   museUiAdapter,
+  piUiAdapter,
   acpUiAdapter,
 ];
 

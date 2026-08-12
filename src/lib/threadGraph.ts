@@ -311,6 +311,8 @@ function adapterLabel(adapter: string) {
       return "Grok";
     case "muse":
       return "Muse";
+    case "pi":
+      return "Pi";
     default:
       return "Agent";
   }

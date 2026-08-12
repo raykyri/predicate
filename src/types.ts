@@ -631,11 +631,11 @@ export interface ThreadParticipant {
 
 export interface HandoffPayload {
   sourceAgentId: string;
-  sourceAdapter: "claude" | "codex";
+  sourceAdapter: string;
   sourceBranchId: string;
   sourceTurnId: string;
   targetAgentId: string;
-  targetAdapter: "claude" | "codex";
+  targetAdapter: string;
   targetBranchId: string;
   contextPath: string;
 }

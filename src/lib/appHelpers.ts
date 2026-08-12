@@ -384,13 +384,19 @@ export function isQueuedTurn(value: unknown): value is QueuedTurn {
 // resume. Single owner of the gate used by context/launcher actions, the
 // selection "Ask in new thread" button, and the composer's queue-and-fork options.
 export function agentCanFork(agent: AgentInfo | null | undefined): boolean {
-  return Boolean(agent?.sessionId && findAgentUiAdapter(agent.adapter)?.supportsFork);
+  if (!agent?.sessionId) {
+    return false;
+  }
+  const adapter = findAgentUiAdapter(agent.adapter);
+  return Boolean(
+    adapter?.supportsFork && (adapter.canFork ? adapter.canFork(agent) : true),
+  );
 }
 
-// Forking from a chosen message additionally needs an adapter whose transcript
-// can be truncated safely, and a transcript on disk to truncate. Mirrors the
-// backend's `adapter_supports_fork_at_message`; the action is hidden rather
-// than disabled where it does not apply.
+// Forking from a chosen message additionally needs an adapter that can preserve
+// its native history at that anchor (by safe transcript synthesis or a native
+// session-tree API), plus a transcript on disk. Mirrors the backend capability;
+// the action is hidden rather than disabled where it does not apply.
 export function agentSupportsForkAtMessage(agent: AgentInfo | null | undefined): boolean {
   return Boolean(
     agentCanFork(agent) &&
