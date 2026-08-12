@@ -2688,6 +2688,7 @@ mod tests {
             socket_path: PathBuf::from("/tmp/qmux-hooks-test.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2707,6 +2708,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         })
     }
 
@@ -2717,6 +2719,7 @@ mod tests {
             socket_path: unique_test_dir("qmux-claude-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some(binary.display().to_string()),
                 },
@@ -2736,6 +2739,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         })
     }
 
@@ -2749,6 +2753,7 @@ mod tests {
             socket_path: unique_test_dir("qmux-claude-hooks-socket").join("qmux.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2768,6 +2773,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         };
 
         let (settings_path, support_file) = hook_settings_support_file(&config, "pane-1").unwrap();
@@ -2861,6 +2867,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }
@@ -4339,6 +4346,7 @@ mod tests {
             socket_path: env::temp_dir().join("qmux-list.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4358,6 +4366,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: plugin_dir.clone(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         };
 
         let skills = list_skills(&config);
@@ -4382,6 +4391,7 @@ mod tests {
             socket_path: env::temp_dir().join("qmux-empty.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4401,6 +4411,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: env::temp_dir().join("qmux-nonexistent-claude-plugin-dir"),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         };
 
         assert!(list_skills(&config).is_empty());
@@ -4437,6 +4448,7 @@ mod tests {
             socket_path: env::temp_dir().join("qmux-dup.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4456,6 +4468,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: plugin_dir.clone(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         };
 
         let skills = list_skills(&config);

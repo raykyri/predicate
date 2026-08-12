@@ -1622,6 +1622,7 @@ mod tests {
             root_session_id: None,
             thread_id: Some(thread_id.to_string()),
             branch_id: Some(branch_id.to_string()),
+            native_leaf_id: None,
             paused: false,
             created_at: 123,
         }

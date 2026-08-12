@@ -38,6 +38,10 @@ pub struct QmuxConfig {
     /// read from or written to the config JSON (it is derived, not configured).
     #[serde(skip)]
     pub opencode_plugin_dir: PathBuf,
+    /// Directory containing qmux's observer-only Pi extension. Resolved at
+    /// load time and never serialized into user config.
+    #[serde(skip)]
+    pub pi_extension_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -53,6 +57,8 @@ pub struct AdapterConfigs {
     pub grok: GrokAdapterConfig,
     #[serde(default)]
     pub muse: MuseAdapterConfig,
+    #[serde(default)]
+    pub pi: PiAdapterConfig,
     #[serde(default)]
     pub acp: AcpAdapterConfig,
 }
@@ -88,6 +94,13 @@ pub struct GrokAdapterConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MuseAdapterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiAdapterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
 }
@@ -318,6 +331,7 @@ impl QmuxConfig {
         );
         config.claude_plugin_dir = resolve_claude_plugin_dir(&cwd);
         config.opencode_plugin_dir = resolve_opencode_plugin_dir(&cwd);
+        config.pi_extension_dir = resolve_pi_extension_dir(&cwd);
 
         fs::create_dir_all(&config.workspace_root).map_err(|err| {
             format!(
@@ -494,6 +508,16 @@ impl QmuxConfig {
         )
     }
 
+    pub fn pi_binary(&self) -> String {
+        expand_binary(
+            self.adapters
+                .pi
+                .binary
+                .clone()
+                .unwrap_or_else(|| "pi".to_string()),
+        )
+    }
+
     fn read_config_file(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -540,6 +564,9 @@ impl QmuxConfig {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                pi: PiAdapterConfig {
+                    binary: Some("pi".to_string()),
+                },
                 acp: AcpAdapterConfig::default(),
             },
             remotes: BTreeMap::new(),
@@ -548,6 +575,7 @@ impl QmuxConfig {
             // placeholder for the no-config-file path.
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         })
     }
 }
@@ -597,6 +625,19 @@ fn resolve_opencode_plugin_dir(cwd: &Path) -> PathBuf {
         override_os.as_deref().map(Path::new),
         exe_dir.as_deref(),
         "qmux-opencode-plugin",
+    )
+}
+
+fn resolve_pi_extension_dir(cwd: &Path) -> PathBuf {
+    let override_os = env::var_os("QMUX_PI_EXTENSION_DIR").filter(|value| !value.is_empty());
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    pick_plugin_dir(
+        cwd,
+        override_os.as_deref().map(Path::new),
+        exe_dir.as_deref(),
+        "qmux-pi-extension",
     )
 }
 
@@ -991,6 +1032,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configured.muse_binary(), "/opt/bin/muse");
+    }
+
+    #[test]
+    fn pi_binary_defaults_and_can_be_configured() {
+        let default_config: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(default_config.pi_binary(), "pi");
+
+        let configured: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock",
+              "adapters": { "pi": { "binary": "/opt/bin/pi" } }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(configured.pi_binary(), "/opt/bin/pi");
     }
 
     #[test]

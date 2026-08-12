@@ -753,6 +753,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }

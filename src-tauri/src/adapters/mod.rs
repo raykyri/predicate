@@ -4,6 +4,7 @@ pub mod codex;
 pub mod grok;
 pub mod muse;
 pub mod opencode;
+pub mod pi;
 
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -25,6 +26,7 @@ use codex::CodexAdapter;
 use grok::GrokAdapter;
 use muse::MuseAdapter;
 use opencode::OpencodeAdapter;
+use pi::PiAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -102,7 +104,7 @@ pub(crate) fn reusable_session_agent(
         agent.adapter == adapter_id
             && agent.pane_id.is_none()
             && same_dir(&agent.worktree_dir, cwd)
-            && agent.session_id.as_deref() == Some(session_id)
+            && native_session_selector_matches(agent, session_id, cwd)
     }))
 }
 
@@ -373,8 +375,8 @@ pub(crate) fn record_shell_fork_lineage(
     let source = state.list_agents()?.into_iter().find(|candidate| {
         candidate.id != agent.id
             && candidate.adapter == adapter_id
-            && candidate.session_id.as_deref() == Some(fork_point)
             && same_dir(&candidate.worktree_dir, cwd)
+            && native_session_selector_matches(candidate, fork_point, cwd)
     });
     state
         .mutate_agent(&agent.id, |agent| {
@@ -403,6 +405,10 @@ pub(crate) fn record_shell_fork_lineage(
 /// the recorded launch dir. Falls back to a raw compare when a side can't be canonicalized
 /// (e.g. the directory no longer exists), preserving the previous exact-match behavior.
 fn same_dir(a: &str, b: &str) -> bool {
+    same_path(a, b)
+}
+
+fn same_path(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
@@ -410,6 +416,25 @@ fn same_dir(a: &str, b: &str) -> bool {
         (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
+}
+
+/// Native CLIs may accept either a session id or a transcript path for resume
+/// and fork selectors. Match both forms so qmux keeps one record and preserves
+/// lineage regardless of which spelling the user gives the CLI.
+fn native_session_selector_matches(agent: &AgentInfo, selector: &str, cwd: &str) -> bool {
+    if agent.session_id.as_deref() == Some(selector) {
+        return true;
+    }
+    let Some(transcript_path) = agent.transcript_path.as_deref() else {
+        return false;
+    };
+    let selector_path = Path::new(selector);
+    let resolved = if selector_path.is_absolute() {
+        selector_path.to_path_buf()
+    } else {
+        Path::new(cwd).join(selector_path)
+    };
+    same_path(transcript_path, &resolved.display().to_string())
 }
 
 /// Parse a single line from a Claude-style or Grok-native rollout transcript (the
@@ -934,6 +959,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(OpencodeAdapter::new(config)),
         Box::new(GrokAdapter::new(config)),
         Box::new(MuseAdapter::new(config)),
+        Box::new(PiAdapter::new(config)),
         Box::new(AcpAdapter::new(config)),
     ])
 }
@@ -1459,6 +1485,7 @@ mod tests {
             socket_path: PathBuf::from("/tmp/qmux-adapter-tests.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -1478,6 +1505,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         }
     }
 
@@ -1498,7 +1526,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 6);
+        assert_eq!(metadata.len(), 7);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1509,8 +1537,10 @@ mod tests {
         assert!(!metadata[3].default);
         assert_eq!(metadata[4].id, "muse");
         assert!(!metadata[4].default);
-        assert_eq!(metadata[5].id, "acp");
+        assert_eq!(metadata[5].id, "pi");
         assert!(!metadata[5].default);
+        assert_eq!(metadata[6].id, "acp");
+        assert!(!metadata[6].default);
         let config = test_config();
         assert!(adapter_supports_fork(&config, "grok"));
         assert!(adapter_supports_fork(&config, "opencode"));
@@ -1555,6 +1585,7 @@ mod tests {
                 root_session_id: None,
                 thread_id: None,
                 branch_id: None,
+                native_leaf_id: None,
                 paused: false,
                 created_at: 1,
             })
@@ -1585,6 +1616,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }
@@ -1627,13 +1659,19 @@ mod tests {
     #[test]
     fn reusable_session_agent_matches_an_unbound_same_dir_session() {
         let state = AppState::new(test_config());
-        state
-            .insert_agent(session_agent("agent-1", None, "/work", "sess-1"))
-            .unwrap();
+        let mut existing = session_agent("agent-1", None, "/work", "sess-1");
+        existing.transcript_path = Some("/work/session.jsonl".to_string());
+        state.insert_agent(existing).unwrap();
 
         let found = reusable_session_agent(&state, "claude", Some("sess-1"), "/work").unwrap();
         assert_eq!(
             found.as_ref().map(|agent| agent.id.as_str()),
+            Some("agent-1")
+        );
+        let found_by_path =
+            reusable_session_agent(&state, "claude", Some("session.jsonl"), "/work").unwrap();
+        assert_eq!(
+            found_by_path.as_ref().map(|agent| agent.id.as_str()),
             Some("agent-1")
         );
 
@@ -1912,14 +1950,14 @@ mod tests {
     #[test]
     fn shell_fork_lineage_links_a_fresh_agent_without_reusing_the_source() {
         let state = AppState::new(test_config());
-        state
-            .insert_agent(session_agent(
-                "source-agent",
-                Some("pane-source"),
-                "/work",
-                "source-session",
-            ))
-            .unwrap();
+        let mut source = session_agent(
+            "source-agent",
+            Some("pane-source"),
+            "/work",
+            "source-session",
+        );
+        source.transcript_path = Some("/work/source.jsonl".to_string());
+        state.insert_agent(source).unwrap();
         let mut fork = session_agent("fork-agent", None, "/work", "placeholder");
         fork.session_id = None;
         state.insert_agent(fork.clone()).unwrap();
@@ -1940,5 +1978,13 @@ mod tests {
                 .as_deref(),
             Some("source-session")
         );
+
+        let mut path_fork = session_agent("path-fork-agent", None, "/work", "placeholder");
+        path_fork.session_id = None;
+        state.insert_agent(path_fork.clone()).unwrap();
+        let path_fork =
+            record_shell_fork_lineage(&state, path_fork, "claude", Some("source.jsonl"), "/work")
+                .unwrap();
+        assert_eq!(path_fork.parent_id.as_deref(), Some("source-agent"));
     }
 }

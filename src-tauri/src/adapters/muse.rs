@@ -1726,6 +1726,7 @@ mod tests {
             socket_path: PathBuf::from("/tmp/qmux-muse-tests.sock"),
             adapters: AdapterConfigs {
                 acp: AcpAdapterConfig::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -1745,6 +1746,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         }
     }
 

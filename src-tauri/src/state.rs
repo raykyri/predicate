@@ -10539,6 +10539,7 @@ mod tests {
             socket_path: PathBuf::from("/tmp/qmux-test.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -10558,6 +10559,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
             opencode_plugin_dir: std::path::PathBuf::new(),
+            pi_extension_dir: std::path::PathBuf::new(),
         }
     }
 
@@ -10583,6 +10585,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }
@@ -16767,6 +16770,7 @@ mod tests {
             root_session_id: Some("sess-src".to_string()),
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         };
@@ -16822,6 +16826,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         };
@@ -16936,6 +16941,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         };

@@ -259,6 +259,11 @@ pub struct AgentInfo {
     pub thread_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_id: Option<String>,
+    /// Adapter-owned leaf within a native session tree. This is intentionally
+    /// separate from `branch_id`, which identifies qmux's own thread-graph
+    /// branch and must remain stable when an agent rewinds or switches leaves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_leaf_id: Option<String>,
     /// True when the queue has paused after a pause-after turn finished; the backend
     /// stops auto-draining until the user unpauses.
     #[serde(default)]
@@ -1183,6 +1188,7 @@ fn prepare_agent_workspace_locked(
         root_session_id: None,
         thread_id: Some(state.next_id("thread")),
         branch_id: Some(state.next_id("branch")),
+        native_leaf_id: None,
         paused: false,
         created_at: now_millis(),
     };
@@ -2426,6 +2432,7 @@ mod tests {
             socket_path,
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -2445,6 +2452,7 @@ mod tests {
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
             opencode_plugin_dir: std::path::PathBuf::new(),
+            pi_extension_dir: std::path::PathBuf::new(),
         })
     }
 
@@ -2578,6 +2586,7 @@ mod tests {
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }

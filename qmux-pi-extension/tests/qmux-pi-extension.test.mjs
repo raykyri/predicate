@@ -65,6 +65,7 @@ test("registers only observer lifecycle handlers", async () => {
     "model_select",
     "thinking_level_select",
     "agent_start",
+    "before_agent_start",
     "turn_start",
     "turn_end",
     "agent_end",
@@ -116,6 +117,16 @@ test("serializes lifecycle delivery and reports the settled boundary", async () 
     records.slice(1).map((record) => record.args[1]),
     ["PiAgentStart", "PiTurnStart", "PiAgentEnd", "PiAgentSettled"],
   );
+});
+
+test("reports the submitted prompt without transforming it", async () => {
+  const pi = fakePi();
+  const records = [];
+  await createQmuxPiExtension({ env: qmuxEnv(), spawn: recordingSpawn(records) })(pi);
+  await pi.handlers.get("before_agent_start")({ prompt: "keep this exact" }, piContext());
+
+  assert.equal(records[1].args.join(" "), "notify PiPromptSubmit");
+  assert.equal(records[1].payload.prompt, "keep this exact");
 });
 
 test("does nothing when it is not running inside qmux", async () => {

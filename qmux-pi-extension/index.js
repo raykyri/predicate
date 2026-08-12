@@ -167,6 +167,12 @@ export function createQmuxPiExtension({
     pi.on("agent_start", (_event, ctx) =>
       notifier.send("PiAgentStart", sessionPayload(ctx)),
     );
+    pi.on("before_agent_start", (event, ctx) =>
+      notifier.send(
+        "PiPromptSubmit",
+        sessionPayload(ctx, { prompt: typeof event?.prompt === "string" ? event.prompt : undefined }),
+      ),
+    );
     pi.on("turn_start", (_event, ctx) => notifier.send("PiTurnStart", sessionPayload(ctx)));
     pi.on("turn_end", (_event, ctx) => notifier.send("PiTurnEnd", sessionPayload(ctx)));
     pi.on("agent_end", (event, ctx) =>

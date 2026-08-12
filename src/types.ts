@@ -221,6 +221,9 @@ export interface AgentInfo {
   transcriptPath?: string | null;
   threadId?: string | null;
   branchId?: string | null;
+  /** Adapter-owned leaf within the agent's native session tree. This is not
+   * qmux's thread-graph branch id and may change when the native agent forks. */
+  nativeLeafId?: string | null;
   status:
     | "starting"
     | "running"

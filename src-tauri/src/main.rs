@@ -1682,6 +1682,7 @@ fn launch_research_child_run(
                 root_session_id: Some(session_id),
                 thread_id: None,
                 branch_id: None,
+                native_leaf_id: None,
                 paused: false,
                 created_at: parent.created_at,
             }

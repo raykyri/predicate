@@ -4218,6 +4218,7 @@ trusted_hash = "sha256:trusted"
             socket_path: PathBuf::from("/tmp/qmux-codex-test.sock"),
             adapters: AdapterConfigs {
                 acp: Default::default(),
+                pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
                 },
@@ -4237,6 +4238,7 @@ trusted_hash = "sha256:trusted"
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
         })
     }
 
@@ -4292,6 +4294,7 @@ trusted_hash = "sha256:trusted"
             root_session_id: None,
             thread_id: None,
             branch_id: None,
+            native_leaf_id: None,
             paused: false,
             created_at: 1,
         }
