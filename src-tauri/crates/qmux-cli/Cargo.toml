@@ -1,6 +1,6 @@
 [package]
 name = "qmux-cli"
-version = "0.2.1"
+version = "0.3.0"
 description = "The qmux in-pane CLI: hook notifies, cwd reporting, forks, and agent supervision."
 license = "MIT"
 edition = "2024"

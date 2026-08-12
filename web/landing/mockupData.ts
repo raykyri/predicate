@@ -348,7 +348,7 @@ export const MOCK_SESSIONS: Record<string, MockSession> = {
       ran(
         4,
         "npm run build:site:server",
-        "> qmux@0.2.1 build:site:server",
+        "> qmux@0.3.0 build:site:server",
         "> tsc -p web/tsconfig.json && esbuild web/server.tsx --bundle --packages=external --platform=node --format=esm --target=node20 --outfile=dist-site/server.mjs",
         "dist-site/server.mjs  267.4kb",
         "Done in 7ms",
@@ -384,7 +384,7 @@ export const MOCK_SESSIONS: Record<string, MockSession> = {
       ran(
         10,
         "npm run build:site:server",
-        "> qmux@0.2.1 build:site:server",
+        "> qmux@0.3.0 build:site:server",
         "> tsc -p web/tsconfig.json && esbuild web/server.tsx --bundle --packages=external --platform=node --format=esm --target=node20 --outfile=dist-site/server.mjs",
         "dist-site/server.mjs  267.4kb",
         "Done in 6ms",
