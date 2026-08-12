@@ -178,6 +178,7 @@ impl AgentAdapter for CodexAdapter {
         &self,
         transcript_path: &Path,
         anchor: &MessageAnchor,
+        _target_cwd: &Path,
     ) -> Result<String, String> {
         synthesize_truncated_codex_session(transcript_path, anchor)
     }

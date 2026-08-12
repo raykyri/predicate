@@ -193,6 +193,7 @@ impl AgentAdapter for ClaudeAdapter {
         &self,
         transcript_path: &Path,
         anchor: &MessageAnchor,
+        _target_cwd: &Path,
     ) -> Result<String, String> {
         synthesize_truncated_claude_session(transcript_path, anchor)
     }

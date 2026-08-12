@@ -1,9 +1,9 @@
 use super::{
-    AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy, LaunchEnv,
-    PrepareShellAgentLaunchRequest, PreparedShellAgentLaunch, ShellCommandIntegration,
-    SpawnAgentRequest, apply_shell_cli_model, cli_flag_value, ensure_on_path,
-    hook_transcript_path_acceptable, prepared_shell_agent, record_shell_session_lineage,
-    reusable_session_agent, shell_cli_model, shell_quote_arg,
+    AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy,
+    FORK_AT_MESSAGE_EMPTY_ERROR, LaunchEnv, MessageAnchor, PrepareShellAgentLaunchRequest,
+    PreparedShellAgentLaunch, ShellCommandIntegration, SpawnAgentRequest, apply_shell_cli_model,
+    cli_flag_value, ensure_on_path, hook_transcript_path_acceptable, prepared_shell_agent,
+    record_shell_session_lineage, reusable_session_agent, shell_cli_model, shell_quote_arg,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -23,7 +23,7 @@ use crate::workspace::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MIN_PI_MAJOR: u64 = 0;
@@ -85,11 +85,181 @@ impl PiAdapter {
         Ok(entrypoint)
     }
 
+    fn session_helper_entrypoint(&self) -> Result<PathBuf, String> {
+        let entrypoint = self.extension_dir.join("session-helper.js");
+        if !entrypoint.is_file() {
+            return Err(format!(
+                "Pi SessionManager helper was not found at {}. Reinstall qmux or set QMUX_PI_EXTENSION_DIR to the bundled qmux-pi-extension directory.",
+                entrypoint.display()
+            ));
+        }
+        Ok(entrypoint)
+    }
+
     fn integration_args(&self) -> Result<Vec<String>, String> {
         Ok(vec![
             "--extension".to_string(),
             self.extension_entrypoint()?.display().to_string(),
         ])
+    }
+
+    fn create_branched_session(
+        &self,
+        source_path: &Path,
+        leaf_id: &str,
+        target_cwd: &Path,
+    ) -> Result<PiBranchedSession, String> {
+        if leaf_id.trim().is_empty() {
+            return Err("this Pi session has no entry to fork yet; send a turn first".to_string());
+        }
+        if !source_path.is_file() {
+            return Err(format!(
+                "Pi source session {} was not found",
+                source_path.display()
+            ));
+        }
+        if !target_cwd.is_dir() {
+            return Err(format!(
+                "Pi fork working directory {} does not exist",
+                target_cwd.display()
+            ));
+        }
+        let pi_binary = self.ensure_compatible_binary()?;
+        let node = ensure_on_path("node").ok_or_else(|| {
+            "Node.js was not found; Pi SessionManager forks require Node.js".to_string()
+        })?;
+        let output = Command::new(node)
+            .arg(self.session_helper_entrypoint()?)
+            .arg(pi_binary)
+            .arg(source_path)
+            .arg(leaf_id)
+            .arg(target_cwd)
+            .output()
+            .map_err(|err| format!("failed to run Pi SessionManager fork helper: {err}"))?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                format!("Pi SessionManager fork helper exited {}", output.status)
+            } else {
+                format!("Pi SessionManager fork failed: {detail}")
+            });
+        }
+        let branched: PiBranchedSession = serde_json::from_slice(&output.stdout)
+            .map_err(|err| format!("Pi SessionManager fork returned invalid output: {err}"))?;
+        if !hook_transcript_path_acceptable(None, &branched.session_file) {
+            return Err(format!(
+                "Pi SessionManager returned an invalid session path: {}",
+                branched.session_file
+            ));
+        }
+        Ok(branched)
+    }
+
+    fn fork_pane_inner(
+        &self,
+        state: &AppState,
+        source: &AgentInfo,
+        use_worktree: bool,
+        prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        let binary = self.ensure_compatible_binary()?;
+        let mut args = self.integration_args()?;
+        let source_path = source
+            .transcript_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                "this Pi session has no transcript yet; send a turn first".to_string()
+            })?;
+        let leaf_id = source
+            .native_leaf_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|leaf| !leaf.is_empty())
+            .ok_or_else(|| {
+                "this Pi session has no active leaf yet; send a turn first".to_string()
+            })?;
+        let mut agent = prepare_agent_workspace_with_parent(
+            state,
+            PrepareAgentWorkspaceRequest {
+                group_id: Some(source.group_id.clone()),
+                base_repo: if use_worktree {
+                    None
+                } else {
+                    Some(source.worktree_dir.clone())
+                },
+                base_ref: Some("HEAD".to_string()),
+                adapter: self.id().to_string(),
+                model: source.model.clone(),
+                effort: source.effort.clone(),
+                use_worktree,
+            },
+            Some(&source.id),
+        )?;
+        let cwd = PathBuf::from(&agent.worktree_dir);
+        let branched = match self.create_branched_session(Path::new(source_path), leaf_id, &cwd) {
+            Ok(branched) => branched,
+            Err(err) => {
+                let _ = mark_agent_failed(state, &agent.id);
+                return Err(err);
+            }
+        };
+        agent.session_id = Some(branched.session_id.clone());
+        agent.transcript_path = Some(branched.session_file.clone());
+        agent.native_leaf_id = branched.leaf_id.clone();
+        agent.fork_point = source.session_id.clone();
+        agent.root_session_id = source
+            .root_session_id
+            .clone()
+            .or_else(|| source.session_id.clone());
+        agent.status = AgentStatus::Idle;
+        state.update_agent(agent.clone())?;
+
+        args.push("--session".to_string());
+        args.push(branched.session_file);
+        if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+            args.push("--".to_string());
+            args.push(prompt.to_string());
+        }
+        let pane_id = state.next_id("pane");
+        let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
+        envs.push(("QMUX_ADAPTER_ID".to_string(), self.id().to_string()));
+        let agent = attach_pi_agent_pane(
+            state,
+            &agent.id,
+            pane_id.clone(),
+            prompt.is_some_and(|prompt| !prompt.trim().is_empty()),
+        )?;
+        let spawn_result = plan_to_spec(
+            state,
+            PaneMeta {
+                pane_id: Some(pane_id.clone()),
+                agent_id: Some(agent.id.clone()),
+                group_id: agent.group_id.clone(),
+                kind: PaneKind::Agent,
+                title: self.display_name().to_string(),
+                last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
+                program: binary,
+                args,
+                cwd,
+                envs,
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
+        )
+        .and_then(|spec| spawn_pty(state, spec));
+        match spawn_result {
+            Ok(pane) => Ok((pane, agent)),
+            Err(err) => {
+                let _ = mark_agent_spawn_failed(state, &agent.id, &pane_id);
+                Err(err)
+            }
+        }
     }
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
@@ -611,6 +781,75 @@ impl AgentAdapter for PiAdapter {
         pi_model_from_transcript_value(&value)
     }
 
+    fn synthesize_truncated_session(
+        &self,
+        transcript_path: &Path,
+        anchor: &MessageAnchor,
+        target_cwd: &Path,
+    ) -> Result<String, String> {
+        let leaf_id = anchor
+            .parent_native_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|leaf_id| !leaf_id.is_empty())
+            .ok_or_else(|| FORK_AT_MESSAGE_EMPTY_ERROR.to_string())?;
+        self.create_branched_session(transcript_path, leaf_id, target_cwd)
+            .map(|session| session.session_file)
+    }
+
+    fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn supports_fork_at_message(&self) -> bool {
+        true
+    }
+
+    fn shell_fork_args(
+        &self,
+        source: &AgentInfo,
+        cwd: &Path,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let transcript_path = source
+            .transcript_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| {
+                "this Pi session has no transcript yet; send a turn first".to_string()
+            })?;
+        let leaf_id = source
+            .native_leaf_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|leaf_id| !leaf_id.is_empty())
+            .ok_or_else(|| {
+                "this Pi session has no active leaf yet; send a turn first".to_string()
+            })?;
+        let session = self.create_branched_session(Path::new(transcript_path), leaf_id, cwd)?;
+        Ok(pi_resume_args(&session.session_file, prompt))
+    }
+
+    fn shell_fork_at_message_args(
+        &self,
+        _source: &AgentInfo,
+        seed_session_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        Ok(pi_resume_args(seed_session_id, prompt))
+    }
+
+    fn fork_pane(
+        &self,
+        state: &AppState,
+        source: &AgentInfo,
+        use_worktree: bool,
+        prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        self.fork_pane_inner(state, source, use_worktree, prompt)
+    }
+
     fn composer_policy(&self) -> ComposerPolicy {
         ComposerPolicy {
             ready_statuses: vec![
@@ -632,6 +871,13 @@ impl AgentAdapter for PiAdapter {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PiLaunchOptions {}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PiBranchedSession {
+    session_file: String,
+    session_id: String,
+    leaf_id: Option<String>,
+}
 
 impl PiLaunchOptions {
     fn from_value(value: Value) -> Result<Self, String> {
@@ -780,6 +1026,15 @@ fn pi_args_contain_prompt(args: &[String]) -> bool {
 
 fn pi_resume_session_id(args: &[String]) -> Option<String> {
     cli_flag_value(args, "--session").or_else(|| cli_flag_value(args, "--session-id"))
+}
+
+fn pi_resume_args(session_file: &str, prompt: Option<&str>) -> Vec<String> {
+    let mut args = vec!["--session".to_string(), session_file.to_string()];
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        args.push("--".to_string());
+        args.push(prompt.to_string());
+    }
+    args
 }
 
 fn pi_shell_thinking(args: &[String]) -> Option<String> {

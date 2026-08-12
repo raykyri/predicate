@@ -867,6 +867,7 @@ pub trait AgentAdapter: Send + Sync {
         &self,
         _transcript_path: &Path,
         _anchor: &MessageAnchor,
+        _target_cwd: &Path,
     ) -> Result<String, String> {
         Err(FORK_UNSUPPORTED_ERROR.to_string())
     }
@@ -1102,7 +1103,7 @@ fn fork_agent_in_shell(
                     )
                 })?;
             let seed_session_id =
-                adapter.synthesize_truncated_session(Path::new(transcript_path), anchor)?;
+                adapter.synthesize_truncated_session(Path::new(transcript_path), anchor, &cwd)?;
             adapter.shell_fork_at_message_args(source, &seed_session_id, prompt)?
         }
         (_, None) => adapter.shell_fork_args(source, &cwd, prompt)?,
@@ -1557,6 +1558,8 @@ mod tests {
         let config = test_config();
         assert!(adapter_supports_fork(&config, "grok"));
         assert!(adapter_supports_fork(&config, "opencode"));
+        assert!(adapter_supports_fork(&config, "pi"));
+        assert!(adapter_supports_fork_at_message(&config, "pi"));
         // ACP has no native fork command: the protocol has no such method, and
         // `session/load` resumes rather than branches.
         assert!(!adapter_supports_fork(&config, "acp"));
