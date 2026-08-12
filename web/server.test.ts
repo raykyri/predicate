@@ -869,3 +869,134 @@ test("the public server backs off all ids after an upstream rate limit", async (
   await second.arrayBuffer();
   assert.equal(fetchCount, 1);
 });
+
+test("the landing page renders the app replica and its own image policy", async (t) => {
+  const fetchImpl: typeof fetch = async () => {
+    throw new Error("the landing page must not call upstream");
+  };
+  const server = createQmuxWebServer({
+    fetchImpl,
+    publicOrigin: "https://qmux.app",
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/`);
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /Visual terminal for coding agents/);
+  assert.match(body, /<a href="#features">Features<\/a>/);
+  assert.match(body, /<section class="grid-section" id="features" aria-label="Features">/);
+  assert.match(body, /html \{\s*scroll-behavior: smooth;/);
+  assert.match(body, /href="https:\/\/github\.com\/raykyri\/qmux\/releases"/);
+  assert.doesNotMatch(body, /releases\/download|\.dmg|Download v\d/);
+  // The hero ships the HTML replica of the app window, not a screenshot.
+  assert.match(body, /class="app-mockup"/);
+  assert.match(body, /class="app-shell has-turn-sidebar"/);
+  assert.match(body, /What should we investigate next\?/);
+  assert.doesNotMatch(body, /qmux running a Codex agent over the Porffor JavaScript engine/);
+  assert.doesNotMatch(body, /Play the session/);
+  assert.doesNotMatch(body, /Type in the composer to queue a turn/);
+  // The curated feature list reaches the markup without retired entries.
+  assert.match(body, /Based on libghostty/);
+  assert.match(body, /<strong>Open source<\/strong>/);
+  assert.match(body, /Fully open-source, local-first, free forever\./);
+  assert.doesNotMatch(body, /<strong>First-class agents<\/strong>/);
+  assert.doesNotMatch(body, /<strong>Vertical splittable tabs<\/strong>/);
+  assert.doesNotMatch(body, /<strong>Git worktrees<\/strong>/);
+  assert.doesNotMatch(body, /<strong>Prompt library<\/strong>/);
+  assert.doesNotMatch(body, /<strong>Browser overlay<\/strong>/);
+  // The FAQ and footer brand mark have been removed completely.
+  assert.doesNotMatch(body, /href="#faq-title"/);
+  assert.doesNotMatch(body, /id="faq"/);
+  assert.doesNotMatch(body, /What&#x27;s the business model\?/);
+  assert.doesNotMatch(body, /class="footer-mark"/);
+  // Absolute social/canonical URLs, which relative ones would not give scrapers.
+  assert.match(body, /property="og:image" content="https:\/\/qmux\.app\/qmux\.png"/);
+  assert.match(body, /rel="canonical" href="https:\/\/qmux\.app\/"/);
+
+  // The replica is complete before any script runs, and it carries the shared
+  // step timeline the enhancement replays from.
+  assert.match(body, /data-mock-features="replay queue groups sessions panes panels menus"/);
+  // Every visible sidebar tab ships a complete terminal/transcript pair. The
+  // default is visible without JavaScript and the enhancement swaps the rest.
+  assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 14);
+  assert.equal((body.match(/data-mock-session-view=/g) ?? []).length, 28);
+  assert.ok((body.match(/class="mock-terminal-block"/g) ?? []).length >= 115);
+  assert.ok((body.match(/class="mock-terminal-line"/g) ?? []).length >= 430);
+  assert.equal((body.match(/data-mock-session-status="active"/g) ?? []).length, 4);
+  assert.equal((body.match(/class="turn-thinking"/g) ?? []).length, 4);
+  assert.match(body, /data-mock-session-view="qmux-landing-transcript"/);
+  assert.match(body, /data-mock-session-view="porffor-replace-all" hidden/);
+  assert.match(body, /data-mock-session-view="nanochat-tokenizer" hidden/);
+  assert.match(body, /\.app-mockup \.turn-timeline \{[^}]*overflow-y: auto;/s);
+  assert.ok(
+    body.indexOf('<span class="pane-group-name">qmux</span>') <
+      body.indexOf('<span class="pane-group-name">porffor</span>'),
+  );
+  const porfforNameIndex = body.indexOf('<span class="pane-group-name">porffor</span>');
+  const porfforSection = body.slice(body.lastIndexOf("<section", porfforNameIndex), porfforNameIndex);
+  assert.match(porfforSection, /pane-group has-panes is-active-group/);
+  assert.doesNotMatch(porfforSection, /is-collapsed/);
+  assert.match(body, /class="turn-image"/);
+  assert.match(body, /src="\/qmux\.png"/);
+  assert.match(body, /alt="The qmux desktop interface"/);
+  assert.doesNotMatch(body, /qmux desktop layout reference/);
+  assert.match(body, /class="turn-card role-assistant turn-image-card" data-step="12"/);
+  assert.match(body, /\.\/porf \/tmp\/replaceall-smoke\.js/);
+  assert.match(body, /10 passed in 0\.42s/);
+  assert.match(body, /All results match for block_size=512\./);
+  assert.doesNotMatch(body, /runner\/index\.js/);
+  assert.doesNotMatch(body, /out\.wasm/);
+  // Header panels are rendered in the markup rather than being built at runtime;
+  // the artifact tray is the initial view, while transient popovers start closed.
+  assert.match(body, /data-mock-panel="prompt-library" hidden/);
+  assert.match(body, /data-mock-panel="artifacts"/);
+  assert.doesNotMatch(body, /data-mock-panel="artifacts" hidden/);
+  assert.match(body, /data-mock-panel="browser" hidden/);
+  // Message and composer overflow menus also ship as closed, inert markup;
+  // enhancement only gives their ellipsis triggers open/close behavior.
+  assert.match(body, /data-mock-menu="message"[^>]*hidden/);
+  assert.match(body, /data-mock-menu="composer"[^>]*hidden/);
+  assert.match(body, /Copy transcript as JSON/);
+  // Collapsing a pane needs a way back, so both restore controls ship inert in
+  // the markup rather than being created at runtime.
+  assert.match(body, /data-mock-action="hide-sidebar"/);
+  assert.match(body, /data-mock-action="show-sidebar"/);
+  assert.match(body, /data-mock-action="show-right"/);
+  assert.match(body, /data-step="5"/);
+  // Replay state is never serialized; the visible default session is complete
+  // enough to read without JavaScript while alternate containers start hidden.
+  assert.equal(/class="[^"]*is-pending/.test(body), false);
+  // Enhancement is a separate file, never an inline script.
+  assert.match(body, /<script src="\/mockup\.js" defer/);
+
+  const csp = response.headers.get("content-security-policy") ?? "";
+  // The landing page serves its logo and enhancement script from disk, so it
+  // relaxes img-src and script-src to 'self' — and nothing inline may execute.
+  assert.match(csp, /img-src 'self'/);
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /default-src 'none'/);
+});
+
+test("the landing page's enhancement script is served as JavaScript", async (t) => {
+  const fetchImpl: typeof fetch = async () => {
+    throw new Error("static assets must not call upstream");
+  };
+  const server = createQmuxWebServer({ fetchImpl });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/mockup.js`);
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.match(body, /app-mockup/);
+});

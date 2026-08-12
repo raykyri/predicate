@@ -33,11 +33,13 @@ import {
   type ResearchPublication,
   type TranscriptPublication,
 } from "../src/lib/publication";
+import { renderLandingPage } from "./landing/LandingPage";
 import {
   beginGitHubAuthorization,
   clearViewerSession,
   completeGitHubAuthorization,
   resolveGitHubWebAuthConfig,
+  validatedPublicOrigin,
   viewerSessionFromRequest,
   type GitHubWebAuthConfig,
   type GitHubWebAuthOptions,
@@ -46,6 +48,7 @@ import {
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8787;
+const DEFAULT_PUBLIC_ORIGIN = "https://qmux.app";
 const GITHUB_API_VERSION = "2026-03-10";
 const LATEST_CACHE_MS = 60_000;
 const COMMENTS_CACHE_MS = 30_000;
@@ -79,7 +82,15 @@ const SITE_FONT_FILES = new Set([
   "JetBrainsMono-Italic.woff2",
   "JetBrainsMono-Bold.woff2",
   "JetBrainsMono-BoldItalic.woff2",
+  // The desktop app's UI face; the landing page's app replica renders in it.
+  "DMSans-Variable-Latin.woff2",
 ]);
+// The landing page serves its logo and its one enhancement script from disk, so
+// it relaxes img-src and script-src to 'self'. It stays inline-script free, and
+// the script it does load only rewrites the page's own markup — no network.
+const LANDING_CSP =
+  "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; img-src 'self'; " +
+  "font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'";
 const GIST_ID_PATTERN = /^[A-Za-z0-9]{5,128}$/;
 const REVISION_PATTERN = /^[a-f0-9]{40}$/;
 const GITHUB_RAW_HOSTS = new Set(["gist.githubusercontent.com", "raw.githubusercontent.com"]);
@@ -181,6 +192,11 @@ export function createQmuxRequestHandler(options: ServerOptions = {}) {
   const siteDir = options.siteDir ?? resolve(dirname(fileURLToPath(import.meta.url)), "..", "site");
   const githubToken = options.githubToken ?? process.env.GITHUB_READER_TOKEN ?? null;
   const webAuth = resolveGitHubWebAuthConfig(options);
+  // Absolute URLs for the landing page's canonical/og tags. GitHub auth may be
+  // unconfigured (webAuth null), so the origin is resolved independently.
+  const publicOrigin = validatedPublicOrigin(
+    options.publicOrigin ?? process.env.QMUX_PUBLIC_ORIGIN ?? DEFAULT_PUBLIC_ORIGIN,
+  );
   const cache: PublicationCache = {
     entries: new Map(),
     totalBytes: 0,
@@ -206,6 +222,7 @@ export function createQmuxRequestHandler(options: ServerOptions = {}) {
       options.trustFlyClientIp ?? Boolean(process.env.FLY_APP_NAME),
     upstreamCooldownUntil: 0,
     webAuth,
+    publicOrigin,
     activePublicationLoads: 0,
     inFlightLoads: new Map(),
   };
@@ -252,6 +269,7 @@ interface RouteContext {
   siteDir: string;
   githubToken: string | null;
   webAuth: GitHubWebAuthConfig | null;
+  publicOrigin: string;
   now: () => number;
   cache: PublicationCache;
   commentsCache: CommentsCache;
@@ -319,7 +337,23 @@ async function routeRequest(
     return;
   }
   if (url.pathname === "/") {
-    await serveStaticFile(response, join(context.siteDir, "index.html"), "text/html; charset=utf-8", request.method);
+    sendHtml(
+      response,
+      200,
+      renderLandingPage(context.publicOrigin),
+      "public, max-age=300",
+      request.method,
+      { "Content-Security-Policy": LANDING_CSP },
+    );
+    return;
+  }
+  if (url.pathname === "/mockup.js") {
+    await serveStaticFile(
+      response,
+      join(context.siteDir, "mockup.js"),
+      "text/javascript; charset=utf-8",
+      request.method,
+    );
     return;
   }
   if (url.pathname === "/logo.png" || url.pathname === "/qmux.png") {
