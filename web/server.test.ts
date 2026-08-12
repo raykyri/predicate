@@ -869,3 +869,78 @@ test("the public server backs off all ids after an upstream rate limit", async (
   await second.arrayBuffer();
   assert.equal(fetchCount, 1);
 });
+
+test("the landing page renders the app replica and its own image policy", async (t) => {
+  const fetchImpl: typeof fetch = async () => {
+    throw new Error("the landing page must not call upstream");
+  };
+  const server = createQmuxWebServer({
+    fetchImpl,
+    publicOrigin: "https://qmux.app",
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/`);
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(body, /Visual queueing for your coding agents/);
+  // The hero ships the HTML replica of the app window, not a screenshot.
+  assert.match(body, /class="app-mockup"/);
+  assert.match(body, /class="app-shell has-turn-sidebar"/);
+  assert.match(body, /What should we investigate next\?/);
+  // Every feature and FAQ entry from the content module reaches the markup.
+  assert.match(body, /Based on libghostty/);
+  assert.match(body, /What&#x27;s the business model\?/);
+  // Absolute social/canonical URLs, which relative ones would not give scrapers.
+  assert.match(body, /property="og:image" content="https:\/\/qmux\.app\/qmux\.png"/);
+  assert.match(body, /rel="canonical" href="https:\/\/qmux\.app\/"/);
+
+  // The replica is complete before any script runs, and it carries the shared
+  // step timeline the enhancement replays from.
+  assert.match(body, /data-mock-features="replay queue groups panes panels"/);
+  // The four header panels ship closed in the markup rather than being built at
+  // runtime, so the no-script page is still the finished session.
+  assert.match(body, /data-mock-panel="prompt-library" hidden/);
+  assert.match(body, /data-mock-panel="artifacts" hidden/);
+  assert.match(body, /data-mock-panel="browser" hidden/);
+  // Collapsing a pane needs a way back, so both restore controls ship inert in
+  // the markup rather than being created at runtime.
+  assert.match(body, /data-mock-action="hide-sidebar"/);
+  assert.match(body, /data-mock-action="show-sidebar"/);
+  assert.match(body, /data-mock-action="show-right"/);
+  assert.match(body, /data-step="6"/);
+  // Nothing ships hidden: the pre-script page is the finished session.
+  assert.equal(/class="[^"]*is-pending/.test(body), false);
+  // Enhancement is a separate file, never an inline script.
+  assert.match(body, /<script src="\/mockup\.js" defer/);
+
+  const csp = response.headers.get("content-security-policy") ?? "";
+  // The landing page serves its logo and enhancement script from disk, so it
+  // relaxes img-src and script-src to 'self' — and nothing inline may execute.
+  assert.match(csp, /img-src 'self'/);
+  assert.match(csp, /script-src 'self'/);
+  assert.match(csp, /default-src 'none'/);
+});
+
+test("the landing page's enhancement script is served as JavaScript", async (t) => {
+  const fetchImpl: typeof fetch = async () => {
+    throw new Error("static assets must not call upstream");
+  };
+  const server = createQmuxWebServer({ fetchImpl });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => server.close());
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/mockup.js`);
+  const body = await response.text();
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+  assert.match(body, /app-mockup/);
+});

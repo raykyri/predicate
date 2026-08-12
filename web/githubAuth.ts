@@ -294,7 +294,7 @@ function normalized(value: string | null | undefined) {
   return result || null;
 }
 
-function validatedPublicOrigin(value: string) {
+export function validatedPublicOrigin(value: string) {
   const parsed = new URL(value);
   if (
     (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||

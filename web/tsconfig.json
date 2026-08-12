@@ -3,11 +3,16 @@
   "compilerOptions": {
     "lib": ["DOM", "DOM.Iterable", "ES2022"],
     "types": ["node"],
-    "noEmit": true
+    "noEmit": true,
+    // The landing page's enhancement script ships as plain JS (no build step for
+    // the client), so it is type-checked here from its JSDoc annotations.
+    "allowJs": true,
+    "checkJs": true
   },
   "include": [
     "./**/*.ts",
     "./**/*.tsx",
+    "../site/mockup.js",
     "../src/lib/publication.ts",
     "../src/lib/publicationComments.ts"
   ]
