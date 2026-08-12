@@ -25,6 +25,38 @@ private func onTerminalMain<T: Sendable>(
     }
 }
 
+@MainActor
+private enum CompletionSoundPlayer {
+    private static var soundsByName: [String: NSSound] = [:]
+
+    static func play(systemName: String) -> Bool {
+        let sound: NSSound
+        if let cached = soundsByName[systemName] {
+            sound = cached
+        } else {
+            guard let loaded = NSSound(named: NSSound.Name(systemName)) else {
+                return false
+            }
+            soundsByName[systemName] = loaded
+            sound = loaded
+        }
+        sound.stop()
+        return sound.play()
+    }
+}
+
+@_cdecl("qmux_native_completion_sound_play")
+public func qmuxNativeCompletionSoundPlay(
+    _ systemName: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let systemName = terminalString(systemName) else {
+        return 0
+    }
+    return onTerminalMain {
+        CompletionSoundPlayer.play(systemName: systemName) ? 1 : 0
+    }
+}
+
 @_cdecl("qmux_native_application_is_active")
 public func qmuxNativeApplicationIsActive() -> Int32 {
     onTerminalMain {

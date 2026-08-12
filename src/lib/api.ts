@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { PaneLayoutItem } from "./paneTree";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
+import type { CompletionSoundId } from "./completionSounds";
 import { HumanBrowserLifecycleQueue } from "./humanBrowserLifecycleQueue";
 import type {
   PublicationBinding,
@@ -63,6 +64,16 @@ import type {
 
 export function getRuntimeConfig() {
   return invoke<RuntimeConfig>("get_runtime_config");
+}
+
+/** Plays one allowlisted macOS system sound through the native AppKit bridge. */
+export function playCompletionSound(soundId: CompletionSoundId) {
+  return invoke<void>("completion_sound_play", { soundId });
+}
+
+/** Keeps the reload-safe backend lifecycle player aligned with Display settings. */
+export function setCompletionSound(soundId: CompletionSoundId) {
+  return invoke<void>("completion_sound_set", { soundId });
 }
 
 /** Published ACP agent registry, annotated with installability. */

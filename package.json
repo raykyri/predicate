@@ -16,6 +16,7 @@
     "format": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "test:app-shortcuts": "node scripts/test-app-shortcuts.mjs",
     "test:terminal-attention": "node scripts/test-terminal-attention.mjs",
+    "test:completion-sounds": "node --import tsx --test tests/completionSounds.test.ts",
     "test:native-terminal-keyboard": "node scripts/test-native-terminal-keyboard.mjs",
     "test:native-terminal-layout": "node scripts/test-native-terminal-layout.mjs",
     "test:terminal-title": "node --import tsx --test tests/terminalTitle.test.ts",

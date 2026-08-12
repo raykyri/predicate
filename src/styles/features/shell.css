@@ -1915,6 +1915,25 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   opacity: 1;
 }
 
+.settings-completion-sound-row {
+  align-items: flex-start;
+}
+
+.settings-completion-sound-controls {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-completion-sound-select {
+  width: 118px;
+}
+
+.settings-completion-sound-test {
+  min-width: 68px;
+}
+
 .settings-divider {
   height: 1px;
   margin: 2px 0;

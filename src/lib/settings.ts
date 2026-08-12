@@ -8,6 +8,11 @@ import {
   DEFAULT_CONFIRM_PASTE_OVER_CHARS,
   type PasteProtectionSettings,
 } from "./paste";
+import {
+  DEFAULT_COMPLETION_SOUND,
+  isCompletionSoundId,
+  type CompletionSoundId,
+} from "./completionSounds";
 
 export interface FontOption {
   id: string;
@@ -328,6 +333,8 @@ export interface AppSettings {
   showToolCalls: boolean;
   /** show the draggable per-agent input delivery diagnostics panel */
   showDebugPanel: boolean;
+  /** sound played when a live chat agent finishes its queued work */
+  completionSound: CompletionSoundId;
   /** pin the latest user message to the top of the transcript while its reply scrolls */
   stickyUserMessages: boolean;
   /**
@@ -369,6 +376,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   showTabDirectories: true,
   showToolCalls: true,
   showDebugPanel: false,
+  completionSound: DEFAULT_COMPLETION_SOUND,
   stickyUserMessages: true,
   showAssistantTimestamps: false,
   requireCmdEnterToSend: true,
@@ -572,6 +580,9 @@ export function loadSettings(): AppSettings {
       typeof parsed.showDebugPanel === "boolean"
         ? parsed.showDebugPanel
         : DEFAULT_SETTINGS.showDebugPanel;
+    const completionSound = isCompletionSoundId(parsed.completionSound)
+      ? parsed.completionSound
+      : DEFAULT_SETTINGS.completionSound;
     const stickyUserMessages =
       typeof parsed.stickyUserMessages === "boolean"
         ? parsed.stickyUserMessages
@@ -622,6 +633,7 @@ export function loadSettings(): AppSettings {
       showTabDirectories,
       showToolCalls,
       showDebugPanel,
+      completionSound,
       stickyUserMessages,
       showAssistantTimestamps,
       requireCmdEnterToSend,

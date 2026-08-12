@@ -1,0 +1,8 @@
+[
+  { "id": "none", "label": "None", "systemName": null },
+  { "id": "chime", "label": "Chime", "systemName": "Glass" },
+  { "id": "ping", "label": "Ping", "systemName": "Ping" },
+  { "id": "pop", "label": "Pop", "systemName": "Pop" },
+  { "id": "tink", "label": "Tink", "systemName": "Tink" },
+  { "id": "purr", "label": "Purr", "systemName": "Purr" }
+]

@@ -46,6 +46,7 @@ import {
   RotateCcw,
   Settings,
   SquareTerminal,
+  Volume2,
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -335,6 +336,10 @@ import {
   SESSION_DRAFT_KEYS,
 } from "./lib/sessionDrafts";
 import {
+  COMPLETION_SOUND_OPTIONS,
+  type CompletionSoundId,
+} from "./lib/completionSounds";
+import {
   bodyFontStackFor,
   clampConfirmPasteOverChars,
   clampFontSize,
@@ -460,6 +465,7 @@ import {
   browserOpenCodexInlineVisualization,
   browserOpenLocalPath,
   paneActivity,
+  playCompletionSound,
   pickGroupDirectory,
   placePaneAfter,
   removeQueuedAgentTurn,
@@ -473,6 +479,7 @@ import {
   setLauncherAdapterPreference,
   setActiveTab,
   setGroupCollapsed,
+  setCompletionSound,
   setNativeTerminalKeyboardOwner,
   setNativeTerminalStageBackstop,
   setPaneLayout,
@@ -9030,6 +9037,18 @@ function MainApp() {
     [],
   );
 
+  const testCompletionSound = useCallback(async (soundId: CompletionSoundId) => {
+    if (soundId === "none") {
+      return;
+    }
+    try {
+      await playCompletionSound(soundId);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      showAppToast(`Couldn't play completion sound: ${message}`, "warning");
+    }
+  }, []);
+
   useQmuxEvents({
     appendHookEvent,
     setPanes: setPanesPreservingRecoveredDismissals,
@@ -11491,6 +11510,13 @@ function MainApp() {
   useEffect(() => {
     saveSettings(settings);
   }, [settings]);
+
+  // Automatic completion playback is backend-owned so it survives WebKit
+  // process reloads. Synchronize the persisted Display choice on boot/change;
+  // the backend retains the last value while the document is temporarily gone.
+  useEffect(() => {
+    void setCompletionSound(settings.completionSound).catch(() => undefined);
+  }, [settings.completionSound]);
 
   // Persist the OpenRouter key to the backend (its durable, owner-only home) whenever it
   // changes — but only after it has been hydrated from the backend, so the initial
@@ -14702,6 +14728,43 @@ function MainApp() {
             ) : null}
 
             <div className="settings-divider" role="separator" />
+
+            <div className="settings-row settings-completion-sound-row">
+              <div className="settings-label-stack">
+                <label htmlFor="settings-completion-sound" className="settings-label">
+                  Completion sound
+                </label>
+                <p className="settings-hint">
+                  Plays when an agent finishes working in a chat.
+                </p>
+              </div>
+              <div className="settings-completion-sound-controls">
+                <select
+                  id="settings-completion-sound"
+                  className="settings-select settings-completion-sound-select"
+                  value={settings.completionSound}
+                  onChange={(event) => {
+                    const completionSound = event.currentTarget.value as CompletionSoundId;
+                    setSettings((current) => ({ ...current, completionSound }));
+                  }}
+                >
+                  {COMPLETION_SOUND_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="control-button settings-completion-sound-test"
+                  disabled={settings.completionSound === "none"}
+                  onClick={() => void testCompletionSound(settings.completionSound)}
+                >
+                  <Volume2 size={14} aria-hidden="true" />
+                  Test
+                </button>
+              </div>
+            </div>
 
             <label className="settings-row settings-toggle">
               <span className="settings-label">Show debug panel</span>

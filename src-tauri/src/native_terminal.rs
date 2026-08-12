@@ -391,6 +391,7 @@ mod imp {
 
     unsafe extern "C" {
         fn qmux_native_application_is_active() -> i32;
+        fn qmux_native_completion_sound_play(system_name: *const c_char) -> i32;
         fn qmux_native_terminal_bridge_available() -> i32;
         fn qmux_native_terminal_register_font(bytes: *const u8, bytes_len: usize) -> i32;
         fn qmux_native_terminal_should_claim_web_app_shortcut(
@@ -511,6 +512,17 @@ mod imp {
         // SAFETY: the function has no borrowed state and synchronously reads
         // NSApplication.isActive on the main actor.
         unsafe { qmux_native_application_is_active() == 1 }
+    }
+
+    pub fn play_system_sound(system_name: &str) -> Result<(), String> {
+        let system_name = cstring(system_name, "completion system sound name")?;
+        // SAFETY: Swift copies the string synchronously and plays an allowlisted
+        // NSSound name resolved by the Rust catalog on the main actor.
+        if unsafe { qmux_native_completion_sound_play(system_name.as_ptr()) } == 1 {
+            Ok(())
+        } else {
+            Err("completion sound was not recognized or could not be played".to_string())
+        }
     }
 
     pub fn should_claim_web_app_shortcut(
@@ -1050,6 +1062,10 @@ mod imp {
         false
     }
 
+    pub fn play_system_sound(_system_name: &str) -> Result<(), String> {
+        Err("completion sounds are only available on macOS".to_string())
+    }
+
     pub fn initialize(_native_view: *mut c_void, _state: AppState) -> Result<(), String> {
         Err("native terminals are only available on macOS".to_string())
     }
@@ -1161,10 +1177,11 @@ mod imp {
 #[allow(unused_imports)]
 pub use imp::{
     action, application_is_active, available, create_host_managed, focus, initialize,
-    is_ready_for_replay, paste_approved_text, prepare_for_webview_reload, read_viewport_text,
-    receive, remove, seed_settings, send_text, set_human_browser_loading_background,
-    set_human_browser_webview, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
-    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
+    is_ready_for_replay, paste_approved_text, play_system_sound, prepare_for_webview_reload,
+    read_viewport_text, receive, remove, seed_settings, send_text,
+    set_human_browser_loading_background, set_human_browser_webview, set_iframe_shortcut_fallback,
+    set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
+    submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1567,6 +1584,22 @@ pub fn native_terminal_set_stage_backstop(
 #[tauri::command]
 pub fn native_terminal_focus(pane_id: String) -> Result<(), String> {
     focus(&pane_id)
+}
+
+#[tauri::command]
+pub fn completion_sound_play(sound_id: String) -> Result<(), String> {
+    let Some(system_name) = crate::completion_sound::system_name_for_id(&sound_id)? else {
+        return Ok(());
+    };
+    imp::play_system_sound(system_name)
+}
+
+#[tauri::command]
+pub fn completion_sound_set(
+    state: tauri::State<'_, AppState>,
+    sound_id: String,
+) -> Result<(), String> {
+    state.set_completion_sound(&sound_id)
 }
 
 #[tauri::command]
