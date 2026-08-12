@@ -1,6 +1,30 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createBranchedSession } from "../session-helper.js";
+
+test("declares an explicit ESM boundary for packaged app resources", () => {
+  const manifest = JSON.parse(
+    readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(manifest.type, "module");
+});
+
+test("bundles the ESM boundary beside both Pi integration scripts", () => {
+  const tauriConfig = JSON.parse(
+    readFileSync(new URL("../../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+  );
+  const resources = tauriConfig.bundle.resources;
+  assert.equal(resources["../qmux-pi-extension/index.js"], "qmux-pi-extension/index.js");
+  assert.equal(
+    resources["../qmux-pi-extension/session-helper.js"],
+    "qmux-pi-extension/session-helper.js",
+  );
+  assert.equal(
+    resources["../qmux-pi-extension/package.json"],
+    "qmux-pi-extension/package.json",
+  );
+});
 
 test("delegates branch creation and target-directory selection to Pi", () => {
   const calls = [];

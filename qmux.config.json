@@ -6,6 +6,7 @@
     "codex": { "binary": "codex" },
     "opencode": { "binary": "opencode" },
     "grok": { "binary": "grok" },
-    "muse": { "binary": "muse" }
+    "muse": { "binary": "muse" },
+    "pi": { "binary": "pi" }
   }
 }

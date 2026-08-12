@@ -1,0 +1,5 @@
+{
+  "name": "qmux-pi-extension",
+  "private": true,
+  "type": "module"
+}

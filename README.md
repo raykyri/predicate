@@ -10,9 +10,9 @@ It has a native UI for launching agents, queueing follow-ups,
 tracking agent status, and driving TUI-based agents.
 
 Agents are integrated through a pluggable adapter layer. Claude Code,
-Codex, OpenCode, Grok, and Muse are included as adapters, each with
-lifecycle hooks, native transcripts, and session resumes; all but Muse
-also support native forks, which its CLI has no command for. New agents
+Codex, OpenCode, Grok, Muse, and [Pi](https://pi.dev) are included as adapters, each with
+lifecycle hooks, native transcripts, and session resumes. All except Muse
+also support forks; Muse's CLI has no fork command. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
@@ -27,8 +27,8 @@ Rust. See [ACP agents](#acp-agents).
 - Native Ghostty terminals: each pane hosts a Metal-rendered Ghostty
   surface on macOS, with a portable Rust PTY backend for tests and
   non-macOS platforms.
-- Agent panes for Claude Code, Codex, OpenCode, and Grok, launched from the app
-  or by running `claude` / `codex` / `opencode` / `grok` / `muse` inside a shell
+- Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, and Pi, launched from the app
+  or by running `claude` / `codex` / `opencode` / `grok` / `muse` / `pi` inside a shell
   pane.
 - Agent panes for any ACP agent, configured under `adapters.acp` and launched
   from the app.
@@ -43,7 +43,7 @@ Rust. See [ACP agents](#acp-agents).
 - Persisted pane, group, agent, transcript, and queued-turn metadata with
   best-effort restart recovery.
 - Session forking from inside a running agent session (`qmux fork`),
-  supported natively by all four adapters.
+  supported by Claude Code, Codex, OpenCode, Grok, and Pi.
 - Saved prompt library: prompts as Markdown files with global and
   per-project scopes, `{placeholder}` fill-in, and a `Cmd-K` command
   palette covering prompts, tab navigation, and pane actions.
@@ -75,7 +75,7 @@ natively on Apple Silicon and Intel Macs.
    [releases page](https://github.com/raykyri/qmux/releases).
 2. Open it and drag **qmux** into **Applications**.
 3. You'll want the agent CLIs you use on your `PATH`: `claude`, `codex`,
-   `opencode`, `grok`, and/or `muse`.
+   `opencode`, `grok`, `muse`, and/or `pi`.
 
 If macOS reports the app is damaged or can't be opened, clear the download
 quarantine flag and launch it again:
@@ -95,7 +95,7 @@ Prerequisites:
 - Rust toolchain.
 - Node.js and npm.
 - The agent CLIs you want to use on `PATH`: `claude`, `codex`, `opencode`, `grok`,
-  and/or `muse`.
+  `muse`, and/or `pi`.
 
 Install dependencies:
 
@@ -267,7 +267,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Shell panes spawn `$SHELL`.
 - Agent panes spawn the adapter's configured agent binary, either in the current
   repo/directory or in a qmux-created agent worktree. Shell functions can route
-  `claude`, `codex`, `opencode`, `grok`, and `muse` through qmux from shell panes, but the
+  `claude`, `codex`, `opencode`, `grok`, `muse`, and `pi` through qmux from shell panes, but the
   adapter binary still needs to be installed or configured.
 - Each pane receives:
   - `QMUX_PANE_ID`
@@ -295,7 +295,8 @@ hosted view can show proposal status without a separate collaboration database.
   `QMUX_CODEX_APP_BUILD_FLAVOR`.
 - Transcript tailing starts once an adapter binds a transcript path: Claude via
   `SessionStart`, Codex via an explicit `SessionStart` path or session-id lookup,
-  and OpenCode via qmux-managed JSONL.
+  OpenCode via qmux-managed JSONL, and Pi via its observer extension and native
+  tree-shaped session JSONL.
 - Persisted state is written under `<workspaceRoot>/.qmux/state.json`, with normalized
   thread graphs stored separately in `<workspaceRoot>/.qmux/threads/<thread-id>.json`.
   Older worktree-local thread graphs are copied into this global store on startup and
@@ -318,7 +319,8 @@ hosted view can show proposal status without a separate collaboration database.
     "codex": { "binary": "codex" },
     "opencode": { "binary": "opencode" },
     "grok": { "binary": "grok" },
-    "muse": { "binary": "muse" }
+    "muse": { "binary": "muse" },
+    "pi": { "binary": "pi" }
   }
 }
 ```
@@ -327,12 +329,49 @@ hosted view can show proposal status without a separate collaboration database.
 Relative paths (for `workspaceRoot`/`socketPath`) are resolved from the config
 file's directory when that directory is under `$HOME`; otherwise they fall back to
 the platform data/runtime locations. Each adapter's `binary` is optional and
-defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`), which is
+defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`, `pi`), which is
 looked up on `PATH`; an absolute path or a `~/…` path (expanded against `$HOME`) is
 used as given. A top-level `claudeBinary` is still honored for backward
 compatibility. If the config file is absent, qmux uses the platform data
 directory for workspace state and the platform runtime directory, or a `run/`
 subdirectory of the data directory, for the control socket.
+
+### Pi
+
+The native Pi adapter requires Pi 0.80 or newer and is local-only. It launches
+Pi's text TUI directly, uses Pi's default model, and leaves authentication,
+model/thinking changes, project trust, packages, and extension UI inside Pi.
+There is intentionally no Pi model selector in the qmux launcher.
+
+qmux adds one explicit observer-only extension alongside the user's normal Pi
+extensions. It registers no tools, commands, shortcuts, flags, providers, input
+transforms, permission gates, UI, or trust handlers. It reports session identity,
+the active tree leaf, prompts, model/thinking changes, and settled boundaries;
+Pi's JSONL remains the transcript source of truth. Forks and message-anchored
+forks call the `SessionManager` exported by the installed Pi package so Pi owns
+session migration, IDs, labels, parent re-chaining, and target-directory layout.
+Development builds can point `QMUX_PI_EXTENSION_DIR` at another copy of the
+bundled observer and SessionManager helper.
+
+User-installed extensions and packages are not disabled, and their relative
+order is unchanged. They can still transform prompts, change models/tools, navigate or replace the
+session, delay lifecycle handlers, or append custom content. qmux guarantees
+tracking for standard Pi lifecycle/session behavior, with graceful raw rendering
+for unknown content. An extension that suppresses standard Pi behavior, exits the
+process, never settles, or writes an incompatible session graph can still prevent
+queue/status/fork parity; qmux does not arbitrate extension semantics.
+
+Interactive `pi` commands typed in a qmux shell are supervised like launches from
+the app. Package/configuration and metadata utilities (`install`, `remove`,
+`update`, `list`, `config`, `--help`, `--version`, `--list-models`, and `--export`)
+pass through unchanged and do not create an agent record. RPC, JSON, print, and
+ephemeral no-session modes are outside the native adapter contract.
+
+The fork bridge currently expects the standard Node package layout, with
+`dist/index.js` beside the canonical `dist/cli.js` behind the `pi` command. A
+custom shell shim or standalone compiled Pi binary can still launch and resume,
+but fork creation will fail with an actionable module-location error; point
+`adapters.pi.binary` at the package's `dist/cli.js` when it is available.
 
 ### Remote groups
 

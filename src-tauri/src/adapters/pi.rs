@@ -968,7 +968,7 @@ fn validate_pi_supervised_args(args: &[String]) -> Result<(), String> {
 fn pi_management_command(arg: &str) -> bool {
     matches!(
         arg,
-        "install" | "remove" | "uninstall" | "update" | "list" | "config"
+        "install" | "remove" | "uninstall" | "update" | "list" | "config" | "auth"
     )
 }
 
@@ -998,6 +998,7 @@ fn pi_value_flag(arg: &str) -> bool {
             | "--skill"
             | "--prompt-template"
             | "--theme"
+            | "--tui-mode"
             | "--export"
     )
 }
@@ -1446,6 +1447,7 @@ mod tests {
             args(&["install", "npm:pkg"]),
             args(&["--offline", "update"]),
             args(&["config", "-l"]),
+            args(&["auth", "check", "--provider", "anthropic"]),
             args(&["--version"]),
             args(&["--list-models", "sonnet"]),
             args(&["--export", "session.jsonl"]),
@@ -1473,6 +1475,16 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    #[test]
+    fn tui_mode_value_is_not_mistaken_for_an_initial_prompt() {
+        let command = args(&["--tui-mode", "fullscreen"]);
+        assert_eq!(
+            pi_shell_disposition(&command).unwrap(),
+            PiShellDisposition::Supervised
+        );
+        assert!(!pi_args_contain_prompt(&command));
     }
 
     #[test]
