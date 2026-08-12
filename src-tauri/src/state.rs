@@ -3309,7 +3309,7 @@ impl AppState {
         // Branching is the defining research feature; accepting an adapter
         // without a native fork command would only be discovered when the
         // first follow-up fails after a completed root run.
-        if !crate::adapters::adapter_supports_fork(&request.adapter) {
+        if !crate::adapters::adapter_supports_fork(&self.inner.config, &request.adapter) {
             return Err(format!(
                 "research requires an adapter with follow-up (fork) support; '{}' has none",
                 request.adapter
@@ -4063,7 +4063,7 @@ impl AppState {
                     // it through `conversation_query_followup_prompt` so it
                     // carries the same tag neutralization as the serialized
                     // turns it travels with.
-                    if crate::adapters::adapter_supports_fork(&parent.adapter) {
+                    if crate::adapters::adapter_supports_fork(&self.inner.config, &parent.adapter) {
                         (parent.adapter, parent.model, parent.effort)
                     } else {
                         (

@@ -44,6 +44,7 @@ struct PreparedAgentLaunch {
     cwd: String,
     args: Vec<String>,
     envs: Vec<PreparedLaunchEnv>,
+    supervised: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,24 +276,23 @@ fn run_agent_exec(adapter_id: String, args: Vec<String>) -> Result<(), String> {
     let launch = serde_json::from_value::<PreparedAgentLaunch>(launch)
         .map_err(|err| format!("invalid prepared agent launch response: {err}"))?;
 
+    let agent_id = prepared_agent_id(&launch)?;
     let mut command = Command::new(&launch.binary);
     command.args(launch.args).current_dir(&launch.cwd);
-    let agent_id = launch
-        .envs
-        .iter()
-        .find(|env| env.key == "QMUX_AGENT_ID")
-        .map(|env| env.value.clone())
-        .ok_or_else(|| "prepared shell launch is missing its agent id".to_string())?;
     for env in launch.envs {
         command.env(env.key, env.value);
     }
     // The containing shell is a user principal. The agent process receives the
     // pane token needed by hooks/MCP, but never inherits cross-pane user power.
-    command.env_remove("QMUX_USER_TOKEN");
+    if launch.supervised {
+        command.env_remove("QMUX_USER_TOKEN");
+    }
     // Lifecycle notifications normally resolve their adapter through the bound
     // agent id. Preserve an explicit hint as well so an authenticated SessionStart
     // can reconstruct that binding if preparation state was lost.
-    command.env("QMUX_ADAPTER_ID", &adapter_id);
+    if launch.supervised {
+        command.env("QMUX_ADAPTER_ID", &adapter_id);
+    }
 
     // The agent must own Ctrl-C/Ctrl-\ itself, so restore the default disposition in the
     // child after fork (it inherits the SIG_IGN we install below before exec). SIGTSTP is
@@ -324,17 +324,31 @@ fn run_agent_exec(adapter_id: String, args: Vec<String>) -> Result<(), String> {
     // backgrounded job can return control to the shell before exiting; detaching here,
     // after wait() reports a real exit, keeps the pane-agent binding alive across
     // job-control stop/continue cycles.
-    let _ = request_silent(
-        "agent.detach_pane",
-        json!({
-            "paneId": env::var("QMUX_PANE_ID").ok(),
-            "jobId": shell_job_id,
-            "agentId": agent_id,
-        }),
-    );
+    if let Some(agent_id) = agent_id {
+        let _ = request_silent(
+            "agent.detach_pane",
+            json!({
+                "paneId": env::var("QMUX_PANE_ID").ok(),
+                "jobId": shell_job_id,
+                "agentId": agent_id,
+            }),
+        );
+    }
 
     let status = status?;
     std::process::exit(exit_code_for_status(status));
+}
+
+fn prepared_agent_id(launch: &PreparedAgentLaunch) -> Result<Option<String>, String> {
+    if !launch.supervised {
+        return Ok(None);
+    }
+    launch
+        .envs
+        .iter()
+        .find(|env| env.key == "QMUX_AGENT_ID")
+        .map(|env| Some(env.value.clone()))
+        .ok_or_else(|| "prepared shell launch is missing its agent id".to_string())
 }
 
 fn exit_code_for_status(status: std::process::ExitStatus) -> i32 {
@@ -517,6 +531,36 @@ mod tests {
         assert!(MCP_USAGE_HINT.lines().count() <= 2);
         assert!(MCP_USAGE_HINT.contains("qmux mcp"));
         assert!(MCP_USAGE_HINT.contains("stdio"));
+    }
+
+    fn prepared_launch(supervised: bool, envs: Vec<PreparedLaunchEnv>) -> PreparedAgentLaunch {
+        PreparedAgentLaunch {
+            binary: "/usr/bin/true".to_string(),
+            cwd: "/tmp".to_string(),
+            args: Vec::new(),
+            envs,
+            supervised,
+        }
+    }
+
+    #[test]
+    fn shell_passthrough_does_not_require_an_agent_binding() {
+        assert_eq!(prepared_agent_id(&prepared_launch(false, Vec::new())).unwrap(), None);
+    }
+
+    #[test]
+    fn supervised_shell_launch_requires_an_agent_binding() {
+        let error = prepared_agent_id(&prepared_launch(true, Vec::new())).unwrap_err();
+        assert_eq!(error, "prepared shell launch is missing its agent id");
+
+        let launch = prepared_launch(
+            true,
+            vec![PreparedLaunchEnv {
+                key: "QMUX_AGENT_ID".to_string(),
+                value: "agent-1".to_string(),
+            }],
+        );
+        assert_eq!(prepared_agent_id(&launch).unwrap().as_deref(), Some("agent-1"));
     }
 
     #[test]

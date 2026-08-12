@@ -624,6 +624,11 @@ pub struct PreparedShellAgentLaunch {
     pub cwd: String,
     pub args: Vec<String>,
     pub envs: Vec<LaunchEnv>,
+    /// Whether `qmux agent-exec` should bind and supervise this process as an
+    /// agent. Adapters can return `false` for utility invocations of a shared
+    /// CLI (for example `pi install`) that must pass through the shell wrapper
+    /// without creating an agent.
+    pub supervised: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -737,6 +742,18 @@ pub trait AgentAdapter: Send + Sync {
         request: PrepareShellAgentLaunchRequest,
     ) -> Result<PreparedShellAgentLaunch, String>;
 
+    /// Gives an adapter the first chance to classify a wrapped shell command
+    /// as a utility invocation rather than an interactive agent. A returned
+    /// launch must set `supervised` to false and must not mutate workspace or
+    /// pane state. The default keeps every invocation on the normal supervised
+    /// path, preserving existing adapters' behavior.
+    fn prepare_shell_passthrough(
+        &self,
+        _request: &PrepareShellAgentLaunchRequest,
+    ) -> Result<Option<PreparedShellAgentLaunch>, String> {
+        Ok(None)
+    }
+
     fn shell_commands(&self) -> Vec<ShellCommandIntegration>;
 
     /// Whether this adapter can launch into a remote group.
@@ -816,6 +833,42 @@ pub trait AgentAdapter: Send + Sync {
         Err(FORK_UNSUPPORTED_ERROR.to_string())
     }
 
+    fn supports_fork(&self) -> bool {
+        false
+    }
+
+    fn supports_fork_at_message(&self) -> bool {
+        false
+    }
+
+    fn shell_fork_args(
+        &self,
+        _source: &AgentInfo,
+        _cwd: &Path,
+        _prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        Err(FORK_UNSUPPORTED_ERROR.to_string())
+    }
+
+    fn shell_fork_at_message_args(
+        &self,
+        _source: &AgentInfo,
+        _seed_session_id: &str,
+        _prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        Err(FORK_AT_MESSAGE_UNSUPPORTED_ERROR.to_string())
+    }
+
+    fn fork_pane(
+        &self,
+        _state: &AppState,
+        _source: &AgentInfo,
+        _use_worktree: bool,
+        _prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        Err(FORK_UNSUPPORTED_ERROR.to_string())
+    }
+
     fn composer_policy(&self) -> ComposerPolicy;
 }
 
@@ -850,8 +903,8 @@ impl AdapterRegistry {
                 id: adapter.id().to_string(),
                 label: adapter.display_name().to_string(),
                 default: adapter.id() == "claude",
-                supports_fork: adapter_supports_fork(adapter.id()),
-                supports_fork_at_message: adapter_supports_fork_at_message(adapter.id()),
+                supports_fork: adapter.supports_fork(),
+                supports_fork_at_message: adapter.supports_fork_at_message(),
             })
             .collect()
     }
@@ -937,10 +990,14 @@ fn fork_agent_in_shell(
     anchor: Option<&MessageAnchor>,
     btw: bool,
 ) -> Result<PaneInfo, String> {
-    if !adapter_supports_fork(&source.adapter) {
+    let registry = adapter_registry(state.config());
+    let adapter = registry
+        .get(&source.adapter)
+        .map_err(|_| FORK_UNSUPPORTED_ERROR.to_string())?;
+    if !adapter.supports_fork() {
         return Err(FORK_UNSUPPORTED_ERROR.to_string());
     }
-    if anchor.is_some() && !adapter_supports_fork_at_message(&source.adapter) {
+    if anchor.is_some() && !adapter.supports_fork_at_message() {
         return Err(FORK_AT_MESSAGE_UNSUPPORTED_ERROR.to_string());
     }
     ensure_shell_agent_startup_supported()?;
@@ -993,7 +1050,7 @@ fn fork_agent_in_shell(
         // own file. Resolving the path from `source` — never from the caller —
         // keeps a forged anchor confined to the transcript of the pane that
         // sent it.
-        (adapter_id, Some(anchor)) => {
+        (_, Some(anchor)) => {
             let transcript_path = source
                 .transcript_path
                 .as_deref()
@@ -1005,34 +1062,11 @@ fn fork_agent_in_shell(
                         source.adapter
                     )
                 })?;
-            let seed_session_id = adapter_registry(state.config())
-                .get(adapter_id)?
-                .synthesize_truncated_session(Path::new(transcript_path), anchor)?;
-            match adapter_id {
-                "claude" => ClaudeAdapter::new(state.config()).shell_fork_at_message_args(
-                    source,
-                    &seed_session_id,
-                    prompt,
-                ),
-                "codex" => CodexAdapter::new(state.config()).shell_fork_at_message_args(
-                    source,
-                    &seed_session_id,
-                    prompt,
-                ),
-                _ => return Err(FORK_AT_MESSAGE_UNSUPPORTED_ERROR.to_string()),
-            }
+            let seed_session_id =
+                adapter.synthesize_truncated_session(Path::new(transcript_path), anchor)?;
+            adapter.shell_fork_at_message_args(source, &seed_session_id, prompt)?
         }
-        ("claude", None) => {
-            ClaudeAdapter::new(state.config()).shell_fork_args(source, &cwd, prompt)?
-        }
-        ("codex", None) => {
-            CodexAdapter::new(state.config()).shell_fork_args(source, &cwd, prompt)?
-        }
-        ("opencode", None) => {
-            OpencodeAdapter::new(state.config()).shell_fork_args(source, &cwd, prompt)?
-        }
-        ("grok", None) => GrokAdapter::new(state.config()).shell_fork_args(source, &cwd, prompt)?,
-        _ => return Err(FORK_UNSUPPORTED_ERROR.to_string()),
+        (_, None) => adapter.shell_fork_args(source, &cwd, prompt)?,
     };
     let pane_id = state.next_id("pane");
     let agent = attach_agent_pane(state, &agent.id, pane_id.clone())?;
@@ -1063,8 +1097,10 @@ fn fork_agent_in_shell(
 /// Adapters with a native fork command. Owns the fork-eligibility check (and its
 /// error message) for both the dispatch below and the queue engine's fail-fast
 /// validation, so a new forkable adapter is added in one place.
-pub fn adapter_supports_fork(adapter_id: &str) -> bool {
-    matches!(adapter_id, "claude" | "codex" | "opencode" | "grok")
+pub fn adapter_supports_fork(config: &QmuxConfig, adapter_id: &str) -> bool {
+    adapter_registry(config)
+        .get(adapter_id)
+        .is_ok_and(|adapter| adapter.supports_fork())
 }
 
 /// Adapters that can fork from a chosen message rather than the session head.
@@ -1073,8 +1109,11 @@ pub fn adapter_supports_fork(adapter_id: &str) -> bool {
 /// native transcript and resumes that instead. Only adapters whose transcript
 /// format we can safely truncate qualify; the rest inherit the trait's default
 /// `Err` and are filtered out of the UI by `supports_fork_at_message`.
-pub fn adapter_supports_fork_at_message(adapter_id: &str) -> bool {
-    matches!(adapter_id, "claude" | "codex")
+#[cfg(test)]
+pub fn adapter_supports_fork_at_message(config: &QmuxConfig, adapter_id: &str) -> bool {
+    adapter_registry(config)
+        .get(adapter_id)
+        .is_ok_and(|adapter| adapter.supports_fork_at_message())
 }
 
 /// Identifies the message a fork branches from. Carries every anchor the
@@ -1181,21 +1220,10 @@ fn fork_agent_source_with_placement(
     prompt: Option<&str>,
     btw: bool,
 ) -> Result<PaneInfo, String> {
-    let (pane, agent) = match source.adapter.as_str() {
-        "claude" => {
-            ClaudeAdapter::new(state.config()).fork_pane(state, source, use_worktree, prompt)?
-        }
-        "codex" => {
-            CodexAdapter::new(state.config()).fork_pane(state, source, use_worktree, prompt)?
-        }
-        "opencode" => {
-            OpencodeAdapter::new(state.config()).fork_pane(state, source, use_worktree, prompt)?
-        }
-        "grok" => {
-            GrokAdapter::new(state.config()).fork_pane(state, source, use_worktree, prompt)?
-        }
-        _ => return Err(FORK_UNSUPPORTED_ERROR.to_string()),
-    };
+    let (pane, agent) = adapter_registry(state.config())
+        .get(&source.adapter)
+        .map_err(|_| FORK_UNSUPPORTED_ERROR.to_string())?
+        .fork_pane(state, source, use_worktree, prompt)?;
     finish_fork_spawn(state, source, pane, agent, btw)
 }
 
@@ -1295,10 +1323,15 @@ pub fn agent_prepare_shell_launch(
     let supervisor_pid = request.supervisor_pid;
     let pane_id = request.pane_id.clone();
     let prepared_agent_id = request.prepared_agent_id.clone();
-    let prepared = match adapter_registry(state.config())
-        .get(&request.adapter_id)?
-        .prepare_shell_launch(state, request)
-    {
+    let registry = adapter_registry(state.config());
+    let adapter = registry.get(&request.adapter_id)?;
+    if let Some(passthrough) = adapter.prepare_shell_passthrough(&request)? {
+        if passthrough.supervised {
+            return Err("adapter shell passthrough was incorrectly marked supervised".to_string());
+        }
+        return Ok(passthrough);
+    }
+    let prepared = match adapter.prepare_shell_launch(state, request) {
         Ok(prepared) => prepared,
         Err(err) => {
             // The caller authenticated for this pane only, and `prepared_agent_id`
@@ -1478,16 +1511,17 @@ mod tests {
         assert!(!metadata[4].default);
         assert_eq!(metadata[5].id, "acp");
         assert!(!metadata[5].default);
-        assert!(adapter_supports_fork("grok"));
-        assert!(adapter_supports_fork("opencode"));
+        let config = test_config();
+        assert!(adapter_supports_fork(&config, "grok"));
+        assert!(adapter_supports_fork(&config, "opencode"));
         // ACP has no native fork command: the protocol has no such method, and
         // `session/load` resumes rather than branches.
-        assert!(!adapter_supports_fork("acp"));
-        assert!(!adapter_supports_fork_at_message("acp"));
+        assert!(!adapter_supports_fork(&config, "acp"));
+        assert!(!adapter_supports_fork_at_message(&config, "acp"));
         // Muse has no fork command either — no `--fork-session` flag and no
         // `fork` subcommand — so branching a session is not offered.
-        assert!(!adapter_supports_fork("muse"));
-        assert!(!adapter_supports_fork_at_message("muse"));
+        assert!(!adapter_supports_fork(&config, "muse"));
+        assert!(!adapter_supports_fork_at_message(&config, "muse"));
     }
 
     #[test]

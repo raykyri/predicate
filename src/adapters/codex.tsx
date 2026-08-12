@@ -47,6 +47,8 @@ export const codexUiAdapter: AgentUiAdapter = {
   label: "Codex",
   LauncherOptions: CodexLauncherOptions,
   composerPolicy: () => codexComposerPolicy,
+  supportsFork: true,
+  supportsForkAtMessage: true,
 };
 
 function CodexLauncherOptions({ value, onChange }: LauncherOptionsProps) {

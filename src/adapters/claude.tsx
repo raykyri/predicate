@@ -42,6 +42,8 @@ export const claudeUiAdapter: AgentUiAdapter = {
   LauncherOptions: ClaudeLauncherOptions,
   normalizeTurns: normalizeClaudeTurns,
   composerPolicy: () => claudeComposerPolicy,
+  supportsFork: true,
+  supportsForkAtMessage: true,
 };
 
 function ClaudeLauncherOptions({ value, onChange }: LauncherOptionsProps) {

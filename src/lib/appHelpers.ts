@@ -4,10 +4,6 @@ import {
 } from "./terminalFont";
 import { FONT_OPTIONS } from "./settings";
 import { findAgentUiAdapter } from "../adapters";
-import { CLAUDE_ADAPTER_ID } from "../adapters/claude";
-import { CODEX_ADAPTER_ID } from "../adapters/codex";
-import { GROK_ADAPTER_ID } from "../adapters/grok";
-import { OPENCODE_ADAPTER_ID } from "../adapters/opencode";
 import type {
   AgentInfo,
   GlobalDraft,
@@ -388,13 +384,7 @@ export function isQueuedTurn(value: unknown): value is QueuedTurn {
 // resume. Single owner of the gate used by context/launcher actions, the
 // selection "Ask in new thread" button, and the composer's queue-and-fork options.
 export function agentCanFork(agent: AgentInfo | null | undefined): boolean {
-  return Boolean(
-    agent?.sessionId &&
-      (agent.adapter === CLAUDE_ADAPTER_ID ||
-        agent.adapter === CODEX_ADAPTER_ID ||
-        agent.adapter === OPENCODE_ADAPTER_ID ||
-        agent.adapter === GROK_ADAPTER_ID),
-  );
+  return Boolean(agent?.sessionId && findAgentUiAdapter(agent.adapter)?.supportsFork);
 }
 
 // Forking from a chosen message additionally needs an adapter whose transcript
@@ -405,7 +395,7 @@ export function agentSupportsForkAtMessage(agent: AgentInfo | null | undefined):
   return Boolean(
     agentCanFork(agent) &&
       agent?.transcriptPath &&
-      (agent.adapter === CLAUDE_ADAPTER_ID || agent.adapter === CODEX_ADAPTER_ID),
+      findAgentUiAdapter(agent?.adapter)?.supportsForkAtMessage,
   );
 }
 

@@ -160,6 +160,29 @@ impl AgentAdapter for GrokAdapter {
         model_from_claude_native_transcript_line(line)
     }
 
+    fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn shell_fork_args(
+        &self,
+        source: &AgentInfo,
+        cwd: &Path,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        GrokAdapter::shell_fork_args(self, source, cwd, prompt)
+    }
+
+    fn fork_pane(
+        &self,
+        state: &AppState,
+        source: &AgentInfo,
+        use_worktree: bool,
+        prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        GrokAdapter::fork_pane(self, state, source, use_worktree, prompt)
+    }
+
     fn composer_policy(&self) -> ComposerPolicy {
         ComposerPolicy {
             ready_statuses: vec![
@@ -555,6 +578,7 @@ impl GrokAdapter {
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
+            supervised: true,
         })
     }
 

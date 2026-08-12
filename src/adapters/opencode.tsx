@@ -13,4 +13,5 @@ export const opencodeUiAdapter: AgentUiAdapter = {
   id: OPENCODE_ADAPTER_ID,
   label: "OpenCode",
   composerPolicy: () => opencodeComposerPolicy,
+  supportsFork: true,
 };

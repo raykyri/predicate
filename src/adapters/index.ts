@@ -37,6 +37,8 @@ export interface AgentUiAdapter {
   normalizeTurns?: (turns: Turn[]) => Turn[];
   renderBlock?: (block: TurnBlock, role: string) => ReactNode | null;
   composerPolicy: (agent: AgentInfo) => ComposerPolicy;
+  supportsFork?: boolean;
+  supportsForkAtMessage?: boolean;
   contextRows?: (agent: AgentInfo, pane: PaneInfo) => Array<{ label: string; value: string }>;
 }
 

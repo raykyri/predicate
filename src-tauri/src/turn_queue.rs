@@ -491,7 +491,7 @@ pub fn queue_delivery_agent_turn(
         return Err(format!("Agent {} has failed", agent.id));
     }
     if matches!(request.delivery, QueuedTurnDelivery::Fork { .. })
-        && !adapter_supports_fork(&agent.adapter)
+        && !adapter_supports_fork(state.config(), &agent.adapter)
     {
         return Err(FORK_UNSUPPORTED_ERROR.to_string());
     }

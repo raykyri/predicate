@@ -195,6 +195,29 @@ impl AgentAdapter for OpencodeAdapter {
         parse_transcript_lifecycle_event(line)
     }
 
+    fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn shell_fork_args(
+        &self,
+        source: &AgentInfo,
+        cwd: &Path,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        OpencodeAdapter::shell_fork_args(self, source, cwd, prompt)
+    }
+
+    fn fork_pane(
+        &self,
+        state: &AppState,
+        source: &AgentInfo,
+        use_worktree: bool,
+        prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        OpencodeAdapter::fork_pane(self, state, source, use_worktree, prompt)
+    }
+
     fn composer_policy(&self) -> ComposerPolicy {
         ComposerPolicy {
             ready_statuses: vec![
@@ -594,6 +617,7 @@ impl OpencodeAdapter {
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
+            supervised: true,
         })
     }
 

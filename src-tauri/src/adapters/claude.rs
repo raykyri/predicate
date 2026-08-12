@@ -197,6 +197,47 @@ impl AgentAdapter for ClaudeAdapter {
         synthesize_truncated_claude_session(transcript_path, anchor)
     }
 
+    fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn supports_fork_at_message(&self) -> bool {
+        true
+    }
+
+    fn shell_fork_args(
+        &self,
+        source: &AgentInfo,
+        cwd: &Path,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        ClaudeAdapter::shell_fork_args(self, source, cwd, prompt)
+    }
+
+    fn shell_fork_at_message_args(
+        &self,
+        source: &AgentInfo,
+        seed_session_id: &str,
+        prompt: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        Ok(ClaudeAdapter::shell_fork_at_message_args(
+            self,
+            source,
+            seed_session_id,
+            prompt,
+        ))
+    }
+
+    fn fork_pane(
+        &self,
+        state: &AppState,
+        source: &AgentInfo,
+        use_worktree: bool,
+        prompt: Option<&str>,
+    ) -> Result<(PaneInfo, AgentInfo), String> {
+        ClaudeAdapter::fork_pane(self, state, source, use_worktree, prompt)
+    }
+
     fn composer_policy(&self) -> ComposerPolicy {
         ComposerPolicy {
             ready_statuses: vec![
@@ -746,6 +787,7 @@ impl ClaudeAdapter {
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
+            supervised: true,
         })
     }
 

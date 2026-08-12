@@ -15,4 +15,5 @@ export const grokUiAdapter: AgentUiAdapter = {
   id: GROK_ADAPTER_ID,
   label: "Grok",
   composerPolicy: () => grokComposerPolicy,
+  supportsFork: true,
 };

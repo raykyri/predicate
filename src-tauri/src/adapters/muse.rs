@@ -489,6 +489,7 @@ impl MuseAdapter {
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
+            supervised: true,
         })
     }
 
