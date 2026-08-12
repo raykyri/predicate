@@ -241,11 +241,9 @@ code {
 .feature-list {
   grid-column: 1 / 9;
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2.25rem var(--gutter);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
   width: 100%;
-  max-width: 980px;
-  justify-self: center;
   list-style: none;
   padding: 0;
 }
@@ -254,6 +252,9 @@ code {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
+  padding: 1.15rem 1.25rem 1.3rem;
+  background: var(--surface);
+  border-radius: 8px;
 }
 
 .feature-list strong {
@@ -319,6 +320,10 @@ code {
   .intro-copy {
     grid-column: 1 / 9;
     text-align: left;
+  }
+
+  .feature-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
