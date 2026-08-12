@@ -303,6 +303,51 @@ function markRecentTurns(history: HandoffMessage[], recentTurns: number) {
   }
 }
 
+/**
+ * Anchor for a handoff of the whole transcript as it stands — what the composer
+ * menu hands off, as opposed to the per-message menus, which name their own
+ * anchor. That is the newest message with something to say: plumbing, dropped
+ * branch work, and empty cards are skipped, and a trailing assistant reply
+ * resolves to the *start* of its run so the whole reply lands in the closing
+ * section instead of arriving split across the transcript. Null when the
+ * transcript holds nothing worth handing over.
+ */
+export function latestHandoffAnchorKey(items: MessageItem[]): string | null {
+  const eligible = (item: MessageItem) =>
+    (item.role === "user" || item.role === "assistant") &&
+    item.status !== "superseded" &&
+    item.contextStatus !== "rolledBack" &&
+    !messageItemIsTaggedInstruction(item) &&
+    Boolean(messageItemCopyText(item) || toolEntries(item.activities).length > 0);
+
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
+    if (!eligible(item)) {
+      continue;
+    }
+    if (item.role !== "assistant") {
+      return item.key;
+    }
+    let start = index;
+    for (let before = index - 1; before >= 0; before -= 1) {
+      const candidate = items[before];
+      if (
+        candidate.status === "superseded" ||
+        candidate.contextStatus === "rolledBack" ||
+        (candidate.role === "user" && messageItemIsTaggedInstruction(candidate))
+      ) {
+        continue;
+      }
+      if (candidate.role !== "assistant") {
+        break;
+      }
+      start = before;
+    }
+    return items[start].key;
+  }
+  return null;
+}
+
 function preamble(assistantAnchor: boolean, context?: HandoffContext | null) {
   const agent = context?.agentLabel?.trim();
   const who = agent ? `${agent}, running in qmux,` : "Another coding agent";

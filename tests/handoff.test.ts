@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildHandoffDocument } from "../src/lib/handoff";
+import { buildHandoffDocument, latestHandoffAnchorKey } from "../src/lib/handoff";
 import { buildTimelineItems } from "../src/lib/turnTimeline";
 import type { Turn, TurnBlock } from "../src/types";
 
@@ -313,6 +313,67 @@ test("returns null when the anchor key is not in the items", () => {
     }),
     null,
   );
+});
+
+test("anchors a whole-transcript handoff on the newest turn", () => {
+  const turns = [
+    turn("user", [text("Add retries.")]),
+    turn("assistant", [text("Done.")]),
+    turn("user", [text("Now cover it with a test.")]),
+  ];
+  const items = itemsFor(turns);
+
+  assert.equal(latestHandoffAnchorKey(items), items[items.length - 1].key);
+  const document = buildHandoffDocument({
+    items,
+    anchorKey: latestHandoffAnchorKey(items) ?? "",
+    assistantLabel: "Claude",
+  });
+  assert.ok(document);
+  assert.match(document, /<request>\nNow cover it with a test\.\n<\/request>/);
+});
+
+test("anchors on the start of a trailing assistant run", () => {
+  const turns = [
+    turn("user", [text("Fix the parser.")]),
+    turn("assistant", [
+      text("Looking now."),
+      toolUse("Edit", { file_path: "/work/repo/src/parser.ts" }, "t1"),
+      toolResult("ok", "t1"),
+      text("Fixed it."),
+    ]),
+  ];
+  const items = itemsFor(turns);
+  const assistantItems = items.filter((item) => item.role === "assistant");
+
+  // The run is split into several cards; the handoff covers all of them.
+  assert.ok(assistantItems.length > 1);
+  assert.equal(latestHandoffAnchorKey(items), assistantItems[0].key);
+  const document = buildHandoffDocument({
+    items,
+    anchorKey: latestHandoffAnchorKey(items) ?? "",
+    assistantLabel: "Claude",
+  });
+  assert.ok(document);
+  assert.match(document, /<last-turn>\nLooking now\.\n\nFixed it\./);
+});
+
+test("skips plumbing and dropped work when anchoring the newest turn", () => {
+  const turns = [
+    turn("user", [text("Real ask.")]),
+    turn("assistant", [text("Abandoned.")], { status: "superseded" }),
+    turn("system", [text("System noise.")]),
+    turn("user", [
+      text(["<environment_context>", "only plumbing", "</environment_context>"].join("\n")),
+    ]),
+  ];
+  const items = itemsFor(turns);
+
+  assert.equal(latestHandoffAnchorKey(items), items[0].key);
+});
+
+test("has no anchor for an empty transcript", () => {
+  assert.equal(latestHandoffAnchorKey([]), null);
 });
 
 test("carries an oversized history message whole when the budget allows", () => {

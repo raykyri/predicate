@@ -128,6 +128,9 @@ interface NativeInputProps {
   hasTranscript: boolean;
   transcriptCopyPlainText: () => string;
   transcriptCopyJsonText: () => string;
+  // Briefing for a *different* coding agent, anchored on the newest turn.
+  // Returns null when the transcript has nothing worth handing over.
+  transcriptCopyHandoffText: () => string | null;
   onPublishTranscript: () => void;
   composerPolicy: ComposerPolicy;
   shortcutLabelForPane: (paneId?: string | null) => string | null;
@@ -195,6 +198,7 @@ export default function NativeInput({
   hasTranscript,
   transcriptCopyPlainText,
   transcriptCopyJsonText,
+  transcriptCopyHandoffText,
   onPublishTranscript,
   composerPolicy,
   shortcutLabelForPane,
@@ -898,6 +902,24 @@ export default function NativeInput({
     }
   }
 
+  async function copyHandoff() {
+    if (!hasTranscript) {
+      return;
+    }
+
+    try {
+      const handoff = transcriptCopyHandoffText();
+      if (!handoff) {
+        onError("This transcript has nothing to hand off yet.");
+        return;
+      }
+      await writeClipboardText(handoff);
+      showToast("Copied to clipboard");
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   async function copyQueued() {
     if (queuedTurns.length === 0) {
       return;
@@ -1580,6 +1602,19 @@ export default function NativeInput({
                   Save current draft as prompt
                 </button>
                 <div className="composer-menu-divider" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="menu-item composer-menu-item"
+                  disabled={!hasTranscript}
+                  title="Copy a briefing another coding agent can pick the work up from"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    void copyHandoff();
+                  }}
+                >
+                  Copy handoff
+                </button>
                 <button
                   type="button"
                   role="menuitem"

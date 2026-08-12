@@ -236,7 +236,12 @@ import {
   threadGraphAnnotationsForTurns,
   threadIdForAgent,
 } from "./lib/threadGraph";
-import { formatPlainTextTranscript } from "./lib/turnTimeline";
+import { buildTimelineItems, formatPlainTextTranscript } from "./lib/turnTimeline";
+import {
+  buildHandoffDocument,
+  latestHandoffAnchorKey,
+  type HandoffContext,
+} from "./lib/handoff";
 import {
   requestResearchFollowupsFocus,
   requestResearchFolderMenuToggle,
@@ -12881,6 +12886,16 @@ function MainApp() {
     // Split cells are short and deliberately headerless, so keep the composer
     // floating there even if this agent normally uses a transcript/queue split.
     const queueSplit = showHeader && surface.queueSplit;
+    // Where the handed-off work lives. The pane's cwd is what the user is
+    // actually looking at; the worktree is the fallback for a pane that never
+    // reported one. Shared by the per-message handoffs in the transcript and
+    // the composer menu's whole-transcript one.
+    const handoffContext: HandoffContext = {
+      cwd: surface.pane.cwd || agent?.worktreeDir || null,
+      branch: agent?.branch ?? null,
+      agentLabel: surface.assistantLabel,
+      model: agent?.model ?? null,
+    };
 
     return (
       <TurnOverlay
@@ -12980,15 +12995,7 @@ function MainApp() {
                 void forkPane(surface.pane, { useWorktree: false, anchor })
             : undefined
         }
-        // Where the handed-off work lives. The pane's cwd is what the user is
-        // actually looking at; the worktree is the fallback for a pane that
-        // never reported one.
-        handoffContext={{
-          cwd: surface.pane.cwd || agent?.worktreeDir || null,
-          branch: agent?.branch ?? null,
-          agentLabel: surface.assistantLabel,
-          model: agent?.model ?? null,
-        }}
+        handoffContext={handoffContext}
         header={
           showHeader ? (
             <TurnPaneHeader
@@ -13090,6 +13097,23 @@ function MainApp() {
                     hooks: hookEventsByAgentRef.current[agent.id] ?? [],
                   })
                 }
+                // Anchored on the newest turn, so the composer's handoff covers
+                // the transcript as it stands — the per-message menus are the
+                // way to hand off from further back. Detail is forced on: the
+                // file paths a handoff reports live in the tool calls, which
+                // the pane itself may be configured to hide.
+                transcriptCopyHandoffText={() => {
+                  const items = buildTimelineItems(surface.turns, true);
+                  const anchorKey = latestHandoffAnchorKey(items);
+                  return anchorKey
+                    ? buildHandoffDocument({
+                        items,
+                        anchorKey,
+                        assistantLabel: surface.assistantLabel,
+                        context: handoffContext,
+                      })
+                    : null;
+                }}
                 onPublishTranscript={() => {
                   const turnsSnapshot = surface.turns;
                   const title =
