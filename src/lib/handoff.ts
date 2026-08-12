@@ -7,6 +7,13 @@
 // are where file contents, command output, and credentials live, and a handoff
 // is on its way to the clipboard and then to a third-party agent. Paths carry
 // the signal without carrying the payload.
+//
+// Length is spent, not rationed: the document budget is allocated rather than
+// applied as a blanket per-message cap, so nothing is truncated that the budget
+// could have carried whole. The order of priority is anchor turn, then the last
+// couple of turns, then older history — because the freshest exchanges hold the
+// live state of the work (what was just tried, what broke, what comes next)
+// while older ones have already been distilled into the files on disk.
 
 import type {
   ActivityItem,
@@ -26,8 +33,19 @@ export interface HandoffContext {
 }
 
 export interface HandoffLimits {
-  /** Cap on one history message before head/tail truncation kicks in. */
+  /**
+   * Cap on one older history message, applied only when the whole conversation
+   * does not fit — a relief valve, not a routine trim.
+   */
   messageCharacters: number;
+  /**
+   * The same cap for a message inside the last `recentTurns` turns of history.
+   * Much larger, because a stale summary of the last exchange is exactly what
+   * makes a receiving agent redo work or resume from the wrong state.
+   */
+  recentMessageCharacters: number;
+  /** How many trailing history turns are treated as recent. */
+  recentTurns: number;
   /**
    * Cap on the anchor turn — the outstanding request, or the agent's parting
    * message — which is the one part of the document that must survive intact.
@@ -39,16 +57,21 @@ export interface HandoffLimits {
   keepRecentMessages: number;
   /** Distinct tool names listed per assistant run. */
   toolNamesPerRun: number;
+  /** Distinct tool names listed per recent assistant run. */
+  recentToolNamesPerRun: number;
   /** Paths listed per file category. */
   filesPerCategory: number;
 }
 
 export const DEFAULT_HANDOFF_LIMITS: HandoffLimits = {
-  messageCharacters: 4_000,
-  requestCharacters: 12_000,
-  totalCharacters: 60_000,
-  keepRecentMessages: 4,
+  messageCharacters: 6_000,
+  recentMessageCharacters: 24_000,
+  recentTurns: 2,
+  requestCharacters: 24_000,
+  totalCharacters: 120_000,
+  keepRecentMessages: 6,
   toolNamesPerRun: 8,
+  recentToolNamesPerRun: 16,
   filesPerCategory: 12,
 };
 
@@ -89,11 +112,38 @@ const MUTATING_TOOL_MARKERS = [
 
 const MAX_PATH_LENGTH = 200;
 
+// A truncation notice costs about forty characters of its own, so trimming a
+// message that is barely over its cap makes the document longer rather than
+// shorter — and costs the reader a whole paragraph to save a line.
+const TRUNCATION_SLACK = 400;
+// Floor a message is never squeezed below while it is still in the document:
+// past this an entry stops being context and becomes noise with a heading.
+const MIN_MESSAGE_CHARACTERS = 500;
+// What the anchor turn keeps, and what the conversation keeps, when a caller's
+// own `totalCharacters` is too small for both to have their full share.
+const MIN_ANCHOR_CHARACTERS = 2_000;
+const MIN_CONVERSATION_CHARACTERS = 4_000;
+// Slack held back from the budget arithmetic so rounding never pushes the
+// assembled document past `totalCharacters` and into the hard clamp.
+const BUDGET_MARGIN = 256;
+const SECTION_GAP = 2;
+const CONVERSATION_CHROME_CHARACTERS = [
+  "## Conversation so far",
+  "",
+  TRANSCRIPT_OPEN,
+  "",
+  TRANSCRIPT_CLOSE,
+].join("\n").length;
+
 interface HandoffMessage {
+  role: "user" | "assistant";
   label: string;
+  /** Full text; truncation is decided later, once the budget is known. */
   text: string | null;
-  toolSummary: string | null;
+  activities: ActivityItem[];
   interrupted: boolean;
+  /** Inside the last `recentTurns` turns of history. */
+  recent: boolean;
 }
 
 /** The anchor turn, rendered as the document's trailing section. */
@@ -150,49 +200,107 @@ export function buildHandoffDocument({
     .filter(
       (item) => item.status !== "superseded" && item.contextStatus !== "rolledBack",
     )
-    .map((item) => handoffMessage(item, assistantLabel, limits))
+    .map((item) => handoffMessage(item, assistantLabel))
     .filter((message): message is HandoffMessage => message !== null);
+  markRecentTurns(history, limits.recentTurns);
 
-  const anchor: HandoffAnchor = assistantAnchor
-    ? assistantAnchorTurn(items, anchorIndex, anchorEnd, limits)
-    : {
-        text: truncateText(
-          messageItemCopyText(items[anchorIndex]) ?? "",
-          limits.requestCharacters,
-        ),
-        toolSummary: null,
-        interrupted: false,
-      };
   // The anchored run's own tool calls are work that already happened, so an
   // assistant handoff lists the files it touched too.
   const files = collectFilePaths(items.slice(0, assistantAnchor ? anchorEnd + 1 : anchorIndex));
 
-  const sections: string[] = [preamble(assistantAnchor, context)];
+  // Everything but the conversation and the anchor is fixed-size, so measure it
+  // first and let the two variable sections divide what is actually left. The
+  // old arithmetic reserved the anchor's *cap* whether or not the anchor used
+  // it, which spent thousands of characters of history on a one-line request.
+  const head: string[] = [preamble(assistantAnchor, context)];
   const environment = environmentSection(context);
   if (environment) {
-    sections.push(environment);
+    head.push(environment);
   }
   const work = workSection(files, limits);
   if (work) {
-    sections.push(work);
+    head.push(work);
   }
-  const conversation = conversationSection(history, limits);
+  const closing = closingInstruction(assistantAnchor);
+  const framing = sectionsLength(head) + sectionsLength([closing]);
+
+  // The anchor turn is the point of the document, so it is served first; it
+  // only gives ground when a caller's own total would otherwise leave the
+  // conversation with nothing at all.
+  const anchorCharacters = Math.min(
+    limits.requestCharacters,
+    Math.max(
+      MIN_ANCHOR_CHARACTERS,
+      limits.totalCharacters -
+        framing -
+        (history.length > 0 ? MIN_CONVERSATION_CHARACTERS : 0) -
+        BUDGET_MARGIN,
+    ),
+  );
+  const anchor: HandoffAnchor = assistantAnchor
+    ? assistantAnchorTurn(items, anchorIndex, anchorEnd, limits, anchorCharacters)
+    : {
+        text: truncateText(messageItemCopyText(items[anchorIndex]) ?? "", anchorCharacters),
+        toolSummary: null,
+        interrupted: false,
+      };
+  const anchorSectionText = anchorSection(assistantAnchor, anchor);
+
+  const conversation = conversationSection(
+    history,
+    limits,
+    limits.totalCharacters -
+      framing -
+      sectionsLength(anchorSectionText ? [anchorSectionText] : []) -
+      BUDGET_MARGIN,
+  );
+
+  const sections = [...head];
   if (conversation) {
     sections.push(conversation);
   }
-  const anchorSectionText = anchorSection(assistantAnchor, anchor);
   if (anchorSectionText) {
     sections.push(anchorSectionText);
   }
-  sections.push(closingInstruction(assistantAnchor));
+  sections.push(closing);
 
   const document = `${sections.join("\n\n")}\n`;
-  // Belt-and-braces clamp: the per-message and middle-elision budgets bound the
-  // conversation, but one unbounded field (a pathological request, a very long
-  // cwd) must still not produce a clipboard payload no agent can accept.
+  // Belt-and-braces clamp: the sections above are budgeted against the same
+  // total, but one unbounded field (a pathological cwd, a caller's very small
+  // total) must still not produce a clipboard payload no agent can accept.
   return document.length > limits.totalCharacters
     ? `${document.slice(0, limits.totalCharacters)}\n[… handoff truncated …]\n`
     : document;
+}
+
+/** Rendered length of a run of sections, including the blank line after each. */
+function sectionsLength(sections: string[]) {
+  return sections.reduce((total, section) => total + section.length + SECTION_GAP, 0);
+}
+
+/**
+ * Flags the messages belonging to the last `recentTurns` turns of history. A
+ * turn is one user message or one assistant reply, and a reply can span several
+ * message items (activities split a run), so consecutive assistant items count
+ * once — otherwise a single tool-heavy reply would eat the whole window.
+ */
+function markRecentTurns(history: HandoffMessage[], recentTurns: number) {
+  if (history.length === 0 || recentTurns <= 0) {
+    return;
+  }
+  const turnOf: number[] = [];
+  let turn = -1;
+  for (const [index, message] of history.entries()) {
+    const previous = index > 0 ? history[index - 1] : null;
+    if (!previous || message.role === "user" || previous.role !== "assistant") {
+      turn += 1;
+    }
+    turnOf.push(turn);
+  }
+  const oldestRecentTurn = turn - recentTurns + 1;
+  for (const [index, message] of history.entries()) {
+    message.recent = turnOf[index] >= oldestRecentTurn;
+  }
 }
 
 function preamble(assistantAnchor: boolean, context?: HandoffContext | null) {
@@ -264,6 +372,7 @@ function assistantAnchorTurn(
   start: number,
   end: number,
   limits: HandoffLimits,
+  anchorCharacters: number,
 ): HandoffAnchor {
   const parts: string[] = [];
   const activities: ActivityItem[] = [];
@@ -287,8 +396,9 @@ function assistantAnchorTurn(
     interrupted = interrupted || item.status === "interrupted";
   }
   return {
-    text: truncateText(parts.join("\n\n").trim(), limits.requestCharacters),
-    toolSummary: toolSummaryLine(activities, limits),
+    text: truncateText(parts.join("\n\n").trim(), anchorCharacters),
+    // The anchor is the most recent turn there is, so it gets the wider list.
+    toolSummary: toolSummaryLine(activities, limits.recentToolNamesPerRun),
     interrupted,
   };
 }
@@ -325,103 +435,197 @@ function workSection(files: { edited: string[]; read: string[] }, limits: Handof
   return lines.length > 0 ? ["## Work already done", "", ...lines].join("\n") : null;
 }
 
-function conversationSection(history: HandoffMessage[], limits: HandoffLimits) {
-  const kept = elideMiddle(history, limits);
-  if (kept.length === 0) {
+function conversationSection(
+  history: HandoffMessage[],
+  limits: HandoffLimits,
+  allowance: number,
+) {
+  if (history.length === 0) {
     return null;
   }
-  const body = kept
-    .map((entry) =>
-      typeof entry === "string" ? entry : formatHandoffMessage(entry),
-    )
-    .join("\n\n");
-  return ["## Conversation so far", "", TRANSCRIPT_OPEN, body, TRANSCRIPT_CLOSE].join("\n");
+  const { textLimits, dropped } = fitHistory(
+    history,
+    limits,
+    Math.max(0, allowance - CONVERSATION_CHROME_CHARACTERS),
+  );
+  const parts: string[] = [];
+  let noticeEmitted = false;
+  for (const [index, message] of history.entries()) {
+    if (dropped.has(index)) {
+      // The gap is always announced, so the receiving agent knows the record is
+      // partial rather than believing it is complete.
+      if (!noticeEmitted) {
+        noticeEmitted = true;
+        parts.push(`[… ${dropped.size} earlier message(s) omitted for length …]`);
+      }
+      continue;
+    }
+    parts.push(formatHandoffMessage(message, limits, textLimits[index]));
+  }
+  if (parts.length === 0) {
+    return null;
+  }
+  return [
+    "## Conversation so far",
+    "",
+    TRANSCRIPT_OPEN,
+    parts.join("\n\n"),
+    TRANSCRIPT_CLOSE,
+  ].join("\n");
 }
 
-function formatHandoffMessage(message: HandoffMessage) {
+/**
+ * Decides how much of each history message survives, in four passes:
+ *
+ * 1. If the whole conversation fits, nothing is touched. A handoff that could
+ *    have been complete never arrives abridged.
+ * 2. Otherwise apply the recency-tiered caps — a hard trim on old messages, a
+ *    generous one on the last turns.
+ * 3. Still over: drop whole messages from the middle outward, sparing the
+ *    original task statement, the recent turns, and the trailing messages.
+ * 4. Spend whatever the drops freed by restoring messages to full length,
+ *    newest first, so the budget lands on the exchanges that matter most.
+ *
+ * A conversation that is *all* protected and still over budget falls through to
+ * a proportional squeeze, oldest first, down to `MIN_MESSAGE_CHARACTERS`.
+ */
+function fitHistory(history: HandoffMessage[], limits: HandoffLimits, budget: number) {
+  const capOf = (index: number) =>
+    history[index].recent ? limits.recentMessageCharacters : limits.messageCharacters;
+  const fullSizes = history.map((message) =>
+    renderedSize(message, limits, Number.POSITIVE_INFINITY),
+  );
+  const textLimits = history.map(() => Number.POSITIVE_INFINITY);
+  const dropped = new Set<number>();
+
+  const sizes = [...fullSizes];
+  let used = sizes.reduce((total, size) => total + size, 0);
+  if (used <= budget) {
+    return { textLimits, dropped };
+  }
+
+  for (const [index, message] of history.entries()) {
+    textLimits[index] = capOf(index);
+    sizes[index] = renderedSize(message, limits, textLimits[index]);
+  }
+  used = sizes.reduce((total, size) => total + size, 0);
+
+  for (const index of dropOrder(history, limits)) {
+    if (used <= budget) {
+      break;
+    }
+    dropped.add(index);
+    used -= sizes[index];
+  }
+
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (dropped.has(index)) {
+      continue;
+    }
+    const gain = fullSizes[index] - sizes[index];
+    if (gain <= 0 || used + gain > budget) {
+      continue;
+    }
+    used += gain;
+    sizes[index] = fullSizes[index];
+    textLimits[index] = Number.POSITIVE_INFINITY;
+  }
+
+  const survivors = history
+    .map((_, index) => index)
+    .filter((index) => !dropped.has(index));
+  // Halving rather than scaling: one pass over the survivors can only shrink
+  // sizes, so this terminates at the floor even if the budget is unreachable.
+  while (
+    used > budget &&
+    survivors.some((index) => textLimits[index] > MIN_MESSAGE_CHARACTERS)
+  ) {
+    for (const index of survivors) {
+      if (used <= budget) {
+        break;
+      }
+      if (textLimits[index] <= MIN_MESSAGE_CHARACTERS) {
+        continue;
+      }
+      textLimits[index] = Math.max(
+        MIN_MESSAGE_CHARACTERS,
+        Math.floor(textLimits[index] / 2),
+      );
+      const size = renderedSize(history[index], limits, textLimits[index]);
+      used += size - sizes[index];
+      sizes[index] = size;
+    }
+  }
+
+  return { textLimits, dropped };
+}
+
+/**
+ * Indices the middle elision may drop, in the order it should drop them: from
+ * the middle toward the oldest first, then forward again. The first message
+ * (the original task statement), the recent turns, and the trailing messages
+ * are never offered — they are the two ends worth keeping.
+ */
+function dropOrder(history: HandoffMessage[], limits: HandoffLimits) {
+  const droppable = (index: number) =>
+    index > 0 &&
+    index < history.length - limits.keepRecentMessages &&
+    !history[index].recent;
+  const order: number[] = [];
+  const last = history.length - 1;
+  let low = Math.floor(last / 2);
+  let high = low + 1;
+  while (low >= 1 || high <= last) {
+    const index = low >= 1 ? low-- : high++;
+    if (droppable(index)) {
+      order.push(index);
+    }
+  }
+  return order;
+}
+
+function renderedSize(message: HandoffMessage, limits: HandoffLimits, textLimit: number) {
+  return formatHandoffMessage(message, limits, textLimit).length + SECTION_GAP;
+}
+
+function formatHandoffMessage(
+  message: HandoffMessage,
+  limits: HandoffLimits,
+  textLimit: number,
+) {
   const heading = `### ${message.label}${message.interrupted ? " (interrupted)" : ""}`;
   const parts = [heading];
   if (message.text) {
-    parts.push(message.text);
+    parts.push(truncateText(message.text, textLimit));
   }
-  if (message.toolSummary) {
-    parts.push(message.toolSummary);
+  const toolSummary = toolSummaryLine(
+    message.activities,
+    message.recent ? limits.recentToolNamesPerRun : limits.toolNamesPerRun,
+  );
+  if (toolSummary) {
+    parts.push(toolSummary);
   }
   return parts.join("\n");
 }
 
-/**
- * Drops messages from the middle outward until the rendered conversation fits
- * the budget, keeping the first message (the original task statement) and the
- * most recent ones. The gap is always announced, so the receiving agent knows
- * the record is partial rather than believing it is complete.
- */
-function elideMiddle(
-  history: HandoffMessage[],
-  limits: HandoffLimits,
-): (HandoffMessage | string)[] {
-  const rendered = history.map(formatHandoffMessage);
-  const sizes = rendered.map((text) => text.length + 2);
-  const total = () => sizes.reduce((sum, size) => sum + size, 0);
-
-  const dropped = new Set<number>();
-  let budget = total();
-  // Leave room for the section chrome and the elision notice itself.
-  const allowance = Math.max(0, limits.totalCharacters - limits.requestCharacters - 2_000);
-  // Walk outward from the middle so the drop is symmetric: the oldest context
-  // and the freshest exchanges are the two ends worth keeping.
-  const firstDroppable = 1;
-  const lastDroppable = history.length - 1 - limits.keepRecentMessages;
-  let low = Math.floor((firstDroppable + lastDroppable) / 2);
-  let high = low + 1;
-  while (budget > allowance && (low >= firstDroppable || high <= lastDroppable)) {
-    const index = low >= firstDroppable ? low-- : high++;
-    if (index < firstDroppable || index > lastDroppable) {
-      continue;
-    }
-    dropped.add(index);
-    budget -= sizes[index];
-  }
-  if (dropped.size === 0) {
-    return history;
-  }
-
-  const result: (HandoffMessage | string)[] = [];
-  let noticeEmitted = false;
-  for (const [index, message] of history.entries()) {
-    if (dropped.has(index)) {
-      if (!noticeEmitted) {
-        noticeEmitted = true;
-        result.push(`[… ${dropped.size} earlier message(s) omitted for length …]`);
-      }
-      continue;
-    }
-    result.push(message);
-  }
-  return result;
-}
-
-function handoffMessage(
-  item: MessageItem,
-  assistantLabel: string,
-  limits: HandoffLimits,
-): HandoffMessage | null {
+function handoffMessage(item: MessageItem, assistantLabel: string): HandoffMessage | null {
   if (item.role !== "user" && item.role !== "assistant") {
     return null;
   }
   // messageItemCopyText strips qmux's own tagged instruction blocks, so an
   // item that was nothing but plumbing sanitizes to null and drops out here.
   const text = messageItemCopyText(item);
-  const toolSummary =
-    item.role === "assistant" ? toolSummaryLine(item.activities, limits) : null;
-  if (!text && !toolSummary) {
+  const activities = item.role === "assistant" ? item.activities : [];
+  if (!text && toolEntries(activities).length === 0) {
     return null;
   }
   return {
+    role: item.role,
     label: messageLabel(item, assistantLabel),
-    text: text ? truncateText(text, limits.messageCharacters) : null,
-    toolSummary,
+    text,
+    activities,
     interrupted: item.status === "interrupted",
+    recent: false,
   };
 }
 
@@ -432,7 +636,7 @@ function messageLabel(item: MessageItem, assistantLabel: string) {
   return item.role === "assistant" ? assistantLabel : "User";
 }
 
-function toolSummaryLine(activities: ActivityItem[], limits: HandoffLimits) {
+function toolSummaryLine(activities: ActivityItem[], nameLimit: number) {
   const counts = new Map<string, number>();
   for (const tool of toolEntries(activities)) {
     const name = tool.name.trim();
@@ -448,7 +652,7 @@ function toolSummaryLine(activities: ActivityItem[], limits: HandoffLimits) {
     (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
   );
   const shown = ordered
-    .slice(0, limits.toolNamesPerRun)
+    .slice(0, nameLimit)
     .map(([name, count]) => (count > 1 ? `${name} ×${count}` : name));
   const hidden = ordered.length - shown.length;
   return `[tools: ${shown.join(", ")}${hidden > 0 ? `, +${hidden} more` : ""}]`;
@@ -527,13 +731,29 @@ function formatPathList(paths: string[], limit: number) {
 
 /** Head + tail, so both the setup and the conclusion of a long message survive. */
 function truncateText(text: string, limit: number) {
-  if (text.length <= limit) {
+  // Cutting a message to save less than the notice costs is pure loss, so a
+  // message that only just overruns its cap travels whole.
+  if (text.length <= limit + TRUNCATION_SLACK) {
     return text;
   }
-  const head = Math.floor(limit * 0.75);
-  const tail = limit - head;
-  const omitted = text.length - limit;
-  return `${text.slice(0, head).trimEnd()}\n\n[… ${omitted} characters omitted …]\n\n${text
-    .slice(text.length - tail)
-    .trimStart()}`;
+  const headLimit = Math.floor(limit * 0.75);
+  const head = snapHead(text.slice(0, headLimit)).trimEnd();
+  const tail = snapTail(text.slice(text.length - (limit - headLimit))).trimStart();
+  const omitted = text.length - head.length - tail.length;
+  return `${head}\n\n[… ${omitted} characters omitted …]\n\n${tail}`;
+}
+
+// Both halves are pulled back to a line boundary, so the surviving text ends
+// and resumes on whole lines instead of mid-identifier — a cut through the
+// middle of a path or a code fence reads as corruption to the next agent.
+// Neither snap gives up more than a quarter of its slice, which is the cost of
+// hunting for a newline in prose that has none.
+function snapHead(slice: string) {
+  const at = slice.lastIndexOf("\n");
+  return at >= slice.length * 0.75 ? slice.slice(0, at) : slice;
+}
+
+function snapTail(slice: string) {
+  const at = slice.indexOf("\n");
+  return at >= 0 && at <= slice.length * 0.25 ? slice.slice(at + 1) : slice;
 }

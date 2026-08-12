@@ -315,8 +315,8 @@ test("returns null when the anchor key is not in the items", () => {
   );
 });
 
-test("truncates an oversized history message but keeps the request intact", () => {
-  const long = "x".repeat(5_000);
+test("carries an oversized history message whole when the budget allows", () => {
+  const long = "x".repeat(20_000);
   const request = "y".repeat(3_000);
   const turns = [
     turn("user", [text(long)]),
@@ -327,14 +327,61 @@ test("truncates an oversized history message but keeps the request intact", () =
   const document = build(turns, 1);
 
   assert.ok(document);
-  assert.match(document, /\[… 1000 characters omitted …\]/);
+  // Nothing is trimmed to a per-message cap while the document as a whole fits.
+  assert.equal(document.includes("characters omitted"), false);
+  assert.ok(document.includes(long));
   assert.ok(document.includes(request));
+});
+
+test("keeps a long request intact", () => {
+  const request = "y".repeat(20_000);
+  const turns = [
+    turn("user", [text("Start.")]),
+    turn("assistant", [text("Ack.")]),
+    turn("user", [text(request)]),
+  ];
+
+  const document = build(turns, 1);
+
+  assert.ok(document);
+  assert.ok(document.includes(request));
+});
+
+test("spends a tight budget on the last turns before the older ones", () => {
+  const older = "a".repeat(5_000);
+  const recentReply = "b".repeat(5_000);
+  const recentAsk = "c".repeat(5_000);
+  const turns = [
+    turn("user", [text("The original task statement.")]),
+    turn("assistant", [text(older)]),
+    turn("user", [text("A middle steer.")]),
+    turn("assistant", [text(recentReply)]),
+    turn("user", [text(recentAsk)]),
+    turn("user", [text("Final ask.")]),
+  ];
+
+  const document = build(turns, 2, {
+    limits: {
+      totalCharacters: 13_500,
+      messageCharacters: 1_000,
+      recentMessageCharacters: 8_000,
+    },
+  });
+
+  assert.ok(document);
+  // The last two turns of history survive whole; the older reply pays for them.
+  assert.ok(document.includes(recentReply));
+  assert.ok(document.includes(recentAsk));
+  assert.equal(document.includes(older), false);
+  assert.match(document, /\[… \d+ characters omitted …\]/);
+  assert.ok(document.includes("The original task statement."));
+  assert.ok(document.length <= 13_500);
 });
 
 test("elides the middle of a long conversation and says so", () => {
   const turns: Turn[] = [turn("user", [text("The original task statement.")])];
   for (let index = 0; index < 40; index += 1) {
-    turns.push(turn("assistant", [text(`reply ${index} ${"z".repeat(3_000)}`)]));
+    turns.push(turn("assistant", [text(`reply ${index} ${"z".repeat(8_000)}`)]));
     turns.push(turn("user", [text(`follow-up ${index}`)]));
   }
   turns.push(turn("assistant", [text("Ready.")]));
@@ -348,7 +395,68 @@ test("elides the middle of a long conversation and says so", () => {
   assert.ok(document.includes("The original task statement."));
   assert.ok(document.includes("follow-up 39"));
   assert.ok(document.includes("Final ask."));
-  assert.ok(document.length <= 60_000);
+  assert.ok(document.length <= 120_000);
+  // The freshest reply is carried in full even though its peers were dropped or
+  // trimmed: the drops buy budget, and recency decides who spends it.
+  assert.ok(document.includes(`reply 39 ${"z".repeat(8_000)}`));
+  assert.equal(document.includes(`reply 0 ${"z".repeat(8_000)}`), false);
+});
+
+test("lists more tool names for a recent run than for an older one", () => {
+  const run = (prefix: string) =>
+    Array.from({ length: 12 }, (_, index) =>
+      toolUse(`${prefix}${String(index + 1).padStart(2, "0")}`, {}, `${prefix}-${index}`),
+    );
+  const turns = [
+    turn("user", [text("Start.")]),
+    turn("assistant", [text("Older work."), ...run("OldTool")]),
+    turn("user", [text("Keep going.")]),
+    turn("assistant", [text("Recent work."), ...run("NewTool")]),
+    turn("user", [text("Final ask.")]),
+  ];
+
+  const document = build(turns, 2);
+
+  assert.ok(document);
+  assert.ok(document.includes("NewTool12"));
+  assert.equal(document.includes("OldTool12"), false);
+  assert.match(document, /\[tools: OldTool01(, OldTool\d\d){7}, \+4 more\]/);
+});
+
+test("truncates on line boundaries", () => {
+  const lines = Array.from({ length: 600 }, (_, index) =>
+    `line ${String(index).padStart(4, "0")} end`,
+  ).join("\n");
+  const turns = [
+    turn("user", [text(lines)]),
+    turn("assistant", [text("Ack.")]),
+    turn("user", [text("Final ask.")]),
+  ];
+
+  const document = build(turns, 1, { limits: { messageCharacters: 1_000, recentTurns: 0, totalCharacters: 4_000 } });
+
+  assert.ok(document);
+  // Neither half of the cut lands mid-line.
+  assert.match(document, / end\n\n\[… \d+ characters omitted …\]\n\nline \d{4} end/);
+});
+
+test("keeps a message that only just overruns its cap", () => {
+  const barelyOver = "d".repeat(1_200);
+  const turns = [
+    turn("user", [text("The original task statement.")]),
+    turn("assistant", [text(barelyOver)]),
+    turn("user", [text("Keep going.")]),
+    turn("assistant", [text("e".repeat(20_000))]),
+    turn("user", [text("Final ask.")]),
+  ];
+
+  const document = build(turns, 1, {
+    limits: { totalCharacters: 8_000, messageCharacters: 1_000, recentTurns: 0 },
+  });
+
+  assert.ok(document);
+  // Cutting 200 characters would cost more in notice than it saves.
+  assert.ok(document.includes(barelyOver));
 });
 
 test("respects an explicit limit override", () => {
