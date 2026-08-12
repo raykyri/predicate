@@ -1664,8 +1664,11 @@ export const MOCKUP_CSS = `
 }
 
 /* ------------------------------------------------------------------ */
-/* Replay. Steps are hidden until the scheduler reveals them; with the script
-   off (or before it runs) every step is visible, which is the finished state. */
+/* Replay. The tiny blocking bootstrap activates server-rendered staging hints
+   before first paint; the deferred enhancement atomically replaces them with
+   its runtime classes. If either script is unavailable, the hints do nothing
+   and the complete static session remains visible. */
+html.mock-replay-boot .app-mockup [data-replay-pending],
 .app-mockup [data-step].is-pending,
 .app-mockup .mock-terminal-line.is-pending {
   display: none;

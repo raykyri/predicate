@@ -85,7 +85,7 @@ const SITE_FONT_FILES = new Set([
   // The desktop app's UI face; the landing page's app replica renders in it.
   "DMSans-Variable-Latin.woff2",
 ]);
-// The landing page serves its logo and its one enhancement script from disk, so
+// The landing page serves its logo and enhancement scripts from disk, so
 // it relaxes img-src and script-src to 'self'. It stays inline-script free, and
 // the script it does load only rewrites the page's own markup — no network.
 const LANDING_CSP =
@@ -347,10 +347,10 @@ async function routeRequest(
     );
     return;
   }
-  if (url.pathname === "/mockup.js") {
+  if (url.pathname === "/mockup.js" || url.pathname === "/mockup-boot.js") {
     await serveStaticFile(
       response,
-      join(context.siteDir, "mockup.js"),
+      join(context.siteDir, url.pathname.slice(1)),
       "text/javascript; charset=utf-8",
       request.method,
     );

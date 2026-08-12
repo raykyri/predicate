@@ -968,11 +968,17 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /data-mock-action="show-sidebar"/);
   assert.match(body, /data-mock-action="show-right"/);
   assert.match(body, /data-step="5"/);
-  // Replay state is never serialized; the visible default session is complete
-  // enough to read without JavaScript while alternate containers start hidden.
+  // Replay staging is inert unless the pre-paint bootstrap activates it, so the
+  // serialized default session remains complete when JavaScript is unavailable.
   assert.equal(/class="[^"]*is-pending/.test(body), false);
-  // Enhancement is a separate file, never an inline script.
+  assert.match(body, /data-replay-pending=""/);
+  assert.match(body, /html\.mock-replay-boot \.app-mockup \[data-replay-pending\]/);
+  // Enhancement is in separate files, never an inline script. The small
+  // bootstrap blocks parsing so it can select the first replay frame before
+  // the mockup paints; the full behavior remains deferred.
+  assert.match(body, /<script src="\/mockup-boot\.js"><\/script>/);
   assert.match(body, /<script src="\/mockup\.js" defer/);
+  assert.ok(body.indexOf('src="/mockup-boot.js"') < body.indexOf('class="app-mockup"'));
 
   const csp = response.headers.get("content-security-policy") ?? "";
   // The landing page serves its logo and enhancement script from disk, so it
@@ -999,4 +1005,11 @@ test("the landing page's enhancement script is served as JavaScript", async (t) 
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
   assert.match(body, /app-mockup/);
+
+  const bootResponse = await fetch(`http://127.0.0.1:${address.port}/mockup-boot.js`);
+  const bootBody = await bootResponse.text();
+  assert.equal(bootResponse.status, 200);
+  assert.match(bootResponse.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.equal(bootResponse.headers.get("x-content-type-options"), "nosniff");
+  assert.match(bootBody, /mock-replay-boot/);
 });

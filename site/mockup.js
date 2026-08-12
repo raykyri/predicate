@@ -100,6 +100,8 @@
     let token = 0;
     let playing = false;
     let played = false;
+    /** @type {HTMLElement | null} */
+    let preparedScreen = null;
 
     function activeContext() {
       const screen = mockup.querySelector('.mock-terminal-screen:not([hidden])');
@@ -159,16 +161,17 @@
     /**
      * @param {NonNullable<ReturnType<typeof activeContext>>} context
      * @param {number} visibleThroughStep
+     * @param {boolean} [animateVisible]
      */
-    function rewind(context, visibleThroughStep) {
+    function rewind(context, visibleThroughStep, animateVisible = true) {
       for (const node of context.stepped) {
         const visible = Number(node.dataset.step) <= visibleThroughStep;
         node.classList.toggle("is-pending", !visible);
-        node.classList.toggle("is-revealed", visible);
+        node.classList.toggle("is-revealed", visible && animateVisible);
         if (node.classList.contains("mock-terminal-block")) {
           for (const line of node.querySelectorAll(".mock-terminal-line")) {
             line.classList.toggle("is-pending", !visible);
-            line.classList.toggle("is-revealed", visible);
+            line.classList.toggle("is-revealed", visible && animateVisible);
           }
         }
       }
@@ -188,6 +191,7 @@
 
     /** @param {NonNullable<ReturnType<typeof activeContext>>} context */
     function showFinalState(context) {
+      preparedScreen = null;
       for (const node of context.stepped) {
         node.classList.remove("is-pending", "is-revealed");
         for (const line of node.querySelectorAll(".mock-terminal-line")) {
@@ -203,6 +207,25 @@
       scrollTranscriptToTail(context.timeline);
     }
 
+    /** @param {NonNullable<ReturnType<typeof activeContext>>} context */
+    function replayStartStep(context) {
+      const terminalSteps = [...context.screen.querySelectorAll(".mock-terminal-block[data-step]")]
+        .map((node) => Number(node.getAttribute("data-step")))
+        .filter(Number.isFinite);
+      return terminalSteps.length > 0 ? Math.min(...terminalSteps) : 0;
+    }
+
+    // Transfer the server-rendered, pre-paint staging hints to the replay's
+    // runtime classes without animating or changing what is currently visible.
+    function prepare() {
+      const context = activeContext();
+      if (!context || !context.isWorking || context.stepped.length === 0) {
+        return;
+      }
+      rewind(context, replayStartStep(context), false);
+      preparedScreen = context.screen;
+    }
+
     async function play() {
       const context = activeContext();
       if (!context || context.stepped.length === 0) {
@@ -212,10 +235,7 @@
         showFinalState(context);
         return;
       }
-      const terminalSteps = [...context.screen.querySelectorAll(".mock-terminal-block[data-step]")]
-        .map((node) => Number(node.getAttribute("data-step")))
-        .filter(Number.isFinite);
-      const visibleThroughStep = terminalSteps.length > 0 ? Math.min(...terminalSteps) : 0;
+      const visibleThroughStep = replayStartStep(context);
       const steps = [
         ...new Set(context.stepped.map((node) => Number(node.dataset.step))),
       ]
@@ -231,7 +251,11 @@
       }
       // A working session opens with its first completed command and matching
       // transcript already visible. Only newer activity streams in.
-      rewind(context, visibleThroughStep);
+      if (preparedScreen === context.screen) {
+        preparedScreen = null;
+      } else {
+        rewind(context, visibleThroughStep);
+      }
       onStateChange();
       try {
         await sleep(260, runToken);
@@ -288,6 +312,7 @@
     let onStateChange = () => {};
 
     return {
+      prepare,
       play,
       skip,
       isPlaying: () => playing,
@@ -1087,6 +1112,10 @@
   const panes = features.has("panes") ? createPanes() : null;
   const panels = features.has("panels") ? createPanels() : null;
   const menus = features.has("menus") ? createMenus() : null;
+  if (document.documentElement.classList.contains("mock-replay-boot")) {
+    replay?.prepare();
+    document.documentElement.classList.remove("mock-replay-boot");
+  }
   if (!replay && !queue && !groups && !sessions && !panes && !panels && !menus) {
     return;
   }

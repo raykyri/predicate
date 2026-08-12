@@ -137,6 +137,10 @@ function LandingDocument({ origin }: { origin: string }) {
           crossOrigin="anonymous"
         />
         <style>{`${LANDING_CSS}${MOCKUP_CSS}`}</style>
+        {/* This small blocking bootstrap selects the replay's initial state
+            before the mockup can paint. The deferred script takes ownership of
+            that state; either script can fail without hiding the static mock. */}
+        <script src="/mockup-boot.js" />
         {/* Progressive enhancement only: the replica is complete without it. */}
         <script src="/mockup.js" defer />
       </head>

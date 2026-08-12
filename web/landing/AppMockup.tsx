@@ -62,6 +62,19 @@ const MOCKUP_LABEL =
   "a live Codex terminal in the middle, and the agent's rendered transcript with a turn " +
   "queue on the right.";
 
+// The blocking replay bootstrap activates these hints before the mockup's body
+// is parsed. Without that bootstrap they are inert data attributes, so a failed
+// or disabled enhancement still leaves the complete static replica visible.
+const DEFAULT_REPLAY_START_STEP = Math.min(
+  ...MOCK_SESSIONS[DEFAULT_SESSION_ID].terminalBlocks.map((block) => block.step),
+);
+
+function replayPending(stageReplay: boolean, sessionId: string, step: number) {
+  return stageReplay && sessionId === DEFAULT_SESSION_ID && step > DEFAULT_REPLAY_START_STEP
+    ? ""
+    : undefined;
+}
+
 function TrafficLights() {
   return (
     <span className="mock-traffic-lights">
@@ -199,7 +212,15 @@ function TerminalRow({ line }: { line: TerminalLine }) {
   );
 }
 
-function TerminalSession({ sessionId, session }: { sessionId: string; session: MockSession }) {
+function TerminalSession({
+  sessionId,
+  session,
+  stageReplay,
+}: {
+  sessionId: string;
+  session: MockSession;
+  stageReplay: boolean;
+}) {
   return (
     <div
       className="mock-terminal-screen"
@@ -207,7 +228,12 @@ function TerminalSession({ sessionId, session }: { sessionId: string; session: M
       hidden={sessionId !== DEFAULT_SESSION_ID}
     >
       {session.terminalBlocks.map((block, blockIndex) => (
-        <div key={blockIndex} className="mock-terminal-block" data-step={block.step}>
+        <div
+          key={blockIndex}
+          className="mock-terminal-block"
+          data-step={block.step}
+          data-replay-pending={replayPending(stageReplay, sessionId, block.step)}
+        >
           {block.lines.map((line, lineIndex) => (
             <TerminalRow key={lineIndex} line={line} />
           ))}
@@ -220,11 +246,16 @@ function TerminalSession({ sessionId, session }: { sessionId: string; session: M
   );
 }
 
-function TerminalPane() {
+function TerminalPane({ stageReplay }: { stageReplay: boolean }) {
   return (
     <div className="mock-terminal">
       {Object.entries(MOCK_SESSIONS).map(([sessionId, session]) => (
-        <TerminalSession key={sessionId} sessionId={sessionId} session={session} />
+        <TerminalSession
+          key={sessionId}
+          sessionId={sessionId}
+          session={session}
+          stageReplay={stageReplay}
+        />
       ))}
     </div>
   );
@@ -466,7 +497,15 @@ function BrowserOverlay() {
   );
 }
 
-function TranscriptSession({ sessionId, session }: { sessionId: string; session: MockSession }) {
+function TranscriptSession({
+  sessionId,
+  session,
+  stageReplay,
+}: {
+  sessionId: string;
+  session: MockSession;
+  stageReplay: boolean;
+}) {
   const isWorking = MOCK_GROUPS.some((group) =>
     group.panes.some((pane) => pane.sessionId === sessionId && pane.status === "active"),
   );
@@ -494,7 +533,12 @@ function TranscriptSession({ sessionId, session }: { sessionId: string; session:
           label; continuations after a tool group drop it, as the app does. */}
       {session.agentTurn.map((item, index) =>
         item.type === "paragraph" ? (
-          <article key={index} className="turn-card role-assistant" data-step={item.step}>
+          <article
+            key={index}
+            className="turn-card role-assistant"
+            data-step={item.step}
+            data-replay-pending={replayPending(stageReplay, sessionId, item.step)}
+          >
             {index === 0 ? <TurnHeader label="Codex" /> : null}
             <div className="turn-blocks">
               <div className="turn-message-block">
@@ -517,6 +561,7 @@ function TranscriptSession({ sessionId, session }: { sessionId: string; session:
             key={index}
             className="turn-card role-assistant turn-image-card"
             data-step={item.step}
+            data-replay-pending={replayPending(stageReplay, sessionId, item.step)}
           >
             <div className="turn-blocks">
               <div className="turn-message-block">
@@ -534,7 +579,12 @@ function TranscriptSession({ sessionId, session }: { sessionId: string; session:
             </div>
           </article>
         ) : (
-          <div key={index} className="activity-group-block is-root-activity" data-step={item.step}>
+          <div
+            key={index}
+            className="activity-group-block is-root-activity"
+            data-step={item.step}
+            data-replay-pending={replayPending(stageReplay, sessionId, item.step)}
+          >
             <div className="activity-summary">
               <span className="activity-group-label is-tool-group">{item.label}</span>
             </div>
@@ -552,11 +602,16 @@ function TranscriptSession({ sessionId, session }: { sessionId: string; session:
   );
 }
 
-function Transcript() {
+function Transcript({ stageReplay }: { stageReplay: boolean }) {
   return (
     <>
       {Object.entries(MOCK_SESSIONS).map(([sessionId, session]) => (
-        <TranscriptSession key={sessionId} sessionId={sessionId} session={session} />
+        <TranscriptSession
+          key={sessionId}
+          sessionId={sessionId}
+          session={session}
+          stageReplay={stageReplay}
+        />
       ))}
     </>
   );
@@ -626,6 +681,7 @@ export default function AppMockup({
   labelledBy?: string;
   features?: readonly string[];
 }) {
+  const stageReplay = features.includes("replay");
   return (
     <div className="app-mockup-frame">
       <div
@@ -639,14 +695,14 @@ export default function AppMockup({
         <FloatingRestoreControls />
         <div className="app-shell has-turn-sidebar">
           <Sidebar />
-          <TerminalPane />
+          <TerminalPane stageReplay={stageReplay} />
           <BrowserOverlay />
           <div className="turn-pane">
             <div className="turn-sidebar has-header">
               <TurnPaneHeader />
               <PromptLibrary />
               <ArtifactTray />
-              <Transcript />
+              <Transcript stageReplay={stageReplay} />
               <Composer />
             </div>
           </div>
