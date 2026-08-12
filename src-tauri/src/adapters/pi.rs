@@ -28,6 +28,7 @@ use std::process::Command;
 
 const MIN_PI_MAJOR: u64 = 0;
 const MIN_PI_MINOR: u64 = 80;
+const MIN_PI_PATCH: u64 = 5;
 
 #[derive(Clone, Debug)]
 pub struct PiAdapter {
@@ -68,7 +69,7 @@ impl PiAdapter {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !pi_version_is_compatible(&version) {
             return Err(format!(
-                "qmux requires Pi {MIN_PI_MAJOR}.{MIN_PI_MINOR}.0 or newer; '{binary}' reported {version:?}"
+                "qmux requires Pi {MIN_PI_MAJOR}.{MIN_PI_MINOR}.{MIN_PI_PATCH} or newer; '{binary}' reported {version:?}"
             ));
         }
         Ok(binary)
@@ -218,10 +219,7 @@ impl PiAdapter {
 
         args.push("--session".to_string());
         args.push(branched.session_file);
-        if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
-            args.push("--".to_string());
-            args.push(prompt.to_string());
-        }
+        append_pi_initial_prompt(&mut args, prompt);
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("QMUX_ADAPTER_ID".to_string(), self.id().to_string()));
@@ -293,10 +291,7 @@ impl PiAdapter {
         }
 
         let prompt = request.prompt.trim();
-        if !prompt.is_empty() {
-            args.push("--".to_string());
-            args.push(prompt.to_string());
-        }
+        append_pi_initial_prompt(&mut args, Some(prompt));
 
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
@@ -1031,11 +1026,24 @@ fn pi_resume_session_id(args: &[String]) -> Option<String> {
 
 fn pi_resume_args(session_file: &str, prompt: Option<&str>) -> Vec<String> {
     let mut args = vec!["--session".to_string(), session_file.to_string()];
-    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
-        args.push("--".to_string());
-        args.push(prompt.to_string());
-    }
+    append_pi_initial_prompt(&mut args, prompt);
     args
+}
+
+/// Pi's CLI parser does not implement a bare `--` option terminator, so initial
+/// prompts have to be positional arguments. Protect its two reserved positional
+/// prefixes with leading whitespace: `-` would otherwise be parsed as a flag and
+/// `@` as a file inclusion. Prompt correlation normalizes whitespace, and the
+/// padding is semantically inert while keeping arbitrary user text out of Pi's
+/// option/file parser.
+fn append_pi_initial_prompt(args: &mut Vec<String>, prompt: Option<&str>) {
+    if let Some(prompt) = prompt.map(str::trim).filter(|prompt| !prompt.is_empty()) {
+        args.push(if prompt.starts_with(['-', '@']) {
+            format!(" {prompt}")
+        } else {
+            prompt.to_string()
+        });
+    }
 }
 
 fn pi_shell_thinking(args: &[String]) -> Option<String> {
@@ -1421,7 +1429,10 @@ fn pi_version_is_compatible(version: &str) -> bool {
     let Some(minor) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
         return false;
     };
-    major > MIN_PI_MAJOR || (major == MIN_PI_MAJOR && minor >= MIN_PI_MINOR)
+    let Some(patch) = components.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    (major, minor, patch) >= (MIN_PI_MAJOR, MIN_PI_MINOR, MIN_PI_PATCH)
 }
 
 #[cfg(test)]
@@ -1433,12 +1444,40 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_floor_is_pi_0_80() {
+    fn compatibility_floor_is_pi_0_80_5() {
         assert!(!pi_version_is_compatible("0.79.9"));
-        assert!(pi_version_is_compatible("0.80.0"));
+        assert!(!pi_version_is_compatible("0.80.0"));
+        assert!(!pi_version_is_compatible("0.80.3"));
+        assert!(pi_version_is_compatible("0.80.5"));
         assert!(pi_version_is_compatible("0.80.6"));
         assert!(pi_version_is_compatible("1.0.0"));
+        assert!(!pi_version_is_compatible("0.80"));
         assert!(!pi_version_is_compatible("unknown"));
+    }
+
+    #[test]
+    fn generated_prompts_are_plain_positional_arguments() {
+        assert_eq!(
+            pi_resume_args("session.jsonl", Some("continue here")),
+            args(&["--session", "session.jsonl", "continue here"])
+        );
+
+        let mut launch = args(&["--extension", "qmux-pi-extension/index.js"]);
+        append_pi_initial_prompt(&mut launch, Some("start here"));
+        assert_eq!(
+            launch,
+            args(&["--extension", "qmux-pi-extension/index.js", "start here"])
+        );
+        assert!(!launch.iter().any(|arg| arg == "--"));
+
+        assert_eq!(
+            pi_resume_args("session.jsonl", Some("--looks-like-a-flag")),
+            args(&["--session", "session.jsonl", " --looks-like-a-flag"])
+        );
+        assert_eq!(
+            pi_resume_args("session.jsonl", Some("@private-file")),
+            args(&["--session", "session.jsonl", " @private-file"])
+        );
     }
 
     #[test]

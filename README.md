@@ -338,7 +338,7 @@ subdirectory of the data directory, for the control socket.
 
 ### Pi
 
-The native Pi adapter requires Pi 0.80 or newer and is local-only. It launches
+The native Pi adapter requires Pi 0.80.5 or newer and is local-only. It launches
 Pi's text TUI directly, uses Pi's default model, and leaves authentication,
 model/thinking changes, project trust, packages, and extension UI inside Pi.
 There is intentionally no Pi model selector in the qmux launcher.
