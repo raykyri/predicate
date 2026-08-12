@@ -47,6 +47,7 @@
     "test:handoff": "node scripts/test-handoff.mjs",
     "test:publication": "node --import tsx --test tests/publication.test.ts tests/publicationComments.test.ts web/server.test.ts web/comments.test.ts",
     "test:opencode-plugin": "node --experimental-default-type=module --test qmux-opencode-plugin/tests/*.test.mjs",
+    "test:pi-extension": "node --test qmux-pi-extension/tests/*.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {
