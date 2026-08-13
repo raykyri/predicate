@@ -640,6 +640,21 @@ export function agentStatusLabel(status: AgentInfo["status"]) {
   }
 }
 
+const AGENT_STATUSES_AT_REST = new Set<AgentInfo["status"]>([
+  "awaitingInput",
+  "done",
+  "idle",
+  "failed",
+]);
+
+/** Whether an agent may still be doing work and should keep the machine awake.
+ * Permission waits remain inside an active tool call, so they are busy. Keeping
+ * this as a resting-state denylist also makes an unexpected future status fail
+ * safe by retaining the wake lock. */
+export function agentStatusKeepsMachineAwake(status: AgentInfo["status"]): boolean {
+  return !AGENT_STATUSES_AT_REST.has(status);
+}
+
 export type AgentStatusTone = "active" | "pending" | "attention" | "done" | "error" | "idle";
 
 // Maps an agent status onto the status-dot tones used by the pane detail popover.

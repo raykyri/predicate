@@ -182,6 +182,7 @@ import {
 import type { OrphanedQueueGroup } from "./components/RecoveredQueuePanel";
 import {
   agentStatusLabel,
+  agentStatusKeepsMachineAwake,
   agentCanFork,
   agentSupportsForkAtMessage,
   agentStatusTone,
@@ -11577,11 +11578,12 @@ function MainApp() {
     },
     [],
   );
-  // Keep the machine awake while the toggle is on and at least one agent is
-  // actively working (running or starting up). Releasing the lock the moment no
-  // agent is busy lets normal power management resume.
+  // Keep the machine awake while the toggle is on and at least one agent may
+  // still be working, including while an in-flight tool waits for permission.
+  // Releasing the lock once every agent is at rest lets normal power management
+  // resume.
   const anyAgentBusy = useMemo(
-    () => agents.some((agent) => agent.status === "running" || agent.status === "starting"),
+    () => agents.some((agent) => agentStatusKeepsMachineAwake(agent.status)),
     [agents],
   );
   useEffect(() => {
