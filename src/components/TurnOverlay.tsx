@@ -15,7 +15,7 @@ import type {
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { ArrowDown, ArrowUpRight, Ellipsis, X } from "lucide-react";
+import { ArrowDown, ArrowUpRight, Ellipsis, History, LoaderCircle, X } from "lucide-react";
 import type {
   MessageAnchor,
   ThreadParticipant,
@@ -74,6 +74,11 @@ import {
 
 export type { LinkActions } from "./TranscriptMarkdown";
 
+export interface ConversationHistorySegment {
+  snapshotId: string;
+  turns: Turn[];
+}
+
 // A remembered transcript scroll position. `stuck` retains live-follow intent,
 // while `atEnd` separately decides whether a tab restore targets the physical
 // tail or the exact saved offset.
@@ -81,6 +86,11 @@ export type { TranscriptScrollPosition } from "../lib/transcriptScroll";
 
 interface TurnOverlayProps {
   turns: Turn[];
+  conversationHistory?: ConversationHistorySegment[];
+  hasPreviousConversation?: boolean;
+  previousConversationLoading?: boolean;
+  previousConversationError?: string | null;
+  onLoadPreviousConversation?: () => void;
   annotations?: TranscriptAnnotation[];
   onSaveAnnotation?: (sourceTurnId: string, text: string) => Promise<void>;
   onRemoveAnnotation?: (annotationId: string) => Promise<void>;
@@ -230,6 +240,11 @@ export function formatTurnsTranscript(turns: Turn[], assistantLabel: string) {
 
 export default function TurnOverlay({
   turns,
+  conversationHistory = [],
+  hasPreviousConversation = false,
+  previousConversationLoading = false,
+  previousConversationError = null,
+  onLoadPreviousConversation,
   annotations = [],
   onSaveAnnotation,
   onRemoveAnnotation,
@@ -323,6 +338,20 @@ export default function TurnOverlay({
     restoringScrollRef.current = true;
     pendingRestoreRef.current = agentId ? getTranscriptScroll?.(agentId) : undefined;
   }
+  const historyRenderRef = useRef({ agentId, count: conversationHistory.length });
+  const historyPrependSnapshotRef = useRef<{ height: number; top: number } | null>(null);
+  const previousHistoryRender = historyRenderRef.current;
+  if (
+    previousHistoryRender.agentId === agentId &&
+    conversationHistory.length > previousHistoryRender.count &&
+    timelineRef.current
+  ) {
+    historyPrependSnapshotRef.current = {
+      height: timelineRef.current.scrollHeight,
+      top: timelineRef.current.scrollTop,
+    };
+  }
+  historyRenderRef.current = { agentId, count: conversationHistory.length };
 
   const scrollToBottom = () => {
     const timeline = timelineRef.current;
@@ -701,16 +730,59 @@ export default function TurnOverlay({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queueSplit, composerBaseHeight, agentId, Boolean(input)]);
 
-  const timelineItems = useMemo(
+  const currentTimelineItems = useMemo(
     () => buildTimelineItems(turns, showActivityDetail),
     [turns, showActivityDetail],
   );
+  const historyTimelineSections = useMemo(
+    () =>
+      conversationHistory.map((segment) => ({
+        ...segment,
+        items: buildTimelineItems(segment.turns, showActivityDetail),
+      })),
+    [conversationHistory, showActivityDetail],
+  );
+  const timelineItems = useMemo(
+    () => [
+      ...historyTimelineSections.flatMap((section) => section.items),
+      ...currentTimelineItems,
+    ],
+    [currentTimelineItems, historyTimelineSections],
+  );
+  const timelineSectionPositionByItemKey = useMemo(() => {
+    const positions = new Map<string, { items: MessageItem[]; index: number }>();
+    for (const items of [
+      ...historyTimelineSections.map((section) => section.items),
+      currentTimelineItems,
+    ]) {
+      items.forEach((item, index) => positions.set(item.key, { items, index }));
+    }
+    return positions;
+  }, [currentTimelineItems, historyTimelineSections]);
+  const historyItemKeys = useMemo(
+    () => new Set(historyTimelineSections.flatMap((section) => section.items.map((item) => item.key))),
+    [historyTimelineSections],
+  );
+  const sectionLabelsByFirstItemKey = useMemo(() => {
+    const labels = new Map<string, string>();
+    for (const section of historyTimelineSections) {
+      const first = section.items[0];
+      if (first) {
+        labels.set(first.key, "Previous conversation");
+      }
+    }
+    if (historyTimelineSections.length > 0 && currentTimelineItems[0]) {
+      labels.set(currentTimelineItems[0].key, "Current conversation");
+    }
+    return labels;
+  }, [currentTimelineItems, historyTimelineSections]);
+  const currentFirstItemKey = currentTimelineItems[0]?.key ?? null;
   const focusedAssistantItems = useMemo(
     () =>
       focusedAssistantTurnKey
-        ? assistantRunForItemKey(timelineItems, focusedAssistantTurnKey)
+        ? assistantRunForItemKey(currentTimelineItems, focusedAssistantTurnKey)
         : [],
-    [focusedAssistantTurnKey, timelineItems],
+    [currentTimelineItems, focusedAssistantTurnKey],
   );
   const readerMode =
     readerModeRequested && focusedAssistantItems.length > 0;
@@ -802,7 +874,11 @@ export default function TurnOverlay({
     }
     const startSourceTurnId = sourceFor(range.startContainer);
     const endSourceTurnId = sourceFor(range.endContainer);
-    if (!startSourceTurnId || startSourceTurnId !== endSourceTurnId) {
+    if (
+      !startSourceTurnId ||
+      startSourceTurnId !== endSourceTurnId ||
+      !turns.some((turn) => turn.id === startSourceTurnId)
+    ) {
       setSelectionAction(null);
       return;
     }
@@ -816,7 +892,7 @@ export default function TurnOverlay({
       text,
       ...transcriptSelectionPlacement(range.getBoundingClientRect(), startCard),
     });
-  }, [onSaveAnnotation]);
+  }, [onSaveAnnotation, turns]);
 
   const applyAnnotationSelection = useCallback(async () => {
     if (!selectionAction || !onSaveAnnotation || savingAnnotation) {
@@ -838,6 +914,18 @@ export default function TurnOverlay({
   useEffect(() => {
     setSelectionAction(null);
   }, [agentId]);
+
+  // Loading a history snapshot prepends DOM above the reader. Offset scrollTop by the
+  // new height so the current conversation stays under the reader's eyes.
+  useLayoutEffect(() => {
+    const snapshot = historyPrependSnapshotRef.current;
+    const timeline = timelineRef.current;
+    if (!snapshot || !timeline) {
+      return;
+    }
+    historyPrependSnapshotRef.current = null;
+    timeline.scrollTop = snapshot.top + (timeline.scrollHeight - snapshot.height);
+  }, [conversationHistory.length]);
 
   useEffect(() => {
     if (!selectionAction) {
@@ -893,17 +981,35 @@ export default function TurnOverlay({
       ? (composerHeight || DEFAULT_COMPOSER_RESERVE) + 10
       : 12;
   const splitBoundsNow = queueSplit ? splitBounds() : null;
-  const assistantRunCopyText = useMemo(
-    () => assistantRunCopyTextByItemKey(timelineItems),
-    [timelineItems],
-  );
+  const assistantRunCopyText = useMemo(() => {
+    const copyText = new Map<string, string>();
+    for (const items of [
+      ...historyTimelineSections.map((section) => section.items),
+      currentTimelineItems,
+    ]) {
+      for (const [key, text] of assistantRunCopyTextByItemKey(items)) {
+        copyText.set(key, text);
+      }
+    }
+    return copyText;
+  }, [currentTimelineItems, historyTimelineSections]);
 
   // "Copy handoff" reads live transcript state through a ref so its callback
   // identity never changes: it is passed to every memoized message row, and a
   // fresh function per render would re-render the whole timeline on every
   // streamed event.
-  const handoffSourceRef = useRef({ turns, assistantLabel, handoffContext, timelineItems });
-  handoffSourceRef.current = { turns, assistantLabel, handoffContext, timelineItems };
+  const handoffSourceRef = useRef({
+    turns,
+    assistantLabel,
+    handoffContext,
+    timelineItems: currentTimelineItems,
+  });
+  handoffSourceRef.current = {
+    turns,
+    assistantLabel,
+    handoffContext,
+    timelineItems: currentTimelineItems,
+  };
   const copyHandoff = useCallback(async (anchorKey: string) => {
     const source = handoffSourceRef.current;
     // Rebuild with activity detail forced on: the file paths a handoff needs
@@ -945,8 +1051,8 @@ export default function TurnOverlay({
     if (!stickyUserMessages) {
       return null;
     }
-    for (let index = timelineItems.length - 1; index >= 0; index -= 1) {
-      const item = timelineItems[index];
+    for (let index = currentTimelineItems.length - 1; index >= 0; index -= 1) {
+      const item = currentTimelineItems[index];
       if (
         item.role === "user" &&
         item.blocks.length > 0 &&
@@ -957,7 +1063,7 @@ export default function TurnOverlay({
       }
     }
     return null;
-  }, [stickyUserMessages, timelineItems]);
+  }, [currentTimelineItems, stickyUserMessages]);
   const [stickyUserFits, setStickyUserFits] = useState(false);
   const [stickyUserStuck, setStickyUserStuck] = useState(false);
   const stickyUserEnabled = Boolean(stickyUserKey) && stickyUserFits;
@@ -1144,6 +1250,35 @@ export default function TurnOverlay({
           onMouseUp={captureAnnotationSelection}
           onKeyUp={captureAnnotationSelection}
         >
+        {!readerMode &&
+        (hasPreviousConversation || previousConversationLoading || previousConversationError) ? (
+          <div className="turn-conversation-history-loader">
+            {hasPreviousConversation || previousConversationLoading ? (
+              <button
+                type="button"
+                className="control-button turn-conversation-history-button"
+                disabled={previousConversationLoading}
+                onClick={onLoadPreviousConversation}
+              >
+                {previousConversationLoading ? (
+                  <LoaderCircle className="is-spinning" size={13} aria-hidden="true" />
+                ) : (
+                  <History size={13} aria-hidden="true" />
+                )}
+                <span>
+                  {previousConversationLoading
+                    ? "Loading previous conversation…"
+                    : "Load previous conversation"}
+                </span>
+              </button>
+            ) : null}
+            {previousConversationError ? (
+              <span className="turn-conversation-history-error" role="status">
+                {previousConversationError}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         {displayedTimelineItems.length === 0 && annotations.length === 0 && !thinking ? (
           <div className="empty-state turn-empty-state">
             <span>No activity yet</span>
@@ -1170,12 +1305,15 @@ export default function TurnOverlay({
           </div>
         ) : (
           displayedTimelineItems.map((item, index) => {
+            const historical = historyItemKeys.has(item.key);
+            const sectionLabel = sectionLabelsByFirstItemKey.get(item.key);
+            const sectionPosition = timelineSectionPositionByItemKey.get(item.key);
             // A continued agent turn — agent text, then a tool-call group, then
             // more agent text — is still the same speaker, so drop the repeated
             // name on the continuation. (Consecutive agent messages only stay
             // separate when activities sit between them; see buildTimelineItems.)
-            const previous = displayedTimelineItems[index - 1];
-            const next = displayedTimelineItems[index + 1];
+            const previous = sectionPosition?.items[sectionPosition.index - 1];
+            const next = sectionPosition?.items[sectionPosition.index + 1];
             const showName = !(
               item.role === "assistant" &&
               previous?.role === "assistant" &&
@@ -1188,7 +1326,10 @@ export default function TurnOverlay({
               showAssistantTimestamps &&
               item.role === "assistant" &&
               (next === undefined || next.role !== "assistant")
-                ? assistantGroupTimestamp(displayedTimelineItems, index)
+                ? assistantGroupTimestamp(
+                    sectionPosition?.items ?? displayedTimelineItems,
+                    sectionPosition?.index ?? index,
+                  )
                 : null;
             const showGroupTimestamp =
               groupTimestamp !== null &&
@@ -1209,15 +1350,21 @@ export default function TurnOverlay({
                 : "";
             return (
               <Fragment key={item.key}>
+                {sectionLabel ? (
+                  <div className="turn-conversation-divider" role="separator">
+                    <span>{sectionLabel}</span>
+                  </div>
+                ) : null}
                 <MessageTimelineItemView
                   item={item}
-                  agentId={agentId}
-                  savePromptAgentId={savePromptAgentId}
+                  agentId={historical ? undefined : agentId}
+                  savePromptAgentId={historical ? null : savePromptAgentId}
+                  copyOnly={historical}
                   assistantLabel={assistantLabel}
                   showName={showName}
                   assistantCopyText={assistantRunCopyText.get(item.key) ?? null}
                   stickyClassName={stickyClassName}
-                  titleGenerationEnabled={titleGenerationEnabled}
+                  titleGenerationEnabled={!historical && titleGenerationEnabled}
                   onRegenerateTitleFromUserMessage={handleRegenerateTitleFromUserMessage}
                   titleGenerationBusy={titleGenerationBusy}
                   // Hidden on the very first rendered message: a fork from there
@@ -1225,8 +1372,12 @@ export default function TurnOverlay({
                   // When the per-agent cap has truncated older turns this is
                   // conservative by one item, which beats offering an action the
                   // backend would refuse.
-                  onForkFromMessage={index === 0 ? undefined : onForkFromMessage}
-                  onCopyHandoff={copyHandoff}
+                  onForkFromMessage={
+                    historical || item.key === currentFirstItemKey
+                      ? undefined
+                      : onForkFromMessage
+                  }
+                  onCopyHandoff={historical ? undefined : copyHandoff}
                 />
                 {showGroupTimestamp ? (
                   <div className="turn-assistant-timestamp">
@@ -1236,7 +1387,7 @@ export default function TurnOverlay({
                     >
                       {formatMessageTimestamp(groupTimestamp)}
                     </time>
-                    {assistantTurnFocusEnabled && !readerMode && onFocusAssistantTurn ? (
+                    {assistantTurnFocusEnabled && !historical && !readerMode && onFocusAssistantTurn ? (
                       <button
                         type="button"
                         className="turn-assistant-focus-button"
@@ -1265,6 +1416,16 @@ export default function TurnOverlay({
             );
           })
         )}
+        {!readerMode &&
+        conversationHistory.length > 0 &&
+        currentTimelineItems.length === 0 ? (
+          <>
+            <div className="turn-conversation-divider" role="separator">
+              <span>Current conversation</span>
+            </div>
+            <div className="turn-conversation-current-empty">No activity yet</div>
+          </>
+        ) : null}
         {!readerMode &&
           timelineAnnotations.orphaned.map((annotation) => (
             <SavedAnnotationCard
@@ -1343,6 +1504,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   item,
   agentId,
   savePromptAgentId,
+  copyOnly,
   assistantLabel,
   showName,
   assistantCopyText,
@@ -1356,6 +1518,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   item: MessageItem;
   agentId?: string;
   savePromptAgentId?: string | null;
+  copyOnly?: boolean;
   assistantLabel: string;
   showName: boolean;
   assistantCopyText?: string | null;
@@ -1373,6 +1536,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
           item={item}
           agentId={agentId}
           savePromptAgentId={savePromptAgentId}
+          copyOnly={copyOnly}
           assistantLabel={assistantLabel}
           showName={showName}
           assistantCopyText={assistantCopyText}
@@ -1406,6 +1570,7 @@ const MessageTimelineItemView = memo(function MessageTimelineItemView({
   previous.assistantLabel === next.assistantLabel &&
   previous.agentId === next.agentId &&
   previous.savePromptAgentId === next.savePromptAgentId &&
+  previous.copyOnly === next.copyOnly &&
   previous.showName === next.showName &&
   previous.assistantCopyText === next.assistantCopyText &&
   previous.stickyClassName === next.stickyClassName &&
@@ -1420,6 +1585,7 @@ function MessageItemView({
   item,
   agentId,
   savePromptAgentId,
+  copyOnly = false,
   assistantLabel,
   showName,
   assistantCopyText,
@@ -1433,6 +1599,7 @@ function MessageItemView({
   item: MessageItem;
   agentId?: string;
   savePromptAgentId?: string | null;
+  copyOnly?: boolean;
   assistantLabel: string;
   showName: boolean;
   assistantCopyText?: string | null;
@@ -1468,7 +1635,7 @@ function MessageItemView({
   const showUserMessageActions = Boolean(
     item.role === "user" &&
       showName &&
-      (titleGenerationEnabled || savePromptAgentId || forkFromMessage || copyHandoff),
+      (copyOnly || titleGenerationEnabled || savePromptAgentId || forkFromMessage || copyHandoff),
   );
   const showMessageActions = Boolean(
     !taggedInstructionMessage &&

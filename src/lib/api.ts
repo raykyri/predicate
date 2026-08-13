@@ -18,6 +18,7 @@ import type {
   AgentInfo,
   AgentDeliveryDebugInfo,
   ArtifactInfo,
+  ConversationHistorySnapshot,
   ClaudeSkill,
   GlobalDraft,
   GlobalTaskLauncherHotkey,
@@ -450,6 +451,12 @@ export function listThreadGraphs() {
 
 export function getThreadGraph(threadId: string) {
   return invoke<ThreadGraph | null>("get_thread_graph", { threadId });
+}
+
+export function getConversationHistorySnapshot(snapshotId: string) {
+  return invoke<ConversationHistorySnapshot | null>("get_conversation_history_snapshot", {
+    snapshotId,
+  });
 }
 
 export function createTranscriptAnnotation(

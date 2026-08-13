@@ -1063,6 +1063,17 @@ async fn get_thread_graph(
 }
 
 #[tauri::command]
+async fn get_conversation_history_snapshot(
+    state: tauri::State<'_, AppState>,
+    snapshot_id: String,
+) -> Result<Option<thread_graph::ConversationHistorySnapshot>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.conversation_history_snapshot(&snapshot_id))
+        .await
+        .map_err(|err| format!("get_conversation_history_snapshot task failed: {err}"))?
+}
+
+#[tauri::command]
 async fn create_transcript_annotation(
     state: tauri::State<'_, AppState>,
     agent_id: String,
@@ -3192,6 +3203,7 @@ fn main() {
             list_home_turn_history,
             list_thread_graphs,
             get_thread_graph,
+            get_conversation_history_snapshot,
             create_transcript_annotation,
             remove_transcript_annotation,
             list_research_trees,

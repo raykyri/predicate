@@ -1,3 +1,4 @@
+use crate::adapters::MessageAnchor;
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
@@ -2926,6 +2927,117 @@ impl AppState {
         };
         let store = thread_graph::ThreadStore::new(record.storage_root);
         store.read_thread(&record.id)
+    }
+
+    /// Snapshots the source side of a fork before the child process starts.
+    /// The returned reference names immutable qmux-owned content, so it remains
+    /// stable after either pane closes or the source transcript is rewritten.
+    pub fn capture_conversation_history(
+        &self,
+        source: &AgentInfo,
+        anchor: Option<&MessageAnchor>,
+    ) -> Result<Option<thread_graph::ConversationHistoryRef>, String> {
+        let (source, turns, store, created_record) = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let source = model
+                .agents
+                .get(&source.id)
+                .cloned()
+                .unwrap_or_else(|| source.clone());
+            if model
+                .groups
+                .get(&source.group_id)
+                .is_some_and(|group| group.scope == WorkspaceScope::Research)
+            {
+                // Research runs deliberately use durable response snapshots
+                // instead of terminal thread graphs. A follow-up fork must not
+                // create otherwise-unreachable graph records for that scope.
+                return Ok(None);
+            }
+            let turns = model.turns.get(&source.id).cloned().unwrap_or_default();
+            let (store, created_record) = thread_store_for_agent_locked(
+                &mut model,
+                &source,
+                &self.inner.config.workspace_root,
+            );
+            (source, turns, store, created_record)
+        };
+        let graph = match store.read_thread(&thread_graph::agent_thread_id(&source))? {
+            Some(graph) => graph,
+            None => store.replace_agent_branch_turns(&source, &turns)?,
+        };
+        if created_record {
+            self.persist();
+        }
+        let snapshot_id = self.next_id("history");
+        let snapshot = thread_graph::ConversationHistorySnapshot {
+            id: snapshot_id.clone(),
+            adapter: source.adapter.clone(),
+            turns: thread_graph::conversation_history_turns(
+                &graph,
+                &source,
+                anchor.and_then(|anchor| anchor.native_id.as_deref()),
+                anchor.map(|anchor| anchor.source_index),
+            ),
+            previous_snapshot_id: graph
+                .conversation_history
+                .map(|history| history.snapshot_id),
+        };
+        // The snapshot is immutable and must be durable before a child can
+        // reference it. A failed fork can leave an unreferenced snapshot, which
+        // is safer than a live child whose history target never reached disk.
+        thread_graph::write_conversation_history_snapshot(
+            &self.inner.config.workspace_root,
+            &snapshot,
+        )?;
+        Ok(Some(thread_graph::ConversationHistoryRef { snapshot_id }))
+    }
+
+    /// Attaches previously captured history to a child thread. The graph
+    /// mutation flushes synchronously because no transcript event can recreate
+    /// this user-visible lineage after a crash.
+    pub fn record_conversation_history(
+        &self,
+        child: &AgentInfo,
+        history: thread_graph::ConversationHistoryRef,
+    ) -> Result<(), String> {
+        let (child, store, created_record) = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let child = model
+                .agents
+                .get(&child.id)
+                .cloned()
+                .unwrap_or_else(|| child.clone());
+            let (store, created_record) = thread_store_for_agent_locked(
+                &mut model,
+                &child,
+                &self.inner.config.workspace_root,
+            );
+            (child, store, created_record)
+        };
+        store.set_conversation_history(&child, history)?;
+        if created_record {
+            self.persist();
+        }
+        Ok(())
+    }
+
+    pub fn conversation_history_snapshot(
+        &self,
+        snapshot_id: &str,
+    ) -> Result<Option<thread_graph::ConversationHistorySnapshot>, String> {
+        thread_graph::read_conversation_history_snapshot(
+            &self.inner.config.workspace_root,
+            snapshot_id,
+        )
     }
 
     pub fn create_transcript_annotation(

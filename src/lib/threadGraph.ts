@@ -223,17 +223,27 @@ export function overlayLiveTurnState(branchTurns: Turn[], liveTurns: Turn[]): Tu
 
 export function focusedBranchTurns(graph: ThreadGraph, agent: AgentInfo): Turn[] {
   const branchId = resolveFocusedBranchId(graph, agent);
+  return turnsForBranch(graph, branchId, agent.id, agent.sessionId ?? null);
+}
+
+function turnsForBranch(
+  graph: ThreadGraph,
+  branchId: string,
+  fallbackAgentId: string,
+  fallbackSessionId: string | null,
+): Turn[] {
   const branchSelection = focusedBranchSelection(graph, branchId);
   return Object.values(graph.nodes)
     .filter(
       (node): node is TurnNode =>
-        node.kind === "turn" && nodeMatchesBranchSelection(node, branchSelection),
+        node.kind === "turn" &&
+        nodeMatchesBranchSelection(node, branchSelection),
     )
     .sort(compareThreadNodes)
     .map((node) => ({
       id: node.id,
-      agentId: node.native?.agentId ?? node.participant.agentId ?? agent.id,
-      sessionId: node.native?.sessionId ?? agent.sessionId ?? null,
+      agentId: node.native?.agentId ?? node.participant.agentId ?? fallbackAgentId,
+      sessionId: node.native?.sessionId ?? fallbackSessionId,
       role: node.turn.role,
       blocks: node.turn.blocks,
       sourceIndex: node.turn.sourceIndex ?? node.native?.sourceIndex ?? 0,

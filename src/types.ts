@@ -543,7 +543,19 @@ export interface ThreadGraph {
   rootTurnIds: string[];
   branches: Record<string, ThreadBranch>;
   nodes: Record<string, ThreadNode>;
+  conversationHistory?: ConversationHistoryRef | null;
   annotations?: TranscriptAnnotation[];
+}
+
+export interface ConversationHistoryRef {
+  snapshotId: string;
+}
+
+export interface ConversationHistorySnapshot {
+  id: string;
+  adapter: string;
+  turns: Turn[];
+  previousSnapshotId?: string | null;
 }
 
 export interface TranscriptAnnotation {

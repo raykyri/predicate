@@ -26,6 +26,7 @@ execFileSync(
     "react-jsx",
     "--esModuleInterop",
     "--allowSyntheticDefaultImports",
+    "--resolveJsonModule",
     "--outDir",
     outDir,
     "--rootDir",

@@ -25,6 +25,72 @@
   padding: 24px;
 }
 
+.turn-conversation-history-loader {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 0 7px;
+}
+
+.turn-conversation-history-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid var(--surface-border);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  font-size: calc(11.5px + var(--transcript-font-delta, 0px));
+}
+
+.turn-conversation-history-button:hover:not(:disabled) {
+  border-color: var(--surface-border-strong);
+  color: var(--text-primary);
+}
+
+.turn-conversation-history-button .is-spinning {
+  animation: spinner-spin 0.9s linear infinite;
+}
+
+.turn-conversation-history-error {
+  max-width: 360px;
+  color: var(--text-muted);
+  font-size: calc(11px + var(--transcript-font-delta, 0px));
+  text-align: center;
+}
+
+.turn-conversation-divider {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 9px;
+  margin: 8px 0 4px;
+  color: var(--text-muted);
+  font-size: calc(10.5px + var(--transcript-font-delta, 0px));
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  user-select: none;
+}
+
+.turn-conversation-divider::before,
+.turn-conversation-divider::after {
+  height: 1px;
+  flex: 1 1 auto;
+  background: var(--surface-divider);
+  content: "";
+}
+
+.turn-conversation-current-empty {
+  padding: 14px 0 8px;
+  color: var(--text-muted);
+  font-size: calc(13px + var(--transcript-font-delta, 0px));
+  text-align: center;
+}
+
 /* Return a transcript reader to its live tail. The button is a sibling of the
    scroll surface so it stays parked above the floating composer (or queue split)
    while older turns move beneath it. Its live bottom offset is set by

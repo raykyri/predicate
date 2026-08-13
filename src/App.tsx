@@ -109,6 +109,7 @@ import TerminalPip from "./components/TerminalPip";
 import { shouldShowTerminalPip, shouldShowTerminalPipToggle } from "./lib/terminalPip";
 import TurnOverlay, {
   formatTurnsTranscript,
+  type ConversationHistorySegment,
   type TranscriptScrollPosition,
 } from "./components/TurnOverlay";
 import TurnPaneHeader from "./components/TurnPaneHeader";
@@ -416,6 +417,7 @@ import {
   restoreResearchTree,
   retryResearchNode,
   forkAgent,
+  getConversationHistorySnapshot,
   getActiveTab,
   getPaneSplits,
   getLauncherAdapterPreference,
@@ -512,6 +514,8 @@ import type {
   AgentInfo,
   ArtifactInfo,
   ClaudeSkill,
+  ConversationHistoryRef,
+  ConversationHistorySnapshot,
   GlobalTaskLauncherHotkey,
   GlobalTaskLauncherSetting,
   GlobalDraft,
@@ -889,6 +893,14 @@ interface AgentTurnInfo {
   getTranscript: () => string;
   getPlainTextTranscript: () => string;
   hasTranscript: boolean;
+  conversationHistory: ConversationHistoryRef | null;
+}
+
+interface ConversationHistoryState {
+  /** Immediate parent first; rendering reverses this into chronological order. */
+  snapshots: ConversationHistorySnapshot[];
+  loading: boolean;
+  error: string | null;
 }
 
 interface TurnPaneSurface {
@@ -900,6 +912,11 @@ interface TurnPaneSurface {
   getTranscript: () => string;
   getPlainTextTranscript: () => string;
   hasTranscript: boolean;
+  conversationHistory: ConversationHistorySegment[];
+  hasPreviousConversation: boolean;
+  previousConversationSnapshotId: string | null;
+  previousConversationLoading: boolean;
+  previousConversationError: string | null;
   transcriptNotice: string | null;
   transcriptOptions: TranscriptOption[];
   queuedTurns: QueuedTurn[];
@@ -1705,6 +1722,9 @@ function MainApp() {
   const turnsRef = useRef(turns);
   turnsRef.current = turns;
   const [threadGraphs, setThreadGraphs] = useState<ThreadGraph[]>([]);
+  const [conversationHistoryByThread, setConversationHistoryByThread] = useState<
+    Record<string, ConversationHistoryState>
+  >({});
   const [homeTurnHistoryByAgent, setHomeTurnHistoryByAgent] = useState<
     Record<string, HomeTurnHistoryState>
   >({});
@@ -1747,6 +1767,72 @@ function MainApp() {
   const [transcriptOptionsByAgent, setTranscriptOptionsByAgent] = useState<
     Record<string, TranscriptOption[]>
   >({});
+  const loadingConversationThreadIdsRef = useRef(new Set<string>());
+  const conversationHistoryRequestSequenceRef = useRef(new Map<string, number>());
+  const nextConversationHistoryRequestSequenceRef = useRef(0);
+  const loadPreviousConversationForThread = useCallback(async (
+    rootThreadId: string,
+    snapshotId: string | null,
+  ) => {
+    if (!snapshotId || loadingConversationThreadIdsRef.current.has(rootThreadId)) {
+      return;
+    }
+    loadingConversationThreadIdsRef.current.add(rootThreadId);
+    const requestSequence = ++nextConversationHistoryRequestSequenceRef.current;
+    conversationHistoryRequestSequenceRef.current.set(rootThreadId, requestSequence);
+    const requestIsCurrent = () =>
+      conversationHistoryRequestSequenceRef.current.get(rootThreadId) === requestSequence;
+    setConversationHistoryByThread((history) => ({
+      ...history,
+      [rootThreadId]: {
+        snapshots: history[rootThreadId]?.snapshots ?? [],
+        loading: true,
+        error: null,
+      },
+    }));
+    try {
+      const snapshot = await getConversationHistorySnapshot(snapshotId);
+      if (!requestIsCurrent()) {
+        return;
+      }
+      if (!snapshot) {
+        throw new Error("No earlier conversation is available");
+      }
+      setConversationHistoryByThread((history) => {
+        const existing = history[rootThreadId]?.snapshots ?? [];
+        if (existing.some((item) => item.id === snapshot.id)) {
+          return {
+            ...history,
+            [rootThreadId]: { snapshots: existing, loading: false, error: null },
+          };
+        }
+        return {
+          ...history,
+          [rootThreadId]: {
+            snapshots: [...existing, snapshot],
+            loading: false,
+            error: null,
+          },
+        };
+      });
+    } catch (err) {
+      if (!requestIsCurrent()) {
+        return;
+      }
+      setConversationHistoryByThread((history) => ({
+        ...history,
+        [rootThreadId]: {
+          snapshots: history[rootThreadId]?.snapshots ?? [],
+          loading: false,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      }));
+    } finally {
+      if (requestIsCurrent()) {
+        loadingConversationThreadIdsRef.current.delete(rootThreadId);
+      }
+    }
+  }, []);
   const [waitTargetHoverAgentId, setWaitTargetHoverAgentId] = useState<string | null>(null);
   // The agent whose split cell a queued-card drag is currently hovering, so that
   // cell can render as the drop target while dragging a card between splits.
@@ -2861,6 +2947,7 @@ function MainApp() {
         getPlainTextTranscript: () =>
           (plainTextTranscript ??= formatPlainTextTranscript(visibleTurns, assistantLabel)),
         hasTranscript: visibleTurns.length > 0,
+        conversationHistory: storedGraph?.conversationHistory ?? null,
       };
       cache.set(agent.id, { agentKey, agentTurns, storedGraph, storedBranchTurns, info });
       result.set(agent.id, info);
@@ -3364,6 +3451,22 @@ function MainApp() {
   retainedTurnHistoryAgentIdsRef.current = retainedTurnHistoryAgentIds;
   retainedGraphHistoryAgentIdsRef.current = retainedGraphHistoryAgentIds;
   retainedGraphHistoryThreadIdsRef.current = retainedGraphHistoryThreadIds;
+  useEffect(() => {
+    setConversationHistoryByThread((history) => {
+      const retained = Object.entries(history).filter(([threadId]) =>
+        retainedGraphHistoryThreadIds.has(threadId),
+      );
+      return retained.length === Object.keys(history).length
+        ? history
+        : Object.fromEntries(retained);
+    });
+    for (const threadId of conversationHistoryRequestSequenceRef.current.keys()) {
+      if (!retainedGraphHistoryThreadIds.has(threadId)) {
+        conversationHistoryRequestSequenceRef.current.delete(threadId);
+        loadingConversationThreadIdsRef.current.delete(threadId);
+      }
+    }
+  }, [retainedGraphHistoryThreadIds]);
   useEffect(() => {
     if (!homeActive) {
       for (const agentId of homeHistoryRequestSequenceByAgentRef.current.keys()) {
@@ -4911,6 +5014,7 @@ function MainApp() {
         getTranscript: () => "",
         getPlainTextTranscript: () => "",
         hasTranscript: false,
+        conversationHistory: null,
       };
     }
     return (
@@ -4921,6 +5025,7 @@ function MainApp() {
         getTranscript: () => "",
         getPlainTextTranscript: () => "",
         hasTranscript: false,
+        conversationHistory: null,
       }
     );
   }
@@ -4977,6 +5082,23 @@ function MainApp() {
   function turnPaneSurfaceForPane(pane: PaneInfo, splitIndex = -1): TurnPaneSurface {
     const agent = agentByPaneId.get(pane.id);
     const turnInfo = turnInfoForAgent(agent);
+    const threadId = agent ? threadIdForAgent(agent) : null;
+    const conversationHistoryState = threadId
+      ? conversationHistoryByThread[threadId]
+      : undefined;
+    const conversationHistory = (conversationHistoryState?.snapshots ?? [])
+      .slice()
+      .reverse()
+      .map((snapshot) => ({
+        snapshotId: snapshot.id,
+        turns:
+          getAgentUiAdapter(snapshot.adapter).normalizeTurns?.(snapshot.turns) ?? snapshot.turns,
+      }));
+    const loadedSnapshots = conversationHistoryState?.snapshots ?? [];
+    const oldestLoadedSnapshot = loadedSnapshots[loadedSnapshots.length - 1];
+    const previousConversationSnapshotId = oldestLoadedSnapshot
+      ? (oldestLoadedSnapshot.previousSnapshotId ?? null)
+      : (turnInfo.conversationHistory?.snapshotId ?? null);
     const orphanedQueues = orphanedQueuesForPane(pane);
     const topFraction =
       splitRightPaneMode && splitIndex > 0
@@ -4994,6 +5116,11 @@ function MainApp() {
       getTranscript: turnInfo.getTranscript,
       getPlainTextTranscript: turnInfo.getPlainTextTranscript,
       hasTranscript: turnInfo.hasTranscript,
+      conversationHistory,
+      hasPreviousConversation: Boolean(previousConversationSnapshotId),
+      previousConversationSnapshotId,
+      previousConversationLoading: conversationHistoryState?.loading ?? false,
+      previousConversationError: conversationHistoryState?.error ?? null,
       transcriptNotice: agent ? (transcriptNoticeByAgent[agent.id] ?? null) : null,
       transcriptOptions: agent ? (transcriptOptionsByAgent[agent.id] ?? []) : [],
       queuedTurns: agent ? (queuedTurnsByAgent[agent.id] ?? []) : [],
@@ -12925,6 +13052,19 @@ function MainApp() {
     return (
       <TurnOverlay
         turns={agent ? surface.turns : []}
+        conversationHistory={agent ? surface.conversationHistory : []}
+        hasPreviousConversation={agent && surface.hasPreviousConversation}
+        previousConversationLoading={surface.previousConversationLoading}
+        previousConversationError={surface.previousConversationError}
+        onLoadPreviousConversation={
+          agent && surface.previousConversationSnapshotId
+            ? () =>
+                void loadPreviousConversationForThread(
+                  threadIdForAgent(agent),
+                  surface.previousConversationSnapshotId,
+                )
+            : undefined
+        }
         annotations={agent ? surface.annotations : []}
         onSaveAnnotation={
           agent

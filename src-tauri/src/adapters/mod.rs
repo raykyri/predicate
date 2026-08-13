@@ -378,7 +378,7 @@ pub(crate) fn record_shell_fork_lineage(
             && same_dir(&candidate.worktree_dir, cwd)
             && native_session_selector_matches(candidate, fork_point, cwd)
     });
-    state
+    let updated = state
         .mutate_agent(&agent.id, |agent| {
             agent.fork_point = Some(fork_point.to_string());
             agent.root_session_id = source
@@ -396,7 +396,25 @@ pub(crate) fn record_shell_fork_lineage(
                 "agent {} disappeared while recording fork lineage",
                 agent.id
             )
-        })
+        })?;
+    if let Some(source) = source {
+        match state.capture_conversation_history(&source, None) {
+            Ok(Some(history)) => {
+                if let Err(err) = state.record_conversation_history(&updated, history) {
+                    eprintln!(
+                        "qmux: could not record conversation history for shell fork {}: {err}",
+                        updated.id
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(err) => eprintln!(
+                "qmux: could not capture conversation history for shell fork {}: {err}",
+                updated.id
+            ),
+        }
+    }
+    Ok(updated)
 }
 
 /// True when both paths name the same directory. Canonicalization resolves symlinks,
@@ -1053,6 +1071,16 @@ fn fork_agent_in_shell(
             )
         })?
         .to_string();
+    let conversation_history = match state.capture_conversation_history(source, anchor) {
+        Ok(history) => history,
+        Err(err) => {
+            eprintln!(
+                "qmux: could not capture conversation history for fork of {}: {err}",
+                source.id
+            );
+            None
+        }
+    };
     let mut agent = prepare_agent_workspace_with_parent(
         state,
         PrepareAgentWorkspaceRequest {
@@ -1077,6 +1105,14 @@ fn fork_agent_in_shell(
         .or_else(|| Some(session_id.clone()));
     agent.status = AgentStatus::Idle;
     state.update_agent(agent.clone())?;
+    if let Some(history) = conversation_history
+        && let Err(err) = state.record_conversation_history(&agent, history)
+    {
+        eprintln!(
+            "qmux: could not record conversation history for fork {}: {err}",
+            agent.id
+        );
+    }
 
     let cwd = PathBuf::from(&agent.worktree_dir);
     if !cwd.is_dir() {
@@ -1260,10 +1296,28 @@ fn fork_agent_source_with_placement(
     prompt: Option<&str>,
     btw: bool,
 ) -> Result<PaneInfo, String> {
+    let conversation_history = match state.capture_conversation_history(source, None) {
+        Ok(history) => history,
+        Err(err) => {
+            eprintln!(
+                "qmux: could not capture conversation history for fork of {}: {err}",
+                source.id
+            );
+            None
+        }
+    };
     let (pane, agent) = adapter_registry(state.config())
         .get(&source.adapter)
         .map_err(|_| FORK_UNSUPPORTED_ERROR.to_string())?
         .fork_pane(state, source, use_worktree, prompt)?;
+    if let Some(history) = conversation_history
+        && let Err(err) = state.record_conversation_history(&agent, history)
+    {
+        eprintln!(
+            "qmux: could not record conversation history for fork {}: {err}",
+            agent.id
+        );
+    }
     finish_fork_spawn(state, source, pane, agent, btw)
 }
 

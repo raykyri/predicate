@@ -455,11 +455,59 @@ pub struct ThreadGraph {
     pub root_turn_ids: Vec<String>,
     pub branches: HashMap<String, ThreadBranch>,
     pub nodes: HashMap<String, ThreadNode>,
+    /// Immutable transcript snapshot captured when this conversation forked.
+    /// The parent graph remains independently mutable, so history must never
+    /// be reconstructed from a live inter-thread pointer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_history: Option<ConversationHistoryRef>,
     /// User-authored excerpts saved from assistant messages. Unlike turn nodes,
     /// these cannot be reconstructed from a provider transcript, so annotation
     /// mutations synchronously flush this graph before reporting success.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<TranscriptAnnotation>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHistoryRef {
+    pub snapshot_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHistorySnapshot {
+    pub id: String,
+    pub adapter: String,
+    pub turns: Vec<ConversationHistoryTurn>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_snapshot_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationHistoryTurn {
+    pub id: String,
+    pub agent_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub role: String,
+    pub blocks: Vec<TurnBlock>,
+    pub source_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<i64>,
+    pub participant: ThreadParticipant,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<TurnStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status_reason: Option<TurnStatusReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_status: Option<TurnContextStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_native_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_message_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -680,6 +728,7 @@ impl ThreadGraph {
             root_turn_ids: Vec::new(),
             branches,
             nodes: HashMap::new(),
+            conversation_history: None,
             annotations: Vec::new(),
         }
     }
@@ -718,6 +767,107 @@ pub fn snapshot_path(storage_root: &str, thread_id: &str) -> PathBuf {
         .join(".qmux")
         .join("threads")
         .join(format!("{thread_id}.json"))
+}
+
+fn conversation_history_snapshot_path(
+    storage_root: &str,
+    snapshot_id: &str,
+) -> Result<PathBuf, String> {
+    let valid = snapshot_id.starts_with("history-")
+        && snapshot_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    if !valid {
+        return Err("invalid conversation history snapshot id".to_string());
+    }
+    Ok(Path::new(storage_root)
+        .join(".qmux")
+        .join("conversation-history")
+        .join(format!("{snapshot_id}.json")))
+}
+
+pub fn write_conversation_history_snapshot(
+    storage_root: &Path,
+    snapshot: &ConversationHistorySnapshot,
+) -> Result<(), String> {
+    let storage_root = storage_root.display().to_string();
+    let path = conversation_history_snapshot_path(&storage_root, &snapshot.id)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "conversation history snapshot has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "failed to create conversation history dir {}: {err}",
+            parent.display()
+        )
+    })?;
+    if let Some(state_dir) = parent.parent() {
+        fs::set_permissions(state_dir, fs::Permissions::from_mode(0o700)).map_err(|err| {
+            format!(
+                "failed to set permissions on thread state dir {}: {err}",
+                state_dir.display()
+            )
+        })?;
+    }
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|err| {
+        format!(
+            "failed to set permissions on conversation history dir {}: {err}",
+            parent.display()
+        )
+    })?;
+    let raw = serde_json::to_vec(snapshot).map_err(|err| {
+        format!(
+            "failed to encode conversation history {}: {err}",
+            snapshot.id
+        )
+    })?;
+    atomic_write_owner_only(&path, &raw)
+}
+
+pub fn read_conversation_history_snapshot(
+    storage_root: &Path,
+    snapshot_id: &str,
+) -> Result<Option<ConversationHistorySnapshot>, String> {
+    let path =
+        conversation_history_snapshot_path(&storage_root.display().to_string(), snapshot_id)?;
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(format!(
+                "failed to read conversation history {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let snapshot = serde_json::from_str::<ConversationHistorySnapshot>(&raw)
+        .map_err(|err| format!("invalid conversation history {}: {err}", path.display()))?;
+    if snapshot.id != snapshot_id {
+        return Err(format!(
+            "conversation history {} contains snapshot id {}, expected {snapshot_id}",
+            path.display(),
+            snapshot.id
+        ));
+    }
+    if let Some(previous_snapshot_id) = snapshot.previous_snapshot_id.as_deref() {
+        conversation_history_snapshot_path(
+            storage_root.to_string_lossy().as_ref(),
+            previous_snapshot_id,
+        )
+        .map_err(|_| {
+            format!(
+                "conversation history {} contains an invalid previous snapshot id",
+                path.display()
+            )
+        })?;
+        if previous_snapshot_id == snapshot_id {
+            return Err(format!(
+                "conversation history {} points to itself",
+                path.display()
+            ));
+        }
+    }
+    Ok(Some(snapshot))
 }
 
 pub fn thread_record_for_agent(
@@ -887,6 +1037,24 @@ impl ThreadStore {
 
     pub fn read_thread(&self, thread_id: &str) -> Result<Option<ThreadGraph>, String> {
         read_snapshot(&self.storage_root_string(), thread_id)
+    }
+
+    pub fn set_conversation_history(
+        &self,
+        agent: &AgentInfo,
+        history: ConversationHistoryRef,
+    ) -> Result<ThreadGraph, String> {
+        let thread_id = agent_thread_id(agent);
+        let graph = self
+            .with_agent_graph(agent, |graph| {
+                graph.conversation_history = Some(history);
+            })
+            .map_err(|err| format!("thread {thread_id}: {err}"))?;
+        // Unlike streamed turns, this edge cannot be reconstructed by tailing
+        // the child's transcript, so commit it before the fork proceeds.
+        flush_dirty_thread_graph(&self.storage_root_string(), &thread_id)
+            .map_err(|err| format!("thread {thread_id}: {err}"))?;
+        Ok(graph)
     }
 
     pub fn append_turn_node(&self, agent: &AgentInfo, turn: &Turn) -> Result<ThreadGraph, String> {
@@ -1332,6 +1500,92 @@ fn focused_branch_turn_nodes<'a>(graph: &'a ThreadGraph, branch_id: &str) -> Vec
     nodes
 }
 
+/// Captures the visible source prefix for an immutable fork-history snapshot.
+/// Anchored forks branch immediately before the selected message; head forks
+/// inherit the source branch through its current tail.
+pub fn conversation_history_turns(
+    graph: &ThreadGraph,
+    agent: &AgentInfo,
+    anchor_native_id: Option<&str>,
+    anchor_source_index: Option<usize>,
+) -> Vec<ConversationHistoryTurn> {
+    let branch_id = focused_branch_id_for_agent(graph, agent);
+    let turns = focused_branch_turn_nodes(graph, &branch_id);
+    let through_position = match anchor_source_index {
+        None => turns.len().checked_sub(1),
+        Some(source_index) => {
+            let anchor_position = anchor_native_id
+                .and_then(|native_id| {
+                    turns.iter().position(|turn| {
+                        turn.native
+                            .as_ref()
+                            .and_then(|native| native.native_id.as_deref())
+                            == Some(native_id)
+                    })
+                })
+                .or_else(|| {
+                    turns.iter().position(|turn| {
+                        turn.native.as_ref().map(|native| native.source_index) == Some(source_index)
+                    })
+                });
+            anchor_position
+                .and_then(|position| position.checked_sub(1))
+                .or_else(|| {
+                    // A live transcript append can be ahead of the debounced
+                    // graph snapshot. The nearest earlier native record remains
+                    // the correct cutoff even if the selected record is absent.
+                    turns.iter().rposition(|turn| {
+                        turn.native
+                            .as_ref()
+                            .is_some_and(|native| native.source_index < source_index)
+                    })
+                })
+        }
+    };
+    through_position
+        .map(|position| &turns[..=position])
+        .unwrap_or_default()
+        .iter()
+        .map(|turn| ConversationHistoryTurn {
+            id: turn.base.id.clone(),
+            agent_id: turn
+                .native
+                .as_ref()
+                .map(|native| native.agent_id.clone())
+                .or_else(|| turn.base.participant.agent_id.clone())
+                .unwrap_or_else(|| agent.id.clone()),
+            session_id: turn
+                .native
+                .as_ref()
+                .and_then(|native| native.session_id.clone()),
+            role: turn.turn.role.clone(),
+            blocks: turn.turn.blocks.clone(),
+            source_index: turn
+                .turn
+                .source_index
+                .or_else(|| turn.native.as_ref().map(|native| native.source_index))
+                .unwrap_or_default(),
+            timestamp: turn.turn.timestamp,
+            participant: turn.base.participant.clone(),
+            status: turn.base.status,
+            status_reason: turn.base.status_reason,
+            context_status: turn.base.context_status,
+            native_id: turn
+                .native
+                .as_ref()
+                .and_then(|native| native.native_id.clone()),
+            parent_native_id: turn
+                .native
+                .as_ref()
+                .and_then(|native| native.parent_native_id.clone()),
+            native_message_id: turn
+                .native
+                .as_ref()
+                .and_then(|native| native.native_message_id.clone()),
+        })
+        .collect()
+}
+
 fn first_user_text(node: &TurnNode) -> Option<String> {
     if node.turn.role != "user"
         || node.base.status == Some(TurnStatus::Superseded)
@@ -1677,6 +1931,96 @@ mod tests {
             last_accessed_at: now,
             last_access_sequence,
         }
+    }
+
+    #[test]
+    fn conversation_history_captures_cutoff_and_persists_snapshot_reference() {
+        let worktree = temp_worktree("qmux-thread-conversation-history");
+        let parent = sample_agent(worktree.display().to_string());
+        let parent_turns = vec![
+            sample_turn("agent-1", "agent-1-0", "user", 0),
+            sample_turn("agent-1", "agent-1-1", "assistant", 1),
+            sample_turn("agent-1", "agent-1-2", "user", 2),
+        ];
+        let parent_graph = ThreadStore::new(worktree.clone())
+            .replace_agent_branch_turns(&parent, &parent_turns)
+            .unwrap();
+
+        let head = conversation_history_turns(&parent_graph, &parent, None, None);
+        assert_eq!(
+            head.iter().map(|turn| turn.id.as_str()).collect::<Vec<_>>(),
+            vec!["agent-1-0", "agent-1-1", "agent-1-2"]
+        );
+
+        let anchored =
+            conversation_history_turns(&parent_graph, &parent, Some("native-agent-1-2"), Some(2));
+        assert_eq!(
+            anchored
+                .iter()
+                .map(|turn| turn.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-1-0", "agent-1-1"]
+        );
+
+        let snapshot = ConversationHistorySnapshot {
+            id: "history-123-1".to_string(),
+            adapter: "codex".to_string(),
+            turns: anchored,
+            previous_snapshot_id: Some("history-122-1".to_string()),
+        };
+        write_conversation_history_snapshot(&worktree, &snapshot).unwrap();
+        ThreadStore::new(worktree.clone())
+            .replace_agent_branch_turns(
+                &parent,
+                &[sample_turn("agent-1", "replacement", "assistant", 9)],
+            )
+            .unwrap();
+        let loaded = read_conversation_history_snapshot(&worktree, &snapshot.id)
+            .unwrap()
+            .expect("history snapshot exists");
+        assert_eq!(loaded.id, snapshot.id);
+        assert_eq!(loaded.turns.len(), 2);
+        assert_eq!(loaded.previous_snapshot_id, snapshot.previous_snapshot_id);
+
+        let mismatched_snapshot = ConversationHistorySnapshot {
+            id: "history-other".to_string(),
+            adapter: "codex".to_string(),
+            turns: Vec::new(),
+            previous_snapshot_id: None,
+        };
+        let mismatched_path = conversation_history_snapshot_path(
+            worktree.to_string_lossy().as_ref(),
+            "history-mismatched",
+        )
+        .unwrap();
+        atomic_write_owner_only(
+            &mismatched_path,
+            &serde_json::to_vec(&mismatched_snapshot).unwrap(),
+        )
+        .unwrap();
+        let mismatch =
+            read_conversation_history_snapshot(&worktree, "history-mismatched").unwrap_err();
+        assert!(mismatch.contains("contains snapshot id history-other"));
+
+        let child = sample_agent_with(
+            "agent-2",
+            "codex",
+            "thread-2",
+            "branch-2",
+            worktree.display().to_string(),
+        );
+        let history = ConversationHistoryRef {
+            snapshot_id: snapshot.id,
+        };
+        ThreadStore::new(worktree.clone())
+            .set_conversation_history(&child, history.clone())
+            .unwrap();
+        let child_graph = read_snapshot(&child.worktree_dir, "thread-2")
+            .unwrap()
+            .expect("child graph exists");
+        assert_eq!(child_graph.conversation_history, Some(history));
+
+        fs::remove_dir_all(worktree).unwrap();
     }
 
     #[test]
