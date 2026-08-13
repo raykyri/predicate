@@ -392,6 +392,11 @@ mod imp {
     unsafe extern "C" {
         fn qmux_native_application_is_active() -> i32;
         fn qmux_native_completion_sound_play(system_name: *const c_char) -> i32;
+        fn qmux_native_completion_sound_play_data(
+            name: *const c_char,
+            bytes: *const u8,
+            bytes_len: usize,
+        ) -> i32;
         fn qmux_native_terminal_bridge_available() -> i32;
         fn qmux_native_terminal_register_font(bytes: *const u8, bytes_len: usize) -> i32;
         fn qmux_native_terminal_should_claim_web_app_shortcut(
@@ -522,6 +527,20 @@ mod imp {
             Ok(())
         } else {
             Err("completion sound was not recognized or could not be played".to_string())
+        }
+    }
+
+    pub fn play_bundled_sound(name: &str, bytes: &[u8]) -> Result<(), String> {
+        let name = cstring(name, "bundled completion sound name")?;
+        // SAFETY: Swift copies the name and audio data synchronously before this
+        // call returns, then caches the resulting NSSound on the main actor.
+        if unsafe {
+            qmux_native_completion_sound_play_data(name.as_ptr(), bytes.as_ptr(), bytes.len())
+        } == 1
+        {
+            Ok(())
+        } else {
+            Err("bundled completion sound could not be played".to_string())
         }
     }
 
@@ -1066,6 +1085,10 @@ mod imp {
         Err("completion sounds are only available on macOS".to_string())
     }
 
+    pub fn play_bundled_sound(_name: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("completion sounds are only available on macOS".to_string())
+    }
+
     pub fn initialize(_native_view: *mut c_void, _state: AppState) -> Result<(), String> {
         Err("native terminals are only available on macOS".to_string())
     }
@@ -1177,8 +1200,8 @@ mod imp {
 #[allow(unused_imports)]
 pub use imp::{
     action, application_is_active, available, create_host_managed, focus, initialize,
-    is_ready_for_replay, paste_approved_text, play_system_sound, prepare_for_webview_reload,
-    read_viewport_text, receive, remove, seed_settings, send_text,
+    is_ready_for_replay, paste_approved_text, play_bundled_sound, play_system_sound,
+    prepare_for_webview_reload, read_viewport_text, receive, remove, seed_settings, send_text,
     set_human_browser_loading_background, set_human_browser_webview, set_iframe_shortcut_fallback,
     set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
     submit, update_settings,
@@ -1586,12 +1609,19 @@ pub fn native_terminal_focus(pane_id: String) -> Result<(), String> {
     focus(&pane_id)
 }
 
+pub fn play_completion_sound(sound_id: &str) -> Result<(), String> {
+    use crate::completion_sound::CompletionSound;
+
+    match crate::completion_sound::sound_for_id(sound_id)? {
+        Some(CompletionSound::System(name)) => imp::play_system_sound(name),
+        Some(CompletionSound::Bundled { name, bytes }) => imp::play_bundled_sound(name, bytes),
+        None => Ok(()),
+    }
+}
+
 #[tauri::command]
 pub fn completion_sound_play(sound_id: String) -> Result<(), String> {
-    let Some(system_name) = crate::completion_sound::system_name_for_id(&sound_id)? else {
-        return Ok(());
-    };
-    imp::play_system_sound(system_name)
+    play_completion_sound(&sound_id)
 }
 
 #[tauri::command]

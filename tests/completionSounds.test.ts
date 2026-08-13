@@ -13,21 +13,25 @@ const store = new Map<string, string>();
   removeItem: (key: string) => store.delete(key),
 };
 
-test("the shared completion sound catalog is curated and Chime is the default", () => {
-  assert.equal(DEFAULT_COMPLETION_SOUND, "chime");
+test("the shared completion sound catalog is curated and Default is the default", () => {
+  assert.equal(DEFAULT_COMPLETION_SOUND, "default");
   assert.deepEqual(
     COMPLETION_SOUND_OPTIONS.map((option) => option.label),
-    ["None", "Chime", "Ping", "Pop", "Tink", "Purr"],
+    ["Default", "Confirmation", "Chime", "Ping", "Purr"],
   );
   assert.deepEqual(
     COMPLETION_SOUND_OPTIONS.map((option) => option.systemName),
-    [null, "Glass", "Ping", "Pop", "Tink", "Purr"],
+    [null, null, "Glass", "Ping", "Purr"],
+  );
+  assert.deepEqual(
+    COMPLETION_SOUND_OPTIONS.map((option) => option.bundledName ?? null),
+    ["default", "confirmation", null, null, null],
   );
 });
 
 test("completion sound settings round-trip and reject unknown ids", () => {
   store.clear();
-  assert.equal(loadSettings().completionSound, "chime");
+  assert.equal(loadSettings().completionSound, "default");
 
   saveSettings({ ...DEFAULT_SETTINGS, completionSound: "purr" });
   assert.equal(loadSettings().completionSound, "purr");
@@ -36,5 +40,5 @@ test("completion sound settings round-trip and reject unknown ids", () => {
     ...DEFAULT_SETTINGS,
     completionSound: "arbitrary-path" as unknown as typeof DEFAULT_SETTINGS.completionSound,
   });
-  assert.equal(loadSettings().completionSound, "chime");
+  assert.equal(loadSettings().completionSound, "default");
 });

@@ -9039,9 +9039,6 @@ function MainApp() {
   );
 
   const testCompletionSound = useCallback(async (soundId: CompletionSoundId) => {
-    if (soundId === "none") {
-      return;
-    }
     try {
       await playCompletionSound(soundId);
     } catch (err) {
@@ -14731,15 +14728,10 @@ function MainApp() {
 
             <div className="settings-divider" role="separator" />
 
-            <div className="settings-row settings-completion-sound-row">
-              <div className="settings-label-stack">
-                <label htmlFor="settings-completion-sound" className="settings-label">
-                  Completion sound
-                </label>
-                <p className="settings-hint">
-                  Plays when an agent finishes working in a chat.
-                </p>
-              </div>
+            <div className="settings-row">
+              <label htmlFor="settings-completion-sound" className="settings-label">
+                Completion sound
+              </label>
               <div className="settings-completion-sound-controls">
                 <select
                   id="settings-completion-sound"
@@ -14759,7 +14751,6 @@ function MainApp() {
                 <button
                   type="button"
                   className="control-button settings-completion-sound-test"
-                  disabled={settings.completionSound === "none"}
                   onClick={() => void testCompletionSound(settings.completionSound)}
                 >
                   <Volume2 size={14} aria-hidden="true" />

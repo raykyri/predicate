@@ -2453,20 +2453,20 @@ impl AppState {
     }
 
     pub fn emit(&self, event: QmuxEvent) {
-        let completion_system_name = self
+        let completion_sound_id = self
             .inner
             .completion_sound
             .lock()
             .ok()
             .and_then(|mut state| state.observe_event(&event));
         #[cfg(not(test))]
-        if let Some(system_name) = completion_system_name
-            && let Err(err) = crate::native_terminal::play_system_sound(&system_name)
+        if let Some(sound_id) = completion_sound_id
+            && let Err(err) = crate::native_terminal::play_completion_sound(&sound_id)
         {
             eprintln!("qmux: failed to play completion sound: {err}");
         }
         #[cfg(test)]
-        let _ = completion_system_name;
+        let _ = completion_sound_id;
 
         // Clone the handle under the lock but emit outside it. emit() serializes
         // the payload (turn.updated events carry whole turn arrays) and enqueues

@@ -4,14 +4,19 @@ use std::collections::HashSet;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
-const DEFAULT_SOUND_ID: &str = "chime";
+const DEFAULT_SOUND_ID: &str = "default";
 const COMPLETION_COALESCE: Duration = Duration::from_millis(250);
+
+const DEFAULT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/default.wav");
+const CONFIRMATION_SOUND_BYTES: &[u8] =
+    include_bytes!("../../src/assets/sounds/completion/confirmation.wav");
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct CompletionSoundOption {
     id: String,
     label: String,
+    bundled_name: Option<String>,
     system_name: Option<String>,
 }
 
@@ -20,12 +25,40 @@ static SOUND_OPTIONS: LazyLock<Vec<CompletionSoundOption>> = LazyLock::new(|| {
         .expect("completion-sounds.json must contain a valid sound catalog")
 });
 
-pub fn system_name_for_id(sound_id: &str) -> Result<Option<&'static str>, String> {
-    SOUND_OPTIONS
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionSound {
+    System(&'static str),
+    Bundled {
+        name: &'static str,
+        bytes: &'static [u8],
+    },
+}
+
+pub fn sound_for_id(sound_id: &str) -> Result<Option<CompletionSound>, String> {
+    let option = SOUND_OPTIONS
         .iter()
         .find(|option| option.id == sound_id)
-        .map(|option| option.system_name.as_deref())
-        .ok_or_else(|| format!("unknown completion sound id {sound_id:?}"))
+        .ok_or_else(|| format!("unknown completion sound id {sound_id:?}"))?;
+
+    match (
+        option.bundled_name.as_deref(),
+        option.system_name.as_deref(),
+    ) {
+        (Some("default"), None) => Ok(Some(CompletionSound::Bundled {
+            name: "default",
+            bytes: DEFAULT_SOUND_BYTES,
+        })),
+        (Some("confirmation"), None) => Ok(Some(CompletionSound::Bundled {
+            name: "confirmation",
+            bytes: CONFIRMATION_SOUND_BYTES,
+        })),
+        (Some(name), None) => Err(format!("unknown bundled completion sound {name:?}")),
+        (None, Some(name)) => Ok(Some(CompletionSound::System(name))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(format!(
+            "completion sound {sound_id:?} cannot be both bundled and system-provided"
+        )),
+    }
 }
 
 pub struct CompletionSoundState {
@@ -50,7 +83,7 @@ impl Default for CompletionSoundState {
 
 impl CompletionSoundState {
     pub fn set_selected_id(&mut self, sound_id: &str) -> Result<(), String> {
-        system_name_for_id(sound_id)?;
+        sound_for_id(sound_id)?;
         self.selected_id = sound_id.to_string();
         Ok(())
     }
@@ -132,10 +165,10 @@ impl CompletionSoundState {
             return None;
         }
         self.last_completion_at = Some(now);
-        system_name_for_id(&self.selected_id)
+        sound_for_id(&self.selected_id)
             .ok()
             .flatten()
-            .map(ToString::to_string)
+            .map(|_| self.selected_id.clone())
     }
 }
 
@@ -169,9 +202,36 @@ mod tests {
 
     #[test]
     fn catalog_is_the_expected_allowlist() {
-        assert_eq!(system_name_for_id("chime"), Ok(Some("Glass")));
-        assert_eq!(system_name_for_id("none"), Ok(None));
-        assert!(system_name_for_id("../../arbitrary").is_err());
+        assert!(matches!(
+            sound_for_id("default"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "default",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("confirmation"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "confirmation",
+                ..
+            }))
+        ));
+        assert_eq!(
+            sound_for_id("chime"),
+            Ok(Some(CompletionSound::System("Glass")))
+        );
+        assert_eq!(
+            sound_for_id("ping"),
+            Ok(Some(CompletionSound::System("Ping")))
+        );
+        assert_eq!(
+            sound_for_id("purr"),
+            Ok(Some(CompletionSound::System("Purr")))
+        );
+        for removed in ["none", "pop", "tink"] {
+            assert!(sound_for_id(removed).is_err());
+        }
+        assert!(sound_for_id("../../arbitrary").is_err());
     }
 
     #[test]
@@ -194,7 +254,7 @@ mod tests {
                 &agent_event("agent.done", "agent-1", "done"),
                 start + Duration::from_secs(1),
             ),
-            Some("Glass".to_string())
+            Some("default".to_string())
         );
     }
 
@@ -268,7 +328,7 @@ mod tests {
                 &agent_event("agent.done", "one", "done"),
                 start + Duration::from_secs(2),
             ),
-            Some("Glass".to_string())
+            Some("default".to_string())
         );
         assert_eq!(
             state.observe_event_at(

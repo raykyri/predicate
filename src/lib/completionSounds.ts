@@ -3,6 +3,7 @@ import completionSoundCatalog from "../assets/completion-sounds.json";
 export interface CompletionSoundOption {
   id: string;
   label: string;
+  bundledName?: string;
   systemName: string | null;
 }
 
@@ -11,7 +12,7 @@ export const COMPLETION_SOUND_OPTIONS: readonly CompletionSoundOption[] = comple
 
 export type CompletionSoundId = string;
 
-export const DEFAULT_COMPLETION_SOUND: CompletionSoundId = "chime";
+export const DEFAULT_COMPLETION_SOUND: CompletionSoundId = "default";
 
 export function isCompletionSoundId(value: unknown): value is CompletionSoundId {
   return (

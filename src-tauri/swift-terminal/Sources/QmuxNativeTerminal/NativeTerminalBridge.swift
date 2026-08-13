@@ -30,14 +30,26 @@ private enum CompletionSoundPlayer {
     private static var soundsByName: [String: NSSound] = [:]
 
     static func play(systemName: String) -> Bool {
+        play(cacheKey: "system:\(systemName)") {
+            NSSound(named: NSSound.Name(systemName))
+        }
+    }
+
+    static func play(name: String, data: Data) -> Bool {
+        play(cacheKey: "bundled:\(name)") {
+            NSSound(data: data)
+        }
+    }
+
+    private static func play(cacheKey: String, load: () -> NSSound?) -> Bool {
         let sound: NSSound
-        if let cached = soundsByName[systemName] {
+        if let cached = soundsByName[cacheKey] {
             sound = cached
         } else {
-            guard let loaded = NSSound(named: NSSound.Name(systemName)) else {
+            guard let loaded = load() else {
                 return false
             }
-            soundsByName[systemName] = loaded
+            soundsByName[cacheKey] = loaded
             sound = loaded
         }
         sound.stop()
@@ -54,6 +66,21 @@ public func qmuxNativeCompletionSoundPlay(
     }
     return onTerminalMain {
         CompletionSoundPlayer.play(systemName: systemName) ? 1 : 0
+    }
+}
+
+@_cdecl("qmux_native_completion_sound_play_data")
+public func qmuxNativeCompletionSoundPlayData(
+    _ name: UnsafePointer<CChar>?,
+    _ bytes: UnsafePointer<UInt8>?,
+    _ length: Int
+) -> Int32 {
+    guard let name = terminalString(name), let bytes, length > 0 else {
+        return 0
+    }
+    let data = Data(bytes: bytes, count: length)
+    return onTerminalMain {
+        CompletionSoundPlayer.play(name: name, data: data) ? 1 : 0
     }
 }
 
