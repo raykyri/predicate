@@ -2,7 +2,7 @@ use super::{
     AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy,
     FORK_AT_MESSAGE_EMPTY_ERROR, LaunchEnv, MessageAnchor, PrepareShellAgentLaunchRequest,
     PreparedShellAgentLaunch, ShellCommandIntegration, SpawnAgentRequest, TranscriptLifecycleEvent,
-    apply_shell_cli_model, ensure_on_path, hook_transcript_path_acceptable,
+    WorkspaceObservation, apply_shell_cli_model, ensure_on_path, hook_transcript_path_acceptable,
     model_from_codex_transcript_line, new_uuid_v4, parse_transcript_records, prepared_shell_agent,
     record_shell_session_lineage, reusable_session_agent, shell_cli_model, shell_quote_arg,
     shell_quote_path,
@@ -21,8 +21,9 @@ use crate::transcript::{
 };
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
-    AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
-    mark_agent_spawn_failed, prepare_agent_workspace, prepare_agent_workspace_with_parent,
+    ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
+    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
+    prepare_agent_workspace_with_parent,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -159,6 +160,10 @@ impl AgentAdapter for CodexAdapter {
 
     fn transcript_line_model(&self, line: &str) -> Option<String> {
         model_from_codex_transcript_line(line)
+    }
+
+    fn transcript_workspace_observation(&self, line: &str) -> Option<WorkspaceObservation> {
+        codex_workspace_observation(line)
     }
 
     fn resolve_transcript_turns(
@@ -2053,6 +2058,63 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
     })
 }
 
+fn codex_workspace_observation(line: &str) -> Option<WorkspaceObservation> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    let raw_cwd = match value.get("type").and_then(Value::as_str)? {
+        "turn_context" => value
+            .get("payload")?
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::trim),
+        "event_msg" => {
+            let payload = value.get("payload")?;
+            if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+                return None;
+            }
+            let item = payload.get("item")?;
+            if item.get("type").and_then(Value::as_str) != Some("CommandExecution") {
+                return None;
+            }
+            item.get("cwd").and_then(Value::as_str).map(str::trim)
+        }
+        _ => None,
+    }?;
+    if raw_cwd.is_empty() {
+        return None;
+    }
+    Some(WorkspaceObservation {
+        cwd: decode_codex_cwd(raw_cwd)?,
+        source: ActiveWorkspaceSource::Codex,
+        session_id: codex_observation_session_id(&value),
+        observed_at_millis: super::native_timestamp_ms(&value)
+            .and_then(|millis| u128::try_from(millis).ok()),
+    })
+}
+
+fn decode_codex_cwd(raw_cwd: &str) -> Option<String> {
+    if raw_cwd.starts_with("file:") {
+        url::Url::parse(raw_cwd)
+            .ok()?
+            .to_file_path()
+            .ok()
+            .map(|path| path.display().to_string())
+    } else {
+        Some(raw_cwd.to_string())
+    }
+}
+
+fn codex_observation_session_id(value: &Value) -> Option<String> {
+    string_field(value, "session_id")
+        .or_else(|| string_field(value, "sessionId"))
+        .or_else(|| {
+            value.get("payload").and_then(|payload| {
+                string_field(payload, "session_id")
+                    .or_else(|| string_field(payload, "sessionId"))
+                    .or_else(|| string_field(payload, "thread_id"))
+            })
+        })
+}
+
 #[cfg(test)]
 fn resolve_transcript_turns(agent_id: &str, lines: &[String]) -> Vec<Turn> {
     resolve_transcript_turns_from(agent_id, 0, lines)
@@ -2536,6 +2598,70 @@ mod tests {
 
     fn svec(items: &[&str]) -> Vec<String> {
         items.iter().map(|item| item.to_string()).collect()
+    }
+
+    #[test]
+    fn workspace_observation_uses_turn_context_cwd_and_record_session_id() {
+        let line = json!({
+            "type": "turn_context",
+            "session_id": "child-session",
+            "payload": { "cwd": "/tmp/feature worktree" }
+        })
+        .to_string();
+
+        assert_eq!(
+            codex_workspace_observation(&line),
+            Some(WorkspaceObservation {
+                cwd: "/tmp/feature worktree".to_string(),
+                source: ActiveWorkspaceSource::Codex,
+                session_id: Some("child-session".to_string()),
+                observed_at_millis: None,
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_observation_decodes_completed_command_file_urls() {
+        let line = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "child-session",
+                "item": {
+                    "type": "CommandExecution",
+                    "cwd": "file:///tmp/feature%20worktree",
+                    "command": "pwd",
+                    "status": "completed"
+                }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            codex_workspace_observation(&line),
+            Some(WorkspaceObservation {
+                cwd: "/tmp/feature worktree".to_string(),
+                source: ActiveWorkspaceSource::Codex,
+                session_id: Some("child-session".to_string()),
+                observed_at_millis: None,
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_observation_ignores_session_and_incomplete_command_records() {
+        let session = json!({ "type": "session_meta", "cwd": "/wrong" }).to_string();
+        let started = json!({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_started",
+                "item": { "type": "CommandExecution", "cwd": "/wrong" }
+            }
+        })
+        .to_string();
+
+        assert_eq!(codex_workspace_observation(&session), None);
+        assert_eq!(codex_workspace_observation(&started), None);
     }
 
     #[test]
@@ -4284,6 +4410,7 @@ trusted_hash = "sha256:trusted"
             adapter: "codex".to_string(),
             worktree_dir: "/tmp/qmux-codex-test".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some("pane-1".to_string()),
             orphaned_queue_pane_id: None,
             session_id: None,

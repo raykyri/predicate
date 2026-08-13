@@ -1681,6 +1681,7 @@ fn launch_research_child_run(
                 adapter: parent.adapter.clone(),
                 worktree_dir: parent.worktree_dir.clone(),
                 branch: None,
+                active_workspace: None,
                 pane_id: None,
                 orphaned_queue_pane_id: None,
                 session_id: Some(session_id.clone()),

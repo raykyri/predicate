@@ -2117,6 +2117,7 @@ mod tests {
             adapter: "grok".to_string(),
             worktree_dir: "/tmp/qmux-grok-tests".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: None,
             orphaned_queue_pane_id: None,
             session_id: None,

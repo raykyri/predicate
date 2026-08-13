@@ -647,6 +647,56 @@ const AGENT_STATUSES_AT_REST = new Set<AgentInfo["status"]>([
   "failed",
 ]);
 
+/** The live command cwd is display-only; lifecycle operations continue to use
+ * AgentInfo.worktreeDir and AgentInfo.branch directly. */
+export function agentDisplayDirectory(agent: AgentInfo | undefined, paneCwd: string): string {
+  return agent?.activeWorkspace?.cwd ?? agent?.worktreeDir ?? paneCwd;
+}
+
+/** True when the observed command cwd is a different directory than the launch
+ * worktree. macOS aliases `/tmp` as `/private/tmp` (and `/var` as
+ * `/private/var`), so a raw string compare would always show a redundant
+ * Launch directory row after canonicalize. */
+export function agentShowsLaunchDirectory(agent: AgentInfo | undefined): boolean {
+  const cwd = agent?.activeWorkspace?.cwd;
+  if (!agent || !cwd) {
+    return false;
+  }
+  return !displayPathsReferToSameDirectory(cwd, agent.worktreeDir);
+}
+
+export function displayPathsReferToSameDirectory(left: string, right: string): boolean {
+  return normalizeDisplayPath(left) === normalizeDisplayPath(right);
+}
+
+function normalizeDisplayPath(value: string): string {
+  const trimmed = value.replace(/\/+$/, "") || "/";
+  return trimmed.replace(/^\/private\/(tmp|var)(?=\/|$)/, "/$1");
+}
+
+export function agentDisplayBranch(agent: AgentInfo | undefined): string | null {
+  return agent?.activeWorkspace
+    ? (agent.activeWorkspace.branch ?? null)
+    : (agent?.branch ?? null);
+}
+
+export function agentDisplayWorktreeRoot(agent: AgentInfo | undefined): string | null {
+  if (agent?.activeWorkspace) {
+    return agent.activeWorkspace.kind === "linkedWorktree"
+      ? (agent.activeWorkspace.gitRoot ?? null)
+      : null;
+  }
+  return agent?.branch ? agent.worktreeDir : null;
+}
+
+export function agentDisplayCheckoutRoot(agent: AgentInfo | undefined): string | null {
+  return agent?.activeWorkspace
+    ? (agent.activeWorkspace.gitRoot ?? null)
+    : agent?.branch
+      ? agent.worktreeDir
+      : null;
+}
+
 /** Whether an agent may still be doing work and should keep the machine awake.
  * Permission waits remain inside an active tool call, so they are busy. Keeping
  * this as a resting-state denylist also makes an unexpected future status fail

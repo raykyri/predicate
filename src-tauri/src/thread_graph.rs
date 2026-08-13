@@ -1864,6 +1864,7 @@ mod tests {
             adapter: adapter.to_string(),
             worktree_dir,
             branch: None,
+            active_workspace: None,
             pane_id: None,
             orphaned_queue_pane_id: None,
             session_id: Some(format!("{id}-session")),

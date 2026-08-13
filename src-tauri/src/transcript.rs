@@ -2,7 +2,7 @@ use crate::adapters::{TranscriptLifecycleEvent, adapter_registry, maybe_record_a
 use crate::events::QmuxEvent;
 use crate::state::{AgentSendSource, AppState};
 use crate::turn_queue::{IdleResolution, advance_after_interruption};
-use crate::workspace::{AgentInfo, AgentStatus};
+use crate::workspace::{AgentInfo, AgentStatus, record_agent_active_workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashSet, VecDeque};
@@ -177,6 +177,27 @@ pub fn start_transcript_tail(
     transcript_path: String,
     adapter_id: String,
 ) {
+    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, true);
+}
+
+/// Tails a transcript selected for historical viewing without letting its old
+/// command cwd replace the live tab's active-workspace indicator.
+fn start_historical_transcript_tail(
+    state: AppState,
+    agent_id: String,
+    transcript_path: String,
+    adapter_id: String,
+) {
+    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, false);
+}
+
+fn start_transcript_tail_inner(
+    state: AppState,
+    agent_id: String,
+    transcript_path: String,
+    adapter_id: String,
+    observe_snapshot_workspace: bool,
+) {
     if let Err(err) = adapter_registry(state.config()).get(&adapter_id) {
         state.emit(QmuxEvent::new(
             "transcript.error",
@@ -187,12 +208,11 @@ pub fn start_transcript_tail(
         return;
     }
 
-    let should_start = state
-        .mark_transcript_tail(&agent_id, &transcript_path)
-        .unwrap_or(false);
-    if !should_start {
+    let Ok(Some((tail_generation, tail_gate))) =
+        state.mark_transcript_tail(&agent_id, &transcript_path, observe_snapshot_workspace)
+    else {
         return;
-    }
+    };
 
     thread::spawn(move || {
         let path = PathBuf::from(&transcript_path);
@@ -233,6 +253,10 @@ pub fn start_transcript_tail(
         };
 
         loop {
+            if !state.transcript_tail_is_current(&agent_id, &transcript_path, tail_generation) {
+                state.clear_transcript_tail(&agent_id, &transcript_path, tail_generation);
+                return;
+            }
             // Stop once the agent has rotated to a different transcript file (resume,
             // compact, a fresh session) or has gone away entirely. Claude only ever
             // changes the path alongside a freshly started tail for the new file, so
@@ -256,7 +280,7 @@ pub fn start_transcript_tail(
                     if notice_active {
                         state.emit(transcript_notice(&agent_id, &transcript_path, None));
                     }
-                    state.clear_transcript_tail(&agent_id, &transcript_path);
+                    state.clear_transcript_tail(&agent_id, &transcript_path, tail_generation);
                     return;
                 }
             }
@@ -284,12 +308,13 @@ pub fn start_transcript_tail(
                         if notice_active {
                             state.emit(transcript_notice(&agent_id, &transcript_path, None));
                         }
-                        state.clear_transcript_tail(&agent_id, &transcript_path);
-                        start_transcript_tail(
+                        state.clear_transcript_tail(&agent_id, &transcript_path, tail_generation);
+                        start_transcript_tail_inner(
                             state.clone(),
                             agent_id.clone(),
                             recovered_path,
                             adapter_id.clone(),
+                            observe_snapshot_workspace,
                         );
                         return;
                     }
@@ -309,53 +334,23 @@ pub fn start_transcript_tail(
                     continue;
                 }
             };
-            if snapshot.reset || first_read {
-                // Rebuild from the whole file: either this is the tail's first read of
-                // a freshly bound transcript (which must replace any prior timeline), or
-                // the file is now shorter than what we'd already consumed (a truncation
-                // or in-place rewrite) so our timeline no longer prefixes it.
-                raw_lines = complete_lines(&snapshot.data);
-                raw_line_offset = snapshot.start_line_index;
-                let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
-                let turns = adapter.resolve_transcript_turns_at_leaf(
-                    &agent_id,
-                    raw_line_offset,
-                    &raw_lines,
-                    native_leaf_id.as_deref(),
-                );
-                // Bound-checked write: a rebind can land between this tail's
-                // loop-top binding check and here, and an unconditional replace
-                // would swap the new transcript's timeline for this dead file's
-                // parse. A skipped write emits nothing; the next loop-top check
-                // retires this tail.
-                match state.replace_turns_for_transcript(&agent_id, &transcript_path, turns.clone())
-                {
-                    Err(err) => {
-                        state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
-                    }
-                    Ok(true) => {
-                        state.emit(QmuxEvent::new(
-                            "turn.updated",
-                            None,
-                            Some(agent_id.clone()),
-                            json!({ "reset": true, "turns": turns }),
-                        ));
-                    }
-                    Ok(false) => {}
+
+            let pending_workspace = {
+                let Ok(_tail_lease) = tail_gate.lock() else {
+                    return;
+                };
+                if !state.transcript_tail_is_current(&agent_id, &transcript_path, tail_generation) {
+                    state.clear_transcript_tail(&agent_id, &transcript_path, tail_generation);
+                    return;
                 }
-                line_index = raw_line_offset + raw_lines.len();
-                consumed = snapshot.consumed_bytes;
-            } else {
-                // Steady state: parse only the complete lines that arrived since the
-                // last tick. line_index advances for every complete line (parsed or
-                // not) so source indices stay aligned with the file's line numbers.
-                let lines = complete_lines(&snapshot.data);
-                let should_refresh_turns = lines
-                    .iter()
-                    .any(|line| adapter.transcript_line_can_update_turn_status(line));
-                if should_refresh_turns {
-                    raw_lines.extend(lines.iter().cloned());
-                    trim_transcript_window(&mut raw_lines, &mut raw_line_offset);
+                let mut pending_workspace = None;
+                if snapshot.reset || first_read {
+                    // Rebuild from the whole file: either this is the tail's first read of
+                    // a freshly bound transcript (which must replace any prior timeline), or
+                    // the file is now shorter than what we'd already consumed (a truncation
+                    // or in-place rewrite) so our timeline no longer prefixes it.
+                    raw_lines = complete_lines(&snapshot.data);
+                    raw_line_offset = snapshot.start_line_index;
                     let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
                     let turns = adapter.resolve_transcript_turns_at_leaf(
                         &agent_id,
@@ -363,6 +358,11 @@ pub fn start_transcript_tail(
                         &raw_lines,
                         native_leaf_id.as_deref(),
                     );
+                    // Bound-checked write: a rebind can land between this tail's
+                    // loop-top binding check and here, and an unconditional replace
+                    // would swap the new transcript's timeline for this dead file's
+                    // parse. A skipped write emits nothing; the next loop-top check
+                    // retires this tail.
                     match state.replace_turns_for_transcript(
                         &agent_id,
                         &transcript_path,
@@ -381,18 +381,57 @@ pub fn start_transcript_tail(
                         }
                         Ok(false) => {}
                     }
-                }
-                for line in lines {
-                    let lifecycle_event = adapter.parse_transcript_lifecycle_event(&line);
-                    if !should_refresh_turns
-                        && let Some(turn) =
-                            adapter.parse_transcript_line(&agent_id, line_index, &line)
-                    {
-                        // Surface a persistence failure rather than silently emitting a
-                        // turn the store never recorded, which would drift the UI
-                        // timeline from recovered state. A write skipped because the
-                        // agent rebound mid-poll emits nothing.
-                        match state.append_turn_for_transcript(turn.clone(), &transcript_path) {
+                    let current_agent = state.agent(&agent_id).ok().flatten();
+                    if observe_snapshot_workspace {
+                        pending_workspace = raw_lines
+                            .iter()
+                            .filter_map(|line| adapter.transcript_workspace_observation(line))
+                            .filter(|observation| {
+                                workspace_observation_belongs_to_agent(
+                                    observation,
+                                    current_agent.as_ref(),
+                                )
+                            })
+                            .next_back();
+                    }
+                    line_index = raw_line_offset + raw_lines.len();
+                    consumed = snapshot.consumed_bytes;
+                } else {
+                    // Steady state: parse only the complete lines that arrived since the
+                    // last tick. line_index advances for every complete line (parsed or
+                    // not) so source indices stay aligned with the file's line numbers.
+                    let lines = complete_lines(&snapshot.data);
+                    let current_agent = state.agent(&agent_id).ok().flatten();
+                    if observe_snapshot_workspace {
+                        pending_workspace = lines
+                            .iter()
+                            .filter_map(|line| adapter.transcript_workspace_observation(line))
+                            .filter(|observation| {
+                                workspace_observation_belongs_to_agent(
+                                    observation,
+                                    current_agent.as_ref(),
+                                )
+                            })
+                            .next_back();
+                    }
+                    let should_refresh_turns = lines
+                        .iter()
+                        .any(|line| adapter.transcript_line_can_update_turn_status(line));
+                    if should_refresh_turns {
+                        raw_lines.extend(lines.iter().cloned());
+                        trim_transcript_window(&mut raw_lines, &mut raw_line_offset);
+                        let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
+                        let turns = adapter.resolve_transcript_turns_at_leaf(
+                            &agent_id,
+                            raw_line_offset,
+                            &raw_lines,
+                            native_leaf_id.as_deref(),
+                        );
+                        match state.replace_turns_for_transcript(
+                            &agent_id,
+                            &transcript_path,
+                            turns.clone(),
+                        ) {
                             Err(err) => {
                                 state.emit(transcript_persist_error(
                                     &agent_id,
@@ -402,56 +441,130 @@ pub fn start_transcript_tail(
                             }
                             Ok(true) => {
                                 state.emit(QmuxEvent::new(
-                                    "turn.appended",
+                                    "turn.updated",
                                     None,
                                     Some(agent_id.clone()),
-                                    json!({ "turn": turn }),
+                                    json!({ "reset": true, "turns": turns }),
                                 ));
                             }
                             Ok(false) => {}
                         }
                     }
-                    // Bare shell launches often omit `--model`; Claude/Codex still
-                    // write the active model into the transcript. Record it once it
-                    // differs so the session header can show e.g. "(Fable)".
-                    if let Some(model) = adapter.transcript_line_model(&line)
-                        && let Err(err) = maybe_record_agent_model(&state, &agent_id, &model)
-                    {
-                        state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
-                    }
-                    if !should_refresh_turns {
-                        raw_lines.push(line.to_string());
-                    }
-                    if let Some(lifecycle_event) = lifecycle_event {
-                        match transcript_lifecycle_agent_event(
-                            &state,
-                            &agent_id,
-                            &transcript_path,
-                            lifecycle_event,
-                        ) {
-                            Ok(Some(event)) => state.emit(event),
-                            Ok(None) => {}
-                            Err(err) => {
-                                state.emit(transcript_persist_error(
-                                    &agent_id,
-                                    &transcript_path,
-                                    &err,
-                                ));
+                    for line in lines {
+                        let lifecycle_event = adapter.parse_transcript_lifecycle_event(&line);
+                        if !should_refresh_turns
+                            && let Some(turn) =
+                                adapter.parse_transcript_line(&agent_id, line_index, &line)
+                        {
+                            // Surface a persistence failure rather than silently emitting a
+                            // turn the store never recorded, which would drift the UI
+                            // timeline from recovered state. A write skipped because the
+                            // agent rebound mid-poll emits nothing.
+                            match state.append_turn_for_transcript(turn.clone(), &transcript_path) {
+                                Err(err) => {
+                                    state.emit(transcript_persist_error(
+                                        &agent_id,
+                                        &transcript_path,
+                                        &err,
+                                    ));
+                                }
+                                Ok(true) => {
+                                    state.emit(QmuxEvent::new(
+                                        "turn.appended",
+                                        None,
+                                        Some(agent_id.clone()),
+                                        json!({ "turn": turn }),
+                                    ));
+                                }
+                                Ok(false) => {}
                             }
                         }
+                        // Bare shell launches often omit `--model`; Claude/Codex still
+                        // write the active model into the transcript. Record it once it
+                        // differs so the session header can show e.g. "(Fable)".
+                        if let Some(model) = adapter.transcript_line_model(&line)
+                            && let Err(err) = maybe_record_agent_model(&state, &agent_id, &model)
+                        {
+                            state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
+                        }
+                        if !should_refresh_turns {
+                            raw_lines.push(line.to_string());
+                        }
+                        if let Some(lifecycle_event) = lifecycle_event {
+                            match transcript_lifecycle_agent_event(
+                                &state,
+                                &agent_id,
+                                &transcript_path,
+                                lifecycle_event,
+                            ) {
+                                Ok(Some(event)) => state.emit(event),
+                                Ok(None) => {}
+                                Err(err) => {
+                                    state.emit(transcript_persist_error(
+                                        &agent_id,
+                                        &transcript_path,
+                                        &err,
+                                    ));
+                                }
+                            }
+                        }
+                        line_index += 1;
                     }
-                    line_index += 1;
+                    if !should_refresh_turns {
+                        trim_transcript_window(&mut raw_lines, &mut raw_line_offset);
+                    }
+                    consumed += snapshot.consumed_bytes;
                 }
-                if !should_refresh_turns {
-                    trim_transcript_window(&mut raw_lines, &mut raw_line_offset);
-                }
-                consumed += snapshot.consumed_bytes;
-            }
+                pending_workspace
+            };
             first_read = false;
+
+            if let Some(observation) = pending_workspace
+                && let Err(err) = record_agent_active_workspace(
+                    &state,
+                    &agent_id,
+                    &transcript_path,
+                    tail_generation,
+                    &observation.cwd,
+                    observation.source,
+                )
+            {
+                state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
+            }
 
             thread::sleep(Duration::from_millis(350));
         }
     });
+}
+
+fn workspace_observation_belongs_to_agent(
+    observation: &crate::adapters::WorkspaceObservation,
+    agent: Option<&AgentInfo>,
+) -> bool {
+    let Some(agent) = agent else {
+        return false;
+    };
+    let Some(fork_point) = agent.fork_point.as_deref() else {
+        return true;
+    };
+    let belongs_to_child = agent
+        .session_id
+        .as_deref()
+        .filter(|session_id| *session_id != fork_point)
+        .is_some_and(|session_id| observation.session_id.as_deref() == Some(session_id));
+    if !belongs_to_child {
+        return false;
+    }
+    // Claude rewrites copied fork history's top-level `sessionId` to the child
+    // id, so identity alone cannot distinguish inherited commands. Their record
+    // timestamps still predate the Qmux child. Requiring a timestamp at or after
+    // child creation retains the first real child command even when it is already
+    // present in the initial snapshot, while leaving the launch cwd authoritative
+    // until then.
+    observation.source != crate::workspace::ActiveWorkspaceSource::Claude
+        || observation
+            .observed_at_millis
+            .is_some_and(|observed_at| observed_at >= agent.created_at)
 }
 
 /// Re-resolves the currently bound transcript without waiting for another file
@@ -1088,7 +1201,7 @@ pub fn set_agent_transcript(
     // Clear any recovery/ambiguity notice tied to the previous binding.
     state.emit(transcript_notice(agent_id, path, None));
     if !already_bound {
-        start_transcript_tail(
+        start_historical_transcript_tail(
             state.clone(),
             agent_id.to_string(),
             path.to_string(),
@@ -1901,6 +2014,7 @@ mod tests {
         AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
         MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
+    use std::sync::Arc;
     use std::time::UNIX_EPOCH;
 
     fn tool_result() -> TurnBlock {
@@ -2787,6 +2901,70 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn fork_snapshot_only_uses_observations_from_the_child_session() {
+        let mut forked = sample_agent(AgentStatus::Starting);
+        forked.fork_point = Some("source-session".to_string());
+        forked.session_id = Some("child-session".to_string());
+        let inherited = crate::adapters::WorkspaceObservation {
+            cwd: "/source".to_string(),
+            source: crate::workspace::ActiveWorkspaceSource::Claude,
+            // Camel-case sessionId is rewritten, but the parser prefers the
+            // preserved snake-case source id.
+            session_id: Some("source-session".to_string()),
+            observed_at_millis: Some(forked.created_at),
+        };
+        let child = crate::adapters::WorkspaceObservation {
+            cwd: "/child".to_string(),
+            source: crate::workspace::ActiveWorkspaceSource::Claude,
+            session_id: Some("child-session".to_string()),
+            observed_at_millis: Some(forked.created_at),
+        };
+
+        assert!(!workspace_observation_belongs_to_agent(
+            &inherited,
+            Some(&forked)
+        ));
+        assert!(workspace_observation_belongs_to_agent(
+            &child,
+            Some(&forked)
+        ));
+    }
+
+    #[test]
+    fn newer_tail_generation_supersedes_without_being_cleared_by_older_tail() {
+        let state = test_state();
+        let (first, gate) = state
+            .mark_transcript_tail("agent-1", "/tmp/session.jsonl", false)
+            .unwrap()
+            .unwrap();
+        let duplicate = state
+            .mark_transcript_tail("agent-1", "/tmp/session.jsonl", false)
+            .unwrap();
+        let (second, replacement_gate) = state
+            .mark_transcript_tail("agent-1", "/tmp/session.jsonl", true)
+            .unwrap()
+            .unwrap();
+
+        assert!(duplicate.is_none());
+        assert!(Arc::ptr_eq(&gate, &replacement_gate));
+        assert!(!state.transcript_tail_is_current("agent-1", "/tmp/session.jsonl", first));
+        assert!(state.transcript_tail_is_current("agent-1", "/tmp/session.jsonl", second));
+
+        let (third, rotated_gate) = state
+            .mark_transcript_tail("agent-1", "/tmp/rotated.jsonl", true)
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&gate, &rotated_gate));
+        assert!(!state.transcript_tail_is_current("agent-1", "/tmp/session.jsonl", second));
+        assert!(state.transcript_tail_is_current("agent-1", "/tmp/rotated.jsonl", third));
+
+        state.clear_transcript_tail("agent-1", "/tmp/session.jsonl", first);
+        assert!(state.transcript_tail_is_current("agent-1", "/tmp/rotated.jsonl", third));
+        state.clear_transcript_tail("agent-1", "/tmp/rotated.jsonl", third);
+        assert!(!state.transcript_tail_is_current("agent-1", "/tmp/rotated.jsonl", third));
+    }
+
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
             remotes: Default::default(),
@@ -2829,6 +3007,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/qmux-transcript-test".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some("pane-1".to_string()),
             orphaned_queue_pane_id: None,
             session_id: None,

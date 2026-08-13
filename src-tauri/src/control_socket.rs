@@ -658,6 +658,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/agent-1".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some(pane_id.to_string()),
             orphaned_queue_pane_id: None,
             session_id: None,

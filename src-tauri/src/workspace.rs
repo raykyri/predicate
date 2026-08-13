@@ -221,6 +221,12 @@ pub struct AgentInfo {
     pub adapter: String,
     pub worktree_dir: String,
     pub branch: Option<String>,
+    /// Best-effort, display-only workspace most recently observed from this
+    /// agent's command stream. This is deliberately separate from
+    /// `worktree_dir` / `branch`: those fields describe the launch workspace
+    /// qmux owns and are used by resume, fork, and cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace: Option<ActiveWorkspace>,
     pub pane_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orphaned_queue_pane_id: Option<String>,
@@ -269,6 +275,38 @@ pub struct AgentInfo {
     #[serde(default)]
     pub paused: bool,
     pub created_at: u128,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActiveWorkspaceKind {
+    Directory,
+    GitCheckout,
+    MainCheckout,
+    LinkedWorktree,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ActiveWorkspaceSource {
+    Qmux,
+    Claude,
+    Codex,
+}
+
+/// Runtime location reported by an agent. It is informational only: no launch,
+/// fork, status, or deletion path may use it in place of `worktree_dir`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveWorkspace {
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    pub kind: ActiveWorkspaceKind,
+    pub source: ActiveWorkspaceSource,
+    pub managed_by_qmux: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1140,7 +1178,8 @@ fn prepare_agent_workspace_locked(
     // cannot disagree with the workspace the worktree is being cut from.
     let host = host::for_group(group.remote.as_ref());
 
-    let worktree_dir = if request.use_worktree {
+    let use_worktree = request.use_worktree;
+    let worktree_dir = if use_worktree {
         // Isolated git worktree in the configured global or project-local root
         // (or a plain directory when the base is not a git repo).
         let dir =
@@ -1165,6 +1204,17 @@ fn prepare_agent_workspace_locked(
         base_repo.unwrap_or_else(|| state.default_open_dir().display().to_string())
     };
 
+    let active_workspace = host
+        .is_local()
+        .then(|| {
+            resolve_active_workspace(
+                &worktree_dir,
+                ActiveWorkspaceSource::Qmux,
+                use_worktree && branch.is_some(),
+            )
+        })
+        .flatten();
+
     let agent = AgentInfo {
         acp_config_options: Vec::new(),
         id: agent_id.clone(),
@@ -1172,6 +1222,7 @@ fn prepare_agent_workspace_locked(
         adapter: request.adapter,
         worktree_dir,
         branch,
+        active_workspace,
         pane_id: None,
         orphaned_queue_pane_id: None,
         session_id: None,
@@ -2040,6 +2091,129 @@ fn is_git_repo(host: &Host, path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Resolves a local command cwd into display-only workspace metadata. A cwd
+/// outside Git is still useful to show, while Git's own plumbing determines
+/// whether a checkout is the repository's primary tree or a linked worktree.
+pub fn resolve_active_workspace(
+    cwd: &str,
+    source: ActiveWorkspaceSource,
+    managed_by_qmux: bool,
+) -> Option<ActiveWorkspace> {
+    if !Path::new(cwd).is_absolute() {
+        return None;
+    }
+    let reported = cwd.to_string();
+    let canonical = fs::canonicalize(cwd).ok()?;
+    if !canonical.is_dir() {
+        return None;
+    }
+    let Some(git_root) = local_git_field(&canonical, &["rev-parse", "--show-toplevel"]) else {
+        return Some(ActiveWorkspace {
+            cwd: reported,
+            git_root: None,
+            branch: None,
+            kind: ActiveWorkspaceKind::Directory,
+            source,
+            managed_by_qmux,
+        });
+    };
+    let git_root = fs::canonicalize(&git_root).unwrap_or_else(|_| PathBuf::from(&git_root));
+    let branch = local_git_field(&canonical, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    let git_dir = local_git_path(&canonical, &["rev-parse", "--absolute-git-dir"]);
+    // Older Git releases do not support `--path-format=absolute`. Resolve the
+    // command's relative output against its cwd instead of turning a plumbing
+    // compatibility failure into a false linked-worktree claim.
+    let common_dir = local_git_path(&canonical, &["rev-parse", "--git-common-dir"]);
+    let kind = classify_git_checkout(git_dir.as_deref(), common_dir.as_deref());
+
+    Some(ActiveWorkspace {
+        cwd: reported,
+        git_root: Some(git_root.display().to_string()),
+        branch,
+        kind,
+        source,
+        managed_by_qmux,
+    })
+}
+
+fn classify_git_checkout(git_dir: Option<&Path>, common_dir: Option<&Path>) -> ActiveWorkspaceKind {
+    match (git_dir, common_dir) {
+        (Some(git_dir), Some(common_dir)) if git_dir == common_dir => {
+            ActiveWorkspaceKind::MainCheckout
+        }
+        (Some(_), Some(_)) => ActiveWorkspaceKind::LinkedWorktree,
+        _ => ActiveWorkspaceKind::GitCheckout,
+    }
+}
+
+fn local_git_field(cwd: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8(output.stdout).ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn local_git_path(cwd: &Path, args: &[&str]) -> Option<PathBuf> {
+    let path = PathBuf::from(local_git_field(cwd, args)?);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    fs::canonicalize(path).ok()
+}
+
+/// Applies an adapter observation only for local agents and emits a surgical
+/// update when the normalized workspace actually changes. The launch workspace
+/// remains authoritative for lifecycle operations.
+pub fn record_agent_active_workspace(
+    state: &AppState,
+    agent_id: &str,
+    transcript_path: &str,
+    tail_generation: u64,
+    cwd: &str,
+    source: ActiveWorkspaceSource,
+) -> Result<Option<AgentInfo>, String> {
+    let Some(current) = state.agent(agent_id)? else {
+        return Ok(None);
+    };
+    if !agent_host(state, &current)?.is_local() {
+        return Ok(None);
+    }
+
+    let mut workspace = match resolve_active_workspace(cwd, source, false) {
+        Some(workspace) => workspace,
+        None => return Ok(None),
+    };
+    workspace.managed_by_qmux = current.branch.is_some()
+        && workspace.git_root.as_deref().is_some_and(|root| {
+            fs::canonicalize(root).ok() == fs::canonicalize(&current.worktree_dir).ok()
+        });
+    let updated = state.set_agent_active_workspace_for_transcript(
+        agent_id,
+        transcript_path,
+        tail_generation,
+        workspace,
+    )?;
+    if let Some(agent) = updated.as_ref() {
+        state.emit(QmuxEvent::new(
+            "agent.workspace_changed",
+            agent.pane_id.clone(),
+            Some(agent.id.clone()),
+            json!({ "agent": agent }),
+        ));
+    }
+    Ok(updated)
+}
+
 fn create_worktree(
     host: &Host,
     base_repo: &str,
@@ -2473,6 +2647,114 @@ mod tests {
     }
 
     #[test]
+    fn active_workspace_resolves_main_checkout_linked_worktree_and_nested_cwd() {
+        let workspace = temp_workspace("active-worktree");
+        let repo = workspace.join("repo");
+        let linked = workspace.join("linked");
+        let nested = linked.join("packages/app");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "qmux test"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/test",
+                linked.to_str().unwrap(),
+            ],
+        );
+        fs::create_dir_all(&nested).unwrap();
+
+        let main =
+            resolve_active_workspace(repo.to_str().unwrap(), ActiveWorkspaceSource::Qmux, false)
+                .unwrap();
+        let canonical_repo = fs::canonicalize(&repo).unwrap();
+        let canonical_linked = fs::canonicalize(&linked).unwrap();
+        assert_eq!(main.kind, ActiveWorkspaceKind::MainCheckout);
+        assert_eq!(main.git_root.as_deref(), canonical_repo.to_str());
+        assert_eq!(main.branch.as_deref(), Some("main"));
+
+        let current =
+            resolve_active_workspace(nested.to_str().unwrap(), ActiveWorkspaceSource::Codex, true)
+                .unwrap();
+        assert_eq!(current.kind, ActiveWorkspaceKind::LinkedWorktree);
+        assert_eq!(current.cwd, nested.to_str().unwrap());
+        assert_eq!(
+            fs::canonicalize(&current.cwd).unwrap(),
+            fs::canonicalize(&nested).unwrap()
+        );
+        assert_eq!(current.git_root.as_deref(), canonical_linked.to_str());
+        assert_eq!(current.branch.as_deref(), Some("feature/test"));
+        assert_eq!(current.source, ActiveWorkspaceSource::Codex);
+        assert!(current.managed_by_qmux);
+
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn active_workspace_keeps_non_git_command_directories_visible() {
+        let directory = temp_workspace("active-directory");
+        let current = resolve_active_workspace(
+            directory.to_str().unwrap(),
+            ActiveWorkspaceSource::Claude,
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(current.kind, ActiveWorkspaceKind::Directory);
+        assert_eq!(current.cwd, directory.to_str().unwrap());
+        assert_eq!(current.git_root, None);
+        assert_eq!(current.branch, None);
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn active_workspace_rejects_relative_or_missing_command_directories() {
+        assert_eq!(
+            resolve_active_workspace("relative/path", ActiveWorkspaceSource::Codex, false),
+            None
+        );
+        assert_eq!(
+            resolve_active_workspace(
+                "/definitely/missing/qmux-command-directory",
+                ActiveWorkspaceSource::Claude,
+                false,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn incomplete_git_plumbing_never_claims_a_linked_worktree() {
+        let git_dir = Path::new("/repo/.git");
+        assert_eq!(
+            classify_git_checkout(Some(git_dir), None),
+            ActiveWorkspaceKind::GitCheckout
+        );
+        assert_eq!(
+            classify_git_checkout(None, Some(git_dir)),
+            ActiveWorkspaceKind::GitCheckout
+        );
+    }
+
+    #[test]
     fn rolled_back_group_scaffold_is_removed_when_pristine() {
         let workspace = temp_workspace("rollback-pristine");
         let project = workspace.join("project");
@@ -2575,6 +2857,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/qmux-workspace-tests".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: pane_id.map(ToString::to_string),
             orphaned_queue_pane_id: None,
             session_id: None,
@@ -2592,6 +2875,150 @@ mod tests {
             paused: false,
             created_at: 1,
         }
+    }
+
+    #[test]
+    fn agent_info_deserializes_without_active_workspace() {
+        let mut value = serde_json::to_value(sample_agent("agent-1", None, AgentStatus::Idle))
+            .expect("serializes");
+        value
+            .as_object_mut()
+            .expect("agent object")
+            .remove("activeWorkspace");
+
+        let restored: AgentInfo = serde_json::from_value(value).expect("legacy payload loads");
+        assert_eq!(restored.active_workspace, None);
+    }
+
+    #[test]
+    fn latest_local_command_workspace_replaces_the_previous_observation() {
+        let root = temp_workspace("latest-active-command");
+        let first = root.join("first");
+        let second = root.join("second");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let state = test_state_with_workspace(root.join("state"));
+        state
+            .insert_group_after(allocation_group(&first, &root.join("managed")), None)
+            .unwrap();
+        let mut agent = sample_agent("agent-1", None, AgentStatus::Running);
+        agent.worktree_dir = first.display().to_string();
+        agent.transcript_path = Some("/tmp/live-transcript.jsonl".to_string());
+        state.insert_agent(agent).unwrap();
+        let (tail_generation, _) = state
+            .mark_transcript_tail("agent-1", "/tmp/live-transcript.jsonl", true)
+            .unwrap()
+            .unwrap();
+
+        record_agent_active_workspace(
+            &state,
+            "agent-1",
+            "/tmp/live-transcript.jsonl",
+            tail_generation,
+            first.to_str().unwrap(),
+            ActiveWorkspaceSource::Claude,
+        )
+        .unwrap();
+        record_agent_active_workspace(
+            &state,
+            "agent-1",
+            "/tmp/live-transcript.jsonl",
+            tail_generation,
+            second.to_str().unwrap(),
+            ActiveWorkspaceSource::Codex,
+        )
+        .unwrap();
+
+        let current = state
+            .agent("agent-1")
+            .unwrap()
+            .unwrap()
+            .active_workspace
+            .unwrap();
+        assert_eq!(
+            fs::canonicalize(&current.cwd).unwrap(),
+            fs::canonicalize(&second).unwrap()
+        );
+        assert_eq!(current.cwd, second.to_str().unwrap());
+        assert_eq!(current.source, ActiveWorkspaceSource::Codex);
+
+        let (replacement_generation, _) = state
+            .mark_transcript_tail("agent-1", "/tmp/live-transcript.jsonl", false)
+            .unwrap()
+            .unwrap();
+        let superseded_update = record_agent_active_workspace(
+            &state,
+            "agent-1",
+            "/tmp/live-transcript.jsonl",
+            tail_generation,
+            first.to_str().unwrap(),
+            ActiveWorkspaceSource::Claude,
+        )
+        .unwrap();
+        assert!(superseded_update.is_none());
+
+        state
+            .mutate_agent("agent-1", |agent| {
+                agent.transcript_path = Some("/tmp/new-transcript.jsonl".to_string());
+            })
+            .unwrap();
+        let stale_update = record_agent_active_workspace(
+            &state,
+            "agent-1",
+            "/tmp/live-transcript.jsonl",
+            replacement_generation,
+            first.to_str().unwrap(),
+            ActiveWorkspaceSource::Claude,
+        )
+        .unwrap();
+        assert!(stale_update.is_none());
+        assert_eq!(
+            state
+                .agent("agent-1")
+                .unwrap()
+                .unwrap()
+                .active_workspace
+                .unwrap()
+                .cwd,
+            second.to_str().unwrap()
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn remote_agent_transcript_cwds_are_ignored() {
+        let root = temp_workspace("remote-active-command");
+        let directory = root.join("local-lookalike");
+        fs::create_dir_all(&directory).unwrap();
+        let state = test_state_with_workspace(root.join("state"));
+        let mut group = allocation_group(&directory, &root.join("managed"));
+        group.remote = Some(test_remote());
+        state.insert_group_after(group, None).unwrap();
+        let mut agent = sample_agent("agent-1", None, AgentStatus::Running);
+        agent.worktree_dir = "/srv/code/project".to_string();
+        agent.transcript_path = Some("/tmp/live-transcript.jsonl".to_string());
+        state.insert_agent(agent).unwrap();
+        let (tail_generation, _) = state
+            .mark_transcript_tail("agent-1", "/tmp/live-transcript.jsonl", true)
+            .unwrap()
+            .unwrap();
+
+        let update = record_agent_active_workspace(
+            &state,
+            "agent-1",
+            "/tmp/live-transcript.jsonl",
+            tail_generation,
+            directory.to_str().unwrap(),
+            ActiveWorkspaceSource::Claude,
+        )
+        .unwrap();
+
+        assert!(update.is_none());
+        assert_eq!(
+            state.agent("agent-1").unwrap().unwrap().active_workspace,
+            None
+        );
+        fs::remove_dir_all(root).ok();
     }
 
     fn sample_shell_pane(id: &str, group_id: &str, cwd: &Path) -> crate::state::PaneInfo {

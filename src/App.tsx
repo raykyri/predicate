@@ -185,6 +185,11 @@ import {
   agentStatusLabel,
   agentStatusKeepsMachineAwake,
   agentCanFork,
+  agentDisplayBranch,
+  agentDisplayCheckoutRoot,
+  agentDisplayDirectory,
+  agentDisplayWorktreeRoot,
+  agentShowsLaunchDirectory,
   agentSupportsForkAtMessage,
   agentStatusTone,
   clamp,
@@ -5490,7 +5495,7 @@ function MainApp() {
     const groupedPaneIds = new Set<string>();
     const tabForPane = (pane: PaneInfo) => {
       const paneAgent = agentByPaneId.get(pane.id);
-      const paneDir = paneAgent?.worktreeDir ?? pane.cwd;
+      const paneDir = agentDisplayDirectory(paneAgent, pane.cwd);
       groupedPaneIds.add(pane.id);
       return {
         paneId: pane.id,
@@ -12659,7 +12664,7 @@ function MainApp() {
       paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index - 1]?.id ?? "");
     const isActiveSplitLast =
       paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index + 1]?.id ?? "");
-    const paneDir = paneAgent?.worktreeDir ?? pane.cwd;
+    const paneDir = agentDisplayDirectory(paneAgent, pane.cwd);
     const splitMembersShareDir = Boolean(
       paneSplit &&
         paneSplit.paneIds.length > 1 &&
@@ -12669,18 +12674,19 @@ function MainApp() {
             return false;
           }
           const splitPaneAgent = agentByPaneId.get(paneId);
-          return (splitPaneAgent?.worktreeDir ?? splitPane.cwd) === paneDir;
+          return agentDisplayDirectory(splitPaneAgent, splitPane.cwd) === paneDir;
         }),
     );
     const hidePaneDir =
       splitMembersShareDir && paneSplit?.paneIds[paneSplit.paneIds.length - 1] !== pane.id;
-    const paneBranch = paneAgent?.branch ?? null;
+    const paneBranch = agentDisplayBranch(paneAgent);
+    const paneWorktreeRoot = agentDisplayWorktreeRoot(paneAgent);
     const paneWorktreeName =
-      paneBranch && paneAgent?.worktreeDir
-        ? (paneAgent.worktreeDir.split("/").filter(Boolean).pop() ?? null)
+      paneBranch && paneWorktreeRoot
+        ? (paneWorktreeRoot.split("/").filter(Boolean).pop() ?? null)
         : null;
     const paneGitMeta = [paneBranch, paneWorktreeName].filter(Boolean).join(" · ");
-    const paneGitMetaTitle = [paneBranch, paneBranch ? paneAgent?.worktreeDir : null]
+    const paneGitMetaTitle = [paneBranch, paneWorktreeRoot]
       .filter(Boolean)
       .join(" · ");
     const dropGap =
@@ -14236,21 +14242,53 @@ function MainApp() {
                 <dd>{contextMenuTerminalTitle}</dd>
               </div>
             ) : null}
-            {contextMenuAgent?.branch ? (
+            {agentDisplayBranch(contextMenuAgent) ? (
               <div>
                 <dt>Branch</dt>
-                <dd>{contextMenuAgent.branch}</dd>
+                <dd>{agentDisplayBranch(contextMenuAgent)}</dd>
               </div>
             ) : null}
-            {contextMenuAgent?.branch && contextMenuAgent.worktreeDir ? (
+            {agentDisplayCheckoutRoot(contextMenuAgent) ? (
               <div>
-                <dt>Worktree</dt>
+                <dt>{contextMenuAgent?.activeWorkspace ? "Current checkout" : "Worktree"}</dt>
+                <dd>{agentDisplayCheckoutRoot(contextMenuAgent)}</dd>
+              </div>
+            ) : null}
+            {contextMenuAgent?.activeWorkspace?.gitRoot ? (
+              <div>
+                <dt>Checkout type</dt>
+                <dd>{contextMenuAgent.activeWorkspace.kind === "linkedWorktree"
+                  ? "Linked worktree"
+                  : contextMenuAgent.activeWorkspace.kind === "mainCheckout"
+                    ? "Main checkout"
+                    : "Git checkout"}</dd>
+              </div>
+            ) : null}
+            {contextMenuAgent?.activeWorkspace ? (
+              <>
+                <div>
+                  <dt>Detected from</dt>
+                  <dd>{contextMenuAgent.activeWorkspace.source === "qmux"
+                    ? "Qmux"
+                    : contextMenuAgent.activeWorkspace.source === "claude"
+                      ? "Claude"
+                      : "Codex"}</dd>
+                </div>
+                <div>
+                  <dt>Managed by Qmux</dt>
+                  <dd>{contextMenuAgent.activeWorkspace.managedByQmux ? "Yes" : "No"}</dd>
+                </div>
+              </>
+            ) : null}
+            {contextMenuAgent && agentShowsLaunchDirectory(contextMenuAgent) ? (
+              <div>
+                <dt>Launch directory</dt>
                 <dd>{contextMenuAgent.worktreeDir}</dd>
               </div>
             ) : null}
             <div>
               <dt>Directory</dt>
-              <dd>{contextMenuPane.cwd}</dd>
+              <dd>{contextMenuAgent?.activeWorkspace?.cwd ?? contextMenuPane.cwd}</dd>
             </div>
           </dl>
           <div className="pane-context-actions" role="menu" aria-label="Tab actions">

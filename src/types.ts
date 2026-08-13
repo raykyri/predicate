@@ -215,6 +215,9 @@ export interface AgentInfo {
   adapter: string;
   worktreeDir: string;
   branch?: string | null;
+  /** Display-only command workspace observed from the live agent. Launch,
+   * resume, fork, and cleanup continue to use worktreeDir/branch. */
+  activeWorkspace?: ActiveWorkspace | null;
   paneId?: string | null;
   orphanedQueuePaneId?: string | null;
   sessionId?: string | null;
@@ -247,6 +250,15 @@ export interface AgentInfo {
   // True when the queue has paused after a pause-after turn finished.
   paused?: boolean;
   createdAt: number;
+}
+
+export interface ActiveWorkspace {
+  cwd: string;
+  gitRoot?: string | null;
+  branch?: string | null;
+  kind: "directory" | "gitCheckout" | "mainCheckout" | "linkedWorktree";
+  source: "qmux" | "claude" | "codex";
+  managedByQmux: boolean;
 }
 
 /** One artifact-tray entry: a file or loopback URL opened from an agent pane via

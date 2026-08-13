@@ -2,10 +2,10 @@ use super::{
     AdapterNotification, AdapterNotificationOutcome, AgentAdapter, ComposerPolicy,
     FORK_AT_MESSAGE_EMPTY_ERROR, LaunchEnv, MessageAnchor, PermissionAction,
     PrepareShellAgentLaunchRequest, PreparedShellAgentLaunch, ShellCommandIntegration,
-    SpawnAgentRequest, TranscriptLifecycleEvent, apply_shell_cli_model, ensure_on_path,
-    model_from_claude_native_transcript_line, new_uuid_v4, parse_transcript_records,
-    prepared_shell_agent, record_shell_session_lineage, reusable_session_agent, shell_cli_model,
-    shell_quote_arg, shell_quote_path,
+    SpawnAgentRequest, TranscriptLifecycleEvent, WorkspaceObservation, apply_shell_cli_model,
+    ensure_on_path, model_from_claude_native_transcript_line, new_uuid_v4,
+    parse_transcript_records, prepared_shell_agent, record_shell_session_lineage,
+    reusable_session_agent, shell_cli_model, shell_quote_arg, shell_quote_path,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -15,15 +15,17 @@ use crate::pty::{
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{
-    Turn, TurnStatus, TurnStatusReason, session_id_from_transcript_path, start_transcript_tail,
+    Turn, TurnStatus, TurnStatusReason, rfc3339_to_epoch_ms, session_id_from_transcript_path,
+    start_transcript_tail,
 };
 
 #[cfg(test)]
 use crate::transcript::TurnBlock;
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
-    AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
-    mark_agent_spawn_failed, prepare_agent_workspace, prepare_agent_workspace_with_parent,
+    ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
+    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
+    prepare_agent_workspace_with_parent,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -174,6 +176,10 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn transcript_line_model(&self, line: &str) -> Option<String> {
         model_from_claude_native_transcript_line(line)
+    }
+
+    fn transcript_workspace_observation(&self, line: &str) -> Option<WorkspaceObservation> {
+        claude_workspace_observation(line)
     }
 
     fn resolve_transcript_turns(
@@ -1973,6 +1979,43 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
     super::parse_claude_native_transcript_line(agent_id, source_index, line)
 }
 
+fn claude_workspace_observation(line: &str) -> Option<WorkspaceObservation> {
+    let value = serde_json::from_str::<Value>(line).ok()?;
+    if value
+        .get("isSidechain")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
+    }
+    let content = value.get("message")?.get("content")?.as_array()?;
+    if !content
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"))
+    {
+        return None;
+    }
+    let cwd = value.get("cwd")?.as_str()?.trim();
+    (!cwd.is_empty()).then(|| WorkspaceObservation {
+        cwd: cwd.to_string(),
+        source: ActiveWorkspaceSource::Claude,
+        session_id: value
+            // Claude rewrites camel-case `sessionId` when it copies fork
+            // history, but preserves the originating snake-case `session_id`.
+            // True child records carry the child id in both fields, making the
+            // snake-case value the stable inherited-history discriminator.
+            .get("session_id")
+            .or_else(|| value.get("sessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        observed_at_millis: value
+            .get("timestamp")
+            .and_then(Value::as_str)
+            .and_then(rfc3339_to_epoch_ms)
+            .and_then(|millis| u128::try_from(millis).ok()),
+    })
+}
+
 #[derive(Clone, Debug)]
 struct ClaudeGraphNode {
     uuid: String,
@@ -2482,6 +2525,77 @@ mod tests {
     }
 
     #[test]
+    fn workspace_observation_uses_tool_call_cwd() {
+        let line = json!({
+            "type": "assistant",
+            "cwd": "/repo/.claude/worktrees/feature",
+            "sessionId": "child-session",
+            "session_id": "child-session",
+            "timestamp": "2026-08-13T23:00:00.123Z",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "EnterWorktree",
+                    "input": { "name": "feature" }
+                }]
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            claude_workspace_observation(&line),
+            Some(WorkspaceObservation {
+                cwd: "/repo/.claude/worktrees/feature".to_string(),
+                source: ActiveWorkspaceSource::Claude,
+                session_id: Some("child-session".to_string()),
+                observed_at_millis: Some(1_786_662_000_123),
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_observation_prefers_source_identity_on_copied_fork_history() {
+        let line = json!({
+            "type": "assistant",
+            "cwd": "/source/checkout",
+            "sessionId": "child-session",
+            "session_id": "source-session",
+            "timestamp": "2026-08-13T23:00:00.123Z",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Bash",
+                    "input": { "command": "pwd" }
+                }]
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            claude_workspace_observation(&line).and_then(|observation| observation.session_id),
+            Some("source-session".to_string())
+        );
+    }
+
+    #[test]
+    fn workspace_observation_ignores_sidechains_and_non_tool_messages() {
+        let sidechain = json!({
+            "isSidechain": true,
+            "cwd": "/wrong",
+            "message": { "content": [{ "type": "tool_use", "name": "Bash" }] }
+        })
+        .to_string();
+        let user = json!({
+            "cwd": "/wrong",
+            "message": { "content": [{ "type": "text", "text": "hello" }] }
+        })
+        .to_string();
+
+        assert_eq!(claude_workspace_observation(&sidechain), None);
+        assert_eq!(claude_workspace_observation(&user), None);
+    }
+
+    #[test]
     fn hook_transcript_path_confines_forged_session_start_paths() {
         let dir = "/home/u/.claude/projects/proj";
         let bound = format!("{dir}/sess-a.jsonl");
@@ -2861,6 +2975,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/qmux-hooks-test".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some("pane-1".to_string()),
             orphaned_queue_pane_id: None,
             session_id: None,

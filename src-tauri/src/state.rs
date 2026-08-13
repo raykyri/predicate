@@ -12,7 +12,7 @@ use crate::research::{
 use crate::scrollback::{bounded_undo_scrollback, read_pane_scrollback, remove_pane_scrollback};
 use crate::thread_graph;
 use crate::transcript::Turn;
-use crate::workspace::{AgentInfo, AgentStatus, GroupInfo, WorkspaceScope};
+use crate::workspace::{ActiveWorkspace, AgentInfo, AgentStatus, GroupInfo, WorkspaceScope};
 use portable_pty::{Child, MasterPty};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -159,7 +159,8 @@ struct AppStateInner {
     // would expose unrelated panes and sessions to a leaked preview token.
     file_preview_grants: Mutex<HashMap<String, HashSet<std::path::PathBuf>>>,
     model: Mutex<Model>,
-    transcript_tails: Mutex<HashSet<String>>,
+    transcript_tails: Mutex<HashMap<String, TranscriptTailRegistration>>,
+    next_transcript_tail: AtomicU64,
     next_id: AtomicU64,
     app_handle: Mutex<Option<AppHandle>>,
     /// Reload-safe agent-completion lifecycle and the current sound preference.
@@ -228,6 +229,16 @@ struct AppStateInner {
     /// not a full qmux restart. Kept outside Model so persistence snapshots
     /// never make them durable.
     interface_drafts: Mutex<HashMap<String, String>>,
+}
+
+struct TranscriptTailRegistration {
+    generation: u64,
+    observe_snapshot_workspace: bool,
+    active: bool,
+    /// Same-path replacements serialize their whole read loop through this
+    /// gate. The new generation invalidates the old one immediately, then
+    /// waits for it to finish before any turn or lifecycle mutation can race.
+    gate: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1333,7 +1344,8 @@ impl AppState {
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
-                transcript_tails: Mutex::new(HashSet::new()),
+                transcript_tails: Mutex::new(HashMap::new()),
+                next_transcript_tail: AtomicU64::new(1),
                 next_id: AtomicU64::new(1),
                 app_handle: Mutex::new(None),
                 completion_sound: Mutex::new(
@@ -7012,6 +7024,52 @@ impl AppState {
         Ok(updated)
     }
 
+    /// Records display-only workspace metadata only while the reporting tail
+    /// still owns the agent's transcript binding. Git resolution happens
+    /// outside this lock, so the binding must be rechecked here to prevent an
+    /// old tail from winning a transcript-rotation race.
+    pub fn set_agent_active_workspace_for_transcript(
+        &self,
+        agent_id: &str,
+        transcript_path: &str,
+        tail_generation: u64,
+        workspace: ActiveWorkspace,
+    ) -> Result<Option<AgentInfo>, String> {
+        let updated = {
+            let tail_key = format!("{agent_id}:{transcript_path}");
+            let tails = self
+                .inner
+                .transcript_tails
+                .lock()
+                .map_err(|_| "transcript tail lock poisoned".to_string())?;
+            if tails
+                .get(&tail_key)
+                .filter(|registration| registration.active)
+                .map(|registration| registration.generation)
+                != Some(tail_generation)
+            {
+                return Ok(None);
+            }
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let Some(agent) = model.agents.get_mut(agent_id) else {
+                return Ok(None);
+            };
+            if agent.transcript_path.as_deref() != Some(transcript_path)
+                || agent.active_workspace.as_ref() == Some(&workspace)
+            {
+                return Ok(None);
+            }
+            agent.active_workspace = Some(workspace);
+            agent.clone()
+        };
+        self.persist();
+        Ok(Some(updated))
+    }
+
     /// Reserves the Esc-interrupt grace watch for an agent, returning `true` when the
     /// caller should spawn the watcher and `false` when one is already in flight (so a
     /// held-Esc burst spawns a single thread). Best-effort: a poisoned lock returns
@@ -9136,24 +9194,76 @@ impl AppState {
         Ok(true)
     }
 
-    pub fn mark_transcript_tail(&self, agent_id: &str, path: &str) -> Result<bool, String> {
+    pub fn mark_transcript_tail(
+        &self,
+        agent_id: &str,
+        path: &str,
+        observe_snapshot_workspace: bool,
+    ) -> Result<Option<(u64, Arc<Mutex<()>>)>, String> {
         let key = format!("{agent_id}:{path}");
         let mut tails = self
             .inner
             .transcript_tails
             .lock()
             .map_err(|_| "transcript tail lock poisoned".to_string())?;
-        Ok(tails.insert(key))
+        let agent_prefix = format!("{agent_id}:");
+        // One gate per agent serializes both same-file mode transitions and
+        // transcript rotation. The old path may already be parsing when a hook
+        // binds the new path; sharing its gate ensures every old model/lifecycle
+        // side effect finishes before the replacement tail processes anything.
+        let gate = tails
+            .iter()
+            .find(|(existing_key, _)| existing_key.starts_with(&agent_prefix))
+            .map(|(_, registration)| registration.gate.clone())
+            .unwrap_or_else(|| Arc::new(Mutex::new(())));
+        for (other_key, registration) in tails.iter_mut() {
+            if other_key.starts_with(&agent_prefix) && other_key != &key {
+                registration.active = false;
+            }
+        }
+        if tails.get(&key).is_some_and(|registration| {
+            registration.active
+                && registration.observe_snapshot_workspace == observe_snapshot_workspace
+        }) {
+            return Ok(None);
+        }
+        let generation = self
+            .inner
+            .next_transcript_tail
+            .fetch_add(1, Ordering::Relaxed);
+        tails.insert(
+            key,
+            TranscriptTailRegistration {
+                generation,
+                observe_snapshot_workspace,
+                active: true,
+                gate: gate.clone(),
+            },
+        );
+        Ok(Some((generation, gate)))
     }
 
-    /// Drops the marker for a tail that is stopping (its file rotated away or its
-    /// agent went away) so the same `(agent_id, path)` can be tailed again if the
-    /// agent ever returns to that file. Best-effort: a poisoned lock is ignored
-    /// rather than propagated, since this only runs as a tail unwinds.
-    pub fn clear_transcript_tail(&self, agent_id: &str, path: &str) {
+    pub fn transcript_tail_is_current(&self, agent_id: &str, path: &str, generation: u64) -> bool {
+        let key = format!("{agent_id}:{path}");
+        self.inner.transcript_tails.lock().ok().and_then(|tails| {
+            tails
+                .get(&key)
+                .filter(|registration| registration.active)
+                .map(|registration| registration.generation)
+        }) == Some(generation)
+    }
+
+    /// Drops the marker for a tail that is stopping (its file rotated away, its
+    /// agent went away, or a different transcript superseded it) so inactive
+    /// registrations do not accumulate. A newer generation for the same key is
+    /// preserved. Best-effort: a poisoned lock is ignored rather than propagated,
+    /// since this only runs as a tail unwinds.
+    pub fn clear_transcript_tail(&self, agent_id: &str, path: &str, generation: u64) {
         let key = format!("{agent_id}:{path}");
         if let Ok(mut tails) = self.inner.transcript_tails.lock() {
-            tails.remove(&key);
+            if tails.get(&key).map(|registration| registration.generation) == Some(generation) {
+                tails.remove(&key);
+            }
         }
     }
 
@@ -10731,6 +10841,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/work/agent-1".to_string(),
             branch: Some("qmux/group-1/agent-1".to_string()),
+            active_workspace: None,
             pane_id: Some("pane-7".to_string()),
             orphaned_queue_pane_id: None,
             session_id: Some("session-abc".to_string()),
@@ -16916,6 +17027,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/x".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some("pane-1".to_string()),
             orphaned_queue_pane_id: None,
             session_id: None,
@@ -16972,6 +17084,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/x".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some("pane-1".to_string()),
             orphaned_queue_pane_id: None,
             session_id: Some("sess-1".to_string()),
@@ -17087,6 +17200,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp/x".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: None,
             orphaned_queue_pane_id: None,
             session_id: None,

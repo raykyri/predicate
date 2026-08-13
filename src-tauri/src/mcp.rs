@@ -738,6 +738,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: "/tmp".to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: Some(format!("pane-{id}")),
             orphaned_queue_pane_id: None,
             session_id: None,

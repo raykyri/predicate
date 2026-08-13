@@ -3042,6 +3042,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tungstenite",
+ "url",
  "window-vibrancy 0.7.1",
 ]
 

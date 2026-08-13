@@ -18,7 +18,7 @@ use crate::transcript::{Turn, TurnBlock};
 // as `super::string_field` and share the one definition (see `transcript::string_field`).
 pub(crate) use crate::transcript::string_field;
 use crate::workspace::{
-    AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
+    ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
 };
 use acp::AcpAdapter;
@@ -736,6 +736,14 @@ pub enum TranscriptLifecycleEvent {
     TurnStarted,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceObservation {
+    pub cwd: String,
+    pub source: ActiveWorkspaceSource,
+    pub session_id: Option<String>,
+    pub observed_at_millis: Option<u128>,
+}
+
 impl TranscriptLifecycleEvent {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -874,6 +882,13 @@ pub trait AgentAdapter: Send + Sync {
     /// assistant turns). The transcript tailer uses this to fill in
     /// `AgentInfo.model` for bare shell launches that never passed `--model`.
     fn transcript_line_model(&self, _line: &str) -> Option<String> {
+        None
+    }
+
+    /// Display-only command cwd carried by a native transcript record. Only
+    /// adapters whose formats expose an authoritative cwd opt in; lifecycle
+    /// behavior continues to use the agent's qmux-owned launch workspace.
+    fn transcript_workspace_observation(&self, _line: &str) -> Option<WorkspaceObservation> {
         None
     }
 
@@ -1651,6 +1666,7 @@ mod tests {
                 adapter: "unsupported".to_string(),
                 worktree_dir: "/tmp/qmux-adapter-tests".to_string(),
                 branch: None,
+                active_workspace: None,
                 pane_id: Some("pane-1".to_string()),
                 orphaned_queue_pane_id: None,
                 session_id: Some("session-1".to_string()),
@@ -1682,6 +1698,7 @@ mod tests {
             adapter: "claude".to_string(),
             worktree_dir: dir.to_string(),
             branch: None,
+            active_workspace: None,
             pane_id: pane_id.map(ToString::to_string),
             orphaned_queue_pane_id: None,
             session_id: Some(session.to_string()),

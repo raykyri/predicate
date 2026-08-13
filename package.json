@@ -20,6 +20,7 @@
     "test:native-terminal-keyboard": "node scripts/test-native-terminal-keyboard.mjs",
     "test:native-terminal-layout": "node scripts/test-native-terminal-layout.mjs",
     "test:terminal-title": "node --import tsx --test tests/terminalTitle.test.ts",
+    "test:active-workspace": "node --import tsx --test tests/activeWorkspace.test.ts",
     "test:composer-slash-commands": "node scripts/test-composer-slash-commands.mjs",
     "test:home-rails": "node scripts/test-home-rails.mjs",
     "test:claude-turns": "node scripts/test-claude-turns.mjs",
