@@ -56,15 +56,25 @@ impl PiAdapter {
 
     fn ensure_compatible_binary(&self) -> Result<String, String> {
         let binary = self.ensure_binary()?;
-        let output = Command::new(&binary)
-            .arg("--version")
+        let mut command = Command::new(&binary);
+        command.arg("--version");
+        crate::launch_path::apply_launch_path(&mut command);
+        let output = command
             .output()
             .map_err(|err| format!("failed to read Pi version from '{binary}': {err}"))?;
         if !output.status.success() {
-            return Err(format!(
-                "failed to read Pi version from '{binary}' (exit {})",
-                output.status
-            ));
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                format!(
+                    "failed to read Pi version from '{binary}' ({})",
+                    output.status
+                )
+            } else {
+                format!(
+                    "failed to read Pi version from '{binary}' ({}): {stderr}",
+                    output.status
+                )
+            });
         }
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !pi_version_is_compatible(&version) {
@@ -129,12 +139,15 @@ impl PiAdapter {
         let node = ensure_on_path("node").ok_or_else(|| {
             "Node.js was not found; Pi SessionManager forks require Node.js".to_string()
         })?;
-        let output = Command::new(node)
+        let mut command = Command::new(node);
+        command
             .arg(self.session_helper_entrypoint()?)
             .arg(pi_binary)
             .arg(source_path)
             .arg(leaf_id)
-            .arg(target_cwd)
+            .arg(target_cwd);
+        crate::launch_path::apply_launch_path(&mut command);
+        let output = command
             .output()
             .map_err(|err| format!("failed to run Pi SessionManager fork helper: {err}"))?;
         if !output.status.success() {

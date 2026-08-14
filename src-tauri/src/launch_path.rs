@@ -97,6 +97,24 @@ pub(crate) fn pane_child_path(socket_path: &Path) -> Result<String, String> {
     })
 }
 
+/// PATH used when qmux itself execs adapter CLIs (version probes, plugin
+/// install). Same directories as pane children, minus the qmux shim.
+pub(crate) fn process_child_path() -> Option<String> {
+    let path = env::var_os("PATH");
+    let home = env::var_os("HOME").map(PathBuf::from);
+    child_path_from(path.as_deref(), home.as_deref(), login_shell_path_dirs())
+}
+
+/// Give a subprocess the same PATH `resolve_binary` searched, so
+/// `#!/usr/bin/env node` shebangs (Homebrew `pi`, npm CLIs) can find their
+/// interpreter. GUI apps inherit launchd's bare PATH; without this, `node`
+/// is missing and the script exits 127.
+pub(crate) fn apply_launch_path(command: &mut Command) {
+    if let Some(path) = process_child_path() {
+        command.env("PATH", path);
+    }
+}
+
 fn resolve_binary_from(
     binary: &str,
     path: Option<&OsStr>,
@@ -112,6 +130,16 @@ fn resolve_binary_from(
         .into_iter()
         .map(|dir| dir.join(binary))
         .find(|candidate| candidate.is_file())
+}
+
+fn child_path_from(
+    path: Option<&OsStr>,
+    home: Option<&Path>,
+    login_dirs: &[PathBuf],
+) -> Option<String> {
+    env::join_paths(launch_path_dirs(path, home, login_dirs))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 fn child_path_from_with_prepend(
@@ -404,10 +432,7 @@ mod tests {
         home: Option<&Path>,
         login_dirs: &[PathBuf],
     ) -> String {
-        env::join_paths(launch_path_dirs(path, home, login_dirs))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned()
+        child_path_from(path, home, login_dirs).unwrap()
     }
 
     #[test]
@@ -636,6 +661,46 @@ mod tests {
         assert_eq!(dirs[0], PathBuf::from("/usr/bin"));
         assert_eq!(dirs[1], PathBuf::from("/Users/tester/.bun/bin"));
         assert_eq!(dirs[2], PathBuf::from("/custom/bin"));
+    }
+
+    #[test]
+    fn env_shebangs_find_interpreters_on_the_launch_path() {
+        let root = temp_root("env-shebang");
+        let interpreter_dir = root.join("interp");
+        fs::create_dir_all(&interpreter_dir).unwrap();
+        let interpreter = interpreter_dir.join("qmux-test-node");
+        fs::write(&interpreter, "#!/bin/sh\nprintf 'found'\n").unwrap();
+        fs::set_permissions(&interpreter, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let script = root.join("pi");
+        fs::write(&script, "#!/usr/bin/env qmux-test-node\n").unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let empty = root.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        let mut missing = Command::new(&script);
+        missing.env("PATH", &empty);
+        assert!(
+            !missing.output().unwrap().status.success(),
+            "shebang should fail when the interpreter is not on PATH"
+        );
+
+        let launch_path = child_path_from(
+            Some(empty.as_os_str()),
+            None,
+            std::slice::from_ref(&interpreter_dir),
+        )
+        .unwrap();
+        let mut found = Command::new(&script);
+        found.env("PATH", &launch_path);
+        let output = found.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "found");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
