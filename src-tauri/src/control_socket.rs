@@ -291,7 +291,8 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
             // caller claims, so hook status can only be reported for its own pane.
             notification.pane_id = Some(authed_pane.clone());
 
-            if notification.event == "SessionStart" && state.agent_by_pane(&authed_pane)?.is_none()
+            if matches!(notification.event.as_str(), "SessionStart" | "sessionStart")
+                && state.agent_by_pane(&authed_pane)?.is_none()
             {
                 let adapter_id =
                     notification_adapter_hint(state, &notification)?.ok_or_else(|| {

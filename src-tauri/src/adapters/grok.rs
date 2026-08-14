@@ -124,10 +124,19 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn shell_commands(&self) -> Vec<ShellCommandIntegration> {
-        vec![ShellCommandIntegration {
-            command_name: "grok",
-            adapter_id: self.id(),
-        }]
+        // Grok ships the same binary as both `grok` and `agent`. Wrap both so a
+        // typed `agent` in a qmux shell is supervised like `grok`. `qmux agent`
+        // stays the public CLI and is not this alias.
+        vec![
+            ShellCommandIntegration {
+                command_name: "grok",
+                adapter_id: self.id(),
+            },
+            ShellCommandIntegration {
+                command_name: "agent",
+                adapter_id: self.id(),
+            },
+        ]
     }
 
     fn shell_resume_command(&self, session_id: &str) -> Option<String> {
@@ -2246,6 +2255,16 @@ mod tests {
             .shell_resume_command("sess-1")
             .expect("grok supports shell resume");
         assert_eq!(command, "grok --resume 'sess-1'");
+    }
+
+    #[test]
+    fn shell_commands_include_grok_and_agent_alias() {
+        let commands: Vec<_> = GrokAdapter::new(&test_config())
+            .shell_commands()
+            .into_iter()
+            .map(|command| (command.command_name, command.adapter_id))
+            .collect();
+        assert_eq!(commands, vec![("grok", "grok"), ("agent", "grok")]);
     }
 
     #[test]

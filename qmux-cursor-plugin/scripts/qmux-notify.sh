@@ -1,8 +1,11 @@
 #!/bin/sh
-# Observer shim for cursor-agent hooks. Forwards hook JSON from stdin to
-# `qmux notify <event>` when running inside a qmux pane. Always prints `{}` so
-# Cursor's hook contract is satisfied and standalone `cursor-agent` runs that
-# happen to load this plugin (via --plugin-dir) are unaffected.
+# Observer shim for cursor-agent hooks. The copy qmux actually launches is
+# generated (see `cursor_hook_shim`): cursor-agent does not inherit QMUX_*
+# into plugin hooks, so that overlay calls `qmux cursor-notify` with a baked
+# CLI path and bindings directory. This bundled script remains the env-gated
+# fallback used by plugin tests and by a standalone `cursor-agent --plugin-dir`
+# pointed at the repo copy. Always prints `{}` so Cursor's hook contract is
+# satisfied.
 event="${1:-}"
 payload=$(cat || true)
 if [ -n "$event" ] \

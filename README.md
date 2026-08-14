@@ -30,7 +30,7 @@ Rust. See [ACP agents](#acp-agents).
   surface on macOS, with a portable Rust PTY backend for tests and
   non-macOS platforms.
 - Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, Pi, and Cursor Agent, launched from the app
-  or by running `claude` / `codex` / `opencode` / `grok` / `muse` / `pi` / `cursor-agent` inside a shell
+  or by running `claude` / `codex` / `opencode` / `grok` / `agent` / `muse` / `pi` / `cursor-agent` inside a shell
   pane.
 - Agent panes for any ACP agent, configured under `adapters.acp` and launched
   from the app.
@@ -269,7 +269,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Shell panes spawn `$SHELL`.
 - Agent panes spawn the adapter's configured agent binary, either in the current
   repo/directory or in a qmux-created agent worktree. Shell functions can route
-  `claude`, `codex`, `opencode`, `grok`, `muse`, `pi`, and `cursor-agent` through qmux from shell panes, but the
+  `claude`, `codex`, `opencode`, `grok` (and Grok's `agent` alias), `muse`, `pi`, and `cursor-agent` through qmux from shell panes, but the
   adapter binary still needs to be installed or configured.
 - Each pane receives:
   - `QMUX_PANE_ID`
@@ -381,12 +381,15 @@ but fork creation will fail with an actionable module-location error; point
 
 The native Cursor adapter launches Cursor Agent's interactive TUI (`cursor-agent`)
 in a qmux pane. It is local-only: authentication, model changes, and shell
-approvals stay inside Cursor's TUI. qmux does not wrap the `agent` command
-(Grok uses that name) and does not treat Cursor's `-w`/`--worktree` as qmux
-worktrees.
+approvals stay inside Cursor's TUI. Grok's `agent` alias is wrapped by the
+Grok adapter; Cursor is `cursor-agent`. qmux does not treat Cursor's
+`-w`/`--worktree` as qmux worktrees.
 
 qmux injects one observer-only plugin with `--plugin-dir` on supervised
-launches. It does not mutate user or project `hooks.json`. The plugin reports
+launches. It does not mutate user or project `hooks.json`. cursor-agent runs
+those hooks with a constructed environment that does not inherit `QMUX_*`, so
+the plugin shim resolves the pane through a binding file (`qmux cursor-notify`)
+rather than the env-gated notify used by Claude/Grok. The plugin reports
 session identity, prompt submit, tool/shell start, thought, and turn-complete
 (`stop`); Cursor's JSONL remains the transcript source of truth. There is no
 native fork command. Development builds can point `QMUX_CURSOR_PLUGIN_DIR` at
@@ -395,11 +398,12 @@ another copy of the bundled `qmux-cursor-plugin`.
 Interactive `cursor-agent` commands typed in a qmux shell are supervised like
 launches from the app. Management and metadata utilities (`login`, `logout`,
 `status`, `whoami`, `about`, `models`, `mcp`, `plugin`, `worker`, `update`,
-`ls`, `resume`, `create-chat`, `generate-rule`, `rule`, `sandbox`, `acp`,
+`ls`, `create-chat`, `generate-rule`, `rule`, `sandbox`, `acp`,
 `install-shell-integration`, `uninstall-shell-integration`, `bedrock`, `help`,
 and `--help` / `--version` / `--print` / `--list-models`) pass through unchanged
-and do not create an agent record. `cursor-agent acp` is that passthrough: the
-ACP adapter remains a separate config entry if you want qmux-owned ACP
+and do not create an agent record. `cursor-agent resume` and `--continue` are
+supervised TUI resumes, not passthroughs. `cursor-agent acp` stays a passthrough:
+the ACP adapter remains a separate config entry if you want qmux-owned ACP
 rendering instead of the TUI.
 
 The qmux launcher can pass an optional `--mode plan` or `--mode ask`, plus a

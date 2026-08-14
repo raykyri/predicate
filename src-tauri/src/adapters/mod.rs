@@ -424,7 +424,7 @@ pub(crate) fn record_shell_fork_lineage(
 /// shell's reported `$PWD` rebinds the original agent even when its spelling differs from
 /// the recorded launch dir. Falls back to a raw compare when a side can't be canonicalized
 /// (e.g. the directory no longer exists), preserving the previous exact-match behavior.
-fn same_dir(a: &str, b: &str) -> bool {
+pub(crate) fn same_dir(a: &str, b: &str) -> bool {
     same_path(a, b)
 }
 

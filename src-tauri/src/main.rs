@@ -3089,12 +3089,13 @@ fn main() {
                 if let Some(warning) = state.take_recovery_warning() {
                     notify_startup_warning(app.handle(), &warning);
                 }
-                // Muse pane bindings hand a hook the pane's control-socket
-                // token, and tokens are minted per process. Every binding left
-                // on disk by the previous run is therefore already useless —
-                // drop them before recovery writes fresh ones for the Muse
-                // panes that do come back.
+                // Muse and Cursor pane bindings hand a hook the pane's
+                // control-socket token, and tokens are minted per process.
+                // Every binding left on disk by the previous run is therefore
+                // already useless — drop them before recovery writes fresh
+                // ones for the panes that do come back.
                 adapters::muse::clear_muse_bindings();
+                adapters::cursor::clear_cursor_bindings();
                 recovery::respawn_session(&state, recovered_panes);
                 // Re-level persisted nesting now that we know which panes actually
                 // came back (exited panes are not respawned).

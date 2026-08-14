@@ -4,7 +4,8 @@ use super::{
     SpawnAgentRequest, TranscriptLifecycleEvent, apply_shell_cli_model, cli_flag_value,
     ensure_on_path, hook_transcript_path_acceptable, maybe_record_agent_model,
     parse_claude_native_transcript_value, prepared_shell_agent, record_shell_session_lineage,
-    reusable_session_agent, shell_cli_model, shell_quote_arg, string_field, subagent_id,
+    reusable_session_agent, same_dir, shell_cli_model, shell_quote_arg, shell_quote_path,
+    string_field, subagent_id,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -21,15 +22,25 @@ use crate::workspace::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::env;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Adapter for the Cursor Agent CLI (`cursor-agent`).
 ///
 /// Cursor's interactive TUI is launched in a qmux pane. Lifecycle comes from a
-/// bundled observer plugin loaded with `--plugin-dir` (not from user/project
+/// generated observer plugin loaded with `--plugin-dir` (not from user/project
 /// `hooks.json`, which would be a shared writable target across panes). Native
 /// transcripts live under `~/.cursor/projects/<slug>/agent-transcripts/<id>/`
 /// and are Claude-shaped JSONL plus `turn_ended` records.
+///
+/// cursor-agent runs plugin hooks with a constructed environment that does not
+/// inherit `QMUX_*`, so the Claude-style env-gated shim cannot identify its
+/// pane. qmux writes a binding file per live Cursor pane and the generated
+/// plugin shim calls `qmux cursor-notify`, matching Muse. See
+/// [`write_cursor_binding`].
 ///
 /// There is no native fork command, and this adapter does not opt into remote
 /// groups: `--plugin-dir` points at a locally-materialized plugin.
@@ -58,15 +69,8 @@ impl CursorAdapter {
     }
 
     fn plugin_dir(&self) -> Result<PathBuf, String> {
-        let manifest = self.plugin_dir.join(".cursor-plugin").join("plugin.json");
-        let shim = self.plugin_dir.join("scripts").join("qmux-notify.sh");
-        if !self.plugin_dir.is_dir() || !manifest.is_file() || !shim.is_file() {
-            return Err(format!(
-                "Cursor integration plugin was not found at {}. Reinstall qmux or set QMUX_CURSOR_PLUGIN_DIR to the bundled qmux-cursor-plugin directory.",
-                self.plugin_dir.display()
-            ));
-        }
-        Ok(self.plugin_dir.clone())
+        ensure_source_cursor_plugin(&self.plugin_dir)?;
+        ensure_cursor_plugin_overlay(&self.plugin_dir)
     }
 
     fn integration_args(&self, cwd: &Path) -> Result<Vec<String>, String> {
@@ -263,6 +267,7 @@ impl CursorAdapter {
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("QMUX_ADAPTER_ID".to_string(), self.id().to_string()));
         attach_cursor_agent_pane(state, &agent.id, pane_id.clone(), has_initial_prompt)?;
+        write_cursor_binding(state, &pane_id, &agent.id, &cwd, None)?;
         let spawn_result = plan_to_spec(
             state,
             PaneMeta {
@@ -288,6 +293,7 @@ impl CursorAdapter {
         match spawn_result {
             Ok(pane) => Ok(pane),
             Err(err) => {
+                remove_cursor_binding(&pane_id);
                 let _ = mark_agent_spawn_failed(state, &agent.id, &pane_id);
                 Err(err)
             }
@@ -316,6 +322,13 @@ impl CursorAdapter {
         )?;
         let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
         envs.push(("QMUX_ADAPTER_ID".to_string(), self.id().to_string()));
+        write_cursor_binding(
+            state,
+            &pane.id,
+            &agent.id,
+            &cwd,
+            agent.session_id.as_deref(),
+        )?;
         let spec = plan_to_spec(
             state,
             PaneMeta {
@@ -384,6 +397,8 @@ impl CursorAdapter {
             .pane_group_id(&request.pane_id)?
             .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
         let resume_session_id = cursor_resume_session_id(&request.args);
+        let resume_latest =
+            resume_session_id.is_none() && cursor_resumes_latest_session(&request.args);
         let cursor_mode = cursor_cli_mode(&request.args)?;
         let agent = match prepared_shell_agent(
             state,
@@ -401,6 +416,21 @@ impl CursorAdapter {
                 &cwd_str,
             )? {
                 Some(existing) => existing,
+                None if resume_latest => match reusable_latest_cursor_agent(state, &cwd_str)? {
+                    Some(existing) => existing,
+                    None => prepare_agent_workspace(
+                        state,
+                        PrepareAgentWorkspaceRequest {
+                            group_id: Some(pane_group_id.clone()),
+                            base_repo: Some(cwd_str.clone()),
+                            base_ref: Some("HEAD".to_string()),
+                            adapter: self.id().to_string(),
+                            model: shell_cli_model(&request.args),
+                            effort: None,
+                            use_worktree: false,
+                        },
+                    )?,
+                },
                 None => prepare_agent_workspace(
                     state,
                     PrepareAgentWorkspaceRequest {
@@ -437,6 +467,13 @@ impl CursorAdapter {
             &agent.id,
             request.pane_id.clone(),
             cursor_args_contain_prompt(&request.args),
+        )?;
+        write_cursor_binding(
+            state,
+            &request.pane_id,
+            &agent.id,
+            &cwd,
+            agent.session_id.as_deref().or(resume_session_id.as_deref()),
         )?;
         args.extend(request.args);
         let mut envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
@@ -697,7 +734,6 @@ fn cursor_management_command(arg: &str) -> bool {
             | "worker"
             | "update"
             | "ls"
-            | "resume"
             | "create-chat"
             | "generate-rule"
             | "rule"
@@ -733,7 +769,78 @@ fn cursor_value_flag(arg: &str) -> bool {
 }
 
 fn cursor_resume_session_id(args: &[String]) -> Option<String> {
-    cli_flag_value(args, "--resume").filter(|value| cursor_session_id_acceptable(value))
+    cli_flag_value(args, "--resume")
+        .or_else(|| cursor_resume_subcommand_id(args))
+        .filter(|value| cursor_session_id_acceptable(value))
+}
+
+fn cursor_resume_subcommand_id(args: &[String]) -> Option<String> {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            return None;
+        }
+        if cursor_value_flag(arg) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        if arg == "resume" {
+            return args
+                .get(index + 1)
+                .filter(|value| !value.starts_with('-'))
+                .cloned();
+        }
+        return None;
+    }
+    None
+}
+
+fn cursor_resumes_latest_session(args: &[String]) -> bool {
+    let mut index = 0;
+    while index < args.len() {
+        let arg = &args[index];
+        if arg == "--" {
+            return false;
+        }
+        if arg == "--continue" {
+            return true;
+        }
+        if cursor_value_flag(arg) {
+            index += 2;
+            continue;
+        }
+        if arg.starts_with('-') {
+            index += 1;
+            continue;
+        }
+        return arg == "resume"
+            && args
+                .get(index + 1)
+                .is_none_or(|value| value.starts_with('-'));
+    }
+    false
+}
+
+fn cursor_session_subcommand(arg: &str) -> bool {
+    matches!(arg, "resume" | "agent")
+}
+
+fn reusable_latest_cursor_agent(state: &AppState, cwd: &str) -> Result<Option<AgentInfo>, String> {
+    Ok(state
+        .list_agents()?
+        .into_iter()
+        .filter(|agent| {
+            agent.adapter == "cursor"
+                && agent.pane_id.is_none()
+                && agent.session_id.is_some()
+                && same_dir(&agent.worktree_dir, cwd)
+        })
+        .max_by_key(|agent| agent.created_at))
 }
 
 fn cursor_cli_mode(args: &[String]) -> Result<Option<String>, String> {
@@ -783,7 +890,7 @@ fn cursor_args_contain_prompt(args: &[String]) -> bool {
             index += 1;
             continue;
         }
-        if cursor_management_command(arg) || arg == "agent" {
+        if cursor_management_command(arg) || cursor_session_subcommand(arg) {
             index += 1;
             continue;
         }
@@ -916,6 +1023,9 @@ fn bind_cursor_session(
             agent.transcript_path = Some(transcript_path);
         }
     })?;
+    if let Some(session_id) = session_id {
+        claim_cursor_binding(current, &session_id);
+    }
     if let Some(path) = updated.and_then(|agent| agent.transcript_path) {
         start_transcript_tail(
             state.clone(),
@@ -953,6 +1063,277 @@ fn cursor_session_id_acceptable(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+// ---------------------------------------------------------------------------
+// Pane bindings and generated plugin
+//
+// cursor-agent runs plugin hooks with a constructed env that does not inherit
+// QMUX_*. The bundled env-gated shim therefore never notifies, so a restored
+// pane has no session id to `--resume`. qmux materializes a plugin overlay
+// whose shim calls `cursor-notify` with a baked CLI path and bindings dir,
+// and writes one binding file per live pane (the Muse pattern).
+// ---------------------------------------------------------------------------
+
+fn ensure_source_cursor_plugin(source: &Path) -> Result<(), String> {
+    let manifest = source.join(".cursor-plugin").join("plugin.json");
+    let hooks = source.join("hooks").join("hooks.json");
+    if !source.is_dir() || !manifest.is_file() || !hooks.is_file() {
+        return Err(format!(
+            "Cursor integration plugin was not found at {}. Reinstall qmux or set QMUX_CURSOR_PLUGIN_DIR to the bundled qmux-cursor-plugin directory.",
+            source.display()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn cursor_integration_home() -> Result<PathBuf, String> {
+    if let Some(explicit) = env::var_os("QMUX_CURSOR_HOME") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let data_home = env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .ok_or_else(|| {
+            "XDG_DATA_HOME and HOME are not set; cannot configure the Cursor integration"
+                .to_string()
+        })?;
+    Ok(data_home.join("qmux").join("cursor"))
+}
+
+fn cursor_bindings_dir() -> Result<PathBuf, String> {
+    Ok(cursor_integration_home()?.join("bindings"))
+}
+
+fn ensure_cursor_plugin_overlay(source: &Path) -> Result<PathBuf, String> {
+    let home = cursor_integration_home()?;
+    let plugin_dir = home.join("plugin");
+    let cli = crate::launch_path::qmux_cli_path()?;
+    let bindings = cursor_bindings_dir()?;
+    let shim = cursor_hook_shim(&cli, &bindings);
+    let manifest = fs::read_to_string(source.join(".cursor-plugin").join("plugin.json"))
+        .map_err(|err| format!("failed to read Cursor plugin manifest: {err}"))?;
+    let hooks = fs::read_to_string(source.join("hooks").join("hooks.json"))
+        .map_err(|err| format!("failed to read Cursor plugin hooks: {err}"))?;
+    let fingerprint = fingerprint_of(&[
+        shim.clone(),
+        manifest.clone(),
+        hooks.clone(),
+        cli.display().to_string(),
+        bindings.display().to_string(),
+    ]);
+    let stamp_path = home.join("installed.stamp");
+    if file_matches(&stamp_path, &fingerprint)
+        && plugin_dir.join("scripts").join("qmux-notify.sh").is_file()
+    {
+        return Ok(plugin_dir);
+    }
+
+    for dir in [
+        plugin_dir.join(".cursor-plugin"),
+        plugin_dir.join("hooks"),
+        plugin_dir.join("scripts"),
+    ] {
+        fs::create_dir_all(&dir)
+            .map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    }
+    write_if_changed(
+        &plugin_dir.join(".cursor-plugin").join("plugin.json"),
+        &manifest,
+    )?;
+    write_if_changed(&plugin_dir.join("hooks").join("hooks.json"), &hooks)?;
+    let shim_path = plugin_dir.join("scripts").join("qmux-notify.sh");
+    write_if_changed(&shim_path, &shim)?;
+    fs::set_permissions(&shim_path, fs::Permissions::from_mode(0o755))
+        .map_err(|err| format!("failed to chmod {}: {err}", shim_path.display()))?;
+    fs::write(&stamp_path, &fingerprint)
+        .map_err(|err| format!("failed to write {}: {err}", stamp_path.display()))?;
+    Ok(plugin_dir)
+}
+
+fn cursor_hook_shim(cli_path: &Path, bindings_dir: &Path) -> String {
+    format!(
+        r#"#!/bin/sh
+# Generated by qmux. Do not edit.
+event="${{1:-}}"
+payload=$(cat || true)
+if [ -n "$event" ]; then
+  printf '%s' "$payload" | {} cursor-notify "$event" {} >/dev/null 2>&1 || true
+fi
+printf '%s\n' '{{}}'
+"#,
+        shell_quote_path(cli_path),
+        shell_quote_path(bindings_dir)
+    )
+}
+
+fn write_cursor_binding(
+    state: &AppState,
+    pane_id: &str,
+    agent_id: &str,
+    cwd: &Path,
+    session_id: Option<&str>,
+) -> Result<(), String> {
+    prune_cursor_bindings(state);
+    let dir = cursor_bindings_dir()?;
+    fs::create_dir_all(&dir).map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+        .map_err(|err| format!("failed to chmod {}: {err}", dir.display()))?;
+
+    let canonical_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let document = json!({
+        "paneId": pane_id,
+        "agentId": agent_id,
+        "cwd": cwd.display().to_string(),
+        "canonicalCwd": canonical_cwd.display().to_string(),
+        "sessionId": session_id,
+        "sock": state.config().socket_path.display().to_string(),
+        "token": state.pane_token(pane_id)?,
+        "updatedAt": unix_millis(),
+    });
+    let path = cursor_binding_path(&dir, pane_id);
+    let raw = serde_json::to_string(&document)
+        .map_err(|err| format!("failed to encode Cursor pane binding: {err}"))?;
+    fs::write(&path, raw).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("failed to chmod {}: {err}", path.display()))?;
+    Ok(())
+}
+
+fn claim_cursor_binding(agent: &AgentInfo, session_id: &str) {
+    let Some(pane_id) = agent.pane_id.as_deref() else {
+        return;
+    };
+    if let Err(err) = stamp_cursor_binding_session(pane_id, session_id) {
+        eprintln!("qmux: failed to record Cursor session binding for pane {pane_id}: {err}");
+    }
+}
+
+fn stamp_cursor_binding_session(pane_id: &str, session_id: &str) -> Result<(), String> {
+    let dir = cursor_bindings_dir()?;
+    let path = cursor_binding_path(&dir, pane_id);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let mut document = serde_json::from_str::<Value>(&raw)
+        .map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
+    let Some(object) = document.as_object_mut() else {
+        return Err(format!("{} is not a binding object", path.display()));
+    };
+    object.insert("sessionId".to_string(), json!(session_id));
+    object.insert("updatedAt".to_string(), json!(unix_millis()));
+    let raw = serde_json::to_string(&document)
+        .map_err(|err| format!("failed to encode Cursor pane binding: {err}"))?;
+    fs::write(&path, raw).map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+        .map_err(|err| format!("failed to chmod {}: {err}", path.display()))
+}
+
+fn cursor_binding_path(dir: &Path, pane_id: &str) -> PathBuf {
+    dir.join(format!("{}.json", sanitize_binding_name(pane_id)))
+}
+
+fn sanitize_binding_name(pane_id: &str) -> String {
+    pane_id
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn remove_cursor_binding(pane_id: &str) {
+    let Ok(dir) = cursor_bindings_dir() else {
+        return;
+    };
+    let _ = fs::remove_file(cursor_binding_path(&dir, pane_id));
+}
+
+const CURSOR_BINDING_PRUNE_GRACE: u64 = 60_000;
+
+fn prune_cursor_bindings(state: &AppState) {
+    let Ok(dir) = cursor_bindings_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    let now = unix_millis();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let document = fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<Value>(&raw).ok());
+        let Some(document) = document else {
+            let _ = fs::remove_file(&path);
+            continue;
+        };
+        let written = document
+            .get("updatedAt")
+            .and_then(Value::as_u64)
+            .unwrap_or_default();
+        if now.saturating_sub(written) < CURSOR_BINDING_PRUNE_GRACE {
+            continue;
+        }
+        let stale = match string_field(&document, "paneId") {
+            Some(pane_id) => !state.pane_exists(&pane_id).unwrap_or(true),
+            None => true,
+        };
+        if stale {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+/// Tokens are minted per process, so every binding left by a previous run is
+/// already useless. Called once at startup before recovery writes fresh ones.
+pub fn clear_cursor_bindings() {
+    let Ok(dir) = cursor_bindings_dir() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            let _ = fs::remove_file(&path);
+        }
+    }
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or_default()
+}
+
+fn write_if_changed(path: &Path, contents: &str) -> Result<(), String> {
+    if file_matches(path, contents) {
+        return Ok(());
+    }
+    fs::write(path, contents).map_err(|err| format!("failed to write {}: {err}", path.display()))
+}
+
+fn file_matches(path: &Path, contents: &str) -> bool {
+    fs::read_to_string(path).is_ok_and(|existing| existing == contents)
+}
+
+fn fingerprint_of(parts: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0u8]);
+    }
+    format!("{:x}\n", hasher.finalize())
 }
 
 fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Option<Turn> {
@@ -1063,7 +1444,7 @@ mod tests {
         );
         assert_eq!(
             cursor_shell_disposition(&args(&["resume"])),
-            CursorShellDisposition::Passthrough
+            CursorShellDisposition::Supervised
         );
         assert_eq!(
             cursor_shell_disposition(&[]),
@@ -1090,12 +1471,24 @@ mod tests {
                 .as_deref(),
             Some("d68b3651-d521-4263-aad5-5cabcb413035")
         );
+        assert_eq!(
+            cursor_resume_session_id(&args(&["resume", "d68b3651-d521-4263-aad5-5cabcb413035"]))
+                .as_deref(),
+            Some("d68b3651-d521-4263-aad5-5cabcb413035")
+        );
         assert_eq!(cursor_resume_session_id(&args(&["--resume"])), None);
         assert_eq!(cursor_resume_session_id(&args(&["--continue"])), None);
         assert_eq!(
             cursor_resume_session_id(&args(&["--resume", "../etc/passwd"])),
             None
         );
+        assert!(cursor_resumes_latest_session(&args(&["--continue"])));
+        assert!(cursor_resumes_latest_session(&args(&["resume"])));
+        assert!(!cursor_resumes_latest_session(&args(&[
+            "--resume",
+            "d68b3651-d521-4263-aad5-5cabcb413035"
+        ])));
+        assert!(!cursor_resumes_latest_session(&args(&["login"])));
     }
 
     #[test]
@@ -1164,6 +1557,19 @@ mod tests {
     }
 
     #[test]
+    fn generated_hook_shim_forwards_without_needing_the_environment() {
+        let shim = cursor_hook_shim(
+            Path::new("/Applications/qmux.app/qmux"),
+            Path::new("/data/qmux/cursor/bindings"),
+        );
+        assert!(shim.contains("cursor-notify"));
+        assert!(shim.contains("'/Applications/qmux.app/qmux'"));
+        assert!(shim.contains("'/data/qmux/cursor/bindings'"));
+        assert!(!shim.contains("QMUX_SOCK"));
+        assert!(shim.contains("printf '%s\\n' '{}'"));
+    }
+
+    #[test]
     fn parser_reads_claude_shaped_jsonl_and_skips_turn_ended() {
         let user = r#"{"role":"user","message":{"content":[{"type":"text","text":"PONG?"}]}}"#;
         let assistant =
@@ -1206,6 +1612,7 @@ mod tests {
             "d68b3651-d521-4263-aad5-5cabcb413035"
         ])));
         assert!(!cursor_args_contain_prompt(&args(&["--continue"])));
+        assert!(!cursor_args_contain_prompt(&args(&["resume"])));
         assert!(cursor_args_contain_prompt(&args(&["--", "hello"])));
         assert!(!cursor_args_contain_prompt(&args(&[
             "--model",

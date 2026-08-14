@@ -6,6 +6,7 @@
 //! reporting, and forks once a transport exists.
 
 mod acp;
+mod cursor;
 mod mcp;
 mod muse;
 mod public_cli;
@@ -105,6 +106,16 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             // The generated shim always supplies the directory, because Muse
             // strips every variable it could otherwise be derived from.
             muse::notify(event, args.next())?;
+            Ok(true)
+        }
+        "cursor-notify" => {
+            // cursor-agent runs plugin hooks with a constructed env that does
+            // not inherit QMUX_*. The generated plugin shim therefore resolves
+            // the pane from a binding file, the same way muse-notify does.
+            let event = args
+                .next()
+                .ok_or_else(|| "usage: qmux cursor-notify <event> [bindings-dir]".to_string())?;
+            cursor::notify(event, args.next())?;
             Ok(true)
         }
         "cwd" => {
@@ -545,7 +556,10 @@ mod tests {
 
     #[test]
     fn shell_passthrough_does_not_require_an_agent_binding() {
-        assert_eq!(prepared_agent_id(&prepared_launch(false, Vec::new())).unwrap(), None);
+        assert_eq!(
+            prepared_agent_id(&prepared_launch(false, Vec::new())).unwrap(),
+            None
+        );
     }
 
     #[test]
@@ -560,7 +574,10 @@ mod tests {
                 value: "agent-1".to_string(),
             }],
         );
-        assert_eq!(prepared_agent_id(&launch).unwrap().as_deref(), Some("agent-1"));
+        assert_eq!(
+            prepared_agent_id(&launch).unwrap().as_deref(),
+            Some("agent-1")
+        );
     }
 
     #[test]
