@@ -193,6 +193,7 @@ import {
   agentSupportsForkAtMessage,
   agentStatusTone,
   clamp,
+  clampContextMenuToViewport,
   cycleTabId,
   defaultPaneTitle,
   firstUserTurnText,
@@ -1653,6 +1654,9 @@ function MainApp() {
     null,
   );
   const [settingsMenu, setSettingsMenu] = useState<{ x: number; y: number } | null>(null);
+  const paneContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  const settingsMenuRef = useRef<HTMLDivElement | null>(null);
   const [panes, setPanes] = useState<PaneInfo[]>([]);
   const applyRecoveredDismissals = useCallback((paneList: PaneInfo[]) => {
     const dismissed = dismissedRecoveredPaneIdsRef.current;
@@ -10223,12 +10227,16 @@ function MainApp() {
     event.stopPropagation();
     setGroupMenu(null);
     setSettingsMenu(null);
-    const maxX = Math.max(8, window.innerWidth - PANE_CONTEXT_MENU_WIDTH - 8);
-    const maxY = Math.max(8, window.innerHeight - PANE_CONTEXT_MENU_ESTIMATED_HEIGHT - 8);
+    const { x, y } = clampContextMenuToViewport({
+      x: event.clientX,
+      y: event.clientY,
+      width: PANE_CONTEXT_MENU_WIDTH,
+      height: PANE_CONTEXT_MENU_ESTIMATED_HEIGHT,
+    });
     setPaneContextMenu({
       paneId: pane.id,
-      x: clamp(event.clientX, 8, maxX),
-      y: clamp(event.clientY, 8, maxY),
+      x,
+      y,
     });
   }
 
@@ -11635,6 +11643,66 @@ function MainApp() {
     }
   }, [paneContextMenu, panes, groupMenu, groups]);
 
+  // Estimates used at click time can undershoot a tab menu that grew extra
+  // rows (cwd, fork actions, join). After the real menu paints, shift it up so
+  // it stays inside the window instead of running off the bottom.
+  useLayoutEffect(() => {
+    const menus: Array<{
+      element: HTMLElement | null;
+      x: number;
+      y: number;
+      assign: (x: number, y: number) => void;
+    }> = [];
+    if (paneContextMenu) {
+      menus.push({
+        element: paneContextMenuRef.current,
+        x: paneContextMenu.x,
+        y: paneContextMenu.y,
+        assign: (x, y) =>
+          setPaneContextMenu((current) =>
+            current && (current.x !== x || current.y !== y) ? { ...current, x, y } : current,
+          ),
+      });
+    }
+    if (groupMenu) {
+      menus.push({
+        element: groupMenuRef.current,
+        x: groupMenu.x,
+        y: groupMenu.y,
+        assign: (x, y) =>
+          setGroupMenu((current) =>
+            current && (current.x !== x || current.y !== y) ? { ...current, x, y } : current,
+          ),
+      });
+    }
+    if (settingsMenu) {
+      menus.push({
+        element: settingsMenuRef.current,
+        x: settingsMenu.x,
+        y: settingsMenu.y,
+        assign: (x, y) =>
+          setSettingsMenu((current) =>
+            current && (current.x !== x || current.y !== y) ? { ...current, x, y } : current,
+          ),
+      });
+    }
+    for (const menu of menus) {
+      if (!menu.element) {
+        continue;
+      }
+      const rect = menu.element.getBoundingClientRect();
+      const next = clampContextMenuToViewport({
+        x: menu.x,
+        y: menu.y,
+        width: rect.width,
+        height: rect.height,
+      });
+      if (next.x !== menu.x || next.y !== menu.y) {
+        menu.assign(next.x, next.y);
+      }
+    }
+  }, [paneContextMenu, groupMenu, settingsMenu]);
+
   // Persist application settings whenever they change, so the choice survives a
   // restart. Writing on the initial value is harmless.
   useEffect(() => {
@@ -12586,8 +12654,12 @@ function MainApp() {
     setSettingsMenu(null);
     setGroupMenu({
       groupId: group.id,
-      x: clamp(event.clientX, 8, Math.max(8, window.innerWidth - GROUP_CONTEXT_MENU_WIDTH - 8)),
-      y: clamp(event.clientY, 8, Math.max(8, window.innerHeight - GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT - 8)),
+      ...clampContextMenuToViewport({
+        x: event.clientX,
+        y: event.clientY,
+        width: GROUP_CONTEXT_MENU_WIDTH,
+        height: GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT,
+      }),
     });
   }
 
@@ -12604,8 +12676,12 @@ function MainApp() {
         ? null
         : {
             groupId: group.id,
-            x: clamp(x, 8, Math.max(8, window.innerWidth - GROUP_CONTEXT_MENU_WIDTH - 8)),
-            y: clamp(y, 8, Math.max(8, window.innerHeight - GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT - 8)),
+            ...clampContextMenuToViewport({
+              x,
+              y,
+              width: GROUP_CONTEXT_MENU_WIDTH,
+              height: GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT,
+            }),
           },
     );
   }
@@ -13968,6 +14044,7 @@ function MainApp() {
 
       {settingsMenu ? (
         <div
+          ref={settingsMenuRef}
           className="popover-surface popover-surface--context pane-context-menu settings-context-menu"
           role="menu"
           aria-label="Settings menu"
@@ -14099,6 +14176,7 @@ function MainApp() {
 
       {groupMenu && groupMenuGroup ? (
         <div
+          ref={groupMenuRef}
           className="popover-surface popover-surface--context pane-context-menu group-context-menu"
           role="menu"
           aria-label="Group options"
@@ -14214,6 +14292,7 @@ function MainApp() {
 
       {paneContextMenu && contextMenuPane ? (
         <div
+          ref={paneContextMenuRef}
           className="popover-surface popover-surface--context pane-context-menu"
           role="dialog"
           aria-label={`${contextMenuDisplayTitle} details`}

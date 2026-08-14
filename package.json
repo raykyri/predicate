@@ -26,6 +26,7 @@
     "test:claude-turns": "node scripts/test-claude-turns.mjs",
     "test:pane-splits": "node scripts/test-pane-splits.mjs",
     "test:sidebar-controls": "node --import tsx --test tests/sidebarControls.test.ts",
+    "test:context-menu-placement": "node --import tsx --test tests/contextMenuPlacement.test.ts",
     "test:research-highlights": "node scripts/test-research-highlights.mjs",
     "test:research-navigation": "node scripts/test-research-navigation.mjs",
     "test:research-events": "node scripts/test-research-events.mjs",

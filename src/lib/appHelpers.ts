@@ -27,6 +27,37 @@ export function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
+/** Inset kept between a pointer-anchored context menu and the window edge. */
+export const CONTEXT_MENU_VIEWPORT_MARGIN = 8;
+
+/**
+ * Keep a fixed-position context menu inside the window. `x`/`y` are the
+ * preferred top-left (usually the pointer). When the menu would run off the
+ * bottom or right edge, it shifts up/left; a menu taller than the window pins
+ * to the top margin (CSS `max-height` then scrolls the rest).
+ */
+export function clampContextMenuToViewport(args: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  margin?: number;
+  viewportWidth?: number;
+  viewportHeight?: number;
+}): { x: number; y: number } {
+  const margin = args.margin ?? CONTEXT_MENU_VIEWPORT_MARGIN;
+  const viewportWidth =
+    args.viewportWidth ??
+    (typeof window === "undefined" ? args.x + args.width + margin : window.innerWidth);
+  const viewportHeight =
+    args.viewportHeight ??
+    (typeof window === "undefined" ? args.y + args.height + margin : window.innerHeight);
+  return {
+    x: clamp(args.x, margin, Math.max(margin, viewportWidth - margin - args.width)),
+    y: clamp(args.y, margin, Math.max(margin, viewportHeight - margin - args.height)),
+  };
+}
+
 export function firstUserTurnText(turn: Turn): string | null {
   if (
     turn.role !== "user" ||
