@@ -13,6 +13,23 @@ export interface Feature {
   copy: string;
 }
 
+export interface SupportedAgent {
+  id: "claude" | "codex" | "opencode" | "grok" | "muse" | "pi" | "cursor";
+  label: string;
+}
+
+// First-party adapters with a native TUI. ACP is omitted: it is a wire
+// protocol for other agents, not a product with its own mark.
+export const SUPPORTED_AGENTS: SupportedAgent[] = [
+  { id: "claude", label: "Claude Code" },
+  { id: "codex", label: "Codex" },
+  { id: "opencode", label: "OpenCode" },
+  { id: "grok", label: "Grok" },
+  { id: "muse", label: "Muse" },
+  { id: "pi", label: "Pi" },
+  { id: "cursor", label: "Cursor" },
+];
+
 export const FEATURES: Feature[] = [
   {
     name: "Rich text transcripts",

@@ -887,7 +887,15 @@ test("the landing page renders the app replica and its own image policy", async 
   const response = await fetch(`http://127.0.0.1:${address.port}/`);
   const body = await response.text();
   assert.equal(response.status, 200);
-  assert.match(body, /Visual terminal for coding agents/);
+  assert.match(body, /Your terminal, extended/);
+  assert.match(body, /A simpler approach to coding agent orchestration\./);
+  assert.match(body, /qmux powers up the terminal with artifacts, visual transcripts/);
+  assert.match(body, /aria-label="Supported agents"/);
+  assert.match(body, /class="hero-agents"/);
+  for (const label of ["Claude Code", "Codex", "OpenCode", "Grok", "Muse", "Pi", "Cursor"]) {
+    assert.match(body, new RegExp(`class="visually-hidden">${label}<`));
+  }
+  assert.doesNotMatch(body, /class="visually-hidden">ACP</);
   assert.match(body, /<a href="#features">Features<\/a>/);
   assert.match(body, /<section class="grid-section" id="features" aria-label="Features">/);
   assert.match(body, /html \{\s*scroll-behavior: smooth;/);

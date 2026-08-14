@@ -176,14 +176,51 @@ code {
 }
 
 /* Hero */
-.hero-title {
+.hero-lead {
   grid-column: 1 / 5;
   align-self: end;
+  display: flex;
+  flex-direction: column;
+  gap: calc(0.85rem + 10px);
+}
+
+.hero-title {
   font-size: clamp(2.125rem, 3.35vw, 2.625rem);
   line-height: 0.98;
   font-weight: 400;
   letter-spacing: -0.035em;
   text-wrap: balance;
+}
+
+.hero-agents {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.7rem;
+  list-style: none;
+  padding: 0;
+  color: var(--muted);
+}
+
+.hero-agents li {
+  display: flex;
+  line-height: 0;
+}
+
+.hero-agents svg {
+  display: block;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .text-link {
@@ -316,7 +353,7 @@ code {
 }
 
 @media (max-width: 52rem) {
-  .hero-title,
+  .hero-lead,
   .intro-copy {
     grid-column: 1 / 9;
     text-align: left;
@@ -348,7 +385,7 @@ code {
     grid-column: 6 / 9;
   }
 
-  .hero-title,
+  .hero-lead,
   .intro-copy,
   .product-shot,
   .feature-list {

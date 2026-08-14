@@ -4,6 +4,7 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppMockup from "./AppMockup";
+import { HeroAgents } from "./agentIcons";
 import { FEATURES, GITHUB_URL, RELEASES_URL, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import { LANDING_CSS } from "./landingCss";
 import { MOCKUP_CSS } from "./mockupCss";
@@ -31,13 +32,19 @@ function SiteHeader() {
 function Hero() {
   return (
     <section className="grid-section" aria-labelledby="hero-title">
-      <h1 className="hero-title" id="hero-title">
-        Visual terminal for coding agents
-      </h1>
+      <div className="hero-lead">
+        <h1 className="hero-title" id="hero-title">
+          Your terminal, extended
+        </h1>
+        <HeroAgents />
+      </div>
       <div className="intro-copy">
         <p>
-          A terminal that extends native CLI coding agents, with artifacts, visual transcripts,
-          cross-agent queueing, and more.
+          A simpler approach to coding agent orchestration.
+        </p>
+        <p>
+          qmux powers up the terminal with artifacts, visual transcripts, 
+          cross-agent queues, and more.
         </p>
       </div>
       <figure className="product-shot">
