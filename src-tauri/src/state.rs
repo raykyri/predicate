@@ -10712,11 +10712,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
             opencode_plugin_dir: std::path::PathBuf::new(),
             pi_extension_dir: std::path::PathBuf::new(),
+            cursor_plugin_dir: std::path::PathBuf::new(),
         }
     }
 

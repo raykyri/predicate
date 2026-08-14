@@ -1682,6 +1682,7 @@ fn adapter_label(adapter: &str) -> &str {
         "opencode" => "OpenCode",
         "grok" => "Grok",
         "muse" => "Muse",
+        "cursor" => "Cursor",
         _ => "Agent",
     }
 }

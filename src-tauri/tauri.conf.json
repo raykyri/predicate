@@ -50,6 +50,7 @@
       "../qmux-pi-extension/index.js": "qmux-pi-extension/index.js",
       "../qmux-pi-extension/package.json": "qmux-pi-extension/package.json",
       "../qmux-pi-extension/session-helper.js": "qmux-pi-extension/session-helper.js",
+      "../qmux-cursor-plugin/": "qmux-cursor-plugin",
       "../src/assets/fonts/DMSans-OFL.txt": "licenses/DMSans-OFL.txt",
       "../src/assets/fonts/IoskeleyMono-OFL.txt": "licenses/IoskeleyMono-OFL.txt",
       "../src/assets/fonts/ValleySans-OFL.txt": "licenses/ValleySans-OFL.txt",

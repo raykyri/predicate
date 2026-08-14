@@ -42,6 +42,12 @@ pub struct QmuxConfig {
     /// load time and never serialized into user config.
     #[serde(skip)]
     pub pi_extension_dir: PathBuf,
+    /// Directory of the qmux-managed Cursor observer plugin injected into
+    /// launched `cursor-agent` processes via `--plugin-dir`. Resolved at load
+    /// time from `QMUX_CURSOR_PLUGIN_DIR` or `<cwd>/qmux-cursor-plugin`; never
+    /// read from or written to the config JSON.
+    #[serde(skip)]
+    pub cursor_plugin_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -59,6 +65,8 @@ pub struct AdapterConfigs {
     pub muse: MuseAdapterConfig,
     #[serde(default)]
     pub pi: PiAdapterConfig,
+    #[serde(default)]
+    pub cursor: CursorAdapterConfig,
     #[serde(default)]
     pub acp: AcpAdapterConfig,
 }
@@ -101,6 +109,13 @@ pub struct MuseAdapterConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PiAdapterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorAdapterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
 }
@@ -332,6 +347,7 @@ impl QmuxConfig {
         config.claude_plugin_dir = resolve_claude_plugin_dir(&cwd);
         config.opencode_plugin_dir = resolve_opencode_plugin_dir(&cwd);
         config.pi_extension_dir = resolve_pi_extension_dir(&cwd);
+        config.cursor_plugin_dir = resolve_cursor_plugin_dir(&cwd);
 
         fs::create_dir_all(&config.workspace_root).map_err(|err| {
             format!(
@@ -518,6 +534,16 @@ impl QmuxConfig {
         )
     }
 
+    pub fn cursor_binary(&self) -> String {
+        expand_binary(
+            self.adapters
+                .cursor
+                .binary
+                .clone()
+                .unwrap_or_else(|| "cursor-agent".to_string()),
+        )
+    }
+
     fn read_config_file(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -567,6 +593,9 @@ impl QmuxConfig {
                 pi: PiAdapterConfig {
                     binary: Some("pi".to_string()),
                 },
+                cursor: CursorAdapterConfig {
+                    binary: Some("cursor-agent".to_string()),
+                },
                 acp: AcpAdapterConfig::default(),
             },
             remotes: BTreeMap::new(),
@@ -576,6 +605,7 @@ impl QmuxConfig {
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         })
     }
 }
@@ -638,6 +668,19 @@ fn resolve_pi_extension_dir(cwd: &Path) -> PathBuf {
         override_os.as_deref().map(Path::new),
         exe_dir.as_deref(),
         "qmux-pi-extension",
+    )
+}
+
+fn resolve_cursor_plugin_dir(cwd: &Path) -> PathBuf {
+    let override_os = env::var_os("QMUX_CURSOR_PLUGIN_DIR").filter(|value| !value.is_empty());
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    pick_plugin_dir(
+        cwd,
+        override_os.as_deref().map(Path::new),
+        exe_dir.as_deref(),
+        "qmux-cursor-plugin",
     )
 }
 
@@ -1054,6 +1097,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configured.pi_binary(), "/opt/bin/pi");
+    }
+
+    #[test]
+    fn cursor_binary_defaults_and_can_be_configured() {
+        let default_config: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(default_config.cursor_binary(), "cursor-agent");
+
+        let configured: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock",
+              "adapters": {
+                "cursor": {
+                  "binary": "/opt/bin/cursor-agent"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(configured.cursor_binary(), "/opt/bin/cursor-agent");
     }
 
     #[test]

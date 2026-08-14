@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [{ "command": "./scripts/qmux-notify.sh sessionStart" }],
+    "sessionEnd": [{ "command": "./scripts/qmux-notify.sh sessionEnd" }],
+    "beforeSubmitPrompt": [{ "command": "./scripts/qmux-notify.sh beforeSubmitPrompt" }],
+    "stop": [{ "command": "./scripts/qmux-notify.sh stop" }],
+    "afterAgentResponse": [{ "command": "./scripts/qmux-notify.sh afterAgentResponse" }],
+    "afterAgentThought": [{ "command": "./scripts/qmux-notify.sh afterAgentThought" }],
+    "preToolUse": [{ "command": "./scripts/qmux-notify.sh preToolUse" }],
+    "postToolUse": [{ "command": "./scripts/qmux-notify.sh postToolUse" }],
+    "postToolUseFailure": [{ "command": "./scripts/qmux-notify.sh postToolUseFailure" }],
+    "beforeShellExecution": [{ "command": "./scripts/qmux-notify.sh beforeShellExecution" }],
+    "afterShellExecution": [{ "command": "./scripts/qmux-notify.sh afterShellExecution" }],
+    "subagentStart": [{ "command": "./scripts/qmux-notify.sh subagentStart" }],
+    "subagentStop": [{ "command": "./scripts/qmux-notify.sh subagentStop" }]
+  }
+}

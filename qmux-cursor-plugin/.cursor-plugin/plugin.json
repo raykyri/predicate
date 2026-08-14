@@ -1,0 +1,7 @@
+{
+  "name": "qmux-cursor-observer",
+  "version": "0.1.0",
+  "description": "Observer-only qmux integration for cursor-agent. Reports session identity and turn boundaries; registers no tools, commands, or skills.",
+  "author": { "name": "qmux" },
+  "hooks": "hooks/hooks.json"
+}

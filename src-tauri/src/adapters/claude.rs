@@ -2705,11 +2705,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         })
     }
 
@@ -2736,11 +2738,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         })
     }
 
@@ -2770,11 +2774,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         };
 
         let (settings_path, support_file) = hook_settings_support_file(&config, "pane-1").unwrap();
@@ -4363,11 +4369,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: plugin_dir.clone(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         };
 
         let skills = list_skills(&config);
@@ -4408,11 +4416,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: env::temp_dir().join("qmux-nonexistent-claude-plugin-dir"),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         };
 
         assert!(list_skills(&config).is_empty());
@@ -4465,11 +4475,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: plugin_dir.clone(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         };
 
         let skills = list_skills(&config);

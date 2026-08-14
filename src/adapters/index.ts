@@ -2,6 +2,7 @@ import type { ComponentType, ReactNode } from "react";
 import { acpUiAdapter } from "./acp";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
+import { cursorUiAdapter } from "./cursor";
 import { grokUiAdapter } from "./grok";
 import { museUiAdapter } from "./muse";
 import { opencodeUiAdapter } from "./opencode";
@@ -51,6 +52,7 @@ export const agentUiAdapters = [
   grokUiAdapter,
   museUiAdapter,
   piUiAdapter,
+  cursorUiAdapter,
   acpUiAdapter,
 ];
 

@@ -7,6 +7,7 @@
     "opencode": { "binary": "opencode" },
     "grok": { "binary": "grok" },
     "muse": { "binary": "muse" },
-    "pi": { "binary": "pi" }
+    "pi": { "binary": "pi" },
+    "cursor": { "binary": "cursor-agent" }
   }
 }

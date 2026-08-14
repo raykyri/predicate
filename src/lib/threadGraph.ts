@@ -323,6 +323,8 @@ function adapterLabel(adapter: string) {
       return "Muse";
     case "pi":
       return "Pi";
+    case "cursor":
+      return "Cursor";
     default:
       return "Agent";
   }

@@ -10,9 +10,11 @@ It has a native UI for launching agents, queueing follow-ups,
 tracking agent status, and driving TUI-based agents.
 
 Agents are integrated through a pluggable adapter layer. Claude Code,
-Codex, OpenCode, Grok, Muse, and [Pi](https://pi.dev) are included as adapters, each with
+Codex, OpenCode, Grok, Muse, [Pi](https://pi.dev), and Cursor Agent
+are included as adapters, each with
 lifecycle hooks, native transcripts, and session resumes. All except Muse
-also support forks; Muse's CLI has no fork command. New agents
+and Cursor also support forks; Muse's CLI has no fork command, and Cursor
+Agent has no native fork. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
@@ -27,8 +29,8 @@ Rust. See [ACP agents](#acp-agents).
 - Native Ghostty terminals: each pane hosts a Metal-rendered Ghostty
   surface on macOS, with a portable Rust PTY backend for tests and
   non-macOS platforms.
-- Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, and Pi, launched from the app
-  or by running `claude` / `codex` / `opencode` / `grok` / `muse` / `pi` inside a shell
+- Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, Pi, and Cursor Agent, launched from the app
+  or by running `claude` / `codex` / `opencode` / `grok` / `muse` / `pi` / `cursor-agent` inside a shell
   pane.
 - Agent panes for any ACP agent, configured under `adapters.acp` and launched
   from the app.
@@ -75,7 +77,7 @@ natively on Apple Silicon and Intel Macs.
    [releases page](https://github.com/raykyri/qmux/releases).
 2. Open it and drag **qmux** into **Applications**.
 3. You'll want the agent CLIs you use on your `PATH`: `claude`, `codex`,
-   `opencode`, `grok`, `muse`, and/or `pi`.
+   `opencode`, `grok`, `muse`, `pi`, and/or `cursor-agent`.
 
 If macOS reports the app is damaged or can't be opened, clear the download
 quarantine flag and launch it again:
@@ -95,7 +97,7 @@ Prerequisites:
 - Rust toolchain.
 - Node.js and npm.
 - The agent CLIs you want to use on `PATH`: `claude`, `codex`, `opencode`, `grok`,
-  `muse`, and/or `pi`.
+  `muse`, `pi`, and/or `cursor-agent`.
 
 Install dependencies:
 
@@ -267,7 +269,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Shell panes spawn `$SHELL`.
 - Agent panes spawn the adapter's configured agent binary, either in the current
   repo/directory or in a qmux-created agent worktree. Shell functions can route
-  `claude`, `codex`, `opencode`, `grok`, `muse`, and `pi` through qmux from shell panes, but the
+  `claude`, `codex`, `opencode`, `grok`, `muse`, `pi`, and `cursor-agent` through qmux from shell panes, but the
   adapter binary still needs to be installed or configured.
 - Each pane receives:
   - `QMUX_PANE_ID`
@@ -295,8 +297,9 @@ hosted view can show proposal status without a separate collaboration database.
   `QMUX_CODEX_APP_BUILD_FLAVOR`.
 - Transcript tailing starts once an adapter binds a transcript path: Claude via
   `SessionStart`, Codex via an explicit `SessionStart` path or session-id lookup,
-  OpenCode via qmux-managed JSONL, and Pi via its observer extension and native
-  tree-shaped session JSONL.
+  OpenCode via qmux-managed JSONL, Pi via its observer extension and native
+  tree-shaped session JSONL, and Cursor via `sessionStart`'s conversation id
+  (synthesized under `~/.cursor/projects/<slug>/agent-transcripts/`).
 - Persisted state is written under `<workspaceRoot>/.qmux/state.json`, with normalized
   thread graphs stored separately in `<workspaceRoot>/.qmux/threads/<thread-id>.json`.
   Older worktree-local thread graphs are copied into this global store on startup and
@@ -320,7 +323,8 @@ hosted view can show proposal status without a separate collaboration database.
     "opencode": { "binary": "opencode" },
     "grok": { "binary": "grok" },
     "muse": { "binary": "muse" },
-    "pi": { "binary": "pi" }
+    "pi": { "binary": "pi" },
+    "cursor": { "binary": "cursor-agent" }
   }
 }
 ```
@@ -329,7 +333,7 @@ hosted view can show proposal status without a separate collaboration database.
 Relative paths (for `workspaceRoot`/`socketPath`) are resolved from the config
 file's directory when that directory is under `$HOME`; otherwise they fall back to
 the platform data/runtime locations. Each adapter's `binary` is optional and
-defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`, `pi`), which is
+defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`, `pi`, `cursor-agent`), which is
 looked up on `PATH`; an absolute path or a `~/…` path (expanded against `$HOME`) is
 used as given. A top-level `claudeBinary` is still honored for backward
 compatibility. If the config file is absent, qmux uses the platform data
@@ -372,6 +376,34 @@ The fork bridge currently expects the standard Node package layout, with
 custom shell shim or standalone compiled Pi binary can still launch and resume,
 but fork creation will fail with an actionable module-location error; point
 `adapters.pi.binary` at the package's `dist/cli.js` when it is available.
+
+### Cursor
+
+The native Cursor adapter launches Cursor Agent's interactive TUI (`cursor-agent`)
+in a qmux pane. It is local-only: authentication, model changes, and shell
+approvals stay inside Cursor's TUI. qmux does not wrap the `agent` command
+(Grok uses that name) and does not treat Cursor's `-w`/`--worktree` as qmux
+worktrees.
+
+qmux injects one observer-only plugin with `--plugin-dir` on supervised
+launches. It does not mutate user or project `hooks.json`. The plugin reports
+session identity, prompt submit, tool/shell start, thought, and turn-complete
+(`stop`); Cursor's JSONL remains the transcript source of truth. There is no
+native fork command. Development builds can point `QMUX_CURSOR_PLUGIN_DIR` at
+another copy of the bundled `qmux-cursor-plugin`.
+
+Interactive `cursor-agent` commands typed in a qmux shell are supervised like
+launches from the app. Management and metadata utilities (`login`, `logout`,
+`status`, `whoami`, `about`, `models`, `mcp`, `plugin`, `worker`, `update`,
+`ls`, `resume`, `create-chat`, `generate-rule`, `rule`, `sandbox`, `acp`,
+`install-shell-integration`, `uninstall-shell-integration`, `bedrock`, `help`,
+and `--help` / `--version` / `--print` / `--list-models`) pass through unchanged
+and do not create an agent record. `cursor-agent acp` is that passthrough: the
+ACP adapter remains a separate config entry if you want qmux-owned ACP
+rendering instead of the TUI.
+
+The qmux launcher can pass an optional `--mode plan` or `--mode ask`, plus a
+model when one is selected. It does not pass `--force` or `--yolo`.
 
 ### Remote groups
 

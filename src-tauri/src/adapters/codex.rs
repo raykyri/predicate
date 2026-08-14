@@ -4235,11 +4235,13 @@ trusted_hash = "sha256:trusted"
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         })
     }
 

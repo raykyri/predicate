@@ -1,6 +1,7 @@
 pub mod acp;
 pub mod claude;
 pub mod codex;
+pub mod cursor;
 pub mod grok;
 pub mod muse;
 pub mod opencode;
@@ -23,6 +24,7 @@ use crate::workspace::{
 use acp::AcpAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
+use cursor::CursorAdapter;
 use grok::GrokAdapter;
 use muse::MuseAdapter;
 use opencode::OpencodeAdapter;
@@ -992,6 +994,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(GrokAdapter::new(config)),
         Box::new(MuseAdapter::new(config)),
         Box::new(PiAdapter::new(config)),
+        Box::new(CursorAdapter::new(config)),
         Box::new(AcpAdapter::new(config)),
     ])
 }
@@ -1569,11 +1572,13 @@ mod tests {
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
                 },
+                cursor: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
             opencode_plugin_dir: PathBuf::new(),
             pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
         }
     }
 
@@ -1594,7 +1599,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 7);
+        assert_eq!(metadata.len(), 8);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1607,9 +1612,13 @@ mod tests {
         assert!(!metadata[4].default);
         assert_eq!(metadata[5].id, "pi");
         assert!(!metadata[5].default);
-        assert_eq!(metadata[6].id, "acp");
+        assert_eq!(metadata[6].id, "cursor");
         assert!(!metadata[6].default);
+        assert_eq!(metadata[7].id, "acp");
+        assert!(!metadata[7].default);
         let config = test_config();
+        assert!(!adapter_supports_fork(&config, "cursor"));
+        assert!(!adapter_supports_fork_at_message(&config, "cursor"));
         assert!(adapter_supports_fork(&config, "grok"));
         assert!(adapter_supports_fork(&config, "opencode"));
         assert!(adapter_supports_fork(&config, "pi"));
