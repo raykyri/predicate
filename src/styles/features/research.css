@@ -599,6 +599,19 @@
   display: none;
 }
 
+.research-empty-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  color: var(--text-subtle);
+}
+
+.research-empty-placeholder svg {
+  opacity: 0.5;
+}
+
 /* Placeholder shown while several sidebar items are multi-selected: a large
    faint glyph with its caption, centered where the document would be. */
 .research-multi-select-state {
@@ -761,6 +774,21 @@
   white-space: nowrap;
 }
 
+.research-sidebar-controls {
+  display: flex;
+}
+
+.research-sidebar-controls.is-grouped > .research-sidebar-restore:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.research-sidebar-controls.is-grouped > .research-sidebar-restore:not(:first-child) {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
 .research-open-terminal,
 .research-cancel-run,
 .research-sidebar-restore,
@@ -775,6 +803,12 @@
   font-family: var(--font-ui);
   font-size: calc(12.5px + var(--turn-font-delta, 0px));
   font-weight: 400;
+}
+
+.research-sidebar-restore.is-active {
+  border-color: var(--accent-color);
+  background: var(--accent-shadow);
+  color: var(--text-strong);
 }
 
 .research-open-terminal:hover:not(:disabled),
@@ -1850,23 +1884,28 @@
   color: #c6cdc9;
 }
 
-/* New research — the modal reuses the Home launcher's composer surface: the
-   command-launcher card floats alone on the dialog scrim (palette-style, top
-   anchored), with the folder and agent pickers as overlay chips and the folder
-   path / permissions note in a footer strip under the prompt. */
-.confirm-dialog-backdrop.new-research-backdrop {
-  align-items: flex-start;
-  padding-top: min(20vh, 170px);
+/* New research — the modal reuses the agent launcher's composer surface: the
+   command-launcher card floats alone on the dialog scrim, with the model and
+   agent pickers as overlay chips. */
+.confirm-dialog-backdrop.new-research-backdrop,
+.confirm-dialog-backdrop.new-agent-backdrop {
+  align-items: center;
 }
 
-.new-research-launcher {
+.new-research-launcher,
+.new-agent-launcher {
   width: min(640px, 100%);
   /* Keep the launcher's top-lit inset and add the modal's drop shadow so the
      card reads as floating above the scrim. */
   box-shadow: inset 0 1px 0 var(--surface-highlight), var(--dialog-shadow);
 }
 
-.new-research-launcher:focus-within {
+.new-agent-launcher {
+  width: min(680px, 100%);
+}
+
+.new-research-launcher:focus-within,
+.new-agent-launcher:focus-within {
   border-color: var(--control-border-hover);
 }
 

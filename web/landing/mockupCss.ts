@@ -252,10 +252,14 @@ export const MOCKUP_CSS = `
   background: #28c840;
 }
 
-.app-mockup .sidebar-collapse-button {
+.app-mockup .sidebar-header-controls {
   position: absolute;
   top: 4px;
   right: 10px;
+  display: flex;
+}
+
+.app-mockup .sidebar-header-button {
   display: inline-flex;
   width: 24px;
   height: 24px;
@@ -263,6 +267,17 @@ export const MOCKUP_CSS = `
   justify-content: center;
   border-radius: var(--radius-md);
   color: var(--text-muted);
+}
+
+.app-mockup .sidebar-header-controls.is-grouped > .sidebar-header-button:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.app-mockup .sidebar-header-controls.is-grouped > .sidebar-header-button:not(:first-child) {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 .app-mockup .sidebar-mode-toggle {
@@ -302,25 +317,6 @@ export const MOCKUP_CSS = `
   flex-direction: column;
   gap: 2px;
   overflow: hidden;
-}
-
-.app-mockup .pane-home-row {
-  --pane-tab-left-rail-width: 3px;
-  --pane-tab-left-offset: 10px;
-  flex: 0 0 auto;
-  /* Pull against the sidebar's 14px stack gap so Home sits closer to both the
-     mode switcher and the first project group. */
-  margin: -6px 4px;
-}
-
-.app-mockup .pane-home-row .pane-tab {
-  column-gap: 8px;
-  padding-bottom: 5px;
-}
-
-.app-mockup .pane-home-row .pane-tab .lucide {
-  justify-self: center;
-  color: var(--text-muted);
 }
 
 .app-mockup .pane-group {
@@ -1804,7 +1800,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   color: var(--text-primary);
 }
 
-.app-mockup.is-interactive .sidebar-collapse-button:hover {
+.app-mockup.is-interactive .sidebar-header-button:hover {
   background: var(--hover-bg);
   color: var(--hover-chrome-fg);
 }

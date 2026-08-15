@@ -13,6 +13,7 @@ import { createPortal } from "react-dom";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
 import PromptLibraryMenu from "./PromptLibraryMenu";
+import TerminalMapButton from "./TerminalMapButton";
 import { formatRelativeTime, sessionMenuTitle } from "../lib/transcriptSessions";
 import type { TranscriptOption } from "../types";
 
@@ -57,6 +58,8 @@ interface TurnPaneHeaderProps {
   onToggleTranscriptExpanded: () => void;
   onCollapseRightBar: () => void;
   onRestoreLeftSidebar?: () => void;
+  onOpenTerminalMap?: () => void;
+  terminalMapOpen?: boolean;
   // Inserts saved-prompt text into this pane's composer; absent when the pane
   // has no agent composer, which disables the prompt-library trigger.
   onInsertPrompt?: (text: string) => void;
@@ -96,6 +99,8 @@ export default function TurnPaneHeader({
   onToggleTranscriptExpanded,
   onCollapseRightBar,
   onRestoreLeftSidebar,
+  onOpenTerminalMap,
+  terminalMapOpen = false,
   onInsertPrompt,
   promptProjectDir,
   promptProjectPath,
@@ -403,7 +408,9 @@ export default function TurnPaneHeader({
           )}
         </button>
         <div
-          className={`turn-pane-sidebar-controls${onRestoreLeftSidebar ? " is-grouped" : ""}`}
+          className={`turn-pane-sidebar-controls${
+            onRestoreLeftSidebar || onOpenTerminalMap ? " is-grouped" : ""
+          }`}
         >
           {onRestoreLeftSidebar ? (
             <button
@@ -415,6 +422,13 @@ export default function TurnPaneHeader({
             >
               <PanelLeftOpen size={14} aria-hidden="true" />
             </button>
+          ) : null}
+          {onOpenTerminalMap ? (
+            <TerminalMapButton
+              className="icon-button turn-pane-header-button"
+              pressed={terminalMapOpen}
+              onClick={onOpenTerminalMap}
+            />
           ) : null}
           <button
             type="button"

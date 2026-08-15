@@ -187,7 +187,7 @@ export function contextualizeAppShortcut(
 // uses this to decide what may still run when the chord's origin pane no
 // longer exists in React: running one of these against a different pane than
 // the user aimed at would be worse than dropping the keystroke, while every
-// other command (mode toggles, Home, settings, palette…) is safe to run from
+// other command (mode toggles, map, settings, palette…) is safe to run from
 // anywhere.
 export function appShortcutTargetsActivePane(command: AppShortcutCommand): boolean {
   return (
@@ -216,8 +216,9 @@ function appShortcutLabel(command: AppShortcutCommand): string {
     case "openNewResearch":
       return "start a new research";
     case "focusHome":
+      return "open the terminal map";
     case "focusResearchHome":
-      return "focus Home";
+      return "start a new research";
     case "focusTerminalMode":
       return "switch to terminal mode";
     case "focusResearchMode":

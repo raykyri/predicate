@@ -150,6 +150,8 @@ interface ResearchDocumentProps {
   onPublicationBindingChange: (binding: PublicationBinding) => void;
   /** Reopens the application sidebar when research is using the full width. */
   onShowSidebar?: () => void;
+  onOpenTerminalMap?: () => void;
+  terminalMapOpen?: boolean;
   /** Show held-⌘ shortcut badges (the ⌘J follow-ups hint). */
   shortcutHintsShown: boolean;
 }
@@ -1606,6 +1608,8 @@ function ResearchDocument({
   publicationBinding,
   onPublicationBindingChange,
   onShowSidebar,
+  onOpenTerminalMap,
+  terminalMapOpen,
   shortcutHintsShown,
 }: ResearchDocumentProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -4632,7 +4636,13 @@ function ResearchDocument({
       <ResearchDocumentFrame
         title={headerTitle}
         headerActions={
-          onShowSidebar ? <ResearchSidebarRestoreButton onClick={onShowSidebar} /> : undefined
+          onShowSidebar ? (
+            <ResearchSidebarRestoreButton
+              onClick={onShowSidebar}
+              onOpenTerminalMap={onOpenTerminalMap}
+              terminalMapOpen={terminalMapOpen}
+            />
+          ) : undefined
         }
       >
         <div className="research-placeholder">
@@ -5137,7 +5147,13 @@ function ResearchDocument({
                   : `${legacyFollowupCount} ${legacyFollowupCount === 1 ? "follow-up" : "follow-ups"}`}
               </span>
             ) : null}
-            {onShowSidebar ? <ResearchSidebarRestoreButton onClick={onShowSidebar} /> : null}
+            {onShowSidebar ? (
+              <ResearchSidebarRestoreButton
+                onClick={onShowSidebar}
+                onOpenTerminalMap={onOpenTerminalMap}
+                terminalMapOpen={terminalMapOpen}
+              />
+            ) : null}
             {selectedView?.hasTranscriptActivity && selectedNodeId ? (
               <button
                 type="button"

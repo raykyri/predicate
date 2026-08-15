@@ -1128,7 +1128,7 @@
   hideFromAssistiveTech([
     ".mock-traffic-lights",
     ".sidebar-mode-toggle",
-    ".pane-home-row",
+    ".sidebar-header-controls",
     ".sidebar-actions",
     ".mock-terminal-screen",
     ".turn-pane-session-control",

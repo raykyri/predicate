@@ -27,7 +27,7 @@ import {
   ExpandIcon,
   FolderIcon,
   GlobeIcon,
-  HouseIcon,
+  LayoutDashboardIcon,
   MessageSquareTextIcon,
   Minimize2Icon,
   PanelLeftCloseIcon,
@@ -150,8 +150,13 @@ function PaneGroup({ group }: { group: MockGroup }) {
 function Sidebar() {
   return (
     <aside className="sidebar is-code-mode">
-      <span className="sidebar-collapse-button" data-mock-action="hide-sidebar">
-        <PanelLeftCloseIcon size={14} />
+      <span className="sidebar-header-controls is-grouped">
+        <span className="sidebar-header-button" data-mock-action="open-terminal-map">
+          <LayoutDashboardIcon size={14} />
+        </span>
+        <span className="sidebar-header-button" data-mock-action="hide-sidebar">
+          <PanelLeftCloseIcon size={14} />
+        </span>
       </span>
       <div className="sidebar-mode-toggle">
         <span className="is-selected">
@@ -162,14 +167,6 @@ function Sidebar() {
           <BookOpenIcon size={13} />
           <span>Research</span>
         </span>
-      </div>
-      <div className="pane-home-row">
-        <div className="control-button pane-tab">
-          <HouseIcon size={12} />
-          <span className="pane-tab-content">
-            <span className="pane-tab-title">Home</span>
-          </span>
-        </div>
       </div>
       <nav className="pane-list">
         {MOCK_GROUPS.map((group, index) => (

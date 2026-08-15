@@ -317,7 +317,7 @@ test("cycleTabId enters split panes from the nearest edge", () => {
   assert.equal(cycleTabId(tabIds, "pane-4", -1, paneSplits), "pane-3");
 });
 
-test("cycleTabId treats a split as one stop when Home is included", () => {
+test("cycleTabId treats a split as one stop when a sentinel tab is included", () => {
   const tabIds = ["__home__", "pane-1", "pane-2"];
   const paneSplits = [split(["pane-1", "pane-2"])];
 

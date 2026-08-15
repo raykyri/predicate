@@ -175,7 +175,8 @@ final class NativeTerminalPane: NSObject,
                 "super+shift+w",  // close_window
                 "super+alt+shift+w",  // close_all_windows
                 "super+t",  // new_tab — qmux: new pane / research
-                "super+n",  // new_window — qmux: active-mode home
+                "super+n",  // new_window — qmux: new agent / research
+                "super+shift+h",  // qmux: terminal map / new research
                 "super+d",  // new_split:right — qmux: split pane below
                 "super+shift+d",  // new_split:down — qmux: split pane below
                 "super+comma",  // open_config — qmux: settings

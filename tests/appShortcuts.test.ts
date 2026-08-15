@@ -97,7 +97,7 @@ test("uses command-shift-t to leave Research and reopen tabs elsewhere", () => {
   });
 });
 
-test("uses command-n for Research Home and the launcher elsewhere", () => {
+test("uses command-n for new research and the launcher elsewhere", () => {
   const command = resolveAppShortcut(shortcut({ key: "n", metaKey: true }));
   assert.deepEqual(command, { type: "homeOrCycleAdapter" });
   assert.deepEqual(contextualizeAppShortcut(command!, "research"), {
@@ -153,7 +153,7 @@ test("binds follow-up navigation and the folder menu to research chords", () => 
   assert.equal(resolveAppShortcut(shortcut({ key: "o", ctrlKey: true })), null);
 });
 
-test("keeps the Home shortcut within the active mode", () => {
+test("keeps the map / new-research shortcut within the active mode", () => {
   const command = resolveAppShortcut(
     shortcut({ key: "h", metaKey: true, shiftKey: true }),
   );

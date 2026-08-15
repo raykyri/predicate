@@ -184,15 +184,15 @@ test("switching to Terminal restores a valid prior tab without crossing scope", 
   ];
 
   assert.equal(
-    terminalTabForMode(panes, groups, "terminal-b-pane", "home"),
+    terminalTabForMode(panes, groups, "terminal-b-pane"),
     "terminal-b-pane",
   );
   assert.equal(
-    terminalTabForMode(panes, groups, "research-pane", "home"),
+    terminalTabForMode(panes, groups, "research-pane"),
     "terminal-a-pane",
   );
-  assert.equal(terminalTabForMode(panes, groups, "home", "home"), "home");
-  assert.equal(terminalTabForMode([], groups, "missing", "home"), "home");
+  assert.equal(terminalTabForMode(panes, groups, "home"), "terminal-a-pane");
+  assert.equal(terminalTabForMode([], groups, "missing"), null);
 });
 
 test("switching to Terminal prefers a pane whose group is expanded", () => {
@@ -206,11 +206,11 @@ test("switching to Terminal prefers a pane whose group is expanded", () => {
   ];
 
   // The stale-preference fallback must not activate a tab the sidebar hides.
-  assert.equal(terminalTabForMode(panes, groups, "missing", "home"), "terminal-b-pane");
+  assert.equal(terminalTabForMode(panes, groups, "missing"), "terminal-b-pane");
 
-  // Every group collapsed: any pane beats the empty home screen.
+  // Every group collapsed: any pane beats an empty Terminal stage.
   terminalB.collapsed = true;
-  assert.equal(terminalTabForMode(panes, groups, "missing", "home"), "terminal-a-pane");
+  assert.equal(terminalTabForMode(panes, groups, "missing"), "terminal-a-pane");
 });
 
 test("research cycling stays on the document when no research terminals are visible", () => {

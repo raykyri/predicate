@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { ArrowLeft, ArrowRight, PanelLeftOpen } from "lucide-react";
+import TerminalMapButton from "../TerminalMapButton";
 
 interface ResearchHistoryNavProps {
   canGoBack?: boolean;
@@ -57,14 +58,18 @@ interface ResearchDocumentFrameProps {
 
 interface ResearchSidebarRestoreButtonProps {
   onClick: () => void;
+  onOpenTerminalMap?: () => void;
+  terminalMapOpen?: boolean;
 }
 
 /** Reopens the app sidebar from research chrome, alongside the document's
  * transcript and run controls rather than floating over the research body. */
 export function ResearchSidebarRestoreButton({
   onClick,
+  onOpenTerminalMap,
+  terminalMapOpen = false,
 }: ResearchSidebarRestoreButtonProps) {
-  return (
+  const restore = (
     <button
       type="button"
       className="control-button research-sidebar-restore"
@@ -74,6 +79,20 @@ export function ResearchSidebarRestoreButton({
     >
       <PanelLeftOpen size={15} aria-hidden="true" />
     </button>
+  );
+  if (!onOpenTerminalMap) {
+    return restore;
+  }
+  return (
+    <div className="research-sidebar-controls is-grouped">
+      {restore}
+      <TerminalMapButton
+        className="control-button research-sidebar-restore"
+        size={15}
+        pressed={terminalMapOpen}
+        onClick={onOpenTerminalMap}
+      />
+    </div>
   );
 }
 

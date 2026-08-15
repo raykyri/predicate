@@ -52,8 +52,8 @@
      title bar draws over the top-left of the window (i.e. over the sidebar).
      Horizontal padding is trimmed 10→6px and handed to the group cards' interior
      padding, so groups sit closer to the edges and breathe more while tabs keep
-     their width. The Home row and action buttons re-add the 4px as margin so only
-     the group cards widen. */
+     their width. The action buttons re-add the 4px as margin so only the group
+     cards widen. */
   padding: 32px 6px 12px;
   /* System font (not monospace) so the pane list reads as a native sidebar. */
   font-family: var(--font-ui);
@@ -77,23 +77,43 @@
   height: 30px;
 }
 
-.sidebar-collapse-button {
+.sidebar-header-controls {
   position: absolute;
   top: 3px;
   right: 10px;
   z-index: 2;
+  display: flex;
+}
+
+.sidebar-header-controls .sidebar-header-button {
   width: 24px;
   height: 24px;
   color: var(--text-muted);
 }
 
-.sidebar-collapse-button:hover {
+.sidebar-header-controls .sidebar-header-button:hover {
   background: var(--sidebar-switcher-hover-bg);
 }
 
-.sidebar-collapse-button:focus-visible {
+.sidebar-header-controls .sidebar-header-button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
+.sidebar-header-controls .sidebar-header-button.is-active {
+  color: var(--text-heading);
+  background: var(--sidebar-switcher-hover-bg);
+}
+
+.sidebar-header-controls.is-grouped > .sidebar-header-button:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.sidebar-header-controls.is-grouped > .sidebar-header-button:not(:first-child) {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }
 
 .sidebar-mode-toggle {
@@ -2897,49 +2917,16 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   background: transparent;
 }
 
-/* Home shows web content (launcher, cascades) instead of a native surface, so
-   restore an opaque backdrop — it must also cover the case where the launcher
-   dialog replaces the inline empty state, which would otherwise expose the
-   window's vibrancy material. The home screen is the research home's twin, so it
-   takes the same --research-workspace-bg regardless of the selected terminal
-   theme — a Ghostty theme's --terminal-bg tints panes, not this backdrop. */
-.main-stage.is-home,
-.main-stage.is-native.is-home {
-  background: var(--research-workspace-bg);
-}
-
-.main-stage.is-native .home-stage {
-  background: var(--research-workspace-bg);
-}
-
-.home-stage {
-  position: absolute;
-  inset: 0;
-  padding: 34px 28px 60px;
-  pointer-events: none;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 34px;
-  overflow: auto;
-}
-
-.home-launcher {
-  display: flex;
-  align-items: center;
-  width: min(680px, 100%);
-  pointer-events: auto;
-}
-
-/* The inline launcher is interactive even though its placeholder wrapper isn't. */
-.home-stage .command-launcher {
-  pointer-events: auto;
+/* No Home page remains to paint the empty installation, so restore an opaque
+   stage when nothing is showing — otherwise native vibrancy shows through. */
+.main-stage.is-empty,
+.main-stage.is-native.is-empty {
+  background: var(--terminal-bg, var(--terminal-pane-bg));
 }
 
 /* Home board: the workspace tabs row and the rails below it share a width.
-   Fills the space under the launcher so rails get a bounded height — each
-   column scrolls internally with its fold ("now") at the bottom. */
+   Fills the terminal-map popover so rails get a bounded height — each column
+   scrolls internally with its fold ("now") at the bottom. */
 .home-board {
   display: flex;
   flex-direction: column;
@@ -2948,6 +2935,34 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   flex: 1 1 auto;
   min-height: 0;
   pointer-events: auto;
+}
+
+.confirm-dialog-backdrop.terminal-map-backdrop {
+  align-items: center;
+  padding: 24px;
+}
+
+.terminal-map-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(1180px, 100%);
+  height: min(780px, calc(100vh - 48px));
+  min-height: 0;
+  padding: 18px 18px 16px;
+  overflow: hidden;
+  border: 1px solid var(--dialog-border);
+  border-radius: 12px;
+  background: var(--research-workspace-bg);
+  box-shadow: var(--dialog-shadow);
+}
+
+.terminal-map-popover:focus {
+  outline: none;
+}
+
+.terminal-map-popover .home-board {
+  width: 100%;
 }
 
 .home-group-selector {
@@ -3047,7 +3062,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 }
 
 .home-group-menu {
-  z-index: calc(var(--z-popover) + 1);
+  z-index: calc(var(--z-dialog) + 1);
   gap: 2px;
   padding: 4px;
   overflow-y: auto;
@@ -3356,7 +3371,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 /* Portaled to the body, so it needs its own stacking + padding (the base
    .popover-surface only positions and frames it). */
 .home-rail-card-menu-popover {
-  z-index: calc(var(--z-popover) + 1);
+  z-index: calc(var(--z-dialog) + 1);
   gap: 2px;
   padding: 4px;
   overflow-y: auto;

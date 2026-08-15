@@ -27,11 +27,7 @@ export function terminalTabForMode(
   panes: PaneInfo[],
   groups: GroupInfo[],
   preferredTabId: string | null,
-  homeTabId: string,
-): string {
-  if (preferredTabId === homeTabId) {
-    return homeTabId;
-  }
+): string | null {
   const terminalPanes = panesForScope(panes, groups, "terminal");
   if (preferredTabId && terminalPanes.some((pane) => pane.id === preferredTabId)) {
     return preferredTabId;
@@ -40,12 +36,12 @@ export function terminalTabForMode(
   // whose group is expanded — a collapsed group renders no rows, so
   // activating one of its panes would highlight nothing in the sidebar. Only
   // when every group is collapsed (or there are no panes) fall through to
-  // the first pane / home.
+  // the first pane, or null when Terminal has nothing to show.
   const groupById = new Map(groups.map((group) => [group.id, group]));
   const visiblePane = terminalPanes.find(
     (pane) => groupById.get(pane.groupId)?.collapsed !== true,
   );
-  return visiblePane?.id ?? terminalPanes[0]?.id ?? homeTabId;
+  return visiblePane?.id ?? terminalPanes[0]?.id ?? null;
 }
 
 export function researchCycleTabIds(

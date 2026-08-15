@@ -27,7 +27,6 @@ import {
   Folder,
   Globe,
   GitBranch,
-  House,
   Layers,
   LoaderCircle,
   MessageSquareText,
@@ -95,6 +94,7 @@ import {
 import HomeGroupSelector from "./components/HomeGroupSelector";
 import type { HomeGroup } from "./components/HomeGroupSelector";
 import HomeRails from "./components/HomeRails";
+import TerminalMapButton from "./components/TerminalMapButton";
 import type {
   HomeRailPastTurn,
   HomeRailScrollPosition,
@@ -626,11 +626,9 @@ const GLOBAL_TASK_LAUNCHER_HOTKEY_OPTIONS: ReadonlyArray<{
     glyph: "⌘Space",
   },
 ];
-// Sentinel "active pane" value for the fixed Home tab. It's not a real pane, so it
-// lives outside the `panes` list and can't be closed or reordered. Selecting it
-// shows the empty content placeholder (the launcher).
+// Legacy sentinel once used as the selected tab for the Home page. Kept so a
+// persisted last-tab id from an older build is ignored instead of restored.
 const HOME_TAB_ID = "__home__";
-const RESEARCH_HOME_TAB_ID = "__research_home__";
 const ACTIVE_RESEARCH_TREE_KEY = "qmux.active-research-tree.v1";
 const RESEARCH_VISIBILITY_FILTER_KEY = "qmux.research-visibility-filter.v1";
 const LEGACY_SHOW_ARCHIVED_RESEARCH_KEY = "qmux.show-archived-research.v1";
@@ -1972,7 +1970,7 @@ function MainApp() {
     activeSurfaceRef.current = surface;
     setActiveSurfaceState(surface);
   }, []);
-  const lastTerminalTabIdRef = useRef<string>(HOME_TAB_ID);
+  const lastTerminalTabIdRef = useRef<string>("");
   const setSidebarMode = useCallback((mode: SidebarMode) => {
     if (mode !== sidebarModeRef.current) {
       captureSidebarScroll(sidebarModeRef.current);
@@ -2175,6 +2173,13 @@ function MainApp() {
   const [newResearchOpen, setNewResearchOpen] = useState(
     () => readSessionDraftJson(SESSION_DRAFT_KEYS.newResearchModal) !== null,
   );
+  const [newAgentOpen, setNewAgentOpen] = useState(false);
+  const [terminalMapOpen, setTerminalMapOpen] = useState(false);
+  const newAgentOpenRef = useRef(newAgentOpen);
+  newAgentOpenRef.current = newAgentOpen;
+  const terminalMapOpenRef = useRef(terminalMapOpen);
+  terminalMapOpenRef.current = terminalMapOpen;
+  const terminalMapDialogRef = useRef<HTMLDivElement | null>(null);
   const [recoveredNewDocumentContext] = useState(() =>
     readSessionDraftJson<{
       workspaceId: string | null;
@@ -2805,13 +2810,10 @@ function MainApp() {
   const researchActive = researchSurfaceActive && activeResearchTreeId !== null;
   const researchHomeActive = researchSurfaceActive && activeResearchTreeId === null;
   const selectedPane = panes.find((pane) => pane.id === activePaneId);
-  const homeActive =
-    activeSurface === "pane" &&
-    (activePaneId === HOME_TAB_ID || (!selectedPane && panes.length === 0));
   const activePane = useMemo(
     () =>
-      homeActive || researchActive || activeSurface !== "pane" ? undefined : selectedPane,
-    [activeSurface, homeActive, researchActive, selectedPane],
+      researchActive || activeSurface !== "pane" ? undefined : selectedPane,
+    [activeSurface, researchActive, selectedPane],
   );
   const paneById = useMemo(
     () => new Map(panes.map((pane) => [pane.id, pane])),
@@ -3094,30 +3096,27 @@ function MainApp() {
     }
   }, [activePane, activeResearchPaneId, activeSurface, groupById, panes]);
   useEffect(() => {
-    if (activeSurface !== "pane" || activePaneId === HOME_TAB_ID || selectedPane) {
+    if (activeSurface !== "pane" || selectedPane) {
       return;
     }
     // A selected research terminal is intentionally short-lived. When it retires,
     // return to its durable document instead of falling across into Terminal mode
     // — including when it was the last pane of the session, where the empty-pane
-    // guard below would otherwise leave the surface on "pane" and the stage
-    // rendering the Home launcher against a Research sidebar.
+    // path would otherwise leave the surface on "pane" against a Research sidebar.
     if (sidebarMode === "research" && activeResearchTreeId) {
       setActiveSurface("research");
-      return;
-    }
-    if (panes.length === 0) {
       return;
     }
     const fallback = terminalTabForMode(
       panes,
       groups,
       lastTerminalTabIdRef.current,
-      HOME_TAB_ID,
     );
     activePaneIdRef.current = fallback;
     setActivePaneIdState(fallback);
-    setSidebarMode("terminal");
+    if (fallback) {
+      setSidebarMode("terminal");
+    }
   }, [
     activePaneId,
     activeResearchTreeId,
@@ -3436,26 +3435,24 @@ function MainApp() {
   );
   const historyTargetAgents = useMemo(
     () =>
-      (homeActive ? sidebarPanes : visibleTerminalPanes).flatMap((pane) => {
+      (terminalMapOpen ? sidebarPanes : visibleTerminalPanes).flatMap((pane) => {
         const agent = agentByPaneId.get(pane.id);
         return agent ? [agent] : [];
       }),
-    [agentByPaneId, homeActive, sidebarPanes, visibleTerminalPanes],
+    [agentByPaneId, sidebarPanes, terminalMapOpen, visibleTerminalPanes],
   );
   const retainedTurnHistoryAgentIds = useMemo(
     () => new Set(historyTargetAgents.map((agent) => agent.id)),
     [historyTargetAgents],
   );
   const retainedGraphHistoryAgentIds = useMemo(
-    () => new Set(homeActive ? [] : historyTargetAgents.map((agent) => agent.id)),
-    [historyTargetAgents, homeActive],
+    () => new Set(historyTargetAgents.map((agent) => agent.id)),
+    [historyTargetAgents],
   );
   const retainedGraphHistoryThreadIds = useMemo(
     () =>
-      new Set(
-        homeActive ? [] : historyTargetAgents.map((agent) => threadIdForAgent(agent)),
-      ),
-    [historyTargetAgents, homeActive],
+      new Set(historyTargetAgents.map((agent) => threadIdForAgent(agent))),
+    [historyTargetAgents],
   );
   retainedTurnHistoryAgentIdsRef.current = retainedTurnHistoryAgentIds;
   retainedGraphHistoryAgentIdsRef.current = retainedGraphHistoryAgentIds;
@@ -3477,7 +3474,7 @@ function MainApp() {
     }
   }, [retainedGraphHistoryThreadIds]);
   useEffect(() => {
-    if (!homeActive) {
+    if (!terminalMapOpen) {
       for (const agentId of homeHistoryRequestSequenceByAgentRef.current.keys()) {
         homeHistoryRequestSequenceByAgentRef.current.set(
           agentId,
@@ -3516,7 +3513,7 @@ function MainApp() {
       homeHistoryRequestKeyByAgentRef.current.set(agent.id, requestKey);
       void fetchHomeTurnHistoryPage(agent, null);
     }
-  }, [fetchHomeTurnHistoryPage, historyTargetAgents, homeActive]);
+  }, [fetchHomeTurnHistoryPage, historyTargetAgents, terminalMapOpen]);
   const loadEarlierHomeTurnHistory = useCallback(
     (agentId: string) => {
       const history = homeTurnHistoryByAgentRef.current[agentId];
@@ -3594,11 +3591,10 @@ function MainApp() {
       }
     }
     for (const agent of historyTargetAgents) {
-      void hydrateAgentHistory(agent, !homeActive);
+      void hydrateAgentHistory(agent, true);
     }
   }, [
     historyTargetAgents,
-    homeActive,
     hydrateAgentHistory,
     retainedGraphHistoryAgentIds,
     retainedGraphHistoryThreadIds,
@@ -3759,16 +3755,12 @@ function MainApp() {
     }
     const activePaneIsTerminal =
       activePane && groupById.get(activePane.groupId)?.scope === "terminal";
-    const nextActiveTabId = homeActive
-      ? HOME_TAB_ID
-      : activePaneIsTerminal
-        ? activePane.id
-        : null;
+    const nextActiveTabId = activePaneIsTerminal ? activePane.id : null;
     if (!nextActiveTabId) {
       return;
     }
     void setActiveTab(nextActiveTabId).catch(() => undefined);
-  }, [homeActive, activePane, groupById]);
+  }, [activePane, groupById]);
   // Keep the native opaque backstop aligned with the terminal stage. The stage's
   // webview pixels are transparent while panes are shown, and pane surfaces chase
   // their DOM rects asynchronously, so the backstop (an AppKit view below every
@@ -5319,6 +5311,8 @@ function MainApp() {
     settingsOpen ||
       imageLightbox !== null ||
       newResearchOpen ||
+      newAgentOpen ||
+      terminalMapOpen ||
       newResearchFolderRequest !== null ||
       publicationTarget ||
       commandPaletteOpen ||
@@ -5378,10 +5372,11 @@ function MainApp() {
   // on the state atoms those helpers read — keep this list in sync when a helper
   // starts reading new state, or the memo will serve stale workstreams.
   const homeRailWorkstreams = useMemo<HomeRailWorkstream[]>(() => {
-    // Only Home renders the rails, but this memo's inputs churn with every
-    // event batch — recomputing the per-agent latest-turn extraction (a regex
-    // pass over each latest user message) for a hidden Home was pure waste.
-    if (!homeActive) {
+    // Only the terminal-map popover renders the rails, but this memo's inputs
+    // churn with every event batch — recomputing the per-agent latest-turn
+    // extraction (a regex pass over each latest user message) for a hidden map
+    // was pure waste.
+    if (!terminalMapOpen) {
       return [];
     }
     // A pane files under its root sidebar group (nested child groups fold into
@@ -5442,10 +5437,10 @@ function MainApp() {
     agentByPaneId,
     agentTurnInfoById,
     groupById,
-    homeActive,
     homeTurnHistoryByAgent,
     queuedTurnsByAgent,
     sidebarPanes,
+    terminalMapOpen,
     terminalTitleByPane,
   ]);
 
@@ -7048,8 +7043,7 @@ function MainApp() {
               ? existingTerminalPanes.find((pane) => pane.id === preferredActiveTabId)
               : undefined;
           const fallbackPane = restoredActivePane ?? existingTerminalPanes[0];
-          const nextActivePaneId =
-            preferredActiveTabId === HOME_TAB_ID ? HOME_TAB_ID : fallbackPane.id;
+          const nextActivePaneId = fallbackPane.id;
           setPanesPreservingRecoveredDismissals(existingPanes);
           activePaneIdRef.current = nextActivePaneId;
           setActivePaneIdState(nextActivePaneId);
@@ -7061,13 +7055,14 @@ function MainApp() {
         }
 
         if (!cancelled) {
-          // An empty installation starts on Home. Creating a shell is an explicit
-          // user action, which lets a first-time user enter Research without qmux
-          // manufacturing an unrelated Terminal workspace first.
+          // An empty installation starts with no selected pane. Creating a
+          // shell is an explicit user action, which lets a first-time user
+          // enter Research without qmux manufacturing an unrelated Terminal
+          // workspace first.
           setPanesPreservingRecoveredDismissals(existingPanes);
-          activePaneIdRef.current = HOME_TAB_ID;
-          setActivePaneIdState(HOME_TAB_ID);
-          lastTerminalTabIdRef.current = HOME_TAB_ID;
+          activePaneIdRef.current = null;
+          setActivePaneIdState(null);
+          lastTerminalTabIdRef.current = "";
           activeTabPersistenceReadyRef.current = true;
           await restoreResearchSelection();
         }
@@ -7161,11 +7156,7 @@ function MainApp() {
           ).find((row) => row.dataset.researchTreeId === activeResearchTreeId)
         : Array.from(
             paneList.querySelectorAll<HTMLElement>(".pane-tab-row"),
-          ).find((row) =>
-            activePaneId === HOME_TAB_ID
-              ? row.dataset.homeTab === "true"
-              : row.dataset.paneId === activePaneId,
-          );
+          ).find((row) => row.dataset.paneId === activePaneId);
     if (selectedRow) {
       const scrollRegion = activeSidebarScrollRegion(sidebarMode, activeSurface);
       const scrollContainer = sidebarScrollElement(scrollRegion) ?? paneList;
@@ -7181,7 +7172,8 @@ function MainApp() {
 
   // Report the focused pane to the backend so it can stamp `last_active_at`, which
   // feeds the group's spawn-cwd heuristic (most-recently-active shell pane). One
-  // effect for every setActivePaneId call site; the Home tab is not a real pane.
+  // effect for every setActivePaneId call site; the legacy Home sentinel is not
+  // a real pane.
   useEffect(() => {
     if (!activePaneId || activePaneId === HOME_TAB_ID) {
       return;
@@ -7816,12 +7808,12 @@ function MainApp() {
           panesRef.current,
           groupsRef.current,
           lastTerminalTabIdRef.current,
-          HOME_TAB_ID,
         );
-        if (target === HOME_TAB_ID) {
-          focusHomeTab();
-        } else {
+        if (target) {
           focusPaneTab(target);
+        } else {
+          setSidebarMode("terminal");
+          setActiveSurface("pane");
         }
         return;
       }
@@ -7872,6 +7864,8 @@ function MainApp() {
     // this from a terminal and cancelling would otherwise strand sidebarMode
     // "research" with activeSurface "pane" (a terminal pane on the research
     // stage), the mismatch the boot-restore path treats as unrecoverable.
+    setNewAgentOpen(false);
+    setTerminalMapOpen(false);
     setSidebarMode("research");
     setActiveSurface("research");
     setNewResearchOpen(true);
@@ -7904,6 +7898,8 @@ function MainApp() {
   const markdownDropBlocked =
     settingsOpen ||
     newResearchOpen ||
+    newAgentOpen ||
+    terminalMapOpen ||
     Boolean(publicationTarget) ||
     commandPaletteOpen ||
     Boolean(
@@ -9327,10 +9323,75 @@ function MainApp() {
     });
   }
 
-  function focusHomeTab() {
-    setActivePaneId(HOME_TAB_ID);
-    focusLauncherInput();
+  function openNewAgentPopover() {
+    setTerminalMapOpen(false);
+    setNewResearchOpen(false);
+    setNewAgentOpen(true);
+    if (sidebarModeRef.current !== "terminal") {
+      setSidebarMode("terminal");
+      setActiveSurface("pane");
+    }
   }
+
+  function closeNewAgentPopover() {
+    setNewAgentOpen(false);
+  }
+
+  useEffect(() => {
+    if (!newAgentOpen) {
+      return;
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) {
+        return;
+      }
+      if (document.querySelector(".launcher-select-popover")) {
+        return;
+      }
+      event.preventDefault();
+      setNewAgentOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newAgentOpen]);
+
+  function toggleTerminalMap() {
+    if (terminalMapOpenRef.current) {
+      setTerminalMapOpen(false);
+      return;
+    }
+    setNewAgentOpen(false);
+    setNewResearchOpen(false);
+    setTerminalMapOpen(true);
+  }
+
+  function closeTerminalMap() {
+    setTerminalMapOpen(false);
+  }
+
+  // Escape is handled here in bubble phase so a rail/group menu's capture
+  // listener can consume the key first. The app-level capture dispatcher
+  // would otherwise close the whole map before those menus see it.
+  useEffect(() => {
+    if (!terminalMapOpen) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      terminalMapDialogRef.current?.focus();
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) {
+        return;
+      }
+      event.preventDefault();
+      setTerminalMapOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [terminalMapOpen]);
 
   function openResearchPaneTab(paneId: string) {
     // The research detail that renders the "Open terminal" button trails
@@ -9387,13 +9448,13 @@ function MainApp() {
     commands.push({
       id: "nav:home",
       section: "Go to",
-      title: "Home",
+      title: sidebarMode === "research" ? "New research" : "Terminal map",
       hint: "⇧⌘H",
       action: () => {
         if (sidebarMode === "research") {
-          focusResearchHome();
+          createResearchFromSidebar();
         } else {
-          focusHomeTab();
+          toggleTerminalMap();
         }
       },
     });
@@ -9429,7 +9490,7 @@ function MainApp() {
       section: "Actions",
       title: "New agent",
       hint: !settings.codeMode && sidebarMode === "terminal" ? "⌘T" : undefined,
-      action: () => focusHomeTab(),
+      action: () => openNewAgentPopover(),
     });
     commands.push({
       id: "action:new-research",
@@ -10964,6 +11025,7 @@ function MainApp() {
       }
       clearLauncherPrompt();
       setSelectedSkillId(null);
+      closeNewAgentPopover();
       const [latestAgents] = await Promise.all([listAgents(), refreshGroups()]);
       setAgents(latestAgents);
     } catch (err) {
@@ -11367,6 +11429,8 @@ function MainApp() {
     commandPaletteOpen ||
     settingsOpen ||
     newResearchOpen ||
+    newAgentOpen ||
+    terminalMapOpen ||
     Boolean(publicationTarget) ||
     Boolean(renamePaneId || renameGroupId);
   useEffect(() => {
@@ -11891,21 +11955,14 @@ function MainApp() {
 
   useEffect(() => {
     const focusTabById = (tabId: string) => {
-      if (tabId === HOME_TAB_ID) {
-        focusHomeTab();
-        return;
-      }
       focusPaneTab(tabId);
     };
 
     const cycleTab = (
       direction: -1 | 1,
-      includeHome: boolean,
       cyclePanes = sidebarPanes,
     ) => {
-      const tabIds = includeHome
-        ? [HOME_TAB_ID, ...cyclePanes.map((pane) => pane.id)]
-        : cyclePanes.map((pane) => pane.id);
+      const tabIds = cyclePanes.map((pane) => pane.id);
       if (tabIds.length === 0) {
         return;
       }
@@ -11914,8 +11971,6 @@ function MainApp() {
       let fallbackIndex: number;
       if (listedIndex !== -1) {
         fallbackIndex = listedIndex;
-      } else if (includeHome) {
-        fallbackIndex = direction === 1 ? 0 : Math.min(1, tabIds.length - 1);
       } else {
         fallbackIndex = direction === 1 ? -1 : 0;
       }
@@ -11932,10 +11987,6 @@ function MainApp() {
     };
 
     const focusResearchTabById = (tabId: string) => {
-      if (tabId === RESEARCH_HOME_TAB_ID) {
-        focusResearchHome();
-        return;
-      }
       const treeId = researchTreeIdFromTabId(tabId);
       if (treeId) {
         void selectResearchTree(treeId);
@@ -11960,10 +12011,8 @@ function MainApp() {
       const activeTabId =
         currentResearchSurfaceActive && currentResearchTreeId
           ? researchTreeTabId(currentResearchTreeId)
-          : currentResearchSurfaceActive
-            ? RESEARCH_HOME_TAB_ID
-            : activePaneIdRef.current;
-      const researchTabIds = [RESEARCH_HOME_TAB_ID, ...cycleableResearchTabIds];
+          : activePaneIdRef.current;
+      const researchTabIds = cycleableResearchTabIds;
       const nextTabId = cycleTabId(
         researchTabIds,
         activeTabId,
@@ -12011,23 +12060,20 @@ function MainApp() {
           return;
         }
         case "homeOrCycleAdapter":
-          if (
-            activeSurfaceRef.current === "pane" &&
-            activePaneIdRef.current === HOME_TAB_ID
-          ) {
+          if (newAgentOpenRef.current) {
             cycleLauncherAdapter();
           } else {
-            focusHomeTab();
+            openNewAgentPopover();
           }
           return;
         case "openNewResearch":
           createResearchFromSidebar();
           return;
         case "focusHome":
-          focusHomeTab();
+          toggleTerminalMap();
           return;
         case "focusResearchHome":
-          focusResearchHome();
+          createResearchFromSidebar();
           return;
         case "focusTerminalMode":
           changeSidebarMode("terminal");
@@ -12042,11 +12088,11 @@ function MainApp() {
           if (currentSidebarMode === "research") {
             cycleResearchTab(command.direction);
           } else {
-            cycleTab(command.direction, false, cycleableSidebarPanes);
+            cycleTab(command.direction, cycleableSidebarPanes);
           }
           return;
         case "cycleAllTab":
-          cycleTab(command.direction, true, cycleableSidebarPanes);
+          cycleTab(command.direction, cycleableSidebarPanes);
           return;
         case "moveSidebarItem":
           if (currentSidebarMode === "terminal") {
@@ -12123,7 +12169,7 @@ function MainApp() {
           return;
         case "newPane":
           if (!settingsRef.current.codeMode) {
-            focusHomeTab();
+            openNewAgentPopover();
           } else {
             void addShellPane();
           }
@@ -12194,7 +12240,6 @@ function MainApp() {
     activePane,
     lastActiveGroupId,
     groupById,
-    homeActive,
     launcherAdapterOptions,
     launchAdapter.id,
     paneSplits,
@@ -12202,7 +12247,6 @@ function MainApp() {
     researchSurfaceActive,
     researchHomeActive,
     activeResearchTreeId,
-    focusResearchHome,
     createResearchFromSidebar,
     createDocumentFromSidebar,
     moveActiveResearchTree,
@@ -12220,7 +12264,7 @@ function MainApp() {
   }, [commandPaletteOpen, activePane, groupById]);
 
   useEffect(() => {
-    if (!homeActive) {
+    if (!newAgentOpen) {
       return;
     }
 
@@ -12236,7 +12280,7 @@ function MainApp() {
       launcherInputRef.current?.focus();
       launcherInputRef.current?.select();
     });
-  }, [homeActive]);
+  }, [newAgentOpen]);
 
   // Selecting a non-Claude adapter clears any chosen skill; measure the faint
   // command prefix so the composer's first line is indented past it.
@@ -12252,7 +12296,7 @@ function MainApp() {
       return;
     }
     setSkillPrefixWidth(skillPrefixRef.current?.getBoundingClientRect().width ?? 0);
-  }, [selectedSkill, homeActive]);
+  }, [selectedSkill, newAgentOpen]);
 
   // Grow the launcher textarea to fit its content so a multi-line prompt expands the
   // whole launcher (the CSS max-height caps it, after which the field scrolls). Runs
@@ -12295,11 +12339,11 @@ function MainApp() {
     };
   }, [growLauncherInput]);
   useLayoutEffect(() => {
-    if (!homeActive) {
+    if (!newAgentOpen) {
       return;
     }
     growLauncherInput();
-  }, [growLauncherInput, homeActive, skillPrefixWidth]);
+  }, [growLauncherInput, newAgentOpen, skillPrefixWidth]);
 
   useEffect(() => {
     const runtimeAdapterIds = config?.adapters.map((adapter) => adapter.id) ?? [];
@@ -12510,12 +12554,25 @@ function MainApp() {
     );
   }
 
-  // The launcher form lives on Home and creates a new agent in the selected group.
+  // The launcher form lives in the new-agent popover and creates a new agent
+  // in the selected group.
   const renderLauncher = () => (
     <form
-      className="command-launcher"
+      className="command-launcher new-agent-launcher"
+      role="dialog"
+      aria-modal="true"
       aria-label="New agent"
       onKeyDown={(event) => {
+        if (event.key === "Escape") {
+          // The adapter/model picker portals above this form. Let it dismiss
+          // itself instead of tearing down the whole launcher.
+          if (document.querySelector(".launcher-select-popover")) {
+            return;
+          }
+          event.preventDefault();
+          closeNewAgentPopover();
+          return;
+        }
         // Swallow Undo/Redo (⌘Z / ⌘⇧Z, Ctrl on other platforms). The prompt is
         // cleared programmatically on launch (outside the WebView's undo
         // history), so native undo could resurrect a sent prompt — or, with no
@@ -13020,7 +13077,9 @@ function MainApp() {
           )}
         </button>
         <div
-          className={`turn-pane-sidebar-controls${restoresLeftSidebar ? " is-grouped" : ""}`}
+          className={`turn-pane-sidebar-controls${
+            restoresLeftSidebar ? " is-grouped" : ""
+          }`}
         >
           {restoresLeftSidebar ? (
             <button
@@ -13036,6 +13095,17 @@ function MainApp() {
             >
               <PanelLeftOpen size={14} aria-hidden="true" />
             </button>
+          ) : null}
+          {restoresLeftSidebar ? (
+            <TerminalMapButton
+              className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+              pressed={terminalMapOpen}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                toggleTerminalMap();
+              }}
+            />
           ) : null}
           <button
             type="button"
@@ -13073,7 +13143,7 @@ function MainApp() {
       surface && splitRightPaneMode && splitIndex >= 0
         ? { top: splitTrackPosition(surface.topFraction, splitIndex, 8) }
         : undefined;
-    const grouped = floatingLeftSidebarRestoreVisible && floatingRestoreButtonVisible;
+    const grouped = floatingLeftSidebarRestoreVisible;
 
     return (
       <div
@@ -13091,6 +13161,13 @@ function MainApp() {
           >
             <PanelLeftOpen size={14} aria-hidden="true" />
           </button>
+        ) : null}
+        {floatingLeftSidebarRestoreVisible ? (
+          <TerminalMapButton
+            className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+            pressed={terminalMapOpen}
+            onClick={toggleTerminalMap}
+          />
         ) : null}
         {floatingRestoreButtonVisible && surface ? (
           <button
@@ -13281,6 +13358,14 @@ function MainApp() {
                 leftSidebarRestore.kind === "turn-pane-header"
                   ? () => setLeftSidebarCollapsedForActivePane(false)
                   : undefined
+              }
+              onOpenTerminalMap={
+                leftSidebarRestore.kind === "turn-pane-header"
+                  ? toggleTerminalMap
+                  : undefined
+              }
+              terminalMapOpen={
+                leftSidebarRestore.kind === "turn-pane-header" ? terminalMapOpen : false
               }
               onInsertPrompt={
                 agent ? (text) => requestComposerInsert(agent.id, text) : undefined
@@ -13622,15 +13707,22 @@ function MainApp() {
           }${sidebarMode === "research" ? " is-research-mode" : ""}`}
         >
           <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
-          <button
-            type="button"
-            className="icon-button sidebar-collapse-button"
-            title="Collapse left sidebar"
-            aria-label="Collapse left sidebar"
-            onClick={() => setLeftSidebarCollapsedForActivePane(true)}
-          >
-            <PanelLeftClose size={14} aria-hidden="true" />
-          </button>
+          <div className="sidebar-header-controls is-grouped">
+            <TerminalMapButton
+              className="icon-button sidebar-header-button"
+              pressed={terminalMapOpen}
+              onClick={toggleTerminalMap}
+            />
+            <button
+              type="button"
+              className="icon-button sidebar-header-button"
+              title="Collapse left sidebar"
+              aria-label="Collapse left sidebar"
+              onClick={() => setLeftSidebarCollapsedForActivePane(true)}
+            >
+              <PanelLeftClose size={14} aria-hidden="true" />
+            </button>
+          </div>
         <SidebarModeToggle
           mode={sidebarMode}
           shortcutHintsShown={shortcutHintsShown}
@@ -13639,33 +13731,6 @@ function MainApp() {
           failedResearchCount={failedResearchCount}
           onChange={changeSidebarMode}
         />
-        {sidebarMode === "research" ? (
-          <div
-            className={`pane-tab-row pane-home-row research-home-row${
-              researchHomeActive ? " is-selected" : ""
-            }`}
-            data-research-home-tab="true"
-            onClick={focusResearchHome}
-          >
-            <button
-              type="button"
-              className="control-button pane-tab"
-              aria-current={researchHomeActive ? "page" : undefined}
-              onClick={(event) => {
-                event.stopPropagation();
-                focusResearchHome();
-              }}
-            >
-              <House size={12} aria-hidden="true" />
-              <span className="pane-tab-title">Home</span>
-            </button>
-            {shortcutHintsShown ? (
-              <span className="pane-tab-shortcut-hint" aria-hidden="true">
-                ⌘N
-              </span>
-            ) : null}
-          </div>
-        ) : null}
         {sidebarMode === "research" ? (
           <ResearchFolderSwitcher
             folders={researchGroups}
@@ -13732,33 +13797,6 @@ function MainApp() {
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
           aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
         >
-          {/* Fixed Home tab: not a real pane, so it can't be closed, reordered, or
-              nested. Selecting it shows the empty content placeholder (the launcher). */}
-          {sidebarMode === "terminal" ? (
-            <div
-              className={`pane-tab-row pane-home-row${homeActive ? " is-selected" : ""}`}
-              data-home-tab="true"
-              onClick={() => setActivePaneId(HOME_TAB_ID)}
-            >
-              <button
-                type="button"
-                className="control-button pane-tab"
-                aria-current={homeActive ? "page" : undefined}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  setActivePaneId(HOME_TAB_ID);
-                }}
-              >
-                <House size={12} aria-hidden="true" />
-                <span className="pane-tab-title">Home</span>
-              </button>
-              {shortcutHintsShown ? (
-                <span className="pane-tab-shortcut-hint" aria-hidden="true">
-                  ⌘N
-                </span>
-              ) : null}
-            </div>
-          ) : null}
           {sidebarMode === "research" ? (
             <ResearchSidebarSection
               trees={scopedResearchTrees}
@@ -13963,7 +14001,7 @@ function MainApp() {
                 </div>
               ) : null}
               <div className="sidebar-action-with-hint">
-                <button className="control-button" type="button" onClick={focusHomeTab}>
+                <button className="control-button" type="button" onClick={openNewAgentPopover}>
                   <MessageSquareText size={14} aria-hidden="true" />
                   <span>New agent</span>
                 </button>
@@ -14252,9 +14290,8 @@ function MainApp() {
               role="menuitem"
               onClick={() => {
                 setGroupMenu(null);
-                setActivePaneId(HOME_TAB_ID);
                 setLastActiveGroupId(groupMenuGroup.id);
-                focusLauncherInput();
+                openNewAgentPopover();
               }}
             >
               <MessageSquareText size={13} aria-hidden="true" />
@@ -15857,7 +15894,11 @@ function MainApp() {
 
         <div
           ref={mainStageRef}
-          className={`main-stage${IS_MAC ? " is-native" : ""}${homeActive ? " is-home" : ""}${researchSurfaceActive ? " is-research" : ""}`}
+          className={`main-stage${IS_MAC ? " is-native" : ""}${
+            researchSurfaceActive ? " is-research" : ""
+          }${
+            !researchSurfaceActive && visibleTerminalPaneIds.length === 0 ? " is-empty" : ""
+          }`}
         >
           {newDocumentOpen ? (
             // A research-surface page, not a modal: it replaces the document
@@ -15874,6 +15915,12 @@ function MainApp() {
               sessionDraftKey={SESSION_DRAFT_KEYS.newDocumentFields}
               onShowSidebar={
                 researchSidebarRestoreInHeader ? showLeftSidebarInResearch : undefined
+              }
+              onOpenTerminalMap={
+                researchSidebarRestoreInHeader ? toggleTerminalMap : undefined
+              }
+              terminalMapOpen={
+                researchSidebarRestoreInHeader ? terminalMapOpen : false
               }
             />
           ) : null}
@@ -15925,64 +15972,20 @@ function MainApp() {
               onShowSidebar={
                 researchSidebarRestoreInHeader ? showLeftSidebarInResearch : undefined
               }
+              onOpenTerminalMap={
+                researchSidebarRestoreInHeader ? toggleTerminalMap : undefined
+              }
+              terminalMapOpen={
+                researchSidebarRestoreInHeader ? terminalMapOpen : false
+              }
             />
           ) : null}
-          {/* Keep the Research-home launcher mounted while another tab or
-              Research view is forward. Its in-memory session draft also
-              survives a WebKit reload without becoming durable app state. */}
           <div className="research-empty-state" hidden={researchStageView !== "home"}>
-            <NewResearchDialog
-              open
-              inline
-              visible={researchStageView === "home"}
-              adapters={config?.adapters ?? []}
-              requireCmdEnterToSend={settings.requireCmdEnterToSend}
-              workspaceId={researchScope}
-              onClose={() => undefined}
-              onCreate={submitNewResearch}
-            />
-          </div>
-          {homeActive ? (
-            <div className="home-stage">
-              <div className="home-launcher">{renderLauncher()}</div>
-              <div className="home-board">
-                <HomeGroupSelector
-                  groups={homeGroups}
-                  draftsVisible={homeDraftsVisible}
-                  onDraftsVisibleChange={setHomeDraftsVisibility}
-                  hiddenTerminalIds={hiddenHomeTerminalIds}
-                  onSetTerminalsHidden={setHomeTerminalsHidden}
-                  onToggleTerminal={toggleHomeTerminal}
-                />
-                <HomeRails
-                  workstreams={homeVisibleWorkstreams}
-                  drafts={globalDrafts}
-                  draftsVisible={homeDraftsVisible}
-                  onShowDrafts={showHomeDrafts}
-                  onActivatePane={focusPaneTab}
-                  onLoadEarlierPastTurns={loadEarlierHomeTurnHistory}
-                  onReorderQueuedTurn={(agentId, fromIndex, toIndex, text, expectedId) =>
-                    void reorderHomeQueuedTurn(agentId, fromIndex, toIndex, text, expectedId)
-                  }
-                  onMoveQueuedTurn={(fromAgentId, toAgentId, index, text, expectedId) =>
-                    void moveQueuedTurnToAgent(fromAgentId, toAgentId, index, text, expectedId)
-                  }
-                  onQueueTurn={queueHomeTurn}
-                  onRemoveQueuedTurn={removeHomeQueuedTurn}
-                  onUnpauseAgent={unpauseHomeAgent}
-                  onSetQueuedTurnPause={setHomeQueuedTurnPause}
-                  onSendNextQueuedTurn={sendNextHomeQueuedTurn}
-                  onCreateDraft={createHomeDraft}
-                  onDeleteDraft={deleteHomeDraft}
-                  onAssignDraft={(draftId, agentId) => void assignHomeDraft(draftId, agentId)}
-                  readRailScroll={readHomeRailScroll}
-                  saveRailScroll={saveHomeRailScroll}
-                  composerDrafts={homeComposerDrafts}
-                  setComposerDrafts={setHomeComposerDrafts}
-                />
-              </div>
+            <div className="research-empty-placeholder">
+              <MessageSquareText size={48} aria-hidden="true" />
+              <span>Select a research item or start a new query</span>
             </div>
-          ) : null}
+          </div>
           {panes.map((pane) => (
             <TerminalPane
               key={pane.id}
@@ -16302,6 +16305,81 @@ function MainApp() {
         onClose={() => setNewResearchOpen(false)}
         onCreate={submitNewResearch}
       />
+
+      {newAgentOpen ? (
+        <div
+          className="confirm-dialog-backdrop new-agent-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeNewAgentPopover();
+            }
+          }}
+        >
+          {renderLauncher()}
+        </div>
+      ) : null}
+
+      {terminalMapOpen ? (
+        <div
+          className="confirm-dialog-backdrop terminal-map-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeTerminalMap();
+            }
+          }}
+        >
+          <div
+            ref={terminalMapDialogRef}
+            className="terminal-map-popover"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Terminal map"
+            tabIndex={-1}
+          >
+            <div className="home-board">
+              <HomeGroupSelector
+                groups={homeGroups}
+                draftsVisible={homeDraftsVisible}
+                onDraftsVisibleChange={setHomeDraftsVisibility}
+                hiddenTerminalIds={hiddenHomeTerminalIds}
+                onSetTerminalsHidden={setHomeTerminalsHidden}
+                onToggleTerminal={toggleHomeTerminal}
+              />
+              <HomeRails
+                workstreams={homeVisibleWorkstreams}
+                drafts={globalDrafts}
+                draftsVisible={homeDraftsVisible}
+                onShowDrafts={showHomeDrafts}
+                onActivatePane={(paneId) => {
+                  closeTerminalMap();
+                  focusPaneTab(paneId);
+                }}
+                onLoadEarlierPastTurns={loadEarlierHomeTurnHistory}
+                onReorderQueuedTurn={(agentId, fromIndex, toIndex, text, expectedId) =>
+                  void reorderHomeQueuedTurn(agentId, fromIndex, toIndex, text, expectedId)
+                }
+                onMoveQueuedTurn={(fromAgentId, toAgentId, index, text, expectedId) =>
+                  void moveQueuedTurnToAgent(fromAgentId, toAgentId, index, text, expectedId)
+                }
+                onQueueTurn={queueHomeTurn}
+                onRemoveQueuedTurn={removeHomeQueuedTurn}
+                onUnpauseAgent={unpauseHomeAgent}
+                onSetQueuedTurnPause={setHomeQueuedTurnPause}
+                onSendNextQueuedTurn={sendNextHomeQueuedTurn}
+                onCreateDraft={createHomeDraft}
+                onDeleteDraft={deleteHomeDraft}
+                onAssignDraft={(draftId, agentId) => void assignHomeDraft(draftId, agentId)}
+                readRailScroll={readHomeRailScroll}
+                saveRailScroll={saveHomeRailScroll}
+                composerDrafts={homeComposerDrafts}
+                setComposerDrafts={setHomeComposerDrafts}
+              />
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <ResearchFolderDialog
         open={newResearchFolderRequest !== null}
