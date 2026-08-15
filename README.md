@@ -10,11 +10,11 @@ It has a native UI for launching agents, queueing follow-ups,
 tracking agent status, and driving TUI-based agents.
 
 Agents are integrated through a pluggable adapter layer. Claude Code,
-Codex, OpenCode, Grok, Muse, [Pi](https://pi.dev), and Cursor Agent
+Codex, OpenCode, Grok, Muse, [Pi](https://pi.dev), Cursor Agent, and Devin CLI
 are included as adapters, each with
-lifecycle hooks, native transcripts, and session resumes. All except Muse
-and Cursor also support forks; Muse's CLI has no fork command, and Cursor
-Agent has no native fork. New agents
+lifecycle hooks, native transcripts, and session resumes. All except Muse,
+Cursor, and Devin also support forks; Muse's CLI has no fork command, Cursor
+Agent has no native fork, and Devin's `/fork` is TUI-only. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
@@ -29,12 +29,12 @@ Rust. See [ACP agents](#acp-agents).
 - Native Ghostty terminals: each pane hosts a Metal-rendered Ghostty
   surface on macOS, with a portable Rust PTY backend for tests and
   non-macOS platforms.
-- Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, Pi, and Cursor Agent, launched from the app
-  or by running `claude` / `codex` / `opencode` / `grok` / `agent` / `muse` / `pi` / `cursor-agent` inside a shell
+- Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, Pi, Cursor Agent, and Devin CLI, launched from the app
+  or by running `claude` / `codex` / `opencode` / `grok` / `agent` / `muse` / `pi` / `cursor-agent` / `devin` inside a shell
   pane.
 - Agent panes for any ACP agent, configured under `adapters.acp` and launched
   from the app.
-- Transcript JSONL tailing and a native follow-up composer: send, queue,
+- Transcript tailing and a native follow-up composer: send, queue,
   steer, edit/reorder queued turns, and approve/deny permission prompts where
   supported.
 - qMux slash commands in the follow-up composer: `/fork <message>` branches the
@@ -77,7 +77,7 @@ natively on Apple Silicon and Intel Macs.
    [releases page](https://github.com/raykyri/qmux/releases).
 2. Open it and drag **qmux** into **Applications**.
 3. You'll want the agent CLIs you use on your `PATH`: `claude`, `codex`,
-   `opencode`, `grok`, `muse`, `pi`, and/or `cursor-agent`.
+   `opencode`, `grok`, `muse`, `pi`, `cursor-agent`, and/or `devin`.
 
 If macOS reports the app is damaged or can't be opened, clear the download
 quarantine flag and launch it again:
@@ -97,7 +97,7 @@ Prerequisites:
 - Rust toolchain.
 - Node.js and npm.
 - The agent CLIs you want to use on `PATH`: `claude`, `codex`, `opencode`, `grok`,
-  `muse`, `pi`, and/or `cursor-agent`.
+  `muse`, `pi`, `cursor-agent`, and/or `devin`.
 
 Install dependencies:
 
@@ -269,7 +269,7 @@ hosted view can show proposal status without a separate collaboration database.
 - Shell panes spawn `$SHELL`.
 - Agent panes spawn the adapter's configured agent binary, either in the current
   repo/directory or in a qmux-created agent worktree. Shell functions can route
-  `claude`, `codex`, `opencode`, `grok` (and Grok's `agent` alias), `muse`, `pi`, and `cursor-agent` through qmux from shell panes, but the
+  `claude`, `codex`, `opencode`, `grok` (and Grok's `agent` alias), `muse`, `pi`, `cursor-agent`, and `devin` through qmux from shell panes, but the
   adapter binary still needs to be installed or configured.
 - Each pane receives:
   - `QMUX_PANE_ID`
@@ -324,7 +324,8 @@ hosted view can show proposal status without a separate collaboration database.
     "grok": { "binary": "grok" },
     "muse": { "binary": "muse" },
     "pi": { "binary": "pi" },
-    "cursor": { "binary": "cursor-agent" }
+    "cursor": { "binary": "cursor-agent" },
+    "devin": { "binary": "devin" }
   }
 }
 ```
@@ -333,7 +334,7 @@ hosted view can show proposal status without a separate collaboration database.
 Relative paths (for `workspaceRoot`/`socketPath`) are resolved from the config
 file's directory when that directory is under `$HOME`; otherwise they fall back to
 the platform data/runtime locations. Each adapter's `binary` is optional and
-defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`, `pi`, `cursor-agent`), which is
+defaults to the command name (`claude`, `codex`, `opencode`, `grok`, `muse`, `pi`, `cursor-agent`, `devin`), which is
 looked up on `PATH`; an absolute path or a `~/…` path (expanded against `$HOME`) is
 used as given. A top-level `claudeBinary` is still honored for backward
 compatibility. If the config file is absent, qmux uses the platform data
@@ -408,6 +409,26 @@ rendering instead of the TUI.
 
 The qmux launcher can pass an optional `--mode plan` or `--mode ask`, plus a
 model when one is selected. It does not pass `--force` or `--yolo`.
+
+### Devin
+
+The native Devin adapter launches Devin CLI's interactive TUI (`devin`) in a
+qmux pane. It is local-only. Authentication, model changes, cloud `/handoff`,
+and Devin's TUI `/fork` stay inside Devin. There is no CLI fork flag, so qmux
+does not offer session branching.
+
+Interactive `devin` commands typed in a qmux shell are supervised like
+launches from the app. Management and metadata utilities (`auth`, `mcp`,
+`models`, `rules`, `skills`, `plugins`, `cloud`, `list`, `update`, `migrate`,
+`sandbox`, `setup`, `uninstall`, `acp`, `help`, and `--help` / `--version` /
+`--print`) pass through unchanged and do not create an agent record.
+`devin --resume` / `-c` are supervised TUI resumes. `--config` and `--export`
+are reserved: qmux copies the user's Devin config, injects lifecycle hooks,
+and passes `--config` itself; `--export` writes ATIF JSON under
+`.qmux/devin/` for the sidebar timeline.
+
+The qmux launcher can pass `--permission-mode` (`auto`, `accept-edits`,
+`smart`, `dangerous`) and a model when one is selected.
 
 ### Remote groups
 

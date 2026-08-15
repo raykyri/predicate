@@ -92,6 +92,14 @@ function CursorMark(props: MarkProps) {
   );
 }
 
+function DevinMark(props: MarkProps) {
+  return (
+    <Mark {...props}>
+      <path d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25zm-1.2 4.5h2.55c2.43 0 4.05 1.47 4.05 3.84 0 2.34-1.62 3.81-4.05 3.81H12.3v3.45H10.8V6.75zm2.49 5.88c1.41 0 2.31-.84 2.31-2.07 0-1.26-.9-2.07-2.31-2.07h-1.29v4.14h1.29z" />
+    </Mark>
+  );
+}
+
 const MARK_BY_ID = {
   claude: ClaudeMark,
   codex: CodexMark,
@@ -100,6 +108,7 @@ const MARK_BY_ID = {
   muse: MuseMark,
   pi: PiMark,
   cursor: CursorMark,
+  devin: DevinMark,
 } as const satisfies Record<(typeof SUPPORTED_AGENTS)[number]["id"], typeof ClaudeMark>;
 
 export function HeroAgents() {

@@ -1743,6 +1743,7 @@ mod tests {
                     binary: Some("muse".to_string()),
                 },
                 cursor: Default::default(),
+                devin: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),

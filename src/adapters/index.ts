@@ -3,6 +3,7 @@ import { acpUiAdapter } from "./acp";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
 import { cursorUiAdapter } from "./cursor";
+import { devinUiAdapter } from "./devin";
 import { grokUiAdapter } from "./grok";
 import { museUiAdapter } from "./muse";
 import { opencodeUiAdapter } from "./opencode";
@@ -53,6 +54,7 @@ export const agentUiAdapters = [
   museUiAdapter,
   piUiAdapter,
   cursorUiAdapter,
+  devinUiAdapter,
   acpUiAdapter,
 ];
 

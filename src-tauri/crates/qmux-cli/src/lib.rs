@@ -184,6 +184,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             run_agent_exec("muse".to_string(), args.collect())?;
             Ok(true)
         }
+        "devin" => {
+            run_agent_exec("devin".to_string(), args.collect())?;
+            Ok(true)
+        }
         "mcp" => {
             mcp::run()?;
             Ok(true)

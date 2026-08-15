@@ -14,7 +14,7 @@ export interface Feature {
 }
 
 export interface SupportedAgent {
-  id: "claude" | "codex" | "opencode" | "grok" | "muse" | "pi" | "cursor";
+  id: "claude" | "codex" | "opencode" | "grok" | "muse" | "pi" | "cursor" | "devin";
   label: string;
 }
 
@@ -28,6 +28,7 @@ export const SUPPORTED_AGENTS: SupportedAgent[] = [
   { id: "muse", label: "Muse" },
   { id: "pi", label: "Pi" },
   { id: "cursor", label: "Cursor" },
+  { id: "devin", label: "Devin" },
 ];
 
 export const FEATURES: Feature[] = [

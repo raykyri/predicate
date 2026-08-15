@@ -349,8 +349,16 @@ fn start_transcript_tail_inner(
                     // a freshly bound transcript (which must replace any prior timeline), or
                     // the file is now shorter than what we'd already consumed (a truncation
                     // or in-place rewrite) so our timeline no longer prefixes it.
-                    raw_lines = complete_lines(&snapshot.data);
-                    raw_line_offset = snapshot.start_line_index;
+                    if transcript_is_whole_json_document(&path) {
+                        // ATIF JSON is one object, often without a trailing newline.
+                        // `complete_lines` would hold back the final `}` and the
+                        // document would never parse.
+                        raw_lines = whole_json_document_lines(&snapshot.data);
+                        raw_line_offset = 0;
+                    } else {
+                        raw_lines = complete_lines(&snapshot.data);
+                        raw_line_offset = snapshot.start_line_index;
+                    }
                     let native_leaf_id = agent_native_leaf_id(&state, &agent_id);
                     let turns = adapter.resolve_transcript_turns_at_leaf(
                         &agent_id,
@@ -358,28 +366,39 @@ fn start_transcript_tail_inner(
                         &raw_lines,
                         native_leaf_id.as_deref(),
                     );
-                    // Bound-checked write: a rebind can land between this tail's
-                    // loop-top binding check and here, and an unconditional replace
-                    // would swap the new transcript's timeline for this dead file's
-                    // parse. A skipped write emits nothing; the next loop-top check
-                    // retires this tail.
-                    match state.replace_turns_for_transcript(
-                        &agent_id,
-                        &transcript_path,
-                        turns.clone(),
-                    ) {
-                        Err(err) => {
-                            state.emit(transcript_persist_error(&agent_id, &transcript_path, &err));
+                    // A rewritten whole-file transcript (Devin ATIF JSON) can be
+                    // mid-write or contain only skipped system steps. Replacing
+                    // with an empty parse would wipe a timeline we already have.
+                    let skip_empty_document =
+                        transcript_is_whole_json_document(&path) && turns.is_empty() && !first_read;
+                    if !skip_empty_document {
+                        // Bound-checked write: a rebind can land between this tail's
+                        // loop-top binding check and here, and an unconditional replace
+                        // would swap the new transcript's timeline for this dead file's
+                        // parse. A skipped write emits nothing; the next loop-top check
+                        // retires this tail.
+                        match state.replace_turns_for_transcript(
+                            &agent_id,
+                            &transcript_path,
+                            turns.clone(),
+                        ) {
+                            Err(err) => {
+                                state.emit(transcript_persist_error(
+                                    &agent_id,
+                                    &transcript_path,
+                                    &err,
+                                ));
+                            }
+                            Ok(true) => {
+                                state.emit(QmuxEvent::new(
+                                    "turn.updated",
+                                    None,
+                                    Some(agent_id.clone()),
+                                    json!({ "reset": true, "turns": turns }),
+                                ));
+                            }
+                            Ok(false) => {}
                         }
-                        Ok(true) => {
-                            state.emit(QmuxEvent::new(
-                                "turn.updated",
-                                None,
-                                Some(agent_id.clone()),
-                                json!({ "reset": true, "turns": turns }),
-                            ));
-                        }
-                        Ok(false) => {}
                     }
                     let current_agent = state.agent(&agent_id).ok().flatten();
                     if observe_snapshot_workspace {
@@ -616,6 +635,13 @@ const READ_FAILURE_NOTICE_THRESHOLD: u32 = 6;
 // for branch/rollback resolution, but never retain or read an unbounded transcript.
 const TRANSCRIPT_TAIL_LINE_LIMIT: usize = 20_000;
 const TRANSCRIPT_TAIL_BYTE_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// Devin `--export` (and Devin's native transcripts) are pretty-printed ATIF
+/// JSON objects rewritten as a whole file after each turn, not JSONL. The tailer
+/// must reread from byte 0 and the parser must see the opening `{`.
+fn transcript_is_whole_json_document(path: &Path) -> bool {
+    path.extension().and_then(|ext| ext.to_str()) == Some("json")
+}
 
 fn trim_transcript_window(lines: &mut Vec<String>, source_index_offset: &mut usize) {
     let overflow = lines.len().saturating_sub(TRANSCRIPT_TAIL_LINE_LIMIT);
@@ -1135,10 +1161,16 @@ pub fn set_agent_transcript(
     };
 
     let candidate = Path::new(path);
+    let is_devin_json = agent.adapter == "devin"
+        && candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("json");
     if candidate
         .extension()
         .and_then(|extension| extension.to_str())
         != Some("jsonl")
+        && !is_devin_json
     {
         return Err("transcript must be a .jsonl file".to_string());
     }
@@ -1576,6 +1608,17 @@ fn complete_lines(raw: &str) -> Vec<String> {
     complete.lines().map(ToString::to_string).collect()
 }
 
+/// The entire JSON document as a single record. Pretty-printed ATIF files from
+/// Devin do not end in a newline, so JSONL `complete_lines` would drop the
+/// closing brace.
+fn whole_json_document_lines(data: &str) -> Vec<String> {
+    if data.is_empty() {
+        Vec::new()
+    } else {
+        vec![data.to_string()]
+    }
+}
+
 /// Result of an incremental transcript read.
 struct TranscriptRead {
     /// File content from the read offset, or the whole file when `reset` is set.
@@ -1601,6 +1644,9 @@ struct TranscriptRead {
 /// read starts on a valid-UTF-8 boundary; the *end* may land mid-record, so the read
 /// holds back any unterminated trailing bytes (see `read_complete_lines_utf8`).
 fn read_transcript_from(path: &Path, offset: u64) -> std::io::Result<TranscriptRead> {
+    if transcript_is_whole_json_document(path) {
+        return read_whole_json_document(path, offset);
+    }
     let mut file = fs::File::open(path)?;
     let len = file.metadata()?.len();
     // A shrink below `offset` is an obvious truncation/rewrite. An in-place rewrite to
@@ -1642,6 +1688,33 @@ fn read_transcript_from(path: &Path, offset: u64) -> std::io::Result<TranscriptR
         consumed_bytes,
         start_line_index: 0,
         reset: false,
+    })
+}
+
+/// Reads a pretty-printed JSON transcript from the start. JSONL tail windows
+/// would drop the opening `{` and make the document unparseable. Unchanged
+/// length is treated as a no-op so we do not rebuild the timeline every poll.
+fn read_whole_json_document(path: &Path, offset: u64) -> std::io::Result<TranscriptRead> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    if offset > 0 && len == offset {
+        return Ok(TranscriptRead {
+            data: String::new(),
+            consumed_bytes: 0,
+            start_line_index: 0,
+            reset: false,
+        });
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.take(TRANSCRIPT_TAIL_BYTE_LIMIT)
+        .read_to_end(&mut bytes)?;
+    let data = String::from_utf8_lossy(&bytes).into_owned();
+    Ok(TranscriptRead {
+        data,
+        consumed_bytes: len,
+        start_line_index: 0,
+        reset: offset > 0,
     })
 }
 
@@ -2139,6 +2212,17 @@ mod tests {
     }
 
     #[test]
+    fn whole_json_document_keeps_the_final_unterminated_brace() {
+        let data = "{\n  \"steps\": []\n}";
+        assert!(
+            !complete_lines(data).join("\n").ends_with('}'),
+            "JSONL complete_lines must hold back the unterminated closing brace"
+        );
+        assert_eq!(whole_json_document_lines(data).join("\n"), data);
+        assert!(whole_json_document_lines("").is_empty());
+    }
+
+    #[test]
     fn recovery_waits_for_a_fresh_session_file_to_appear() {
         // A file we followed that then vanished is a rotation: recover to a sibling.
         assert!(should_recover_missing(ErrorKind::NotFound, true));
@@ -2167,6 +2251,40 @@ mod tests {
         let read = read_transcript_from(&path, 0).unwrap();
         assert_eq!(read.data, "{\"a\":1}\n{\"b\":2}\n");
         assert_eq!(read.consumed_bytes, 16);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn json_document_rereads_from_the_start_when_rewritten() {
+        let dir = std::env::temp_dir().join(format!(
+            "qmux-transcript-json-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        fs::write(&path, "{\n  \"steps\": []\n}").unwrap();
+        let first = read_transcript_from(&path, 0).unwrap();
+        assert!(!first.reset);
+        assert!(first.data.contains("\"steps\""));
+        assert_eq!(first.consumed_bytes, fs::metadata(&path).unwrap().len());
+
+        let unchanged = read_transcript_from(&path, first.consumed_bytes).unwrap();
+        assert!(!unchanged.reset);
+        assert!(unchanged.data.is_empty());
+
+        fs::write(
+            &path,
+            "{\n  \"steps\": [{\"source\": \"user\", \"message\": \"hi\"}]\n}",
+        )
+        .unwrap();
+        let rewritten = read_transcript_from(&path, first.consumed_bytes).unwrap();
+        assert!(rewritten.reset);
+        assert!(rewritten.data.ends_with('}'));
+        assert!(rewritten.data.contains("hi"));
 
         fs::remove_dir_all(&dir).ok();
     }
@@ -2989,6 +3107,7 @@ mod tests {
                     binary: Some("muse".to_string()),
                 },
                 cursor: Default::default(),
+                devin: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),

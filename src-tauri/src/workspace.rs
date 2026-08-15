@@ -242,8 +242,7 @@ pub struct AgentInfo {
     /// Tool-approval policy the session was launched with, persisted like
     /// `effort` so a respawn does not silently fall back to the CLI's default —
     /// which would be a quieter, more permissive session than the user chose.
-    /// Only the Muse adapter sets this today. Absent when the adapter default
-    /// applies.
+    /// Muse and Devin set this today. Absent when the adapter default applies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_mode: Option<String>,
     /// Which `adapters.acp.agents` entry an `acp` agent was launched with.
@@ -2623,6 +2622,7 @@ mod tests {
                     binary: Some("muse".to_string()),
                 },
                 cursor: Default::default(),
+                devin: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),

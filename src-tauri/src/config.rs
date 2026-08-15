@@ -68,6 +68,8 @@ pub struct AdapterConfigs {
     #[serde(default)]
     pub cursor: CursorAdapterConfig,
     #[serde(default)]
+    pub devin: DevinAdapterConfig,
+    #[serde(default)]
     pub acp: AcpAdapterConfig,
 }
 
@@ -116,6 +118,13 @@ pub struct PiAdapterConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CursorAdapterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevinAdapterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
 }
@@ -544,6 +553,16 @@ impl QmuxConfig {
         )
     }
 
+    pub fn devin_binary(&self) -> String {
+        expand_binary(
+            self.adapters
+                .devin
+                .binary
+                .clone()
+                .unwrap_or_else(|| "devin".to_string()),
+        )
+    }
+
     fn read_config_file(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -595,6 +614,9 @@ impl QmuxConfig {
                 },
                 cursor: CursorAdapterConfig {
                     binary: Some("cursor-agent".to_string()),
+                },
+                devin: DevinAdapterConfig {
+                    binary: Some("devin".to_string()),
                 },
                 acp: AcpAdapterConfig::default(),
             },
@@ -1123,6 +1145,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configured.cursor_binary(), "/opt/bin/cursor-agent");
+    }
+
+    #[test]
+    fn devin_binary_defaults_and_can_be_configured() {
+        let default_config: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(default_config.devin_binary(), "devin");
+
+        let configured: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock",
+              "adapters": {
+                "devin": {
+                  "binary": "/opt/bin/devin"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(configured.devin_binary(), "/opt/bin/devin");
     }
 
     #[test]

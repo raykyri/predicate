@@ -5,8 +5,8 @@ submitted, when tools run, when permission is needed, and when the
 agent is idle enough for queued turns to advance.
 
 Hooks are only installed for agents launched by qmux or by qmux's
-shell wrapper functions inside a qmux shell pane, so a Claude or Codex
-process started outside qmux's setup will not have these hooks.
+shell wrapper functions inside a qmux shell pane, so a Claude, Codex,
+or Devin process started outside qmux's setup will not have these hooks.
 
 Because status is entirely hook-driven, a CLI blocked on startup UI
 that predates its session — a workspace-trust dialog, a login prompt,
@@ -37,6 +37,17 @@ shell wrapper. Using a fresh, unpredictable path per spawn — rather than
 one shared, same-user-writable qmux-hooks.json — keeps a process in one
 pane from tampering with the hook commands another pane's Claude loads.
 For the exact hooks, see src-tauri/src/adapters/claude.rs:23.
+
+For Devin, `--config` replaces `~/.config/devin/config.json` instead of
+merging, so qmux copies that user file (or a stub with
+`shell.setup_complete` when none exists), injects Claude-shaped
+`qmux notify` hooks, and starts Devin with `--config` pointing at a
+per-pane, per-spawn file under
+<qmux workspace root>/.qmux/hooks/devin-<pane-id>-<nonce>.json (created
+0600 in a 0700 dir with O_EXCL, previous file for that pane pruned). The
+user's original config is never written. Project `.devin/hooks.v1.json`
+is left alone. For the exact hooks, see
+src-tauri/src/adapters/devin.rs:44.
 
 For Codex, we write a qmux-managed profile under `CODEX_HOME`:
 
@@ -86,7 +97,7 @@ happens only when the generated sources change. Muse also rejects a
 plugin whose hooks share one script file, hence one script per event.
 For exact hooks, see src-tauri/src/adapters/muse.rs:32.
 
-The Claude, Codex, and Grok shims call back into qmux via
+The Claude, Codex, Grok, and Devin shims call back into qmux via
 `qmux notify <event>`, which sends a token-scoped hook.notify request
 back to the app.
 
@@ -153,6 +164,32 @@ that early) is not swept by a concurrent one.
   main agent status.
 - Unknown Claude hook events: forwarded as `agent.hook.<event>` with
   the raw hook payload.
+
+
+## Devin
+
+- `SessionStart`: records `session_id` (or `sessionId`) from the hook
+  payload. Devin does not report a `transcript_path`; qmux binds
+  `--export` to `<workspaceRoot>/.qmux/devin/<agent>.json` at launch and
+  tails that ATIF document. This does not mark the agent as running; a
+  prompt or tool hook does that.
+- `UserPromptSubmit`: marks the agent `Running` and emits
+  `agent.prompt_submitted`. qmux matches the payload's `prompt` against
+  outstanding send tracking.
+- `PreToolUse`: marks the agent `Running` and emits `agent.tool_use`.
+- `PostToolUse`: marks the agent `Running` and emits
+  `agent.tool_result`.
+- `PermissionRequest`: marks the agent `AwaitingPermission` and emits
+  `agent.awaiting_permission`. Approvals stay in Devin's TUI; qmux does
+  not send permission actions.
+- `PostCompaction`: marks the agent `Running` and emits
+  `agent.compacted`.
+- `Stop`: treats the agent as idle. qmux clears outstanding send
+  tracking, respects pause and typing state, drains the next queued turn
+  if allowed, and emits either `agent.running` or `agent.done`.
+- `SessionEnd`: emits `agent.session_end` without changing status.
+- Unknown Devin hook events: forwarded as `agent.hook.<event>` with the
+  raw hook payload.
 
 
 ## Codex

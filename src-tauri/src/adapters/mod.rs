@@ -2,6 +2,7 @@ pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
+pub mod devin;
 pub mod grok;
 pub mod muse;
 pub mod opencode;
@@ -25,6 +26,7 @@ use acp::AcpAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
 use cursor::CursorAdapter;
+use devin::DevinAdapter;
 use grok::GrokAdapter;
 use muse::MuseAdapter;
 use opencode::OpencodeAdapter;
@@ -1010,6 +1012,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(MuseAdapter::new(config)),
         Box::new(PiAdapter::new(config)),
         Box::new(CursorAdapter::new(config)),
+        Box::new(DevinAdapter::new(config)),
         Box::new(AcpAdapter::new(config)),
     ])
 }
@@ -1588,6 +1591,7 @@ mod tests {
                     binary: Some("muse".to_string()),
                 },
                 cursor: Default::default(),
+                devin: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
@@ -1614,7 +1618,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 8);
+        assert_eq!(metadata.len(), 9);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1629,8 +1633,10 @@ mod tests {
         assert!(!metadata[5].default);
         assert_eq!(metadata[6].id, "cursor");
         assert!(!metadata[6].default);
-        assert_eq!(metadata[7].id, "acp");
+        assert_eq!(metadata[7].id, "devin");
         assert!(!metadata[7].default);
+        assert_eq!(metadata[8].id, "acp");
+        assert!(!metadata[8].default);
         let config = test_config();
         assert!(!adapter_supports_fork(&config, "cursor"));
         assert!(!adapter_supports_fork_at_message(&config, "cursor"));
@@ -1646,6 +1652,8 @@ mod tests {
         // `fork` subcommand — so branching a session is not offered.
         assert!(!adapter_supports_fork(&config, "muse"));
         assert!(!adapter_supports_fork_at_message(&config, "muse"));
+        assert!(!adapter_supports_fork(&config, "devin"));
+        assert!(!adapter_supports_fork_at_message(&config, "devin"));
     }
 
     #[test]
