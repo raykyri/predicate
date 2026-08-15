@@ -203,8 +203,31 @@ code {
 }
 
 .hero-agents li {
+  position: relative;
   display: flex;
   line-height: 0;
+}
+
+.hero-agents li::after {
+  content: attr(data-label);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 0.38rem);
+  transform: translateX(-50%);
+  padding: 0.18rem 0.42rem;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 13px;
+  line-height: 18px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hero-agents li:hover::after,
+.hero-agents li:focus-visible::after {
+  opacity: 1;
 }
 
 .hero-agents svg {

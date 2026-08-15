@@ -117,7 +117,7 @@ export function HeroAgents() {
       {SUPPORTED_AGENTS.map((agent) => {
         const MarkIcon = MARK_BY_ID[agent.id];
         return (
-          <li key={agent.id} title={agent.label}>
+          <li key={agent.id} data-label={agent.label}>
             <MarkIcon />
             <span className="visually-hidden">{agent.label}</span>
           </li>
