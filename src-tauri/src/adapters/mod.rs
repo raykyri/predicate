@@ -736,6 +736,10 @@ pub struct PermissionAction {
 pub enum TranscriptLifecycleEvent {
     Interrupted,
     TurnStarted,
+    /// A native transcript record that the turn ended successfully. Used when
+    /// the adapter's Stop/idle hook is missing or never fires (Cursor's
+    /// `--plugin-dir` observer is skipped at the `stop` call site).
+    TurnCompleted,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -751,6 +755,7 @@ impl TranscriptLifecycleEvent {
         match self {
             TranscriptLifecycleEvent::Interrupted => "interrupted",
             TranscriptLifecycleEvent::TurnStarted => "turnStarted",
+            TranscriptLifecycleEvent::TurnCompleted => "turnCompleted",
         }
     }
 }

@@ -34,7 +34,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// generated observer plugin loaded with `--plugin-dir` (not from user/project
 /// `hooks.json`, which would be a shared writable target across panes). Native
 /// transcripts live under `~/.cursor/projects/<slug>/agent-transcripts/<id>/`
-/// and are Claude-shaped JSONL plus `turn_ended` records.
+/// and are Claude-shaped JSONL plus `turn_ended` records. cursor-agent only
+/// invokes `stop` / `afterAgentResponse` when user or project `hooks.json`
+/// registers them — not for `--plugin-dir` plugins — so a successful
+/// `turn_ended` record is the idle signal.
 ///
 /// cursor-agent runs plugin hooks with a constructed environment that does not
 /// inherit `QMUX_*`, so the Claude-style env-gated shim cannot identify its
@@ -581,8 +584,11 @@ impl CursorAdapter {
                 }
                 "agent.subagent_stopped"
             }
-            "afterAgentResponse" => "agent.running",
-            "stop" => {
+            // `afterAgentResponse` is the same turn boundary as `stop`. Both
+            // are gated by cursor-agent to user/project hooks.json (plugin
+            // hooks never run), so this path is a backstop for those files;
+            // plugin-only sessions idle via `turn_ended` instead.
+            "afterAgentResponse" | "stop" => {
                 let waiting_on_subagents = agent
                     .as_ref()
                     .map(|current| state.agent_has_active_subagents(&current.id))
@@ -1360,7 +1366,9 @@ fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEve
             if matches!(status, "error" | "aborted" | "cancelled" | "canceled") {
                 Some(TranscriptLifecycleEvent::Interrupted)
             } else {
-                None
+                // cursor-agent writes this unconditionally at end of turn. Its
+                // `stop` hook is not invoked for `--plugin-dir` plugins.
+                Some(TranscriptLifecycleEvent::TurnCompleted)
             }
         }
         _ => None,
@@ -1570,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_reads_claude_shaped_jsonl_and_skips_turn_ended() {
+    fn parser_reads_claude_shaped_jsonl_and_turn_ended_lifecycle() {
         let user = r#"{"role":"user","message":{"content":[{"type":"text","text":"PONG?"}]}}"#;
         let assistant =
             r#"{"role":"assistant","message":{"content":[{"type":"text","text":"PONG"}]}}"#;
@@ -1580,7 +1588,14 @@ mod tests {
         let assistant_turn = parse_transcript_line("agent-1", 1, assistant).unwrap();
         assert_eq!(assistant_turn.role, "assistant");
         assert_eq!(parse_transcript_line("agent-1", 2, ended), None);
-        assert_eq!(parse_transcript_lifecycle_event(ended), None);
+        assert_eq!(
+            parse_transcript_lifecycle_event(ended),
+            Some(TranscriptLifecycleEvent::TurnCompleted)
+        );
+        assert_eq!(
+            parse_transcript_lifecycle_event(r#"{"type":"turn_ended"}"#),
+            Some(TranscriptLifecycleEvent::TurnCompleted)
+        );
         assert_eq!(
             parse_transcript_lifecycle_event(r#"{"type":"turn_ended","status":"cancelled"}"#),
             Some(TranscriptLifecycleEvent::Interrupted)
@@ -1618,5 +1633,76 @@ mod tests {
             "--model",
             "composer-2.5"
         ])));
+    }
+
+    fn test_state() -> AppState {
+        AppState::new(QmuxConfig {
+            remotes: Default::default(),
+            workspace_root: PathBuf::from("/tmp/qmux-cursor-test"),
+            socket_path: PathBuf::from("/tmp/qmux-cursor-test.sock"),
+            adapters: Default::default(),
+            legacy_claude_binary: None,
+            claude_plugin_dir: PathBuf::new(),
+            opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
+        })
+    }
+
+    fn sample_agent() -> AgentInfo {
+        AgentInfo {
+            acp_config_options: Vec::new(),
+            acp_agent: None,
+            id: "agent-1".to_string(),
+            group_id: "group-1".to_string(),
+            adapter: "cursor".to_string(),
+            worktree_dir: "/tmp/qmux-cursor-test".to_string(),
+            branch: None,
+            active_workspace: None,
+            pane_id: Some("pane-1".to_string()),
+            orphaned_queue_pane_id: None,
+            session_id: None,
+            transcript_path: None,
+            status: AgentStatus::Running,
+            model: None,
+            effort: None,
+            approval_mode: None,
+            parent_id: None,
+            fork_point: None,
+            root_session_id: None,
+            thread_id: None,
+            branch_id: None,
+            native_leaf_id: None,
+            paused: false,
+            created_at: 1,
+        }
+    }
+
+    fn ingest(state: &AppState, event: &str) -> QmuxEvent {
+        match CursorAdapter::new(state.config()).ingest_notification(
+            state,
+            AdapterNotification {
+                adapter_id: Some("cursor".to_string()),
+                event: event.to_string(),
+                pane_id: Some("pane-1".to_string()),
+                agent_id: Some("agent-1".to_string()),
+                payload: json!({}),
+            },
+        ) {
+            Ok(AdapterNotificationOutcome::Event(event)) => event,
+            Err(err) => panic!("{err}"),
+        }
+    }
+
+    #[test]
+    fn stop_and_after_agent_response_mark_a_running_agent_done() {
+        for event in ["stop", "afterAgentResponse"] {
+            let state = test_state();
+            state.insert_agent(sample_agent()).unwrap();
+            let emitted = ingest(&state, event);
+            assert_eq!(emitted.event_type, "agent.done", "{event}");
+            let agent = state.agent("agent-1").unwrap().expect("agent exists");
+            assert!(matches!(agent.status, AgentStatus::Done), "{event}");
+        }
     }
 }

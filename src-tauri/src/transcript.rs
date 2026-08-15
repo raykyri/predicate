@@ -1,7 +1,7 @@
 use crate::adapters::{TranscriptLifecycleEvent, adapter_registry, maybe_record_agent_model};
 use crate::events::QmuxEvent;
 use crate::state::{AgentSendSource, AppState};
-use crate::turn_queue::{IdleResolution, advance_after_interruption};
+use crate::turn_queue::{IdleResolution, advance_after_idle, advance_after_interruption};
 use crate::workspace::{AgentInfo, AgentStatus, record_agent_active_workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -681,10 +681,41 @@ fn transcript_lifecycle_agent_event(
         return Ok(None);
     }
     // If a normal Stop/idle hook already drained a queued turn, a late transcript
-    // abort marker belongs to the previous turn. Do not drain again while that
-    // queued send is still waiting for its prompt-submit echo.
+    // abort or completion marker belongs to the previous turn. Do not drain again
+    // while that queued send is still waiting for its prompt-submit echo.
     if state.agent_has_outstanding_send_source(agent_id, AgentSendSource::QueuedTurn)? {
         return Ok(None);
+    }
+
+    if lifecycle_event == TranscriptLifecycleEvent::TurnCompleted {
+        return match advance_after_idle(state, agent_id) {
+            Ok(IdleResolution::Drained) => transcript_lifecycle_updated_agent_event(
+                state,
+                agent_id,
+                transcript_path,
+                lifecycle_event,
+                "agent.running",
+            ),
+            Ok(IdleResolution::Paused | IdleResolution::Idle) => {
+                transcript_lifecycle_updated_agent_event(
+                    state,
+                    agent_id,
+                    transcript_path,
+                    lifecycle_event,
+                    "agent.done",
+                )
+            }
+            Err(err) => Ok(Some(QmuxEvent::new(
+                "agent.queue_error",
+                agent.pane_id,
+                Some(agent_id.to_string()),
+                json!({
+                    "error": err,
+                    "transcriptLifecycleEvent": lifecycle_event.as_str(),
+                    "transcriptPath": transcript_path,
+                }),
+            ))),
+        };
     }
 
     match advance_after_interruption(state, agent_id) {
@@ -2365,6 +2396,46 @@ mod tests {
         .unwrap();
 
         assert!(event.is_none());
+    }
+
+    #[test]
+    fn transcript_lifecycle_turn_completed_marks_running_agent_done() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent(AgentStatus::Running))
+            .unwrap();
+
+        let event = transcript_lifecycle_agent_event(
+            &state,
+            "agent-1",
+            "/tmp/session.jsonl",
+            TranscriptLifecycleEvent::TurnCompleted,
+        )
+        .unwrap()
+        .expect("turn completion should emit an agent event");
+
+        assert_eq!(event.event_type, "agent.done");
+        assert_eq!(event.payload["transcriptLifecycleEvent"], "turnCompleted");
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(matches!(agent.status, AgentStatus::Done));
+    }
+
+    #[test]
+    fn transcript_lifecycle_turn_completed_ignores_non_working_agent() {
+        let state = test_state();
+        state.insert_agent(sample_agent(AgentStatus::Done)).unwrap();
+
+        let event = transcript_lifecycle_agent_event(
+            &state,
+            "agent-1",
+            "/tmp/session.jsonl",
+            TranscriptLifecycleEvent::TurnCompleted,
+        )
+        .unwrap();
+
+        assert!(event.is_none());
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(matches!(agent.status, AgentStatus::Done));
     }
 
     #[test]

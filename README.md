@@ -391,10 +391,12 @@ launches. It does not mutate user or project `hooks.json`. cursor-agent runs
 those hooks with a constructed environment that does not inherit `QMUX_*`, so
 the plugin shim resolves the pane through a binding file (`qmux cursor-notify`)
 rather than the env-gated notify used by Claude/Grok. The plugin reports
-session identity, prompt submit, tool/shell start, thought, and turn-complete
-(`stop`); Cursor's JSONL remains the transcript source of truth. There is no
-native fork command. Development builds can point `QMUX_CURSOR_PLUGIN_DIR` at
-another copy of the bundled `qmux-cursor-plugin`.
+session identity, prompt submit, and tool/shell start. cursor-agent only
+fires `stop` / `afterAgentResponse` for user or project `hooks.json`, not
+`--plugin-dir` plugins, so qmux treats a successful `turn_ended` JSONL
+record as the idle signal. There is no native fork command. Development
+builds can point `QMUX_CURSOR_PLUGIN_DIR` at another copy of the bundled
+`qmux-cursor-plugin`.
 
 Interactive `cursor-agent` commands typed in a qmux shell are supervised like
 launches from the app. Management and metadata utilities (`login`, `logout`,
