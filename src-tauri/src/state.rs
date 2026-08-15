@@ -9071,21 +9071,6 @@ impl AppState {
         Ok(model.agent_activity.get(agent_id).copied().unwrap_or(0))
     }
 
-    /// Current value of the agent's status/lifecycle counter. This is intentionally
-    /// narrower than `agent_activity_seq`: transcript updates do not bump it.
-    pub fn agent_status_activity_seq(&self, agent_id: &str) -> Result<u64, String> {
-        let model = self
-            .inner
-            .model
-            .lock()
-            .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model
-            .agent_status_activity
-            .get(agent_id)
-            .copied()
-            .unwrap_or(0))
-    }
-
     pub fn agent_has_outstanding_send_source(
         &self,
         agent_id: &str,

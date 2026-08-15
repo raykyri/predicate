@@ -663,8 +663,8 @@ fn transcript_lifecycle_agent_event(
     if lifecycle_event == TranscriptLifecycleEvent::TurnStarted {
         // Codex can append the replacement turn immediately after an abort while its
         // UserPromptSubmit hook races the 350ms transcript poll. Only revive the
-        // interruption state we set ourselves: a delayed task_started from a turn whose
-        // Stop hook already reached Done must not resurrect completed work.
+        // interruption state we set ourselves: a delayed task_started from a turn
+        // whose idle signal already reached Done must not resurrect completed work.
         if !matches!(agent.status, AgentStatus::AwaitingInput) {
             return Ok(None);
         }

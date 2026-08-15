@@ -19,7 +19,7 @@ use crate::transcript::{
     gather_transcript_candidates_recursive, read_codex_transcript_session_id,
     start_transcript_tail, string_field,
 };
-use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
+use crate::turn_queue::is_shell_escape_turn;
 use crate::workspace::{
     ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
@@ -831,6 +831,10 @@ impl CodexAdapter {
                 "agent.subagent_stopped"
             }
             "Stop" => {
+                // Codex fires Stop between auto-review/guardian jobs and when
+                // the TUI queues another prompt, then continues the same turn.
+                // Waiters and this agent's own queue settle on transcript
+                // `task_complete` instead (see parse_transcript_lifecycle_event).
                 let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
                     if state.agent_has_active_subagents(&agent.id)? {
                         agent.status = AgentStatus::Running;
@@ -842,19 +846,10 @@ impl CodexAdapter {
                 } else {
                     false
                 };
-                let deferred = if waiting_on_subagents {
-                    false
-                } else if let Some(agent) = agent.as_ref() {
-                    schedule_finish_agent_after_stop(state, agent)?
-                } else {
-                    false
-                };
                 if waiting_on_subagents {
                     "agent.running"
-                } else if deferred {
-                    "agent.stop_observed"
                 } else {
-                    "agent.done"
+                    "agent.stop_observed"
                 }
             }
             other => {
@@ -882,10 +877,10 @@ impl CodexAdapter {
                     .map_err(|err| format!("failed to encode send tracking: {err}"))?,
             );
         }
-        // The idle handler (advance_after_idle) writes status/paused straight to the
-        // store without touching this local snapshot, so re-read the agent before
-        // attaching it — otherwise the event ships a stale (e.g. not-yet-paused) copy
-        // and the surgical upsert below hides the change from the UI.
+        // Status/paused writes go straight to the store without touching this
+        // local snapshot, so re-read the agent before attaching it — otherwise
+        // the event ships a stale copy and the surgical upsert below hides the
+        // change from the UI.
         let agent = match agent {
             Some(agent) => state.agent(&agent.id)?.or(Some(agent)),
             None => None,
@@ -1565,93 +1560,6 @@ fn validate_shell_tail_args(args: &[String]) -> Result<(), String> {
 fn codex_config_overrides_hooks(value: &str) -> bool {
     let key = value.split_once('=').map_or(value, |(key, _)| key).trim();
     key == "hooks" || key.starts_with("hooks.") || key == "features.hooks"
-}
-
-/// Codex can carry its own internal queue: a user may submit into the TUI while a
-/// turn is running, then Codex emits `Stop` for the current turn and immediately
-/// starts the queued prompt. If qmux treats `Stop` as a hard idle boundary
-/// synchronously, it can drain qmux waiters/queues into other panes in the small
-/// gap before Codex's `UserPromptSubmit` for that internal prompt arrives. Defer
-/// Codex idle settlement briefly and stand down if another lifecycle hook lands.
-#[cfg(not(test))]
-const CODEX_STOP_SETTLE_GRACE: Duration = Duration::from_millis(350);
-
-fn schedule_finish_agent_after_stop(state: &AppState, agent: &AgentInfo) -> Result<bool, String> {
-    let baseline = state.agent_status_activity_seq(&agent.id)?;
-    let agent_id = agent.id.clone();
-
-    #[cfg(test)]
-    {
-        let _ = (state, baseline, agent_id);
-        Ok(true)
-    }
-
-    #[cfg(not(test))]
-    {
-        let state = state.clone();
-        thread::spawn(move || {
-            thread::sleep(CODEX_STOP_SETTLE_GRACE);
-            match resolve_agent_after_stop_grace(&state, &agent_id, baseline) {
-                Ok(Some(event)) => state.emit(event),
-                Ok(None) => {}
-                Err(err) => eprintln!("qmux: failed to settle Codex Stop for {agent_id}: {err}"),
-            }
-        });
-        Ok(true)
-    }
-}
-
-fn resolve_agent_after_stop_grace(
-    state: &AppState,
-    agent_id: &str,
-    baseline: u64,
-) -> Result<Option<QmuxEvent>, String> {
-    let Some(agent) = state.agent(agent_id)? else {
-        return Ok(None);
-    };
-    if !matches!(agent.status, AgentStatus::Starting | AgentStatus::Running) {
-        return Ok(None);
-    }
-    if state.agent_status_activity_seq(agent_id)? != baseline {
-        return Ok(None);
-    }
-    if state.agent_has_active_subagents(agent_id)? {
-        return Ok(None);
-    }
-
-    let drained = finish_agent_after_stop(state, &agent)?;
-    let Some(agent) = state.agent(agent_id)? else {
-        return Ok(None);
-    };
-    Ok(Some(QmuxEvent::new(
-        if drained {
-            "agent.running"
-        } else {
-            "agent.done"
-        },
-        agent.pane_id.clone(),
-        Some(agent.id.clone()),
-        json!({ "agent": agent, "deferredHookEvent": "Stop" }),
-    )))
-}
-
-/// Resolves an idle Codex agent: drains the next queued turn, or enters/stays paused.
-/// Returns whether a turn was drained. Status/paused are written by
-/// `advance_after_idle`; the passed agent is only used for its id afterward.
-fn finish_agent_after_stop(state: &AppState, agent: &AgentInfo) -> Result<bool, String> {
-    match advance_after_idle(state, &agent.id) {
-        Ok(IdleResolution::Drained) => Ok(true),
-        Ok(IdleResolution::Paused | IdleResolution::Idle) => Ok(false),
-        Err(err) => {
-            state.emit(QmuxEvent::new(
-                "agent.queue_error",
-                agent.pane_id.clone(),
-                Some(agent.id.clone()),
-                json!({ "error": err }),
-            ));
-            Ok(false)
-        }
-    }
 }
 
 /// Recovers a fork's child identity when its startup hook briefly reported the
@@ -2503,6 +2411,9 @@ fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEve
     match payload.get("type").and_then(Value::as_str) {
         Some("turn_aborted") => Some(TranscriptLifecycleEvent::Interrupted),
         Some("task_started") => Some(TranscriptLifecycleEvent::TurnStarted),
+        // TurnComplete. Codex also emits Stop mid-turn (review jobs, internal
+        // TUI queue); only this record means the parent turn actually finished.
+        Some("task_complete") => Some(TranscriptLifecycleEvent::TurnCompleted),
         _ => None,
     }
 }
@@ -4070,6 +3981,11 @@ trusted_hash = "sha256:trusted"
             "payload": { "type": "task_started", "turn_id": "turn-2" }
         })
         .to_string();
+        let task_complete_line = json!({
+            "type": "event_msg",
+            "payload": { "type": "task_complete", "turn_id": "turn-2" }
+        })
+        .to_string();
 
         assert_eq!(
             parse_transcript_lifecycle_event(&abort_line),
@@ -4078,6 +3994,10 @@ trusted_hash = "sha256:trusted"
         assert_eq!(
             parse_transcript_lifecycle_event(&task_started_line),
             Some(TranscriptLifecycleEvent::TurnStarted)
+        );
+        assert_eq!(
+            parse_transcript_lifecycle_event(&task_complete_line),
+            Some(TranscriptLifecycleEvent::TurnCompleted)
         );
         assert_eq!(parse_transcript_lifecycle_event(&user_message_line), None);
     }
@@ -4146,10 +4066,14 @@ trusted_hash = "sha256:trusted"
 
         let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.stop_observed");
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
     }
 
     #[test]
-    fn deferred_stop_cannot_drain_a_queue_after_subagent_launch() {
+    fn stop_does_not_settle_or_drain_a_codex_queue() {
         let state = test_state();
         let bytes = install_agent_pane(&state);
         state
@@ -4158,117 +4082,37 @@ trusted_hash = "sha256:trusted"
 
         let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.stop_observed");
-        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
-
-        ingest(
-            &state,
-            hook_for_agent("SubagentStart", "agent-1", json!({ "agent_id": "child-1" })),
-        );
-        ingest(
-            &state,
-            hook_for_agent(
-                "UserPromptSubmit",
-                "agent-1",
-                json!({ "prompt": "steer while child runs" }),
-            ),
-        );
-        assert!(state.agent_has_active_subagents("agent-1").unwrap());
-        assert!(
-            resolve_agent_after_stop_grace(&state, "agent-1", baseline)
-                .unwrap()
-                .is_none()
-        );
-
-        // Even a later parent Stop cannot arm a queue drain while that known
-        // child remains live.
-        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
-        assert_eq!(event.event_type, "agent.running");
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
         assert_eq!(
             state.list_agent_turn_queue("agent-1").unwrap(),
             vec!["after synthesis".to_string()]
         );
         assert!(bytes.lock().unwrap().is_empty());
 
-        // Once the child settles, the next synthesis Stop follows the normal
-        // deferred completion path and drains the queue after its grace check.
+        ingest(
+            &state,
+            hook_for_agent("SubagentStart", "agent-1", json!({ "agent_id": "child-1" })),
+        );
+        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(event.event_type, "agent.running");
         ingest(
             &state,
             hook_for_agent("SubagentStop", "agent-1", json!({ "agent_id": "child-1" })),
         );
         let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.stop_observed");
-        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
-        let event = resolve_agent_after_stop_grace(&state, "agent-1", baseline)
-            .unwrap()
-            .expect("settled child should permit completion");
-        assert_eq!(event.event_type, "agent.running");
-        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
-        assert!(
-            String::from_utf8(bytes.lock().unwrap().clone())
-                .unwrap()
-                .contains("after synthesis")
-        );
-    }
-
-    #[test]
-    fn stop_marks_codex_done_without_queued_turns() {
-        let state = test_state();
-        state.insert_agent(sample_agent()).unwrap();
-
-        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
-
-        assert_eq!(event.event_type, "agent.stop_observed");
-        let agent = state.agent("agent-1").unwrap().expect("agent exists");
-        assert!(matches!(agent.status, AgentStatus::Running));
-
-        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
-        let event = resolve_agent_after_stop_grace(&state, "agent-1", baseline)
-            .unwrap()
-            .expect("stop should settle after grace");
-
-        assert_eq!(event.event_type, "agent.done");
-        let agent = state.agent("agent-1").unwrap().expect("agent exists");
-        assert!(matches!(agent.status, AgentStatus::Done));
-    }
-
-    #[test]
-    fn stop_drains_one_queued_codex_turn() {
-        let state = test_state();
-        let bytes = install_agent_pane(&state);
-        state
-            .enqueue_agent_turn("agent-1", "first".to_string())
-            .unwrap();
-        state
-            .enqueue_agent_turn("agent-1", "second".to_string())
-            .unwrap();
-
-        let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
-
-        assert_eq!(event.event_type, "agent.stop_observed");
         assert_eq!(
             state.list_agent_turn_queue("agent-1").unwrap(),
-            vec!["first".to_string(), "second".to_string()]
+            vec!["after synthesis".to_string()]
         );
-
-        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
-        let event = resolve_agent_after_stop_grace(&state, "agent-1", baseline)
-            .unwrap()
-            .expect("stop should settle after grace");
-
-        assert_eq!(event.event_type, "agent.running");
-        assert_eq!(
-            state.list_agent_turn_queue("agent-1").unwrap(),
-            vec!["second".to_string()]
-        );
-        let agent = state.agent("agent-1").unwrap().expect("agent exists");
-        assert!(matches!(agent.status, AgentStatus::Running));
-        let written = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
-        assert!(written.contains("first"));
-        assert!(!written.contains("second"));
+        assert!(bytes.lock().unwrap().is_empty());
     }
 
     #[test]
-    fn stop_grace_stands_down_for_codex_internal_queued_prompt() {
+    fn stop_does_not_release_codex_waiters() {
         let state = test_state();
         install_agent_pane(&state);
         let mut source = sample_agent();
@@ -4288,23 +4132,10 @@ trusted_hash = "sha256:trusted"
 
         let event = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
         assert_eq!(event.event_type, "agent.stop_observed");
-        let baseline = state.agent_status_activity_seq("agent-1").unwrap();
-
-        let event = ingest(
-            &state,
-            hook_for_agent(
-                "UserPromptSubmit",
-                "agent-1",
-                json!({ "prompt": "internally queued turn" }),
-            ),
-        );
-        assert_eq!(event.event_type, "agent.prompt_submitted");
-
-        assert!(
-            resolve_agent_after_stop_grace(&state, "agent-1", baseline)
-                .unwrap()
-                .is_none()
-        );
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
         assert!(state.pop_ready_agent_turn("agent-2").unwrap().is_none());
     }
 

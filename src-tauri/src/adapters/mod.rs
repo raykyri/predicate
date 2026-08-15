@@ -737,8 +737,10 @@ pub enum TranscriptLifecycleEvent {
     Interrupted,
     TurnStarted,
     /// A native transcript record that the turn ended successfully. Used when
-    /// the adapter's Stop/idle hook is missing or never fires (Cursor's
-    /// `--plugin-dir` observer is skipped at the `stop` call site).
+    /// the adapter's Stop/idle hook is missing, never fires, or fires too
+    /// early (Cursor's `--plugin-dir` observer is skipped at the `stop` call
+    /// site; Codex emits `Stop` between review jobs and internally queued
+    /// prompts, then continues the same turn).
     TurnCompleted,
 }
 
