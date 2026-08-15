@@ -211,9 +211,10 @@ struct AppStateInner {
     exit_teardown_started: AtomicBool,
     // Ephemeral loopback file-preview server port, set after it binds.
     file_server: Mutex<Option<u16>>,
-    // (device, inode) of the control socket this process bound, recorded at bind time
-    // so exit cleanup can tell its own socket apart from one a later instance bound
-    // at the same path (see `owns_control_socket`).
+    // (device, inode) of the control socket this process currently has bound,
+    // recorded after each successful bind so exit cleanup can tell its own socket
+    // apart from one a later instance bound at the same path (see
+    // `owns_control_socket`).
     control_socket_identity: Mutex<Option<(u64, u64)>>,
     // Per-pane "send" locks. `write_pane` holds one across a whole paste+submit
     // sequence so two concurrent submits to the same pane can't interleave into one
@@ -1497,11 +1498,25 @@ impl AppState {
         self.inner.file_server.lock().ok().and_then(|slot| *slot)
     }
 
-    /// Records the (device, inode) of the control socket this process bound (set once
-    /// at startup, right after the bind).
+    /// Records the (device, inode) of the control socket this process currently
+    /// has bound. Updated after the initial bind and after each successful rebind.
     pub fn set_control_socket_identity(&self, device: u64, inode: u64) {
         if let Ok(mut slot) = self.inner.control_socket_identity.lock() {
             *slot = Some((device, inode));
+        }
+    }
+
+    pub fn control_socket_identity(&self) -> Option<(u64, u64)> {
+        self.inner
+            .control_socket_identity
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+    }
+
+    pub fn clear_control_socket_identity(&self) {
+        if let Ok(mut slot) = self.inner.control_socket_identity.lock() {
+            *slot = None;
         }
     }
 
@@ -15062,6 +15077,14 @@ mod tests {
         // A missing path is not ours to reclaim either.
         std::fs::remove_file(&config.socket_path).unwrap();
         assert!(!state.owns_control_socket());
+
+        std::fs::write(&config.socket_path, b"").unwrap();
+        let meta = std::fs::symlink_metadata(&config.socket_path).unwrap();
+        state.set_control_socket_identity(meta.dev(), meta.ino());
+        assert!(state.owns_control_socket());
+        state.clear_control_socket_identity();
+        assert!(!state.owns_control_socket());
+        assert_eq!(state.control_socket_identity(), None);
     }
 
     #[test]

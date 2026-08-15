@@ -3047,7 +3047,7 @@ fn main() {
                     Ok(info) => state.set_file_server(info.port),
                     Err(err) => eprintln!("qmux: failed to start file server: {err}"),
                 }
-                start_control_socket(state.clone()).map_err(std::io::Error::other)?;
+                app.manage(start_control_socket(state.clone()).map_err(std::io::Error::other)?);
                 match browser_backend::start_browser_discovery(Some(state.clone())) {
                     Ok(socket) => {
                         eprintln!(
@@ -3328,7 +3328,7 @@ fn main() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building qmux")
-        .run(move |_app_handle, event| match event {
+        .run(move |app_handle, event| match event {
             tauri::RunEvent::ExitRequested { api, code, .. }
                 if code != Some(tauri::RESTART_EXIT_CODE) && exit_state.should_confirm_exit() =>
             {
@@ -3346,13 +3346,14 @@ fn main() {
                 exit_state.finalize_persistence_for_exit();
                 pty::kill_all_panes(&exit_state);
                 native_terminal::shutdown();
-                // Reclaim the control socket on a clean exit rather than leaving the
-                // file for the next launch's stale-socket cleanup — but only while the
-                // path still points at the socket this process bound. If another
-                // instance (e.g. a differently-configured build sharing the socket
-                // path) has re-bound it since, deleting the file would sever every
-                // `qmux` CLI caller from that live instance.
-                if exit_state.owns_control_socket() {
+                // Stop the supervisor before touching the pathname. If we unlink
+                // first, the watchdog can treat that as a missing socket and bind
+                // a replacement while the process is dying.
+                if let Some(runtime) =
+                    app_handle.try_state::<control_socket::ControlSocketRuntime>()
+                {
+                    runtime.shutdown();
+                } else if exit_state.owns_control_socket() {
                     let _ = std::fs::remove_file(&exit_state.config().socket_path);
                 }
             }

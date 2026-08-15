@@ -14,11 +14,15 @@ use qmux_proto::{ControlRequest, ControlResponse, PublicControlRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
-use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::thread;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const CONTROL_SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -26,18 +30,189 @@ const CONTROL_SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// (hook notifies, CLI invocations) with a 5s idle timeout, so this needs to
 /// cover simultaneous in-flight requests, not panes; 64 is far above any real
 /// burst while keeping a connection-spamming local process from exhausting
-/// threads/FDs. At the cap the accept loop blocks and excess connections wait
-/// in the kernel listen backlog.
+/// threads/FDs. At the cap the supervisor leaves excess connections in the
+/// kernel listen backlog and keeps polling so health checks still run.
 const MAX_CONCURRENT_CLIENTS: usize = 64;
 /// Backoff after a failed accept. Persistent accept errors (e.g. EMFILE under
-/// FD exhaustion) would otherwise spin this loop hot and flood socket.error
-/// events.
+/// FD exhaustion) would otherwise spin this loop hot.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+const HEALTH_POLL_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(test)]
+const HEALTH_POLL_TIMEOUT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const RECOVERY_BACKOFF: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const RECOVERY_BACKOFF: Duration = Duration::from_millis(20);
+const RECOVERY_BACKOFF_MAX: Duration = Duration::from_secs(2);
+const REPEATED_RECOVERY_FAILURES_BEFORE_WARN: u32 = 3;
 
-pub fn start_control_socket(state: AppState) -> Result<(), String> {
-    let socket_path = state.config().socket_path.clone();
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SocketWatchState {
+    Healthy,
+    Missing,
+    Recovering,
+    Conflict,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathCheck {
+    Healthy,
+    Missing,
+    Conflict,
+    Unknown,
+}
+
+enum GenerationEnd {
+    Stopped,
+    Missing,
+    Conflict,
+}
+
+struct SupervisorShared {
+    stop: AtomicBool,
+    generation: AtomicU64,
+    #[cfg(test)]
+    panic_next: AtomicBool,
+    #[cfg(test)]
+    transitions: Mutex<Vec<String>>,
+}
+
+/// Owns the control-socket supervisor thread. Shutdown must stop and join this
+/// before removing the socket file; otherwise the watchdog can recreate the
+/// path while the process is exiting.
+pub struct ControlSocketRuntime {
+    shared: Arc<SupervisorShared>,
+    wakeup: Mutex<Option<UnixStream>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
+    state: AppState,
+}
+
+impl ControlSocketRuntime {
+    /// Stop the supervisor, join it, then remove the pathname only if this
+    /// process still owns the inode currently at the configured path.
+    pub fn shutdown(&self) {
+        self.shared.stop.store(true, Ordering::SeqCst);
+        if let Ok(guard) = self.wakeup.lock()
+            && let Some(wakeup) = guard.as_ref()
+        {
+            let _ = (&*wakeup).write_all(&[1]);
+        }
+        if let Ok(mut slot) = self.thread.lock()
+            && let Some(handle) = slot.take()
+            && handle.thread().id() != thread::current().id()
+        {
+            let _ = handle.join();
+        }
+        if self.state.owns_control_socket() {
+            let _ = fs::remove_file(&self.state.config().socket_path);
+        }
+        self.state.clear_control_socket_identity();
+    }
+
+    #[cfg(test)]
+    fn inject_panic(&self) {
+        self.shared.panic_next.store(true, Ordering::SeqCst);
+        if let Ok(guard) = self.wakeup.lock()
+            && let Some(wakeup) = guard.as_ref()
+        {
+            let _ = (&*wakeup).write_all(&[1]);
+        }
+    }
+
+    #[cfg(test)]
+    fn transitions(&self) -> Vec<String> {
+        self.shared
+            .transitions
+            .lock()
+            .map(|events| events.clone())
+            .unwrap_or_default()
+    }
+}
+
+impl Drop for ControlSocketRuntime {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+pub fn start_control_socket(state: AppState) -> Result<ControlSocketRuntime, String> {
     crate::shell_jobs::start_shell_job_monitor(state.clone());
+    start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS)
+}
 
+fn start_control_socket_runtime(
+    state: AppState,
+    max_clients: usize,
+) -> Result<ControlSocketRuntime, String> {
+    let socket_path = state.config().socket_path.clone();
+    remove_stale_socket(&socket_path)?;
+    let (listener, identity) = bind_control_socket(&socket_path)?;
+    state.set_control_socket_identity(identity.0, identity.1);
+
+    let (wakeup_reader, wakeup_writer) = UnixStream::pair()
+        .map_err(|err| format!("failed to create control socket wakeup pipe: {err}"))?;
+    wakeup_reader
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to configure control socket wakeup pipe: {err}"))?;
+    wakeup_writer
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to configure control socket wakeup pipe: {err}"))?;
+
+    let shared = Arc::new(SupervisorShared {
+        stop: AtomicBool::new(false),
+        generation: AtomicU64::new(1),
+        #[cfg(test)]
+        panic_next: AtomicBool::new(false),
+        #[cfg(test)]
+        transitions: Mutex::new(Vec::new()),
+    });
+    let thread_shared = Arc::clone(&shared);
+    let thread_state = state.clone();
+    let thread_path = socket_path.clone();
+    let handle = thread::Builder::new()
+        .name("qmux-control-socket".to_string())
+        .spawn(move || {
+            supervise_control_socket(
+                thread_state,
+                thread_path,
+                listener,
+                identity,
+                wakeup_reader,
+                thread_shared,
+                max_clients,
+            );
+        })
+        .map_err(|err| {
+            if state.owns_control_socket() {
+                let _ = fs::remove_file(&socket_path);
+            }
+            state.clear_control_socket_identity();
+            format!("failed to start control socket supervisor: {err}")
+        })?;
+
+    Ok(ControlSocketRuntime {
+        shared,
+        wakeup: Mutex::new(Some(wakeup_writer)),
+        thread: Mutex::new(Some(handle)),
+        state,
+    })
+}
+
+fn remove_stale_socket(socket_path: &Path) -> Result<(), String> {
+    // Remove any stale socket unconditionally; a missing path is not an error.
+    // Probing with exists() first would open a time-of-check/time-of-use window.
+    match fs::remove_file(socket_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!(
+            "failed to remove stale socket {}: {err}",
+            socket_path.display()
+        )),
+    }
+}
+
+fn bind_control_socket(socket_path: &Path) -> Result<(UnixListener, (u64, u64)), String> {
     // Restrict the socket's parent directory to the owning user *before* binding.
     // With the directory untraversable by other accounts, the socket is never
     // reachable by them even during the brief window between bind() and the
@@ -51,71 +226,561 @@ pub fn start_control_socket(state: AppState) -> Result<(), String> {
             .map_err(|err| format!("failed to restrict socket dir {}: {err}", parent.display()))?;
     }
 
-    // Remove any stale socket unconditionally; a missing path is not an error.
-    // Probing with exists() first would open a time-of-check/time-of-use window.
-    match fs::remove_file(&socket_path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == ErrorKind::NotFound => {}
-        Err(err) => {
-            return Err(format!(
-                "failed to remove stale socket {}: {err}",
-                socket_path.display()
-            ));
-        }
-    }
-
-    let listener = UnixListener::bind(&socket_path)
+    let listener = UnixListener::bind(socket_path)
         .map_err(|err| format!("failed to bind socket {}: {err}", socket_path.display()))?;
 
     // Restrict the socket to the owning user so the per-pane token is not the only thing
     // standing between other local accounts and the control plane.
-    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o600)).map_err(|err| {
-        format!(
+    if let Err(err) = fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600)) {
+        drop(listener);
+        let _ = fs::remove_file(socket_path);
+        return Err(format!(
             "failed to restrict socket permissions {}: {err}",
             socket_path.display()
-        )
-    })?;
-
-    // Remember which file we bound, so exit cleanup removes the socket only if the
-    // path still points at it — not at a socket a later instance bound after
-    // unlinking ours (the stale-socket removal above is exactly that action).
-    {
-        use std::os::unix::fs::MetadataExt;
-        let meta = fs::symlink_metadata(&socket_path).map_err(|err| {
-            format!(
-                "failed to stat bound socket {}: {err}",
-                socket_path.display()
-            )
-        })?;
-        state.set_control_socket_identity(meta.dev(), meta.ino());
+        ));
     }
 
-    thread::spawn(move || {
-        let limiter = ConnectionLimiter::new(MAX_CONCURRENT_CLIENTS);
-        for stream in listener.incoming() {
-            match stream {
-                Ok(stream) => {
-                    let slot = limiter.acquire();
-                    let state = state.clone();
-                    thread::spawn(move || {
-                        let _slot = slot;
-                        handle_client(state, stream);
-                    });
+    if let Err(err) = listener.set_nonblocking(true) {
+        drop(listener);
+        let _ = fs::remove_file(socket_path);
+        return Err(format!(
+            "failed to configure socket {} as nonblocking: {err}",
+            socket_path.display()
+        ));
+    }
+
+    let meta = match fs::symlink_metadata(socket_path) {
+        Ok(meta) => meta,
+        Err(err) => {
+            drop(listener);
+            let _ = fs::remove_file(socket_path);
+            return Err(format!(
+                "failed to stat bound socket {}: {err}",
+                socket_path.display()
+            ));
+        }
+    };
+    Ok((listener, (meta.dev(), meta.ino())))
+}
+
+fn supervise_control_socket(
+    state: AppState,
+    socket_path: PathBuf,
+    listener: UnixListener,
+    mut identity: (u64, u64),
+    wakeup: UnixStream,
+    shared: Arc<SupervisorShared>,
+    max_clients: usize,
+) {
+    let limiter = ConnectionLimiter::new(max_clients);
+    let mut watch_state = SocketWatchState::Healthy;
+    let mut recovery_failures = 0;
+    let mut listener = Some(listener);
+
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let Some(current) = listener.take() else {
+            match recover_missing_socket(
+                &state,
+                &socket_path,
+                &shared,
+                &mut watch_state,
+                &mut recovery_failures,
+            ) {
+                Recovered::Stopped => break,
+                Recovered::Bound(next_listener, next_identity) => {
+                    listener = Some(next_listener);
+                    identity = next_identity;
                 }
-                Err(err) => {
-                    state.emit(QmuxEvent::new(
-                        "socket.error",
-                        None,
-                        None,
-                        json!({ "error": err.to_string() }),
-                    ));
-                    thread::sleep(ACCEPT_ERROR_BACKOFF);
+                Recovered::Conflict => {
+                    if wait_for_conflict_to_clear(
+                        &state,
+                        &socket_path,
+                        &wakeup,
+                        &shared,
+                        &mut watch_state,
+                    )
+                    .is_none()
+                    {
+                        break;
+                    }
                 }
             }
-        }
-    });
+            continue;
+        };
 
-    Ok(())
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            run_listener_generation(
+                &state,
+                &socket_path,
+                &current,
+                identity,
+                &wakeup,
+                &shared,
+                &limiter,
+                &mut watch_state,
+            )
+        }));
+        drop(current);
+
+        match outcome {
+            Ok(GenerationEnd::Stopped) => break,
+            Ok(GenerationEnd::Missing) => {}
+            Ok(GenerationEnd::Conflict) => {
+                state.clear_control_socket_identity();
+                if wait_for_conflict_to_clear(
+                    &state,
+                    &socket_path,
+                    &wakeup,
+                    &shared,
+                    &mut watch_state,
+                )
+                .is_none()
+                {
+                    break;
+                }
+            }
+            Err(_) => {
+                reclaim_owned_socket(&state, &socket_path);
+                enter_watch_state(
+                    &state,
+                    &socket_path,
+                    &shared,
+                    &mut watch_state,
+                    SocketWatchState::Recovering,
+                    Some("control socket listener panicked"),
+                );
+            }
+        }
+    }
+}
+
+enum Recovered {
+    Stopped,
+    Bound(UnixListener, (u64, u64)),
+    Conflict,
+}
+
+fn recover_missing_socket(
+    state: &AppState,
+    socket_path: &Path,
+    shared: &SupervisorShared,
+    watch_state: &mut SocketWatchState,
+    recovery_failures: &mut u32,
+) -> Recovered {
+    let mut backoff = RECOVERY_BACKOFF;
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            return Recovered::Stopped;
+        }
+        match inspect_socket_path(socket_path, state.control_socket_identity()) {
+            PathCheck::Conflict => {
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Conflict,
+                    Some("control socket path is occupied by another listener"),
+                );
+                state.clear_control_socket_identity();
+                return Recovered::Conflict;
+            }
+            PathCheck::Healthy | PathCheck::Missing | PathCheck::Unknown => {}
+        }
+
+        match bind_control_socket(socket_path) {
+            Ok((listener, identity)) => {
+                state.set_control_socket_identity(identity.0, identity.1);
+                shared.generation.fetch_add(1, Ordering::SeqCst);
+                *recovery_failures = 0;
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Healthy,
+                    None,
+                );
+                return Recovered::Bound(listener, identity);
+            }
+            Err(err) => {
+                if matches!(inspect_socket_path(socket_path, None), PathCheck::Conflict) {
+                    enter_watch_state(
+                        state,
+                        socket_path,
+                        shared,
+                        watch_state,
+                        SocketWatchState::Conflict,
+                        Some(&err),
+                    );
+                    state.clear_control_socket_identity();
+                    return Recovered::Conflict;
+                }
+                *recovery_failures = recovery_failures.saturating_add(1);
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Recovering,
+                    Some(&err),
+                );
+                if *recovery_failures == REPEATED_RECOVERY_FAILURES_BEFORE_WARN {
+                    warn_control_socket(
+                        state,
+                        &format!(
+                            "qmux could not restore the control socket at {}: {err}. CLI commands will fail until it recovers.",
+                            socket_path.display()
+                        ),
+                    );
+                }
+                if shared.stop.load(Ordering::SeqCst) {
+                    return Recovered::Stopped;
+                }
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(RECOVERY_BACKOFF_MAX);
+            }
+        }
+    }
+}
+
+fn wait_for_conflict_to_clear(
+    state: &AppState,
+    socket_path: &Path,
+    wakeup: &UnixStream,
+    shared: &SupervisorShared,
+    watch_state: &mut SocketWatchState,
+) -> Option<()> {
+    enter_watch_state(
+        state,
+        socket_path,
+        shared,
+        watch_state,
+        SocketWatchState::Conflict,
+        Some("control socket path is occupied by another listener"),
+    );
+    warn_control_socket(
+        state,
+        &format!(
+            "The qmux control socket at {} was replaced by another process. CLI commands will not reach this instance until that socket is removed. qmux will not delete it automatically.",
+            socket_path.display()
+        ),
+    );
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            return None;
+        }
+        match inspect_socket_path(socket_path, None) {
+            PathCheck::Missing => {
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Missing,
+                    None,
+                );
+                return Some(());
+            }
+            PathCheck::Healthy | PathCheck::Conflict | PathCheck::Unknown => {}
+        }
+        if poll_wakeup_only(wakeup, HEALTH_POLL_TIMEOUT).is_err()
+            && shared.stop.load(Ordering::SeqCst)
+        {
+            return None;
+        }
+        drain_wakeup(wakeup);
+    }
+}
+
+fn run_listener_generation(
+    state: &AppState,
+    socket_path: &Path,
+    listener: &UnixListener,
+    identity: (u64, u64),
+    wakeup: &UnixStream,
+    shared: &SupervisorShared,
+    limiter: &ConnectionLimiter,
+    watch_state: &mut SocketWatchState,
+) -> GenerationEnd {
+    let mut accept_error: Option<String> = None;
+    loop {
+        if shared.stop.load(Ordering::SeqCst) {
+            return GenerationEnd::Stopped;
+        }
+        #[cfg(test)]
+        if shared.panic_next.swap(false, Ordering::SeqCst) {
+            panic!("test-injected control socket panic");
+        }
+
+        match poll_listener_and_wakeup(listener, wakeup, HEALTH_POLL_TIMEOUT) {
+            Ok(ready) => {
+                if ready.wakeup {
+                    drain_wakeup(wakeup);
+                    if shared.stop.load(Ordering::SeqCst) {
+                        return GenerationEnd::Stopped;
+                    }
+                }
+                if ready.listener {
+                    match limiter.try_acquire() {
+                        None => thread::sleep(ACCEPT_ERROR_BACKOFF),
+                        Some(slot) => match listener.accept() {
+                            Ok((stream, _)) => {
+                                accept_error = None;
+                                if let Err(err) = stream.set_nonblocking(false) {
+                                    eprintln!(
+                                        "qmux: failed to configure control socket client as blocking: {err}"
+                                    );
+                                    continue;
+                                }
+                                let state = state.clone();
+                                let _ = thread::Builder::new()
+                                    .name("qmux-control-client".to_string())
+                                    .spawn(move || {
+                                        let _slot = slot;
+                                        handle_client(state, stream);
+                                    });
+                            }
+                            Err(err) if err.kind() == ErrorKind::WouldBlock => {}
+                            Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                            Err(err) => {
+                                let message = err.to_string();
+                                if accept_error.as_deref() != Some(message.as_str()) {
+                                    accept_error = Some(message.clone());
+                                    enter_watch_state(
+                                        state,
+                                        socket_path,
+                                        shared,
+                                        watch_state,
+                                        SocketWatchState::Recovering,
+                                        Some(&message),
+                                    );
+                                }
+                                thread::sleep(ACCEPT_ERROR_BACKOFF);
+                            }
+                        },
+                    }
+                }
+            }
+            Err(err) => {
+                let message = err.to_string();
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Recovering,
+                    Some(&message),
+                );
+                thread::sleep(ACCEPT_ERROR_BACKOFF);
+            }
+        }
+
+        match inspect_socket_path(socket_path, Some(identity)) {
+            PathCheck::Healthy => {
+                if *watch_state != SocketWatchState::Healthy {
+                    enter_watch_state(
+                        state,
+                        socket_path,
+                        shared,
+                        watch_state,
+                        SocketWatchState::Healthy,
+                        None,
+                    );
+                }
+            }
+            PathCheck::Missing => {
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Missing,
+                    None,
+                );
+                return GenerationEnd::Missing;
+            }
+            PathCheck::Conflict => {
+                enter_watch_state(
+                    state,
+                    socket_path,
+                    shared,
+                    watch_state,
+                    SocketWatchState::Conflict,
+                    Some("control socket path is occupied by another listener"),
+                );
+                return GenerationEnd::Conflict;
+            }
+            PathCheck::Unknown => {}
+        }
+    }
+}
+
+fn inspect_socket_path(path: &Path, owned: Option<(u64, u64)>) -> PathCheck {
+    match fs::symlink_metadata(path) {
+        Ok(meta) => match owned {
+            Some((device, inode)) if meta.dev() == device && meta.ino() == inode => {
+                PathCheck::Healthy
+            }
+            Some(_) => PathCheck::Conflict,
+            None => PathCheck::Conflict,
+        },
+        Err(err) if err.kind() == ErrorKind::NotFound => PathCheck::Missing,
+        Err(_) => PathCheck::Unknown,
+    }
+}
+
+fn reclaim_owned_socket(state: &AppState, socket_path: &Path) {
+    if state.owns_control_socket() {
+        let _ = fs::remove_file(socket_path);
+    }
+    state.clear_control_socket_identity();
+}
+
+fn enter_watch_state(
+    state: &AppState,
+    socket_path: &Path,
+    shared: &SupervisorShared,
+    current: &mut SocketWatchState,
+    next: SocketWatchState,
+    error: Option<&str>,
+) {
+    if *current == next {
+        return;
+    }
+    *current = next;
+    let event = match next {
+        SocketWatchState::Healthy => "control_socket.recovered",
+        SocketWatchState::Missing => "control_socket.missing",
+        SocketWatchState::Recovering => "control_socket.error",
+        SocketWatchState::Conflict => "control_socket.conflict",
+    };
+    if next == SocketWatchState::Healthy {
+        eprintln!(
+            "qmux: control socket recovered at {}",
+            socket_path.display()
+        );
+    } else if let Some(error) = error {
+        eprintln!("qmux: {event}: {error}");
+    } else {
+        eprintln!("qmux: {event} at {}", socket_path.display());
+    }
+    emit_watch_event(
+        state,
+        event,
+        socket_path,
+        shared.generation.load(Ordering::SeqCst),
+        error,
+    );
+    #[cfg(test)]
+    if let Ok(mut events) = shared.transitions.lock() {
+        events.push(event.to_string());
+    }
+}
+
+fn emit_watch_event(
+    state: &AppState,
+    event: &str,
+    socket_path: &Path,
+    generation: u64,
+    error: Option<&str>,
+) {
+    let identity = |pair: Option<(u64, u64)>| {
+        pair.map(|(device, inode)| json!({ "device": device, "inode": inode }))
+    };
+    state.emit(QmuxEvent::new(
+        event,
+        None,
+        None,
+        json!({
+            "path": socket_path.display().to_string(),
+            "generation": generation,
+            "currentInode": identity(state.control_socket_identity()),
+            "error": error,
+        }),
+    ));
+}
+
+fn warn_control_socket(state: &AppState, message: &str) {
+    eprintln!("qmux: {message}");
+    if let Some(app) = state.app_handle() {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+        app.dialog()
+            .message(message)
+            .title("qmux")
+            .kind(MessageDialogKind::Warning)
+            .show(|_| {});
+    }
+}
+
+struct PollReady {
+    listener: bool,
+    wakeup: bool,
+}
+
+fn poll_listener_and_wakeup(
+    listener: &UnixListener,
+    wakeup: &UnixStream,
+    timeout: Duration,
+) -> std::io::Result<PollReady> {
+    let mut fds = [
+        libc::pollfd {
+            fd: listener.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: wakeup.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        },
+    ];
+    poll_fds(&mut fds, timeout)?;
+    Ok(PollReady {
+        listener: fds[0].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0,
+        wakeup: fds[1].revents & (libc::POLLIN | libc::POLLERR | libc::POLLHUP) != 0,
+    })
+}
+
+fn poll_wakeup_only(wakeup: &UnixStream, timeout: Duration) -> std::io::Result<()> {
+    let mut fds = [libc::pollfd {
+        fd: wakeup.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    }];
+    poll_fds(&mut fds, timeout).map(|_| ())
+}
+
+fn poll_fds(fds: &mut [libc::pollfd], timeout: Duration) -> std::io::Result<bool> {
+    let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    loop {
+        let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+        if n < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+        return Ok(n > 0);
+    }
+}
+
+fn drain_wakeup(wakeup: &UnixStream) {
+    let mut buf = [0_u8; 32];
+    loop {
+        match (&*wakeup).read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                break;
+            }
+            Err(_) => break,
+        }
+    }
 }
 
 fn handle_client(state: AppState, stream: UnixStream) {
@@ -607,10 +1272,20 @@ mod tests {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn test_state() -> AppState {
-        AppState::new(QmuxConfig {
+        runtime_state(temp_dir(), PathBuf::from("/tmp/qmux-control-test.sock")).0
+    }
+
+    fn runtime_fixture() -> (AppState, PathBuf) {
+        let dir = temp_dir();
+        let socket_path = dir.join("qmux.sock");
+        runtime_state(dir, socket_path)
+    }
+
+    fn runtime_state(workspace_root: PathBuf, socket_path: PathBuf) -> (AppState, PathBuf) {
+        let state = AppState::new(QmuxConfig {
             remotes: Default::default(),
-            workspace_root: temp_dir(),
-            socket_path: PathBuf::from("/tmp/qmux-control-test.sock"),
+            workspace_root,
+            socket_path: socket_path.clone(),
             adapters: AdapterConfigs {
                 acp: Default::default(),
                 pi: Default::default(),
@@ -637,7 +1312,62 @@ mod tests {
             opencode_plugin_dir: std::path::PathBuf::new(),
             pi_extension_dir: std::path::PathBuf::new(),
             cursor_plugin_dir: std::path::PathBuf::new(),
-        })
+        });
+        (state, socket_path)
+    }
+
+    fn ping_control_socket(path: &Path, token: &str) -> Result<ControlResponse, String> {
+        let mut client = UnixStream::connect(path)
+            .map_err(|err| format!("connect {}: {err}", path.display()))?;
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|err| err.to_string())?;
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .map_err(|err| err.to_string())?;
+        let request = json!({ "token": token, "command": "ping", "payload": Value::Null });
+        serde_json::to_writer(&mut client, &request).map_err(|err| err.to_string())?;
+        client.write_all(b"\n").map_err(|err| err.to_string())?;
+        client.flush().map_err(|err| err.to_string())?;
+        let mut response = String::new();
+        BufReader::new(client)
+            .read_line(&mut response)
+            .map_err(|err| err.to_string())?;
+        serde_json::from_str::<ControlResponse>(&response).map_err(|err| err.to_string())
+    }
+
+    fn wait_for_ping(path: &Path, token: &str, timeout: Duration) -> ControlResponse {
+        let started = std::time::Instant::now();
+        let mut last = "no attempt".to_string();
+        while started.elapsed() < timeout {
+            match ping_control_socket(path, token) {
+                Ok(response) if response.ok => return response,
+                Ok(response) => last = format!("{:?}", response.error),
+                Err(err) => last = err,
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!(
+            "control socket did not accept ping at {} within {timeout:?}: {last}",
+            path.display()
+        );
+    }
+
+    fn wait_until(timeout: Duration, mut pred: impl FnMut() -> bool, message: &str) {
+        let started = std::time::Instant::now();
+        while started.elapsed() < timeout {
+            if pred() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("{message}");
+    }
+
+    fn fd_count() -> usize {
+        std::fs::read_dir("/dev/fd")
+            .map(|entries| entries.count())
+            .unwrap_or(0)
     }
 
     fn temp_dir() -> PathBuf {
@@ -936,5 +1666,227 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("server reader should exit after the client closes");
+    }
+
+    #[test]
+    fn inspect_socket_path_classifies_missing_owned_and_replaced_inodes() {
+        let dir = temp_dir();
+        let path = dir.join("qmux.sock");
+        assert_eq!(inspect_socket_path(&path, None), PathCheck::Missing);
+
+        let _listener = UnixListener::bind(&path).unwrap();
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        let owned = (meta.dev(), meta.ino());
+        assert_eq!(inspect_socket_path(&path, Some(owned)), PathCheck::Healthy);
+
+        let replacement = dir.join("other.sock");
+        let _other = UnixListener::bind(&replacement).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_eq!(inspect_socket_path(&path, Some(owned)), PathCheck::Conflict);
+        assert_eq!(inspect_socket_path(&path, None), PathCheck::Conflict);
+    }
+
+    #[test]
+    fn rebind_after_unlink_does_not_remove_a_replacement_socket() {
+        let dir = temp_dir();
+        let path = dir.join("qmux.sock");
+        let _original = UnixListener::bind(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let replacement = dir.join("other.sock");
+        let _other = UnixListener::bind(&replacement).unwrap();
+        let replacement_meta = std::fs::symlink_metadata(&replacement).unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+
+        assert!(bind_control_socket(&path).is_err());
+        let current = std::fs::symlink_metadata(&path).unwrap();
+        assert_eq!(current.dev(), replacement_meta.dev());
+        assert_eq!(current.ino(), replacement_meta.ino());
+    }
+
+    #[test]
+    fn supervisor_rebinds_after_the_socket_file_is_unlinked() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        std::fs::remove_file(&socket_path).unwrap();
+        let response = wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        assert_eq!(response.data, json!({ "status": "ok" }));
+
+        let events = runtime.transitions();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "control_socket.missing")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.as_str() == "control_socket.recovered")
+                .count(),
+            1
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn supervisor_repeated_unlink_recovery_does_not_grow_fds() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        let before = fd_count();
+
+        for _ in 0..8 {
+            std::fs::remove_file(&socket_path).unwrap();
+            wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        }
+
+        let after = fd_count();
+        assert!(
+            after <= before + 4,
+            "fd count grew from {before} to {after} after repeated recovery"
+        );
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn supervisor_reports_conflict_and_does_not_delete_a_replacement() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state.clone(), MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        let replacement_path = socket_path.with_file_name("other.sock");
+        let replacement = UnixListener::bind(&replacement_path).unwrap();
+        let replacement_meta = std::fs::symlink_metadata(&replacement_path).unwrap();
+        std::fs::rename(&replacement_path, &socket_path).unwrap();
+
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                runtime
+                    .transitions()
+                    .iter()
+                    .any(|event| event == "control_socket.conflict")
+            },
+            "expected a control_socket.conflict transition",
+        );
+        let current = std::fs::symlink_metadata(&socket_path).unwrap();
+        assert_eq!(current.dev(), replacement_meta.dev());
+        assert_eq!(current.ino(), replacement_meta.ino());
+        assert!(!state.owns_control_socket());
+
+        thread::sleep(HEALTH_POLL_TIMEOUT.saturating_mul(3));
+        let current = std::fs::symlink_metadata(&socket_path).unwrap();
+        assert_eq!(current.ino(), replacement_meta.ino());
+        assert_eq!(
+            runtime
+                .transitions()
+                .iter()
+                .filter(|event| event.as_str() == "control_socket.conflict")
+                .count(),
+            1
+        );
+
+        drop(replacement);
+        let _ = std::fs::remove_file(&socket_path);
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn supervisor_restarts_after_a_listener_panic() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        runtime.inject_panic();
+        wait_until(
+            Duration::from_secs(1),
+            || {
+                runtime
+                    .transitions()
+                    .iter()
+                    .any(|event| event == "control_socket.error")
+            },
+            "expected a control_socket.error transition after the injected panic",
+        );
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn supervisor_does_not_recreate_the_socket_after_shutdown() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        std::fs::remove_file(&socket_path).unwrap();
+        runtime.shutdown();
+        thread::sleep(HEALTH_POLL_TIMEOUT.saturating_mul(4));
+        assert!(
+            !socket_path.exists(),
+            "watchdog recreated {} after shutdown",
+            socket_path.display()
+        );
+    }
+
+    #[test]
+    fn accepted_connections_survive_a_listener_rebind() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        let mut held = UnixStream::connect(&socket_path).unwrap();
+        // connect() can complete while the connection is still in the listen
+        // backlog; wait long enough for accept() so dropping the old listener
+        // does not discard this client.
+        thread::sleep(Duration::from_millis(80));
+        std::fs::remove_file(&socket_path).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        let request = json!({ "token": token, "command": "ping", "payload": Value::Null });
+        serde_json::to_writer(&mut held, &request).unwrap();
+        held.write_all(b"\n").unwrap();
+        held.flush().unwrap();
+        let mut response = String::new();
+        BufReader::new(held.try_clone().unwrap())
+            .read_line(&mut response)
+            .unwrap();
+        let response = serde_json::from_str::<ControlResponse>(&response).unwrap();
+        assert!(response.ok);
+        assert_eq!(response.data, json!({ "status": "ok" }));
+        runtime.shutdown();
+    }
+
+    #[test]
+    fn supervisor_still_recovers_while_the_client_cap_is_held() {
+        let (state, socket_path) = runtime_fixture();
+        let token = state.pane_token("pane-1").unwrap();
+        let runtime = start_control_socket_runtime(state, 2).unwrap();
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+
+        let _held_a = UnixStream::connect(&socket_path).unwrap();
+        let _held_b = UnixStream::connect(&socket_path).unwrap();
+        thread::sleep(Duration::from_millis(80));
+
+        std::fs::remove_file(&socket_path).unwrap();
+        wait_until(
+            Duration::from_secs(1),
+            || socket_path.exists(),
+            "socket path should return while client slots are held",
+        );
+        drop(_held_a);
+        drop(_held_b);
+        wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+        runtime.shutdown();
     }
 }

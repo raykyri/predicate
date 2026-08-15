@@ -34,6 +34,23 @@ impl ConnectionLimiter {
         }
     }
 
+    /// Claims a slot if one is free. The supervisor uses this so a full cap
+    /// cannot stall path health checks or shutdown.
+    pub fn try_acquire(&self) -> Option<ConnectionSlot> {
+        let mut active = self
+            .inner
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *active >= self.inner.cap {
+            return None;
+        }
+        *active += 1;
+        Some(ConnectionSlot {
+            inner: Arc::clone(&self.inner),
+        })
+    }
+
     /// Blocks until a slot is free, then claims it. The slot is released when
     /// the returned guard drops — including on handler-thread panic, since
     /// unwinding runs destructors.
@@ -113,6 +130,16 @@ mod tests {
         rx.recv_timeout(Duration::from_secs(5))
             .expect("waiter should acquire the freed slot");
         waiter.join().unwrap();
+    }
+
+    #[test]
+    fn try_acquire_returns_none_at_cap() {
+        let limiter = ConnectionLimiter::new(1);
+        let held = limiter.try_acquire();
+        assert!(held.is_some());
+        assert!(limiter.try_acquire().is_none());
+        drop(held);
+        assert!(limiter.try_acquire().is_some());
     }
 
     #[test]
