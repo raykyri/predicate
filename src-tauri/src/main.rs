@@ -3171,6 +3171,7 @@ fn main() {
             browser_backend::browser_automation_key,
             human_browser::human_browser_sync,
             human_browser::human_browser_destroy,
+            human_browser::human_browser_hide_all,
             human_browser::human_browser_generation,
             human_browser::human_browser_snapshot,
             human_browser::human_browser_reload,

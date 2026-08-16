@@ -4,7 +4,10 @@ import type { PaneLayoutItem } from "./paneTree";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
 import type { CompletionSoundId } from "./completionSounds";
-import { HumanBrowserLifecycleQueue } from "./humanBrowserLifecycleQueue";
+import {
+  HumanBrowserLifecycleQueue,
+  retryHumanBrowserLifecycle,
+} from "./humanBrowserLifecycleQueue";
 import type {
   PublicationBinding,
   PublicationProposal,
@@ -971,25 +974,43 @@ function getHumanBrowserGeneration() {
 }
 
 export function syncHumanBrowser(request: HumanBrowserSync) {
-  return humanBrowserLifecycleQueue.enqueue(async () => {
-    humanBrowserSurfaceRevision += 1;
-    const revision = humanBrowserSurfaceRevision;
-    const generation = await getHumanBrowserGeneration();
-    return invoke<HumanBrowserSnapshot | null>("human_browser_sync", {
-      request: { ...request, generation, revision },
-    });
-  });
+  return humanBrowserLifecycleQueue.enqueue(() =>
+    retryHumanBrowserLifecycle(async () => {
+      humanBrowserSurfaceRevision += 1;
+      const revision = humanBrowserSurfaceRevision;
+      const generation = await getHumanBrowserGeneration();
+      return invoke<HumanBrowserSnapshot | null>("human_browser_sync", {
+        request: { ...request, generation, revision },
+      });
+    }),
+  );
 }
 
 export function destroyHumanBrowser(ownerId: string) {
-  return humanBrowserLifecycleQueue.enqueue(async () => {
-    humanBrowserSurfaceRevision += 1;
-    const revision = humanBrowserSurfaceRevision;
-    const generation = await getHumanBrowserGeneration();
-    return invoke<void>("human_browser_destroy", {
-      request: { ownerId, generation, revision },
-    });
-  });
+  return humanBrowserLifecycleQueue.enqueue(() =>
+    retryHumanBrowserLifecycle(async () => {
+      humanBrowserSurfaceRevision += 1;
+      const revision = humanBrowserSurfaceRevision;
+      const generation = await getHumanBrowserGeneration();
+      return invoke<void>("human_browser_destroy", {
+        request: { ownerId, generation, revision },
+      });
+    }),
+  );
+}
+
+/** Collapse every native child. Returns how many views were hidden. */
+export function hideAllHumanBrowsers() {
+  return humanBrowserLifecycleQueue.enqueue(() =>
+    retryHumanBrowserLifecycle(async () => {
+      humanBrowserSurfaceRevision += 1;
+      const revision = humanBrowserSurfaceRevision;
+      const generation = await getHumanBrowserGeneration();
+      return invoke<number>("human_browser_hide_all", {
+        request: { generation, revision },
+      });
+    }),
+  );
 }
 
 export async function getHumanBrowserSnapshot(ownerId: string) {

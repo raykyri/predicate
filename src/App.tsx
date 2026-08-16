@@ -233,6 +233,11 @@ import {
 } from "./lib/appShortcuts";
 import { requestComposerInsert } from "./lib/promptLibrary";
 import { nativeHumanBrowserOwnerIds } from "./lib/humanBrowserState";
+import {
+  anyBrowserOverlayOpen,
+  closeAllBrowserOverlaysState,
+  resolveTranscriptOrBrowserToggle,
+} from "./lib/browserOverlay";
 import { artifactTrayVisible, isArtifactBrowserOpen } from "./lib/artifacts";
 import { createTranscriptScrollCaptureSlot } from "./lib/transcriptScroll";
 import {
@@ -456,6 +461,7 @@ import {
   createGlobalDraft,
   deleteGlobalDraft,
   destroyHumanBrowser,
+  hideAllHumanBrowsers,
   reloadHumanBrowser,
   assignGlobalDraft,
   listTurns,
@@ -4383,14 +4389,23 @@ function MainApp() {
   // has published its final hidden revision.
   useEffect(() => {
     const nextOwnerIds = nativeHumanBrowserOwnerIds(browserOverlayByPane);
-    for (const ownerId of nativeHumanBrowserOwnerIdsRef.current) {
-      if (!nextOwnerIds.has(ownerId)) {
-        void destroyHumanBrowser(ownerId).catch((err) => {
-          setError(err instanceof Error ? err.message : String(err));
-        });
-      }
-    }
+    const retired = [...nativeHumanBrowserOwnerIdsRef.current].filter(
+      (ownerId) => !nextOwnerIds.has(ownerId),
+    );
     nativeHumanBrowserOwnerIdsRef.current = nextOwnerIds;
+    if (retired.length === 0) {
+      return;
+    }
+    // No remaining React-owned child should be on screen. Sweep first so a
+    // dropped per-owner destroy cannot leave the last WKWebView painted.
+    if (nextOwnerIds.size === 0) {
+      void hideEveryHumanBrowser();
+    }
+    for (const ownerId of retired) {
+      void destroyHumanBrowser(ownerId).catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
+    }
   }, [browserOverlayByPane]);
 
   // Drop per-agent UI state for agents that no longer exist, so these maps and refs
@@ -4662,23 +4677,47 @@ function MainApp() {
     });
   }
 
+  function reportHumanBrowserError(error: unknown) {
+    setError(error instanceof Error ? error.message : String(error));
+  }
+
+  // Collapse every native child. A dropped AppKit hide can leave a white
+  // WKWebView square over the terminal after React already thinks the overlay
+  // is closed; this is the recovery path for that leftover.
+  function hideEveryHumanBrowser() {
+    return hideAllHumanBrowsers().catch((error) => {
+      reportHumanBrowserError(error);
+      return 0;
+    });
+  }
+
+  function closeAllBrowserOverlays() {
+    setBrowserOverlayByPane((current) => closeAllBrowserOverlaysState(current));
+    void hideEveryHumanBrowser();
+  }
+
   function toggleActiveBrowserOverlay() {
-    if (activeBrowserOwnerId) {
-      toggleBrowserOverlay(activeBrowserOwnerId);
+    if (anyBrowserOverlayOpen(browserOverlayByPaneRef.current)) {
+      closeAllBrowserOverlays();
+      return;
     }
+    void hideEveryHumanBrowser().then((hidden) => {
+      if (hidden > 0) {
+        return;
+      }
+      const ownerId = activeBrowserOwnerIdRef.current;
+      if (ownerId) {
+        toggleBrowserOverlay(ownerId);
+      }
+    });
   }
 
   function closeActiveBrowserOverlay() {
-    if (!activeBrowserOwnerId) {
+    if (anyBrowserOverlayOpen(browserOverlayByPaneRef.current)) {
+      closeAllBrowserOverlays();
       return;
     }
-    setBrowserOverlayByPane((current) => {
-      const prev = current[activeBrowserOwnerId];
-      if (!prev?.open) {
-        return current;
-      }
-      return { ...current, [activeBrowserOwnerId]: { ...prev, open: false } };
-    });
+    void hideEveryHumanBrowser();
   }
 
   function setBrowserOverlaySize(paneId: string, size: BrowserOverlaySize) {
@@ -12124,13 +12163,27 @@ function MainApp() {
             requestResearchFolderMenuToggle();
           }
           return;
-        case "toggleTranscriptOrBrowser":
-          if (
-            activeSurfaceRef.current === "pane" &&
-            canToggleActiveTranscriptExpandedRef.current
-          ) {
-            toggleActiveTranscriptExpandedRef.current();
-          } else {
+        case "toggleTranscriptOrBrowser": {
+          const anyBrowserOpen = anyBrowserOverlayOpen(browserOverlayByPaneRef.current);
+          const action = resolveTranscriptOrBrowserToggle({
+            anyBrowserOpen,
+            canToggleTranscript: Boolean(
+              activeSurfaceRef.current === "pane" &&
+                canToggleActiveTranscriptExpandedRef.current,
+            ),
+          });
+          if (action.type === "close-browser") {
+            closeAllBrowserOverlays();
+            return;
+          }
+          void hideEveryHumanBrowser().then((hidden) => {
+            if (hidden > 0) {
+              return;
+            }
+            if (action.type === "toggle-transcript") {
+              toggleActiveTranscriptExpandedRef.current();
+              return;
+            }
             const browserOwnerId =
               activeSurfaceRef.current === "research"
                 ? activeResearchTreeIdRef.current
@@ -12140,8 +12193,9 @@ function MainApp() {
             if (browserOwnerId) {
               toggleBrowserOverlay(browserOwnerId);
             }
-          }
+          });
           return;
+        }
         case "splitPaneBelow": {
           const pane =
             activeSurfaceRef.current === "pane" ? activePaneRef.current : undefined;
@@ -14470,7 +14524,16 @@ function MainApp() {
               onClick={() => {
                 setPaneContextMenu(null);
                 setActivePaneId(contextMenuPane.id);
-                toggleBrowserOverlay(contextMenuPane.id);
+                if (browserOverlayByPane[contextMenuPane.id]?.open) {
+                  closeAllBrowserOverlays();
+                  return;
+                }
+                void hideEveryHumanBrowser().then((hidden) => {
+                  if (hidden > 0) {
+                    return;
+                  }
+                  toggleBrowserOverlay(contextMenuPane.id);
+                });
               }}
             >
               <Globe size={13} aria-hidden="true" />
@@ -16262,7 +16325,7 @@ function MainApp() {
             }
             void openExternalUrl(currentUrl);
           }}
-          onClose={toggleActiveBrowserOverlay}
+          onClose={closeActiveBrowserOverlay}
           onModeChange={(mode, currentUrl) =>
             setBrowserOverlayMode(activeBrowserOwnerId, mode, currentUrl)
           }

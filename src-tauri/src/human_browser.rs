@@ -567,6 +567,46 @@ pub async fn human_browser_sync(
     Ok(Some(snapshot))
 }
 
+const HIDE_ALL_OWNER: &str = "__qmux_hide_all__";
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HumanBrowserHideAllRequest {
+    generation: u64,
+    revision: u64,
+}
+
+/// Collapse every native child. Used when React already thinks the overlay is
+/// closed but an AppKit hide was dropped, leaving a white WKWebView square
+/// over the terminal. Views stay in the map so a still-open owner can show
+/// again; destroy retires them when the overlay is actually closed.
+#[tauri::command]
+pub fn human_browser_hide_all(
+    request: HumanBrowserHideAllRequest,
+    manager: State<'_, HumanBrowserManager>,
+) -> Result<u32, String> {
+    let _lifecycle = manager.try_begin_lifecycle()?;
+    let views = {
+        let mut inner = manager
+            .inner
+            .lock()
+            .map_err(|_| "human browser state lock poisoned".to_string())?;
+        if request.generation == inner.generation {
+            let _ = inner.accept_surface_request(
+                HIDE_ALL_OWNER,
+                request.generation,
+                request.revision,
+            );
+        }
+        inner.active_owner = None;
+        inner.views.values().cloned().collect::<Vec<_>>()
+    };
+    for view in &views {
+        deactivate_view(view);
+    }
+    Ok(views.len() as u32)
+}
+
 #[tauri::command]
 pub fn human_browser_destroy(
     request: HumanBrowserDestroyRequest,
@@ -752,5 +792,15 @@ mod tests {
         assert!(manager.try_begin_lifecycle().is_err());
         drop(first);
         assert!(manager.try_begin_lifecycle().is_ok());
+    }
+
+    #[test]
+    fn hide_all_uses_a_reserved_owner_that_cannot_collide_with_a_pane() {
+        assert!(validate_owner_id(HIDE_ALL_OWNER).is_ok());
+        let mut inner = HumanBrowserInner::default();
+        assert!(inner.accept_surface_request("pane-a", 1, 1));
+        assert!(inner.accept_surface_request(HIDE_ALL_OWNER, 1, 2));
+        assert!(!inner.surface_request_is_current("pane-a", 1, 1));
+        assert!(!inner.accept_surface_request("pane-a", 1, 1));
     }
 }
