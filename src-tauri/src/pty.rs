@@ -1983,19 +1983,23 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
     let master = master
         .lock()
         .map_err(|_| format!("pane {pane_id} master lock poisoned"))?;
-    #[cfg(target_os = "macos")]
+    // A no-op TIOCSWINSZ is not free: some kernels still SIGWINCH, and a
+    // duplicate report from Ghostty's session + surface callbacks would
+    // wake a TUI for a size it already has.
     let size_changed = master
         .get_size()
         .map(|size| size.cols != cols || size.rows != rows)
         .unwrap_or(true);
-    master
-        .resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|err| format!("failed to resize pane {pane_id}: {err}"))?;
+    if size_changed {
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|err| format!("failed to resize pane {pane_id}: {err}"))?;
+    }
     #[cfg(target_os = "macos")]
     if size_changed
         && explicitly_notify_resize
@@ -2033,6 +2037,9 @@ pub fn resize_native_host_pane(
     if state.pane_has_host_pty(pane_id)? != Some(true) {
         return state.update_pane_size(pane_id, cols, rows);
     }
+    // Ghostty-driven callers (NativeTerminalPane) already delayed this until
+    // after the new IOSurface present. Keep the ioctl itself synchronous:
+    // `pane_resize` and other non-Ghostty callers must not wait on a frame.
     resize_pane(state, pane_id.to_string(), cols, rows)
 }
 
@@ -4334,6 +4341,28 @@ mod tests {
         assert!(!worktree.exists());
 
         fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn resize_pane_is_a_noop_when_the_grid_is_unchanged() {
+        let state = test_state();
+        let pane = spawn_test_pty(
+            &state,
+            "pane-resize-noop",
+            vec!["-c".to_string(), "sleep 30".to_string()],
+        );
+        resize_pane(&state, pane.id.clone(), 100, 40).unwrap();
+        let master = state.pane_master(&pane.id).unwrap().unwrap();
+        {
+            let size = master.lock().unwrap().get_size().unwrap();
+            assert_eq!(size.cols, 100);
+            assert_eq!(size.rows, 40);
+        }
+        resize_pane(&state, pane.id.clone(), 100, 40).unwrap();
+        let size = master.lock().unwrap().get_size().unwrap();
+        assert_eq!(size.cols, 100);
+        assert_eq!(size.rows, 40);
+        let _ = kill_pane(&state, pane.id);
     }
 
     #[test]

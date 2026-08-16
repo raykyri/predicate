@@ -103,6 +103,16 @@ final class NativeTerminalPane: NSObject,
     /// never repaint it.
     private var settingsRevision: UInt64 = 0
     private var lastUserInputReport = Date.distantPast
+    /// Last grid Ghostty reported that we have not yet turned into a PTY ioctl.
+    private var pendingPtyColumns: Int32?
+    private var pendingPtyRows: Int32?
+    /// Last grid we actually delivered to Rust. Duplicate reports (the
+    /// in-memory session callback plus the surface delegate, or two fits
+    /// of the same frame) must not TIOCSWINSZ again.
+    private var flushedPtyColumns: Int32?
+    private var flushedPtyRows: Int32?
+    private var ptyResizeFlushGeneration: UInt64 = 0
+    private var ptyResizeFlushScheduled = false
 
     init(
         paneID: String,
@@ -128,9 +138,11 @@ final class NativeTerminalPane: NSObject,
                 guard let columns = Int32(exactly: viewport.columns),
                       let rows = Int32(exactly: viewport.rows)
                 else { return }
-                paneID.withCString {
-                    nativeTerminalDidResize($0, columns, rows)
-                }
+                NativeTerminalHost.enqueuePanePtyResizeFromAnyThread(
+                    id: paneID,
+                    columns: columns,
+                    rows: rows
+                )
             }
         )
         // The explicit theme is load-bearing: TerminalController's own default
@@ -277,6 +289,47 @@ final class NativeTerminalPane: NSObject,
         else {
             return
         }
+        enqueuePtyResize(columns: columns, rows: rows)
+    }
+
+    /// Record a Ghostty grid change without TIOCSWINSZ yet. `fitToSize` /
+    /// `setFrameSize` apply the new size and schedule the IOSurface present
+    /// as one `main.async`. Two further hops put the ioctl after that
+    /// present, so a full-screen TUI's SIGWINCH redraw cannot race a stale
+    /// backing store (Emacs after a split close). If no present was queued
+    /// (occluded / background), the ioctl still runs — same as the old
+    /// immediate path. Repeated reports before the flush coalesce to the
+    /// last size.
+    func enqueuePtyResize(columns: Int32, rows: Int32) {
+        guard columns > 0, rows > 0 else { return }
+        pendingPtyColumns = columns
+        pendingPtyRows = rows
+        guard !ptyResizeFlushScheduled else { return }
+        ptyResizeFlushScheduled = true
+        let generation = ptyResizeFlushGeneration
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.ptyResizeFlushGeneration == generation else { return }
+                self.ptyResizeFlushScheduled = false
+                self.flushPendingPtyResize()
+            }
+        }
+    }
+
+    func cancelPendingPtyResize() {
+        ptyResizeFlushGeneration += 1
+        ptyResizeFlushScheduled = false
+        pendingPtyColumns = nil
+        pendingPtyRows = nil
+    }
+
+    private func flushPendingPtyResize() {
+        guard let columns = pendingPtyColumns, let rows = pendingPtyRows else { return }
+        if flushedPtyColumns == columns, flushedPtyRows == rows {
+            return
+        }
+        flushedPtyColumns = columns
+        flushedPtyRows = rows
         paneID.withCString { nativeTerminalDidResize($0, columns, rows) }
     }
 

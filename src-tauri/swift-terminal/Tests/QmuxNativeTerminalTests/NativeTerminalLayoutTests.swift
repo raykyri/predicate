@@ -62,7 +62,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
 
     func testUnchangedTabRevealDoesNotEmitResizeOrMoveViewport() async throws {
         try await MainActor.run {
-            try Self.withPane { paneID, frame in
+            try await Self.withPane { paneID, frame in
                 let session = try XCTUnwrap(
                     TerminalSessionRegistry.shared.session(for: paneID)
                 )
@@ -87,6 +87,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
                 XCTAssertTrue(
                     Self.setLayout(paneID: paneID, frame: frame, visible: true)
                 )
+                await Self.waitForPtyResizeFlush()
 
                 XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
                 XCTAssertEqual(session.readViewportText(), viewportBefore)
@@ -96,7 +97,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
 
     func testRealFrameChangeStillEmitsResize() async throws {
         try await MainActor.run {
-            try Self.withPane { paneID, frame in
+            try await Self.withPane { paneID, frame in
                 NativeTerminalCallbackRecorder.shared.reset()
                 let widerFrame = CGRect(
                     x: frame.minX,
@@ -115,12 +116,61 @@ final class NativeTerminalLayoutTests: XCTestCase {
                         visible: true
                     )
                 )
+                await Self.waitForPtyResizeFlush()
 
                 let resizes = NativeTerminalCallbackRecorder.shared.resizes
                 XCTAssertEqual(resizes.count, 1)
                 let resize = try XCTUnwrap(resizes.first)
                 XCTAssertGreaterThan(resize.columns, 0)
                 XCTAssertGreaterThan(resize.rows, 0)
+            }
+        }
+    }
+
+    func testRapidFrameChangesCoalesceToOnePtyResize() async throws {
+        try await MainActor.run {
+            try await Self.withPane { paneID, frame in
+                NativeTerminalCallbackRecorder.shared.reset()
+                let mid = CGRect(
+                    x: frame.minX,
+                    y: frame.minY,
+                    width: frame.width,
+                    height: frame.height + 80
+                )
+                let tall = CGRect(
+                    x: frame.minX,
+                    y: frame.minY,
+                    width: frame.width,
+                    height: frame.height + 200
+                )
+                XCTAssertTrue(Self.setLayout(paneID: paneID, frame: mid, visible: true))
+                XCTAssertTrue(Self.setLayout(paneID: paneID, frame: tall, visible: true))
+                XCTAssertTrue(
+                    NativeTerminalCallbackRecorder.shared.resizes.isEmpty,
+                    "TIOCSWINSZ must wait until after Ghostty's present"
+                )
+                await Self.waitForPtyResizeFlush()
+                let resizes = NativeTerminalCallbackRecorder.shared.resizes
+                XCTAssertEqual(resizes.count, 1)
+                XCTAssertGreaterThan(try XCTUnwrap(resizes.first).rows, 0)
+            }
+        }
+    }
+
+    func testRemovedPaneDoesNotFlushPtyResize() async throws {
+        try await MainActor.run {
+            try await Self.withPane { paneID, frame in
+                NativeTerminalCallbackRecorder.shared.reset()
+                let taller = CGRect(
+                    x: frame.minX,
+                    y: frame.minY,
+                    width: frame.width,
+                    height: frame.height + 160
+                )
+                XCTAssertTrue(Self.setLayout(paneID: paneID, frame: taller, visible: true))
+                NativeTerminalHost.shared.removePane(id: paneID)
+                await Self.waitForPtyResizeFlush()
+                XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
             }
         }
     }
@@ -198,7 +248,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
 
     func testStaleLayoutRevisionDoesNotOverwriteNewerFrame() async throws {
         try await MainActor.run {
-            try Self.withPane { paneID, frame in
+            try await Self.withPane { paneID, frame in
                 let wider = CGRect(
                     x: frame.minX,
                     y: frame.minY,
@@ -218,6 +268,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
                         revision: newerRevision
                     )
                 )
+                await Self.waitForPtyResizeFlush()
                 NativeTerminalCallbackRecorder.shared.reset()
                 // An older revision carrying the previous, smaller frame must
                 // be ignored even though it arrives later on the main actor.
@@ -232,6 +283,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
                         revision: olderRevision
                     )
                 )
+                await Self.waitForPtyResizeFlush()
                 XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
 
                 // Re-applying the wider frame under a fresh revision must also
@@ -248,6 +300,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
                         revision: Self.nextLayoutRevision()
                     )
                 )
+                await Self.waitForPtyResizeFlush()
                 XCTAssertTrue(NativeTerminalCallbackRecorder.shared.resizes.isEmpty)
             }
         }
@@ -255,7 +308,7 @@ final class NativeTerminalLayoutTests: XCTestCase {
 
     func testWebViewReloadClearsOldDocumentLayoutRevisions() async throws {
         try await MainActor.run {
-            try Self.withPane { paneID, frame in
+            try await Self.withPane { paneID, frame in
                 let wider = CGRect(
                     x: frame.minX,
                     y: frame.minY,
@@ -287,15 +340,29 @@ final class NativeTerminalLayoutTests: XCTestCase {
                         revision: 1
                     )
                 )
+                await Self.waitForPtyResizeFlush()
                 XCTAssertEqual(NativeTerminalCallbackRecorder.shared.resizes.count, 1)
             }
         }
     }
 
     @MainActor
+    private static func waitForPtyResizeFlush() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async {
+                DispatchQueue.main.async {
+                    DispatchQueue.main.async {
+                        continuation.resume()
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
     private static func withPane(
-        _ body: (_ paneID: String, _ frame: CGRect) throws -> Void
-    ) rethrows {
+        _ body: (_ paneID: String, _ frame: CGRect) async throws -> Void
+    ) async rethrows {
         let paneID = "native-layout-test-pane"
         let frame = CGRect(x: 24, y: 18, width: 720, height: 360)
         NativeTerminalHost.shared.shutdown()
@@ -312,12 +379,14 @@ final class NativeTerminalLayoutTests: XCTestCase {
         )
         XCTAssertTrue(Self.setLayout(paneID: paneID, frame: frame, visible: true))
         XCTAssertTrue(NativeTerminalHost.shared.paneIsReadyForReplay(id: paneID))
+        await waitForPtyResizeFlush()
+        NativeTerminalCallbackRecorder.shared.reset()
         defer {
             NativeTerminalHost.shared.shutdown()
             NativeTerminalCallbackRecorder.shared.reset()
             withExtendedLifetime(root) {}
         }
-        try body(paneID, frame)
+        try await body(paneID, frame)
     }
 
     @MainActor

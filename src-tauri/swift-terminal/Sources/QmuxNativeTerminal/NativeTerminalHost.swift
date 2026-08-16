@@ -237,11 +237,39 @@ final class NativeTerminalHost {
         if pointerCapturePane === pane {
             pointerCapturePane = nil
         }
+        pane.cancelPendingPtyResize()
         clientDeferredGeometryPaneIDs.remove(id)
         pendingPaneFrames.removeValue(forKey: id)
         pendingFitPaneIDs.remove(id)
         layoutRevisionByPaneID.removeValue(forKey: id)
         pane.view.removeFromSuperview()
+    }
+
+    /// Host-managed PTY size follows Ghostty's grid, but `TIOCSWINSZ` is
+    /// deferred one present so a SIGWINCH redraw cannot hit a stale
+    /// IOSurface. The in-memory session resize callback is `@Sendable` and
+    /// may fire off the main actor; hop here and coalesce with the surface
+    /// delegate path.
+    nonisolated static func enqueuePanePtyResizeFromAnyThread(
+        id: String,
+        columns: Int32,
+        rows: Int32
+    ) {
+        DispatchQueue.main.async {
+            // Same queue Ghostty uses to present the new IOSurface. FIFO
+            // with that hop keeps isolation without jumping ahead via Task.
+            MainActor.assumeIsolated {
+                NativeTerminalHost.shared.enqueuePanePtyResize(
+                    id: id,
+                    columns: columns,
+                    rows: rows
+                )
+            }
+        }
+    }
+
+    func enqueuePanePtyResize(id: String, columns: Int32, rows: Int32) {
+        panes[id]?.enqueuePtyResize(columns: columns, rows: rows)
     }
 
     func surfaceDidClose(id: String) {
@@ -421,6 +449,11 @@ final class NativeTerminalHost {
             pane.view.frame = frame
         }
         if !pane.view.isHidden, frameChanged || forceFit {
+            // fitToSize resizes Ghostty's grid immediately and schedules the
+            // IOSurface present. The PTY ioctl is intentionally not issued
+            // here: NativeTerminalPane coalesces grid reports and flushes
+            // TIOCSWINSZ after that present so a TUI redraw cannot race a
+            // stale backing store.
             pane.view.fitToSize()
             // First fit to a real frame: the surface's grid now matches the
             // pane's actual size, so restored scrollback can replay without
@@ -678,6 +711,7 @@ final class NativeTerminalHost {
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
         for pane in panes.values {
+            pane.cancelPendingPtyResize()
             pane.view.removeFromSuperview()
         }
         panes.removeAll()
