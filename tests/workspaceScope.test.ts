@@ -4,6 +4,7 @@ import type { GroupInfo, PaneInfo, ResearchTreeSummary } from "../src/types";
 import { cycleTabId } from "../src/lib/appHelpers";
 import {
   groupsForScope,
+  paneCanOpenWorktree,
   panesForScope,
   researchAttention,
   replaceScopedGroupOrder,
@@ -358,4 +359,25 @@ test("the next-tree fallback stays inside the scoped folder", () => {
   // jumping to another folder's tree.
   assert.equal(nextTreeInResearchScope(trees, "research-b", "tree-2"), null);
   assert.equal(nextTreeInResearchScope(trees, null, "tree-1"), null);
+});
+
+test("Open worktree is disabled for Research and for non-git agent checkouts", () => {
+  const terminal = group("terminal-a", "terminal");
+  const research = group("research-a", "research");
+  assert.deepEqual(paneCanOpenWorktree(undefined, terminal), { enabled: true });
+  assert.deepEqual(paneCanOpenWorktree(undefined, research), {
+    enabled: false,
+    reason: "Worktrees are not available in Research",
+  });
+  assert.deepEqual(
+    paneCanOpenWorktree({ activeWorkspace: { gitRoot: null } }, terminal),
+    {
+      enabled: false,
+      reason: "This tab is not inside a git repository",
+    },
+  );
+  assert.deepEqual(
+    paneCanOpenWorktree({ activeWorkspace: { gitRoot: "/tmp/repo" } }, terminal),
+    { enabled: true },
+  );
 });

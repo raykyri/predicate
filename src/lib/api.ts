@@ -739,6 +739,16 @@ export function spawnShell(
   });
 }
 
+export function openPaneWorktree(
+  paneId: string,
+  initialSize?: InitialPaneSize | null,
+) {
+  return invoke<PaneInfo>("open_pane_worktree", {
+    paneId,
+    initialSize: initialSize ?? null,
+  });
+}
+
 export function getUseLoginShell() {
   return invoke<boolean>("use_login_shell_get");
 }

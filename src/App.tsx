@@ -25,6 +25,7 @@ import {
   FileText,
   FileUp,
   Folder,
+  FolderGit2,
   Globe,
   GitBranch,
   Layers,
@@ -326,6 +327,7 @@ import {
 import { isActiveResearchStatus } from "./lib/researchThreads";
 import {
   groupsForScope,
+  paneCanOpenWorktree,
   paneScope,
   panesForScope,
   researchAttention,
@@ -512,6 +514,7 @@ import {
   setWorktreeLocation,
   spawnAgent,
   spawnShell,
+  openPaneWorktree,
   sendNextQueuedAgentTurn,
   setQueuedTurnPause,
   submitAgentTurn,
@@ -6791,6 +6794,9 @@ function MainApp() {
         contextMenuPaneSplit.id !== contextMenuAdjacentBelowSplit.id),
   );
   const canForkContextMenuPane = agentCanFork(contextMenuAgent);
+  const contextMenuWorktreeAction = contextMenuPane
+    ? paneCanOpenWorktree(contextMenuAgent, groupById.get(contextMenuPane.groupId))
+    : { enabled: false, reason: undefined };
 
   useEffect(() => {
     let cancelled = false;
@@ -9275,6 +9281,24 @@ function MainApp() {
 
   async function addShellPane() {
     await addShellPaneInGroup(launchGroupId());
+  }
+
+  async function openWorktreeFromPane(pane: PaneInfo) {
+    setError(null);
+    setPaneContextMenu(null);
+    try {
+      const created = await openPaneWorktree(pane.id, estimateInitialPaneSize(false));
+      const orderedPanes = placePaneAfterOptimistically(created, pane.id);
+      setPanesPreservingRecoveredDismissals(orderedPanes);
+      setActivePaneId(created.id);
+      setLastActiveGroupId(created.groupId);
+      await refreshGroups();
+      requestAnimationFrame(() => {
+        terminalPaneRefs.current.get(created.id)?.focus();
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   async function restoreClosedPane() {
@@ -14518,30 +14542,25 @@ function MainApp() {
                 <span>Detach from split</span>
               </button>
             ) : null}
-            <button className="control-button"
+            <button
+              className="control-button"
               type="button"
               role="menuitem"
+              disabled={!contextMenuWorktreeAction.enabled}
+              title={
+                contextMenuWorktreeAction.enabled
+                  ? "Create a git worktree from this tab's checkout and open a shell there"
+                  : contextMenuWorktreeAction.reason
+              }
               onClick={() => {
-                setPaneContextMenu(null);
-                setActivePaneId(contextMenuPane.id);
-                if (browserOverlayByPane[contextMenuPane.id]?.open) {
-                  closeAllBrowserOverlays();
+                if (!contextMenuWorktreeAction.enabled) {
                   return;
                 }
-                void hideEveryHumanBrowser().then((hidden) => {
-                  if (hidden > 0) {
-                    return;
-                  }
-                  toggleBrowserOverlay(contextMenuPane.id);
-                });
+                void openWorktreeFromPane(contextMenuPane);
               }}
             >
-              <Globe size={13} aria-hidden="true" />
-              <span>
-                {browserOverlayByPane[contextMenuPane.id]?.open
-                  ? "Hide browser"
-                  : "Show browser"}
-              </span>
+              <FolderGit2 size={13} aria-hidden="true" />
+              <span>Open worktree</span>
             </button>
             {canForkContextMenuPane ? (
               <>

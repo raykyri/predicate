@@ -6,6 +6,19 @@ export function groupsForScope(groups: GroupInfo[], scope: WorkspaceScope): Grou
   return groups.filter((group) => group.scope === scope);
 }
 
+export function paneCanOpenWorktree(
+  agent: { activeWorkspace?: { gitRoot?: string | null } | null } | undefined,
+  group: GroupInfo | undefined,
+): { enabled: boolean; reason?: string } {
+  if (group?.scope === "research") {
+    return { enabled: false, reason: "Worktrees are not available in Research" };
+  }
+  if (agent?.activeWorkspace && !agent.activeWorkspace.gitRoot) {
+    return { enabled: false, reason: "This tab is not inside a git repository" };
+  }
+  return { enabled: true };
+}
+
 export function paneScope(
   pane: PaneInfo,
   groupById: ReadonlyMap<string, GroupInfo>,

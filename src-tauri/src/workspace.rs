@@ -2090,6 +2090,105 @@ fn is_git_repo(host: &Host, path: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn git_rev_parse_field(host: &Host, cwd: &str, spec: &str) -> Result<String, String> {
+    let output = host
+        .git(["-C", cwd, "rev-parse", spec])
+        .output()
+        .map_err(|err| format!("failed to run git rev-parse {spec}: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git rev-parse {spec} failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value.is_empty() {
+        return Err(format!("git rev-parse {spec} returned an empty path"));
+    }
+    Ok(value)
+}
+
+fn git_rev_parse_path(host: &Host, cwd: &str, spec: &str) -> Result<PathBuf, String> {
+    let raw = git_rev_parse_field(host, cwd, spec)?;
+    let path = PathBuf::from(&raw);
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(Path::new(cwd).join(path))
+    }
+}
+
+/// The repository's primary checkout. A linked worktree's `--show-toplevel` is
+/// the worktree itself; allocating under that would nest `.qmux/worktrees`
+/// inside another worktree. Prefer the parent of `--git-common-dir` when that
+/// is the main `.git`.
+///
+/// Git dir probes run from `--show-toplevel`, not the caller's possibly nested
+/// cwd. `--git-common-dir` is often the relative `.git`; joining that with a
+/// subdirectory would invent `<subdir>/.git` and mis-classify a main checkout.
+pub(crate) fn git_main_checkout(host: &Host, cwd: &str) -> Result<PathBuf, String> {
+    if !is_git_repo(host, cwd) {
+        return Err("this tab is not inside a git repository".to_string());
+    }
+    let current = git_project_root(host, cwd)?;
+    let current_str = current
+        .to_str()
+        .ok_or_else(|| "current checkout path is not valid UTF-8".to_string())?;
+    let git_dir = git_rev_parse_path(host, current_str, "--absolute-git-dir")?;
+    let common_dir = git_rev_parse_path(host, current_str, "--git-common-dir")?;
+    if git_dir == common_dir {
+        return Ok(current);
+    }
+    match common_dir.file_name().and_then(|name| name.to_str()) {
+        Some(".git") => {
+            let parent = common_dir
+                .parent()
+                .ok_or_else(|| "could not resolve the repository's main checkout".to_string())?;
+            let parent_str = parent
+                .to_str()
+                .ok_or_else(|| "main checkout path is not valid UTF-8".to_string())?;
+            git_project_root(host, parent_str)
+        }
+        _ => Err("could not resolve the repository's main checkout".to_string()),
+    }
+}
+
+/// Creates a linked worktree from the current checkout's HEAD and returns its
+/// path. Allocation uses the main checkout so project-local worktrees do not
+/// nest inside an existing linked worktree.
+pub fn create_shell_worktree(
+    state: &AppState,
+    host: &Host,
+    group: &GroupInfo,
+    seed_cwd: &str,
+) -> Result<PathBuf, String> {
+    let _guard = AGENT_WORKSPACE_CREATION_LOCK
+        .lock()
+        .map_err(|_| "agent workspace creation lock poisoned".to_string())?;
+    if !is_git_repo(host, seed_cwd) {
+        return Err("this tab is not inside a git repository".to_string());
+    }
+    let current_checkout = git_project_root(host, seed_cwd)?;
+    let main_checkout = git_main_checkout(host, seed_cwd)?;
+    let current = current_checkout
+        .to_str()
+        .ok_or_else(|| "current checkout path is not valid UTF-8".to_string())?;
+    let main = main_checkout
+        .to_str()
+        .ok_or_else(|| "main checkout path is not valid UTF-8".to_string())?;
+    let name = default_group_name();
+    let dir = allocate_agent_worktree_dir(state, host, Some(main), group, &name)?;
+    let head = git_rev_parse_field(host, current, "HEAD")?;
+    let branch = format!(
+        "qmux/{}/{}",
+        sanitize_ref_segment(&group.id),
+        sanitize_ref_segment(&name)
+    );
+    create_worktree(host, current, &dir, &branch, &head)?;
+    Ok(dir)
+}
+
 /// Resolves a local command cwd into display-only workspace metadata. A cwd
 /// outside Git is still useful to show, while Git's own plumbing determines
 /// whether a checkout is the repository's primary tree or a linked worktree.
@@ -2652,6 +2751,7 @@ mod tests {
         let repo = workspace.join("repo");
         let linked = workspace.join("linked");
         let nested = linked.join("packages/app");
+        let nested_main = repo.join("packages/app");
         fs::create_dir_all(&repo).unwrap();
         let git = |cwd: &Path, args: &[&str]| {
             let output = Command::new("git")
@@ -2681,6 +2781,7 @@ mod tests {
             ],
         );
         fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&nested_main).unwrap();
 
         let main =
             resolve_active_workspace(repo.to_str().unwrap(), ActiveWorkspaceSource::Qmux, false)
@@ -2704,6 +2805,130 @@ mod tests {
         assert_eq!(current.branch.as_deref(), Some("feature/test"));
         assert_eq!(current.source, ActiveWorkspaceSource::Codex);
         assert!(current.managed_by_qmux);
+
+        let main_from_nested = git_main_checkout(&Host::Local, nested.to_str().unwrap()).unwrap();
+        let main_from_nested_main =
+            git_main_checkout(&Host::Local, nested_main.to_str().unwrap()).unwrap();
+        let main_from_repo = git_main_checkout(&Host::Local, repo.to_str().unwrap()).unwrap();
+        assert_eq!(fs::canonicalize(&main_from_nested).unwrap(), canonical_repo);
+        assert_eq!(
+            fs::canonicalize(&main_from_nested_main).unwrap(),
+            canonical_repo
+        );
+        assert_eq!(fs::canonicalize(&main_from_repo).unwrap(), canonical_repo);
+
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn git_main_checkout_rejects_a_directory_outside_git() {
+        let directory = temp_workspace("not-git");
+        let err = git_main_checkout(&Host::Local, directory.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("not inside a git repository"), "{err}");
+        fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn create_shell_worktree_uses_main_checkout_and_current_head() {
+        let workspace = temp_workspace("open-worktree");
+        let repo = workspace.join("repo");
+        let linked = workspace.join("linked");
+        let managed = workspace.join("managed/group");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "qmux test"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/open-worktree",
+                linked.to_str().unwrap(),
+            ],
+        );
+        git(&linked, &["commit", "--allow-empty", "-m", "feature"]);
+        let feature_head = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&linked)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        let main_head = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(feature_head, main_head);
+
+        let state = test_state_with_workspace(workspace.join("state"));
+        persistence::save_preferences(
+            &state.config().workspace_root,
+            &persistence::AppPreferences {
+                worktree_location: Some(WorktreeLocation::LocalQmux),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let group = allocation_group(&repo, &managed);
+        let created =
+            create_shell_worktree(&state, &Host::Local, &group, linked.to_str().unwrap()).unwrap();
+        let canonical_repo = fs::canonicalize(&repo).unwrap();
+        let canonical_created = fs::canonicalize(&created).unwrap();
+        assert!(
+            canonical_created.starts_with(canonical_repo.join(".qmux/worktrees")),
+            "{canonical_created:?}"
+        );
+        assert!(
+            !canonical_created.starts_with(fs::canonicalize(&linked).unwrap()),
+            "must not nest inside the linked worktree: {canonical_created:?}"
+        );
+        let created_head = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&created)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_eq!(created_head, feature_head);
+
+        let err = create_shell_worktree(&state, &Host::Local, &group, workspace.to_str().unwrap())
+            .unwrap_err();
+        assert!(err.contains("not inside a git repository"), "{err}");
 
         fs::remove_dir_all(workspace).ok();
     }
