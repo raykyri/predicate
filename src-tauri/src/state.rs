@@ -1238,7 +1238,7 @@ pub enum SubmitWatchStatus {
     Confirmed,
     /// The send is still outstanding, but *some* UserPromptSubmit arrived after it
     /// was written — most likely this very turn submitting with text that failed
-    /// the exact match (a mangled or concatenated paste). Recovery must stand down:
+    /// the containment match (for example, a mangled paste). Recovery must stand down:
     /// a Return nudge or a requeue on top of a turn that actually started risks a
     /// duplicate, and a visible stall is the safer failure.
     StillPendingWithPromptActivity,
@@ -9096,9 +9096,9 @@ impl AppState {
     /// What a submit-confirmation watch should conclude about one exact send: gone
     /// (confirmed), still outstanding with prompt activity after it, or still
     /// outstanding with no prompt submitted since. The distinction matters because
-    /// `match_agent_prompt_submit` only pops on an exact text match — a turn that
-    /// submitted with mangled text leaves its record outstanding forever, and
-    /// recovery must not treat that as "never started".
+    /// `match_agent_prompt_submit` only pops when the submitted prompt contains the
+    /// sent text — a turn that submitted with mangled text leaves its record
+    /// outstanding, and recovery must not treat that as "never started".
     pub fn check_agent_submit_watch(
         &self,
         agent_id: &str,
@@ -10741,7 +10741,7 @@ fn normalized_pane_splits(
 fn prompts_match(actual: &str, expected: &str) -> bool {
     let actual = normalize_prompt(actual);
     let expected = normalize_prompt(expected);
-    actual == expected
+    actual == expected || (!expected.is_empty() && actual.contains(&expected))
 }
 
 fn normalize_prompt(prompt: &str) -> String {

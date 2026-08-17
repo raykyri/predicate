@@ -1648,7 +1648,7 @@ const SUBMIT_CONFIRM_RECHECKS: [std::time::Duration; 2] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SubmitWatchDecision {
     /// Confirmed — or ambiguous (a prompt was submitted after our send but failed
-    /// the exact text match, so the turn very likely started). Both stop recovery:
+    /// the containment match, so the turn very likely started). Both stop recovery:
     /// nudging or requeueing a turn that actually started risks a duplicate, and a
     /// visible stall is the safer failure.
     StandDown,
@@ -2278,12 +2278,12 @@ mod tests {
         let send_id = state
             .record_agent_send("agent-1", "commit".to_string(), AgentSendSource::QueuedTurn)
             .unwrap();
-        // A prompt submitted after our send that fails the exact text match (e.g.
-        // the paste was mangled or concatenated) leaves the record outstanding —
+        // A prompt submitted after our send that does not contain the sent text
+        // leaves the record outstanding —
         // but the turn very likely started, so recovery must stand down on every
         // check rather than nudge or requeue a duplicate.
         state
-            .match_agent_prompt_submit("agent-1", Some("commit commit"))
+            .match_agent_prompt_submit("agent-1", Some("foreign prompt"))
             .unwrap();
         let status = state.check_agent_submit_watch("agent-1", send_id).unwrap();
         assert_eq!(status, SubmitWatchStatus::StillPendingWithPromptActivity);

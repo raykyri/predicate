@@ -3950,6 +3950,35 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_submit_matches_queued_send_inside_existing_composer_text() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .record_agent_send(
+                "agent-1",
+                "queued follow-up".to_string(),
+                AgentSendSource::QueuedTurn,
+            )
+            .unwrap();
+
+        let event = ingest(
+            &state,
+            hook(
+                "UserPromptSubmit",
+                json!({ "prompt": "existing composer textqueued follow-up" }),
+            ),
+        );
+
+        assert!(state.outstanding_agent_sends("agent-1").unwrap().is_empty());
+        assert_eq!(event.payload["sendTracking"]["status"], "matched");
+        state
+            .enqueue_agent_turn("agent-1", "next queued turn".to_string())
+            .unwrap();
+        ingest(&state, hook("Stop", json!({})));
+        assert!(written_text(&bytes).contains("next queued turn"));
+    }
+
+    #[test]
     fn shell_escape_prompt_submit_preserves_ready_status() {
         let state = test_state();
         install_agent_pane(&state);
