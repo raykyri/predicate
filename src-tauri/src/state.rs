@@ -1233,8 +1233,8 @@ pub enum AgentPromptSubmitMatch {
 /// pane (see `check_agent_submit_watch`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SubmitWatchStatus {
-    /// The send's prompt-submit echo popped it (or an idle boundary cleared the
-    /// tracking): the turn started, the watch stands down.
+    /// The send's prompt-submit echo popped it, a later matching send superseded it,
+    /// or an idle boundary cleared the tracking: the watch stands down.
     Confirmed,
     /// The send is still outstanding, but *some* UserPromptSubmit arrived after it
     /// was written — most likely this very turn submitting with text that failed
@@ -8984,25 +8984,35 @@ impl AppState {
             });
         };
 
-        let Some(front) = tracking.outstanding_sends.front() else {
+        if tracking.outstanding_sends.is_empty() {
             return Ok(AgentPromptSubmitMatch::Untracked {
                 actual: prompt.to_string(),
                 outstanding_sends: 0,
             });
-        };
+        }
 
-        if prompts_match(prompt, &front.text) {
+        if let Some(index) = tracking
+            .outstanding_sends
+            .iter()
+            .position(|send| prompts_match(prompt, &send.text))
+        {
             let matched = tracking
                 .outstanding_sends
-                .pop_front()
-                .expect("front checked above");
+                .remove(index)
+                .expect("matching index checked above");
+            drop(tracking.outstanding_sends.drain(..index));
             Ok(AgentPromptSubmitMatch::Matched {
                 source: matched.source,
                 outstanding_sends: tracking.outstanding_sends.len(),
             })
         } else {
             Ok(AgentPromptSubmitMatch::Mismatched {
-                expected: front.text.clone(),
+                expected: tracking
+                    .outstanding_sends
+                    .front()
+                    .expect("non-empty checked above")
+                    .text
+                    .clone(),
                 actual: prompt.to_string(),
                 outstanding_sends: outstanding_count,
             })
@@ -9094,11 +9104,11 @@ impl AppState {
     }
 
     /// What a submit-confirmation watch should conclude about one exact send: gone
-    /// (confirmed), still outstanding with prompt activity after it, or still
-    /// outstanding with no prompt submitted since. The distinction matters because
-    /// `match_agent_prompt_submit` only pops when the submitted prompt contains the
-    /// sent text — a turn that submitted with mangled text leaves its record
-    /// outstanding, and recovery must not treat that as "never started".
+    /// (confirmed or superseded), still outstanding with prompt activity after it,
+    /// or still outstanding with no prompt submitted since. The distinction matters
+    /// because `match_agent_prompt_submit` only pops when the submitted prompt
+    /// contains the sent text — a turn that submitted with mangled text leaves its
+    /// record outstanding, and recovery must not treat that as "never started".
     pub fn check_agent_submit_watch(
         &self,
         agent_id: &str,
@@ -17195,6 +17205,50 @@ mod tests {
             .match_agent_prompt_submit("agent-1", Some("real prompt"))
             .unwrap();
         assert!(matches!(matched, AgentPromptSubmitMatch::Matched { .. }));
+    }
+
+    #[test]
+    fn later_prompt_match_retires_older_superseded_sends() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+
+        state
+            .record_agent_send(
+                "agent-1",
+                "canceled prompt".to_string(),
+                AgentSendSource::QueuedTurn,
+            )
+            .unwrap();
+        state
+            .record_agent_send(
+                "agent-1",
+                "submitted prompt".to_string(),
+                AgentSendSource::DirectSend,
+            )
+            .unwrap();
+        state
+            .record_agent_send(
+                "agent-1",
+                "future prompt".to_string(),
+                AgentSendSource::QueuedTurn,
+            )
+            .unwrap();
+
+        let matched = state
+            .match_agent_prompt_submit("agent-1", Some("existing composer textsubmitted prompt"))
+            .unwrap();
+        assert_eq!(
+            matched,
+            AgentPromptSubmitMatch::Matched {
+                source: AgentSendSource::DirectSend,
+                outstanding_sends: 1,
+            }
+        );
+        let outstanding = state.outstanding_agent_sends("agent-1").unwrap();
+        assert_eq!(outstanding.len(), 1);
+        assert_eq!(outstanding[0].id, 3);
+        assert_eq!(outstanding[0].text, "future prompt");
+        assert_eq!(outstanding[0].source, AgentSendSource::QueuedTurn);
     }
 
     #[test]
