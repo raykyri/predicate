@@ -1466,7 +1466,7 @@ export default function NativeInput({
             agentMayBeBackgrounded
               ? "Agent may be backgrounded"
               : awaitingPermission
-                ? "Requesting approval for pending tool use..."
+                ? "Waiting on approval for pending tool use..."
                 : "What should we investigate next?"
           }
           rows={1}
