@@ -1,7 +1,9 @@
 use crate::adapters::{TranscriptLifecycleEvent, adapter_registry, maybe_record_agent_model};
 use crate::events::QmuxEvent;
 use crate::state::{AgentSendSource, AppState};
-use crate::turn_queue::{IdleResolution, advance_after_idle, advance_after_interruption};
+use crate::turn_queue::{
+    IdleResolution, advance_after_idle, advance_after_interruption, is_tui_command_turn,
+};
 use crate::workspace::{AgentInfo, AgentStatus, record_agent_active_workspace};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -683,6 +685,12 @@ fn transcript_lifecycle_agent_event(
     // If a normal Stop/idle hook already drained a queued turn, a late transcript
     // abort or completion marker belongs to the previous turn. Do not drain again
     // while that queued send is still waiting for its prompt-submit echo.
+    //
+    // TUI command turns run hooklessly, so their queued send record can only be
+    // stale by the time a transcript lifecycle event arrives.
+    let _ = state.clear_agent_outstanding_sends_by(agent_id, |send| {
+        send.source == AgentSendSource::QueuedTurn && is_tui_command_turn(&send.text)
+    });
     if state.agent_has_outstanding_send_source(agent_id, AgentSendSource::QueuedTurn)? {
         return Ok(None);
     }

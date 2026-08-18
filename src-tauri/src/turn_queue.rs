@@ -872,6 +872,14 @@ fn advance_after_settlement(
     // not consume the next queue entry. Report `Drained` because the agent is already
     // running the newly sent turn. Expired advisory records are pruned by the query,
     // so a genuinely missing echo cannot block the queue indefinitely.
+    //
+    // TUI command turns (`!` shell escapes and `/` slash commands) run hooklessly: they
+    // never receive a prompt-submit echo, so the record can only be stale by the next
+    // idle boundary. Reap those so the real double-drain guard still protects plain
+    // queued turns that are in flight.
+    let _ = state.clear_agent_outstanding_sends_by(agent_id, |send| {
+        send.source == AgentSendSource::QueuedTurn && is_tui_command_turn(&send.text)
+    });
     if state.agent_has_outstanding_send_source(agent_id, AgentSendSource::QueuedTurn)? {
         return Ok(IdleResolution::Drained);
     }
@@ -3117,6 +3125,47 @@ mod tests {
         assert_eq!(
             state.list_agent_turn_queue("agent-1").unwrap(),
             vec!["still queued".to_string()]
+        );
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Running
+        ));
+    }
+
+    #[test]
+    fn idle_drains_past_a_hookless_queued_command_outstanding() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent_with_id(
+                "agent-1",
+                AgentStatus::Running,
+                Some("pane-1"),
+            ))
+            .unwrap();
+        state
+            .insert_pane(sample_pane_runtime("pane-1", Some("agent-1")))
+            .unwrap();
+
+        // A queued `/model` turn is sent, but built-in slash commands run hooklessly,
+        // so no prompt-submit echo will ever clear this record. The next idle must
+        // not let that stale record block the queue behind it.
+        state
+            .record_agent_send(
+                "agent-1",
+                "/model".to_string(),
+                AgentSendSource::QueuedTurn,
+            )
+            .unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "still queued".to_string())
+            .unwrap();
+
+        let resolution = advance_after_idle(&state, "agent-1").unwrap();
+
+        assert!(matches!(resolution, IdleResolution::Drained));
+        assert!(
+            state.agent_queued_turns("agent-1").unwrap().is_empty(),
+            "a hookless command outstanding must not block the next queued turn"
         );
         assert!(matches!(
             state.agent("agent-1").unwrap().unwrap().status,

@@ -9070,6 +9070,31 @@ impl AppState {
         Ok(cleared)
     }
 
+    /// Removes advisory send records matching `filter`, returning how many were
+    /// dropped. Used at idle boundaries to reap hookless queued TUI commands that
+    /// will never receive a prompt-submit echo and would otherwise block the queue.
+    pub fn clear_agent_outstanding_sends_by<F>(
+        &self,
+        agent_id: &str,
+        mut filter: F,
+    ) -> Result<usize, String>
+    where
+        F: FnMut(&AgentOutstandingSend) -> bool,
+    {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let Some(tracking) = model.agent_send_tracking.get_mut(agent_id) else {
+            return Ok(0);
+        };
+        tracking.prune_expired(now_millis());
+        let before = tracking.outstanding_sends.len();
+        tracking.outstanding_sends.retain(|send| !filter(send));
+        Ok(before - tracking.outstanding_sends.len())
+    }
+
     /// Current value of the agent's activity counter (see `Model::agent_activity`).
     /// An agent with no recorded activity reads as 0.
     pub fn agent_activity_seq(&self, agent_id: &str) -> Result<u64, String> {
