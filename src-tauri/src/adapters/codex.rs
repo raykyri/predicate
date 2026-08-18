@@ -2042,6 +2042,7 @@ fn resolve_transcript_turns_from(
     let mut active_segments: Vec<CodexReplaySegment> = Vec::new();
     let mut interrupted_turn_ids = HashSet::new();
     let mut rolled_back_source_indices = HashSet::new();
+    let mut seen_native_message_ids = HashSet::new();
 
     for (relative_index, line) in lines.iter().enumerate() {
         let source_index = source_index_offset + relative_index;
@@ -2064,7 +2065,18 @@ fn resolve_transcript_turns_from(
                         .turn_source_indices
                         .push(source_index);
                 }
-                turns.push(turn);
+                if should_add_codex_turn(&turn, &mut seen_native_message_ids) {
+                    turns.push(turn);
+                }
+            }
+            continue;
+        }
+
+        if value.get("type").and_then(Value::as_str) == Some("compacted") {
+            for turn in codex_compacted_record_turns(agent_id, source_index, &value) {
+                if should_add_codex_turn(&turn, &mut seen_native_message_ids) {
+                    turns.push(turn);
+                }
             }
             continue;
         }
@@ -2126,6 +2138,89 @@ fn resolve_transcript_turns_from(
         if rolled_back_source_indices.contains(&turn.source_index) {
             turn.context_status = Some(TurnContextStatus::RolledBack);
         }
+    }
+
+    turns
+}
+
+const COMPACTED_SOURCE_INDEX_STRIDE: usize = 1_000_000;
+
+/// Returns true the first time a native message id is seen. Turns without a
+/// native message id are always admitted. This prevents a message from
+/// appearing twice when it is recorded both as a `response_item` and inside a
+/// later `compacted.replacement_history`.
+fn should_add_codex_turn(turn: &Turn, seen_native_message_ids: &mut HashSet<String>) -> bool {
+    turn.native_message_id
+        .as_ref()
+        .map_or(true, |id| seen_native_message_ids.insert(id.clone()))
+}
+
+/// Expands a Codex `compacted` record into the user/assistant `message` entries
+/// it summarizes. The top-level `compacted` line itself does not appear as a
+/// turn; instead, each entry in `payload.replacement_history` becomes a turn
+/// with a synthetic source index derived from the parent line so it is unique
+/// and stable across re-reads. This makes the right pane transcript keep
+/// working after Codex replaces earlier `response_item` records with a compacted
+/// summary.
+fn codex_compacted_record_turns(
+    agent_id: &str,
+    source_index: usize,
+    value: &Value,
+) -> Vec<Turn> {
+    let Some(payload) = value.get("payload") else {
+        return Vec::new();
+    };
+    let Some(history) = payload
+        .get("replacement_history")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let session_id =
+        string_field(value, "session_id").or_else(|| string_field(value, "sessionId"));
+    let parent_timestamp = super::native_timestamp_ms(value);
+    let mut turns = Vec::new();
+
+    for (index, item) in history.iter().enumerate() {
+        let item_type = item.get("type").and_then(Value::as_str);
+        if item_type == Some("compaction") {
+            // A nested compaction is an encrypted summary of an earlier
+            // compaction; it has no human-readable content to display.
+            continue;
+        }
+        if item_type != Some("message") {
+            continue;
+        }
+        let Some(role) = item.get("role").and_then(Value::as_str) else {
+            continue;
+        };
+        if role == "developer" || role == "system" {
+            continue;
+        }
+        let Some(blocks) = parse_codex_message_blocks(item.get("content")) else {
+            continue;
+        };
+        if blocks.is_empty() {
+            continue;
+        }
+        let compacted_source_index = (source_index + 1)
+            .saturating_mul(COMPACTED_SOURCE_INDEX_STRIDE)
+            .saturating_add(index);
+        turns.push(Turn {
+            id: format!("{agent_id}-{compacted_source_index}"),
+            agent_id: agent_id.to_string(),
+            session_id: session_id.clone(),
+            role: role.to_string(),
+            blocks,
+            source_index: compacted_source_index,
+            timestamp: super::native_timestamp_ms(item).or(parent_timestamp),
+            status: None,
+            status_reason: None,
+            context_status: None,
+            native_id: codex_payload_turn_id(item),
+            parent_native_id: None,
+            native_message_id: string_field(item, "id"),
+        });
     }
 
     turns
@@ -2389,6 +2484,12 @@ fn is_codex_status_event(line: &str) -> bool {
     let Ok(value) = serde_json::from_str::<Value>(line) else {
         return false;
     };
+    // A `compacted` record replaces earlier history with its own
+    // `replacement_history`, so the whole visible transcript has to be re-resolved
+    // rather than appended one line at a time.
+    if value.get("type").and_then(Value::as_str) == Some("compacted") {
+        return true;
+    }
     if value.get("type").and_then(Value::as_str) != Some("event_msg") {
         return false;
     }
@@ -3931,6 +4032,106 @@ trusted_hash = "sha256:trusted"
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].source_index, 501);
         assert_eq!(turns[0].id, "agent-1-501");
+    }
+
+    #[test]
+    fn resolve_codex_transcript_expands_compacted_record() {
+        let lines = vec![
+            json!({
+                "type": "compacted",
+                "timestamp": "2026-08-18T21:17:36.289Z",
+                "payload": {
+                    "replacement_history": [
+                        {
+                            "type": "message",
+                            "id": "msg-turn-1",
+                            "role": "user",
+                            "content": [{ "type": "input_text", "text": "hello" }],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": "turn-1"
+                            }
+                        },
+                        {
+                            "type": "message",
+                            "id": "msg-turn-2",
+                            "role": "assistant",
+                            "content": [{ "type": "output_text", "text": "hi there" }],
+                            "internal_chat_message_metadata_passthrough": {
+                                "turn_id": "turn-2"
+                            }
+                        },
+                        {
+                            "type": "compaction",
+                            "id": "cmp-1"
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        ];
+
+        let turns = resolve_transcript_turns("agent-1", &lines);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].role, "user");
+        assert_eq!(turns[0].source_index, 1_000_000);
+        assert_eq!(turns[0].native_id.as_deref(), Some("turn-1"));
+        assert_text_block(&turns[0].blocks[0], "hello");
+        assert_eq!(turns[1].role, "assistant");
+        assert_eq!(turns[1].source_index, 1_000_001);
+        assert_eq!(turns[1].native_id.as_deref(), Some("turn-2"));
+        assert_text_block(&turns[1].blocks[0], "hi there");
+    }
+
+    #[test]
+    fn resolve_codex_transcript_deduplicates_compacted_messages() {
+        let user_message = json!({
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "msg-turn-1",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "hello" }],
+                "internal_chat_message_metadata_passthrough": {
+                    "turn_id": "turn-1"
+                }
+            }
+        })
+        .to_string();
+        let compacted = json!({
+            "type": "compacted",
+            "payload": {
+                "replacement_history": [
+                    {
+                        "type": "message",
+                        "id": "msg-turn-1",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": "hello again" }],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn-1"
+                        }
+                    },
+                    {
+                        "type": "message",
+                        "id": "msg-turn-2",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": "hi" }],
+                        "internal_chat_message_metadata_passthrough": {
+                            "turn_id": "turn-2"
+                        }
+                    }
+                ]
+            }
+        })
+        .to_string();
+
+        let turns = resolve_transcript_turns("agent-1", &[user_message, compacted]);
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].source_index, 0);
+        assert_text_block(&turns[0].blocks[0], "hello");
+        assert_eq!(turns[1].source_index, 2_000_001);
+        assert_text_block(&turns[1].blocks[0], "hi");
     }
 
     #[test]
