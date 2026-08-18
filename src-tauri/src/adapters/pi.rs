@@ -530,42 +530,57 @@ impl PiAdapter {
                     .and_then(|pane_id| state.agent_by_pane(pane_id).ok().flatten())
             });
         let hook_event = notification.event.clone();
+
+        if let Some(current) = agent.as_ref() {
+            let session_id = string_field(&notification.payload, "session_id");
+            let transcript_path = string_field(&notification.payload, "session_file")
+                .filter(|candidate| {
+                    hook_transcript_path_acceptable(current.transcript_path.as_deref(), candidate)
+                });
+            let leaf_id = pi_leaf_marker(&notification.payload);
+            let model = pi_model_from_payload(&notification.payload);
+            let effort = string_field(&notification.payload, "thinking_level");
+
+            let mut needs_refresh = false;
+            let updated = state.mutate_agent(&current.id, |agent| {
+                if let Some(session_id) = session_id {
+                    agent.session_id = Some(session_id);
+                }
+                if let Some(transcript_path) = transcript_path {
+                    if agent.transcript_path.as_deref() != Some(transcript_path.as_str()) {
+                        agent.transcript_path = Some(transcript_path);
+                        needs_refresh = true;
+                    }
+                }
+                if let Some(leaf_id) = leaf_id {
+                    if agent.native_leaf_id.as_deref() != Some(leaf_id.as_str()) {
+                        agent.native_leaf_id = Some(leaf_id);
+                        needs_refresh = true;
+                    }
+                }
+                if model.is_some() {
+                    agent.model = model;
+                }
+                if effort.is_some() {
+                    agent.effort = effort;
+                }
+                if hook_event == "PiSessionStart" && agent.status == AgentStatus::Starting {
+                    agent.status = AgentStatus::Idle;
+                }
+            })?;
+
+            if needs_refresh {
+                if let Some(path) = updated.as_ref().and_then(|a| a.transcript_path.clone()) {
+                    let _ = refresh_transcript_turns(state, &current.id, &path, self.id());
+                }
+            }
+        }
+
         let event_type = match hook_event.as_str() {
             "PiExtensionReady" => "agent.integration_ready",
             "PiSessionStart" => {
                 if let Some(current) = agent.as_ref() {
-                    let session_id = string_field(&notification.payload, "session_id");
-                    let transcript_path = string_field(&notification.payload, "session_file")
-                        .filter(|candidate| {
-                            hook_transcript_path_acceptable(
-                                current.transcript_path.as_deref(),
-                                candidate,
-                            )
-                        });
-                    let leaf_id = pi_leaf_marker(&notification.payload);
-                    let model = pi_model_from_payload(&notification.payload);
-                    let effort = string_field(&notification.payload, "thinking_level");
-                    let updated = state.mutate_agent(&current.id, |agent| {
-                        if let Some(session_id) = session_id.clone() {
-                            agent.session_id = Some(session_id);
-                        }
-                        if let Some(transcript_path) = transcript_path.clone() {
-                            agent.transcript_path = Some(transcript_path);
-                        }
-                        if let Some(leaf_id) = leaf_id.clone() {
-                            agent.native_leaf_id = Some(leaf_id);
-                        }
-                        if model.is_some() {
-                            agent.model = model.clone();
-                        }
-                        if effort.is_some() {
-                            agent.effort = effort.clone();
-                        }
-                        if agent.status == AgentStatus::Starting {
-                            agent.status = AgentStatus::Idle;
-                        }
-                    })?;
-                    if let Some(path) = updated.and_then(|agent| agent.transcript_path) {
+                    if let Some(path) = state.agent(&current.id).ok().flatten().and_then(|a| a.transcript_path) {
                         start_transcript_tail(
                             state.clone(),
                             current.id.clone(),
@@ -606,46 +621,8 @@ impl PiAdapter {
                     "agent.done"
                 }
             }
-            "PiModelSelect" | "PiThinkingLevelSelect" => {
-                if let Some(agent) = agent.as_ref() {
-                    let model = pi_model_from_payload(&notification.payload);
-                    let effort = string_field(&notification.payload, "thinking_level");
-                    state.mutate_agent(&agent.id, |agent| {
-                        if model.is_some() {
-                            agent.model = model.clone();
-                        }
-                        if effort.is_some() {
-                            agent.effort = effort.clone();
-                        }
-                    })?;
-                }
-                "agent.updated"
-            }
-            "PiSessionTree" | "PiSessionCompact" => {
-                if let Some(agent) = agent.as_ref() {
-                    let leaf_id = pi_leaf_marker(&notification.payload);
-                    let model = pi_model_from_payload(&notification.payload);
-                    let effort = string_field(&notification.payload, "thinking_level");
-                    let updated = state.mutate_agent(&agent.id, |agent| {
-                        if let Some(leaf_id) = leaf_id.clone() {
-                            agent.native_leaf_id = Some(leaf_id);
-                        }
-                        if model.is_some() {
-                            agent.model = model.clone();
-                        }
-                        if effort.is_some() {
-                            agent.effort = effort.clone();
-                        }
-                    })?;
-                    if let Some(updated) = updated
-                        && let Some(path) = updated.transcript_path
-                    {
-                        refresh_transcript_turns(state, &updated.id, &path, self.id())?;
-                    }
-                }
-                "agent.updated"
-            }
-            "PiSessionInfoChanged" => "agent.updated",
+            "PiModelSelect" | "PiThinkingLevelSelect" => "agent.updated",
+            "PiSessionTree" | "PiSessionCompact" | "PiSessionInfoChanged" => "agent.updated",
             "PiSessionShutdown" => "agent.session_shutdown",
             _ => "agent.hook",
         };
