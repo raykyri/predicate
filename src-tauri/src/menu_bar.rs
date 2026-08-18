@@ -1,4 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
+#[cfg(target_os = "macos")]
+use std::sync::LazyLock;
 use tauri::{AppHandle, Emitter};
 
 const TRAY_ID: &str = "qmux-menu-bar";
@@ -6,6 +9,7 @@ const SHOW_WINDOW_ID: &str = "qmux-menu-bar-show-window";
 const HIDE_WINDOW_ID: &str = "qmux-menu-bar-hide-window";
 const SELECT_PANE_PREFIX: &str = "qmux-menu-bar-select-pane:";
 const SELECT_PANE_EVENT: &str = "menu-bar-select-pane";
+const TOGGLE_GROUP_PREFIX: &str = "qmux-menu-bar-toggle-group:";
 const MAX_TAB_TITLE_CHARS: usize = 40;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -47,13 +51,37 @@ fn default_status_tone() -> String {
     "idle".to_string()
 }
 
+/// Collapsed group ids persist across snapshot updates so a status flip does
+/// not reopen a group the user just closed.
+#[cfg(target_os = "macos")]
+static COLLAPSED_GROUPS: LazyLock<std::sync::Mutex<HashSet<String>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashSet::new()));
+
+/// Raw AppKit pointers for the live tray menu. Touched only on the main
+/// thread: `with_inner_tray_icon` would deadlock from a menu-item action.
+#[cfg(target_os = "macos")]
+struct NativeMenuHandles {
+    menu: std::ptr::NonNull<objc2_app_kit::NSMenu>,
+    status_item: std::ptr::NonNull<objc2_app_kit::NSStatusItem>,
+}
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for NativeMenuHandles {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for NativeMenuHandles {}
+
+#[cfg(target_os = "macos")]
+static NATIVE_MENU_HANDLES: std::sync::Mutex<Option<NativeMenuHandles>> =
+    std::sync::Mutex::new(None);
+
 /// The last applied tray menu: the snapshot it renders plus one item handle
 /// per tab, flattened in render order. Content-only changes (a status dot, a
 /// retitled tab) mutate those items in place; a full AppKit menu rebuild —
 /// which reconstructs every NSMenuItem on the main thread and swaps the tray
 /// menu — is reserved for structural changes (groups or tabs added, removed,
 /// or reordered). Agent status flips are by far the most frequent update, and
-/// each one previously paid the full rebuild.
+/// each one previously paid the full rebuild. Group collapse hides existing
+/// items instead of rebuilding so those in-place updates stay valid.
 #[cfg(target_os = "macos")]
 struct AppliedMenuBar {
     snapshot: MenuBarSnapshot,
@@ -104,6 +132,7 @@ pub fn menu_bar_set_visible(app: AppHandle, visible: bool) -> Result<(), String>
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (menu, tab_items) = build_menu(&app, latest.as_ref()).map_err(|err| err.to_string())?;
         create_tray(&app, &menu).map_err(|err| err.to_string())?;
+        decorate_inline_menu(&app, latest.as_ref());
 
         let mut applied = APPLIED_MENU_BAR
             .lock()
@@ -144,9 +173,8 @@ pub fn menu_bar_update(app: AppHandle, snapshot: MenuBarSnapshot) -> Result<(), 
 
 /// Whether `next` can be applied to the already-built menu by mutating items:
 /// same groups (id and label) holding the same tabs in the same order. Group
-/// labels are structural on purpose — submenu text has no retained handle here,
-/// and label changes (a rename, a moved folder) are rare enough that a rebuild
-/// is the simpler correct path.
+/// header text is rebuilt only on a structural change; collapse state is
+/// applied by hiding items, not by dropping them from the menu.
 #[cfg(target_os = "macos")]
 fn same_menu_structure(current: &MenuBarSnapshot, next: &MenuBarSnapshot) -> bool {
     current.groups.len() == next.groups.len()
@@ -212,6 +240,7 @@ fn update_menu(app: &AppHandle, snapshot: MenuBarSnapshot) -> tauri::Result<()> 
     }
     let (menu, tab_items) = build_menu(app, Some(&snapshot))?;
     tray.set_menu(Some(menu))?;
+    decorate_inline_menu(app, Some(&snapshot));
     *applied = Some(AppliedMenuBar {
         snapshot,
         tab_items,
@@ -227,7 +256,7 @@ fn build_menu(
     tauri::menu::Menu<tauri::Wry>,
     Vec<tauri::menu::IconMenuItem<tauri::Wry>>,
 )> {
-    use tauri::menu::{IconMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem, Submenu};
+    use tauri::menu::{IconMenuItemBuilder, Menu, MenuItemBuilder, PredefinedMenuItem};
 
     let menu = Menu::new(app)?;
     let show = MenuItemBuilder::with_id(SHOW_WINDOW_ID, "Show Window").build(app)?;
@@ -243,21 +272,29 @@ fn build_menu(
         return Ok((menu, Vec::new()));
     };
 
+    if snapshot.groups.is_empty() {
+        let empty = MenuItemBuilder::new("No active tabs")
+            .enabled(false)
+            .build(app)?;
+        menu.append(&empty)?;
+        return Ok((menu, Vec::new()));
+    }
+
+    let collapsed = COLLAPSED_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut tab_items = Vec::new();
     for group in &snapshot.groups {
-        let group_label = sanitize_menu_text(&group.label, 88)
-            .filter(|label| !label.is_empty())
-            .unwrap_or_else(|| "Group".to_string());
-        let group_menu = Submenu::with_id(
-            app,
-            format!("qmux-menu-bar-group:{}", group.id),
-            group_label,
-            true,
-        )?;
+        let header = MenuItemBuilder::with_id(
+            format!("{TOGGLE_GROUP_PREFIX}{}", group.id),
+            group_header_label(&group.label, collapsed.contains(&group.id), group.tabs.len()),
+        )
+        .build(app)?;
+        menu.append(&header)?;
 
         if group.tabs.is_empty() {
             let empty = MenuItemBuilder::new("No tabs").enabled(false).build(app)?;
-            group_menu.append(&empty)?;
+            menu.append(&empty)?;
         } else {
             for tab in &group.tabs {
                 let item = IconMenuItemBuilder::with_id(
@@ -266,19 +303,10 @@ fn build_menu(
                 )
                 .icon(status_icon(&tab.status_tone, tab.waiting_on_pane))
                 .build(app)?;
-                group_menu.append(&item)?;
+                menu.append(&item)?;
                 tab_items.push(item);
             }
         }
-
-        menu.append(&group_menu)?;
-    }
-
-    if tab_items.is_empty() {
-        let empty = MenuItemBuilder::new("No active tabs")
-            .enabled(false)
-            .build(app)?;
-        menu.append(&empty)?;
     }
 
     Ok((menu, tab_items))
@@ -298,7 +326,14 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
             }
         }
         id => {
-            if let Some(pane_id) = id.strip_prefix(SELECT_PANE_PREFIX) {
+            if let Some(group_id) = id.strip_prefix(TOGGLE_GROUP_PREFIX) {
+                // Keyboard activation (or a click that missed the custom header
+                // view) dismisses the menu. Apply the collapse on the live items
+                // and pop the tray open again so the user sees the new state.
+                toggle_group_collapsed(group_id);
+                apply_collapsed_state_from_handles();
+                reopen_tray_menu();
+            } else if let Some(pane_id) = id.strip_prefix(SELECT_PANE_PREFIX) {
                 if let Err(err) = crate::show_hide_shortcut::show_qmux_window(app) {
                     eprintln!("qmux: failed to show app from menu bar tab selection: {err}");
                 }
@@ -312,6 +347,309 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
                 }
             }
         }
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn group_header_label(label: &str, collapsed: bool, tab_count: usize) -> String {
+    let name = sanitize_menu_text(label, 88)
+        .filter(|label| !label.is_empty())
+        .unwrap_or_else(|| "Group".to_string());
+    if collapsed {
+        format!("{name} ({tab_count})")
+    } else {
+        name
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn toggle_group_collapsed(group_id: &str) {
+    let mut collapsed = COLLAPSED_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    toggle_collapsed_id(&mut collapsed, group_id);
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn toggle_collapsed_id(collapsed: &mut HashSet<String>, group_id: &str) {
+    if !collapsed.remove(group_id) {
+        collapsed.insert(group_id.to_string());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn decorate_inline_menu(app: &AppHandle, snapshot: Option<&MenuBarSnapshot>) {
+    use objc2_app_kit::{NSMenu, NSStatusItem};
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(snapshot) = snapshot.cloned() else {
+        return;
+    };
+    let Some(tray) = app.tray_by_id(TRAY_ID) else {
+        return;
+    };
+    let _ = tray.with_inner_tray_icon(move |inner| {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(status_item) = inner.ns_status_item() else {
+            return;
+        };
+        let Some(menu) = status_item.menu(mtm) else {
+            return;
+        };
+        apply_inline_decoration(&menu, &snapshot, mtm);
+        let mut handles = NATIVE_MENU_HANDLES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *handles = Some(NativeMenuHandles {
+            menu: std::ptr::NonNull::new(objc2::rc::Retained::as_ptr(&menu) as *mut NSMenu)
+                .expect("NSMenu pointer"),
+            status_item: std::ptr::NonNull::new(
+                objc2::rc::Retained::as_ptr(&status_item) as *mut NSStatusItem
+            )
+            .expect("NSStatusItem pointer"),
+        });
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn apply_inline_decoration(
+    menu: &objc2_app_kit::NSMenu,
+    snapshot: &MenuBarSnapshot,
+    mtm: objc2_foundation::MainThreadMarker,
+) {
+    let collapsed = COLLAPSED_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let items = menu.itemArray();
+    let mut index = first_group_item_index(&items);
+    for (group_index, group) in snapshot.groups.iter().enumerate() {
+        let Some(header) = item_at(&items, index) else {
+            return;
+        };
+        index += 1;
+        let is_collapsed = collapsed.contains(&group.id);
+        let title = group_header_label(&group.label, is_collapsed, group.tabs.len());
+        attach_group_header_button(&header, group_index, &title, mtm);
+
+        let child_count = group.tabs.len().max(1);
+        for _ in 0..child_count {
+            let Some(child) = item_at(&items, index) else {
+                return;
+            };
+            index += 1;
+            child.setHidden(is_collapsed);
+        }
+    }
+    menu.update();
+}
+
+#[cfg(target_os = "macos")]
+fn apply_collapsed_state_from_handles() {
+    let snapshot = LATEST_MENU_BAR_SNAPSHOT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    let handles = NATIVE_MENU_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(handles) = handles.as_ref() else {
+        return;
+    };
+    // Safety: stored when the tray last received this menu; the status item
+    // retains it until the next set_menu, which also replaces these handles.
+    let menu = unsafe { handles.menu.as_ref() };
+    apply_collapsed_state(menu, &snapshot);
+}
+
+#[cfg(target_os = "macos")]
+fn apply_collapsed_state(menu: &objc2_app_kit::NSMenu, snapshot: &MenuBarSnapshot) {
+    use objc2_foundation::NSString;
+
+    let collapsed = COLLAPSED_GROUPS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    let items = menu.itemArray();
+    let mut index = first_group_item_index(&items);
+    for group in &snapshot.groups {
+        let Some(header) = item_at(&items, index) else {
+            return;
+        };
+        index += 1;
+        let is_collapsed = collapsed.contains(&group.id);
+        let title = group_header_label(&group.label, is_collapsed, group.tabs.len());
+        header.setTitle(&NSString::from_str(&title));
+        if let Some(view) = header.view()
+            && let Ok(button) = view.downcast::<objc2_app_kit::NSButton>()
+        {
+            set_header_button_title(&button, &title);
+        }
+
+        let child_count = group.tabs.len().max(1);
+        for _ in 0..child_count {
+            let Some(child) = item_at(&items, index) else {
+                return;
+            };
+            index += 1;
+            child.setHidden(is_collapsed);
+        }
+    }
+    menu.update();
+}
+
+#[cfg(target_os = "macos")]
+fn reopen_tray_menu() {
+    use objc2_foundation::MainThreadMarker;
+
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let handles = NATIVE_MENU_HANDLES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(handles) = handles.as_ref() else {
+        return;
+    };
+    // Safety: same lifetime as apply_collapsed_state_from_handles.
+    let status_item = unsafe { handles.status_item.as_ref() };
+    if let Some(button) = status_item.button(mtm) {
+        unsafe { button.performClick(None) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn first_group_item_index(items: &objc2_foundation::NSArray<objc2_app_kit::NSMenuItem>) -> usize {
+    for index in 0..items.count() {
+        if items.objectAtIndex(index).isSeparatorItem() {
+            return index + 1;
+        }
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn item_at(
+    items: &objc2_foundation::NSArray<objc2_app_kit::NSMenuItem>,
+    index: usize,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSMenuItem>> {
+    if index >= items.count() {
+        return None;
+    }
+    Some(items.objectAtIndex(index))
+}
+
+#[cfg(target_os = "macos")]
+fn attach_group_header_button(
+    item: &objc2_app_kit::NSMenuItem,
+    group_index: usize,
+    title: &str,
+    mtm: objc2_foundation::MainThreadMarker,
+) {
+    use objc2::sel;
+    use objc2_app_kit::{NSButton, NSFocusRingType, NSFont, NSTextAlignment};
+    use objc2_foundation::{NSPoint, NSRect, NSSize};
+
+    let button = NSButton::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 22.0)),
+    );
+    button.setBordered(false);
+    button.setFocusRingType(NSFocusRingType::None);
+    button.setAlignment(NSTextAlignment::Left);
+    button.setFont(Some(&NSFont::menuFontOfSize(0.0)));
+    set_header_button_title(&button, title);
+    button.setTag(group_index as isize);
+    let target = group_header_target();
+    unsafe {
+        button.setTarget(Some(&target));
+        button.setAction(Some(sel!(toggleGroup:)));
+    }
+    item.setView(Some(&button));
+}
+
+#[cfg(target_os = "macos")]
+fn set_header_button_title(button: &objc2_app_kit::NSButton, title: &str) {
+    use objc2_app_kit::{NSFocusRingType, NSTextAlignment};
+    use objc2_foundation::NSString;
+
+    button.setFocusRingType(NSFocusRingType::None);
+    button.setAlignment(NSTextAlignment::Left);
+    button.setTitle(&NSString::from_str(title));
+    button.sizeToFit();
+    let mut frame = button.frame();
+    frame.size.width = (frame.size.width + 16.0).max(160.0);
+    frame.size.height = 22.0;
+    button.setFrame(frame);
+}
+
+#[cfg(target_os = "macos")]
+fn group_header_target() -> objc2::rc::Retained<GroupHeaderTarget> {
+    use objc2::Message;
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    static TARGET: AtomicPtr<GroupHeaderTarget> = AtomicPtr::new(std::ptr::null_mut());
+    let ptr = TARGET.load(Ordering::SeqCst);
+    if !ptr.is_null() {
+        // Safety: created once and leaked so this pointer stays valid.
+        return unsafe { objc2::rc::Retained::retain(ptr) }.expect("group header target");
+    }
+    let target = GroupHeaderTarget::new();
+    TARGET.store(
+        objc2::rc::Retained::as_ptr(&target).cast_mut(),
+        Ordering::SeqCst,
+    );
+    // Leak one retain so the static pointer stays valid.
+    std::mem::forget(target.retain());
+    target
+}
+
+#[cfg(target_os = "macos")]
+objc2::define_class!(
+    #[unsafe(super(objc2::runtime::NSObject))]
+    #[name = "QmuxMenuBarGroupHeaderTarget"]
+    #[ivars = ()]
+    struct GroupHeaderTarget;
+
+    impl GroupHeaderTarget {
+        #[unsafe(method(toggleGroup:))]
+        fn toggle_group(&self, sender: Option<&objc2::runtime::AnyObject>) {
+            let Some(sender) = sender else {
+                return;
+            };
+            let Some(button) = sender.downcast_ref::<objc2_app_kit::NSButton>() else {
+                return;
+            };
+            let group_index = button.tag() as usize;
+            let snapshot = LATEST_MENU_BAR_SNAPSHOT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let Some(group_id) = snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.groups.get(group_index))
+                .map(|group| group.id.clone())
+            else {
+                return;
+            };
+            toggle_group_collapsed(&group_id);
+            apply_collapsed_state_from_handles();
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+impl GroupHeaderTarget {
+    fn new() -> objc2::rc::Retained<Self> {
+        use objc2::{msg_send, AllocAnyThread};
+
+        let this = Self::alloc().set_ivars(());
+        unsafe { msg_send![super(this), init] }
     }
 }
 
@@ -514,6 +852,22 @@ mod tests {
             waiting_on_pane: false,
             selected,
         }
+    }
+
+    #[test]
+    fn group_header_shows_count_when_collapsed() {
+        assert_eq!(group_header_label("qmux", false, 3), "qmux");
+        assert_eq!(group_header_label("qmux", true, 3), "qmux (3)");
+        assert_eq!(group_header_label("   ", true, 0), "Group (0)");
+    }
+
+    #[test]
+    fn collapsing_a_group_is_a_toggle() {
+        let mut collapsed = HashSet::new();
+        toggle_collapsed_id(&mut collapsed, "g1");
+        assert!(collapsed.contains("g1"));
+        toggle_collapsed_id(&mut collapsed, "g1");
+        assert!(!collapsed.contains("g1"));
     }
 
     #[test]
