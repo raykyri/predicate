@@ -1,6 +1,6 @@
 [package]
 name = "qmux-proto"
-version = "0.3.0"
+version = "0.3.1"
 description = "Wire types for the qmux control protocol."
 license = "MIT"
 edition = "2024"
