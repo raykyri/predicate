@@ -6,6 +6,7 @@ const SHOW_WINDOW_ID: &str = "qmux-menu-bar-show-window";
 const HIDE_WINDOW_ID: &str = "qmux-menu-bar-hide-window";
 const SELECT_PANE_PREFIX: &str = "qmux-menu-bar-select-pane:";
 const SELECT_PANE_EVENT: &str = "menu-bar-select-pane";
+const MAX_TAB_TITLE_CHARS: usize = 40;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -314,14 +315,14 @@ fn handle_menu_event(app: &AppHandle, event: tauri::menu::MenuEvent) {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn tab_menu_label(tab: &MenuBarTab) -> String {
     let mut label = String::new();
     if tab.selected {
         label.push_str("* ");
     }
     label.push_str(
-        &sanitize_menu_text(&tab.title, 96)
+        &sanitize_menu_text(&tab.title, MAX_TAB_TITLE_CHARS)
             .filter(|title| !title.is_empty())
             .unwrap_or_else(|| "Untitled".to_string()),
     );
@@ -344,7 +345,7 @@ fn tab_menu_label(tab: &MenuBarTab) -> String {
     label
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn sanitize_menu_text(text: &str, max_chars: usize) -> Option<String> {
     let compact = text
         .chars()
@@ -362,7 +363,7 @@ fn sanitize_menu_text(text: &str, max_chars: usize) -> Option<String> {
     Some(truncate_chars(&compact, max_chars))
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(test, target_os = "macos"))]
 fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
     let truncated = chars.by_ref().take(max_chars).collect::<String>();
@@ -497,4 +498,51 @@ fn rounded_rect_covers(x: f32, y: f32, left: f32, top: f32, size: f32, radius: f
     let dx = ((x - (left + half)).abs() - (half - radius)).max(0.0);
     let dy = ((y - (top + half)).abs() - (half - radius)).max(0.0);
     dx * dx + dy * dy <= radius * radius
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tab(title: &str, path: Option<&str>, status: Option<&str>, selected: bool) -> MenuBarTab {
+        MenuBarTab {
+            pane_id: "pane-1".to_string(),
+            title: title.to_string(),
+            path: path.map(str::to_string),
+            status_tone: "idle".to_string(),
+            status_label: status.map(str::to_string),
+            waiting_on_pane: false,
+            selected,
+        }
+    }
+
+    #[test]
+    fn tab_title_under_the_cap_is_kept() {
+        let title = "a".repeat(MAX_TAB_TITLE_CHARS);
+        assert_eq!(tab_menu_label(&tab(&title, None, None, false)), title);
+    }
+
+    #[test]
+    fn tab_title_over_the_cap_is_truncated() {
+        let title = "a".repeat(MAX_TAB_TITLE_CHARS + 8);
+        let expected = format!("{}...", "a".repeat(MAX_TAB_TITLE_CHARS));
+        assert_eq!(tab_menu_label(&tab(&title, None, None, false)), expected);
+    }
+
+    #[test]
+    fn tab_title_cap_is_in_characters() {
+        let title = "é".repeat(MAX_TAB_TITLE_CHARS + 1);
+        let expected = format!("{}...", "é".repeat(MAX_TAB_TITLE_CHARS));
+        assert_eq!(tab_menu_label(&tab(&title, None, None, false)), expected);
+    }
+
+    #[test]
+    fn truncated_title_still_appends_path_and_status() {
+        let title = "a".repeat(MAX_TAB_TITLE_CHARS + 4);
+        let label = tab_menu_label(&tab(&title, Some("src/lib"), Some("working"), true));
+        assert_eq!(
+            label,
+            format!("* {}... - src/lib (working)", "a".repeat(MAX_TAB_TITLE_CHARS))
+        );
+    }
 }
