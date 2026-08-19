@@ -310,6 +310,27 @@ export function togglePaneSplitAxis(split: PaneSplitInfo): PaneSplitInfo {
   );
 }
 
+/** Width the terminal stage must keep so a column split stays at or above the
+ * per-pane resize floor. Stacked splits (and a single pane) use `minWidth`. */
+export function reservedTerminalStageWidth({
+  axis,
+  paneCount,
+  minWidth,
+  splitMinWidth,
+  gutter,
+}: {
+  axis: PaneSplitAxis;
+  paneCount: number;
+  minWidth: number;
+  splitMinWidth: number;
+  gutter: number;
+}): number {
+  if (axis === "horizontal" && paneCount >= 2) {
+    return paneCount * splitMinWidth + Math.max(0, paneCount - 1) * gutter;
+  }
+  return minWidth;
+}
+
 export function paneSplitForPane(splits: PaneSplitInfo[], paneId: string | null | undefined) {
   if (!paneId) {
     return null;

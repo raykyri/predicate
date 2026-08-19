@@ -10,15 +10,17 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import { useNativeWebOverlayRegion } from "../hooks/useNativeWebOverlayRegion";
 import { artifactFileUrl } from "../lib/api";
+import { IS_MAC } from "../lib/appHelpers";
 import { artifactKind, artifactName } from "../lib/artifacts";
 import { formatRelativeTime } from "../lib/transcriptSessions";
 import type { ArtifactInfo } from "../types";
 
 interface ArtifactTrayProps {
-  /** The pane whose right-pane cell hosts this tray instance. */
+  /** The pane whose cell hosts this tray instance. */
   paneId: string;
   /** This workspace group's artifacts, oldest first (newest renders on top). */
   artifacts: ArtifactInfo[];
@@ -26,6 +28,8 @@ interface ArtifactTrayProps {
   collapsed: boolean;
   /** Dragged position; null keeps the default top-right anchor. */
   position: ArtifactTrayPosition | null;
+  /** Register the card as a Ghostty-safe overlay when it floats over terminals. */
+  nativeOverlay?: boolean;
   onPositionChange: (position: ArtifactTrayPosition) => void;
   onSetCollapsed: (collapsed: boolean) => void;
   onClose: () => void;
@@ -53,6 +57,7 @@ export default function ArtifactTray({
   paneExists,
   collapsed,
   position,
+  nativeOverlay = false,
   onPositionChange,
   onSetCollapsed,
   onClose,
@@ -64,7 +69,12 @@ export default function ArtifactTray({
   onUndo,
   onHoverArtifact,
 }: ArtifactTrayProps) {
-  const frameRef = useRef<HTMLDivElement>(null);
+  const frameRef = useNativeWebOverlayRegion<HTMLDivElement>(
+    nativeOverlay && IS_MAC,
+    nativeOverlay
+      ? `${paneId}:${collapsed}:${position?.top ?? ""}:${position?.right ?? ""}:${artifacts.length}:${undo?.id ?? ""}`
+      : undefined,
+  );
   // Token-scoped file-server URLs for image and HTML previews, fetched once
   // per artifact id. null = fetched but unavailable (source pane gone, file
   // moved); the row falls back to a glyph tile.
@@ -183,7 +193,9 @@ export default function ArtifactTray({
   return (
     <div
       ref={frameRef}
-      className={`artifact-tray${collapsed ? " is-collapsed" : ""}`}
+      className={`artifact-tray${collapsed ? " is-collapsed" : ""}${
+        nativeOverlay ? " is-stage-hosted" : ""
+      }`}
       style={position ? { top: position.top, right: position.right, left: "auto" } : undefined}
     >
       <div className="artifact-tray-titlebar" onPointerDown={startDrag}>

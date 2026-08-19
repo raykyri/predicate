@@ -16,6 +16,7 @@ import {
   paneSplitAxis,
   paneSplitFlagIsEnabled,
   paneSnapshotForPersistedPaneSplits,
+  reservedTerminalStageWidth,
   setPaneSplitFlagEnabled,
   togglePaneSplitAxis,
   withPaneSplitAxis,
@@ -176,6 +177,49 @@ test("togglePaneSplitAxis switches between stacked and columns and omits vertica
   assert.equal(restored.axis, undefined);
   assert.equal(withPaneSplitAxis(columns, "horizontal"), columns);
   assert.equal(withPaneSplitAxis(stacked, "vertical"), stacked);
+});
+
+test("reservedTerminalStageWidth keeps column splits at the per-pane floor", () => {
+  assert.equal(
+    reservedTerminalStageWidth({
+      axis: "vertical",
+      paneCount: 3,
+      minWidth: 380,
+      splitMinWidth: 200,
+      gutter: 8,
+    }),
+    380,
+  );
+  assert.equal(
+    reservedTerminalStageWidth({
+      axis: "horizontal",
+      paneCount: 1,
+      minWidth: 380,
+      splitMinWidth: 200,
+      gutter: 8,
+    }),
+    380,
+  );
+  assert.equal(
+    reservedTerminalStageWidth({
+      axis: "horizontal",
+      paneCount: 2,
+      minWidth: 380,
+      splitMinWidth: 200,
+      gutter: 8,
+    }),
+    408,
+  );
+  assert.equal(
+    reservedTerminalStageWidth({
+      axis: "horizontal",
+      paneCount: 3,
+      minWidth: 380,
+      splitMinWidth: 200,
+      gutter: 8,
+    }),
+    616,
+  );
 });
 
 test("joinPaneSplit inherits a horizontal axis from the existing split", () => {

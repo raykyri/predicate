@@ -1,7 +1,7 @@
-/* Artifact tray: a small draggable card floating over the right pane listing
-   files/URLs agent panes opened via `qmux open`. Default position is the
-   top-right corner under the header; dragging stores an explicit top/right
-   offset kept per pane. */
+/* Artifact tray: a small draggable card listing files/URLs agent panes opened
+   via `qmux open`. Default host is the right pane (top-right under the header);
+   column splits parent it on the terminal stage instead. Dragging stores an
+   explicit top/right offset kept per workspace. */
 .artifact-tray {
   position: absolute;
   top: 48px;
@@ -15,6 +15,10 @@
   border-radius: 10px;
   background: var(--right-pane-bg);
   box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+}
+
+.artifact-tray.is-stage-hosted {
+  top: 8px;
 }
 
 .artifact-tray-titlebar {

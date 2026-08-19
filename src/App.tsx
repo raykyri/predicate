@@ -298,6 +298,7 @@ import {
   paneSplitForPane,
   paneSplitsEqual,
   paneSnapshotForPersistedPaneSplits,
+  reservedTerminalStageWidth,
   resizeSplitFractions,
   setPaneSplitFlagEnabled,
   splitFractions,
@@ -6446,12 +6447,20 @@ function MainApp() {
     return clamp(width, TURN_PANE_MIN_WIDTH, maxTurnPaneWidth());
   }
 
-  // The sidebar may grow until the terminal would fall below its minimum (with the
-  // turn pane's current width reserved), capped by a comfortable absolute maximum.
+  // The sidebar may grow until the terminal stage would fall below its minimum
+  // (with the turn pane's current width reserved), capped by a comfortable
+  // absolute maximum. Column splits reserve 200px per pane plus gutters.
   function maxSidebarWidth() {
     const appWidth = appRef.current?.getBoundingClientRect().width ?? window.innerWidth;
     const reservedTurnPane = hasVisibleRightBar ? turnPaneWidth : 0;
-    const available = Math.floor(appWidth - TERMINAL_MIN_WIDTH - reservedTurnPane);
+    const reservedStage = reservedTerminalStageWidth({
+      axis: activeSplitAxis,
+      paneCount: splitLayoutActive ? (activePaneSplit?.paneIds.length ?? 1) : 1,
+      minWidth: TERMINAL_MIN_WIDTH,
+      splitMinWidth: TERMINAL_SPLIT_MIN_WIDTH,
+      gutter: TERMINAL_SPLIT_GUTTER_PX,
+    });
+    const available = Math.floor(appWidth - reservedStage - reservedTurnPane);
     return Math.max(LEFT_SIDEBAR_MIN_WIDTH, Math.min(LEFT_SIDEBAR_MAX_WIDTH, available));
   }
 
@@ -12429,7 +12438,13 @@ function MainApp() {
     handleResize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
-  }, [hasVisibleRightBar, turnPaneWidth]);
+  }, [
+    hasVisibleRightBar,
+    turnPaneWidth,
+    splitLayoutActive,
+    activeSplitAxis,
+    activePaneSplit?.paneIds.length,
+  ]);
 
   async function updateShowHideShortcut(accelerator: string | null) {
     const request = ++showHideShortcutRequestRef.current;
@@ -13587,7 +13602,13 @@ function MainApp() {
 
   // The floating artifact tray for a workspace. A single pane and the top
   // visible split host the shared tray; lower split cells never repeat it.
-  function renderArtifactTray(surface: TurnPaneSurface, workspaceHost = true) {
+  // Column splits parent it on the terminal stage so it stays visible without
+  // the docked right pane.
+  function renderArtifactTray(
+    surface: TurnPaneSurface,
+    workspaceHost = true,
+    nativeOverlay = false,
+  ) {
     const trayArtifacts = artifactsForGroup(surface.pane.groupId);
     const ui = artifactTrayUiByWorkspace[surface.pane.groupId];
     if (!artifactTrayVisible(trayArtifacts.length > 0, ui?.closed, workspaceHost)) {
@@ -13601,6 +13622,7 @@ function MainApp() {
         paneExists={(paneId) => panes.some((pane) => pane.id === paneId)}
         collapsed={ui?.collapsed ?? false}
         position={ui?.pos ?? null}
+        nativeOverlay={nativeOverlay}
         onPositionChange={(pos) => patchArtifactTrayUi(surface.pane.groupId, { pos })}
         onSetCollapsed={(collapsed) =>
           patchArtifactTrayUi(surface.pane.groupId, { collapsed })
@@ -16134,6 +16156,13 @@ function MainApp() {
                   }
                 />
               ))
+            : null}
+          {activeTurnPaneSurface &&
+          !researchSurfaceActive &&
+          splitLayoutActive &&
+          activeSplitAxis === "horizontal" &&
+          !activeTranscriptVisibleExpanded
+            ? renderArtifactTray(activeTurnPaneSurface, true, true)
             : null}
           {!activeTranscriptVisibleExpanded && splitRightPaneMode && hasVisibleRightBar
             ? visibleRightBarSurfaces.map((surface, index) => (
