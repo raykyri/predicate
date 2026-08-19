@@ -998,7 +998,13 @@ export default function HomeRails({
   // remains useful after adding the visibility filter.
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key.toLowerCase() === "d" && event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (
+        event.key.toLowerCase() === "d" &&
+        event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey
+      ) {
         event.preventDefault();
         if (!draftsVisible) {
           onShowDrafts();

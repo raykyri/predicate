@@ -190,7 +190,7 @@ final class NativeTerminalPane: NSObject,
                 "super+n",  // new_window — qmux: new agent / research
                 "super+shift+h",  // qmux: terminal map / new research
                 "super+d",  // new_split:right — qmux: split pane below
-                "super+shift+d",  // new_split:down — qmux: split pane below
+                "super+shift+d",  // new_split:down — qmux: split pane left/right
                 "super+comma",  // open_config — qmux: settings
                 "super+equal",  // increase_font_size — qmux: font zoom
                 "super+plus",  // increase_font_size

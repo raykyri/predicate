@@ -21,6 +21,7 @@ export type AppShortcutCommand =
   | { type: "openFolderMenu" }
   | { type: "toggleTranscriptOrBrowser" }
   | { type: "splitPaneBelow" }
+  | { type: "splitPaneRight" }
   | { type: "restoreClosedPane" }
   | { type: "closePane" }
   | { type: "newGroup" }
@@ -125,8 +126,11 @@ export function resolveAppShortcut(input: AppShortcutInput): AppShortcutCommand 
   if (command && !control && !option && !shift && key === "o") {
     return { type: "openFolderMenu" };
   }
-  if (command && !control && !option && key === "d") {
+  if (command && !control && !option && !shift && key === "d") {
     return { type: "splitPaneBelow" };
+  }
+  if (command && !control && !option && shift && key === "d") {
+    return { type: "splitPaneRight" };
   }
   if (command && !control && !option && shift && key === "t") {
     return { type: "restoreClosedPane" };
@@ -193,6 +197,7 @@ export function appShortcutTargetsActivePane(command: AppShortcutCommand): boole
   return (
     command.type === "closePane" ||
     command.type === "splitPaneBelow" ||
+    command.type === "splitPaneRight" ||
     command.type === "toggleTranscriptOrBrowser" ||
     // Reorders the active sidebar item (pane or research tree). A native chord
     // from an already-removed pane must be dropped, not run against whatever is
@@ -244,6 +249,8 @@ function appShortcutLabel(command: AppShortcutCommand): string {
       return "toggle the transcript or browser";
     case "splitPaneBelow":
       return "split the terminal";
+    case "splitPaneRight":
+      return "split the terminal left to right";
     case "restoreClosedPane":
       return "restore a closed tab";
     case "closePane":
@@ -348,6 +355,7 @@ export function parseAppShortcutCommand(
     case "openFolderMenu":
     case "toggleTranscriptOrBrowser":
     case "splitPaneBelow":
+    case "splitPaneRight":
     case "restoreClosedPane":
     case "closePane":
     case "newGroup":

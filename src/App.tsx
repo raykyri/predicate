@@ -1600,6 +1600,7 @@ function MainApp() {
   const activePaneRef = useRef<PaneInfo | undefined>(undefined);
   const requestClosePaneRef = useRef<(pane: PaneInfo) => void>(() => {});
   const splitPaneBelowRef = useRef<(pane: PaneInfo) => void | Promise<void>>(() => {});
+  const splitPaneRightRef = useRef<(pane: PaneInfo) => void | Promise<void>>(() => {});
   const canToggleActiveTranscriptExpandedRef = useRef(false);
   const toggleActiveTranscriptExpandedRef = useRef<() => void>(() => {});
   const paneTabPointerDragRef = useRef<PaneTabPointerDrag | null>(null);
@@ -5934,22 +5935,36 @@ function MainApp() {
   }
 
   async function splitPaneBelow(sourcePane: PaneInfo) {
+    return splitTerminal(sourcePane, "vertical");
+  }
+
+  async function splitPaneRight(sourcePane: PaneInfo) {
+    return splitTerminal(sourcePane, "horizontal");
+  }
+
+  async function splitTerminal(sourcePane: PaneInfo, requestedAxis: "vertical" | "horizontal") {
+    const existingSplit = paneSplitForPane(paneSplitsRef.current, sourcePane.id);
+    const inSplit = Boolean(existingSplit && existingSplit.paneIds.length >= 2);
+    if (requestedAxis === "horizontal" && inSplit && paneSplitAxis(existingSplit) === "vertical") {
+      return;
+    }
+    const axis = inSplit ? paneSplitAxis(existingSplit) : requestedAxis;
     setError(null);
     setPaneContextMenu(null);
     try {
-      const existingSplit = paneSplitForPane(paneSplits, sourcePane.id);
       const nextSplitPaneCount = (existingSplit?.paneIds.length ?? 1) + 1;
       const pane = await spawnShell(
-        estimateSplitPaneSize(nextSplitPaneCount, paneSplitAxis(existingSplit)),
+        estimateSplitPaneSize(nextSplitPaneCount, axis),
         sourcePane.kind === "shell" ? sourcePane.id : null,
         sourcePane.groupId,
       );
       const orderedPanes = placePaneAfterOptimistically(pane, sourcePane.id);
       setPanesPreservingRecoveredDismissals(orderedPanes);
       savePaneSplits(
-        joinPaneSplit(paneSplits, orderedPanes, sourcePane.id, pane.id, {
+        joinPaneSplit(paneSplitsRef.current, orderedPanes, sourcePane.id, pane.id, {
           insertedPaneId: pane.id,
           source: "command",
+          ...(axis === "horizontal" ? { axis: "horizontal" as const } : {}),
         }),
         orderedPanes,
       );
@@ -11187,6 +11202,7 @@ function MainApp() {
     closeActiveBrowserOverlayRef.current = closeActiveBrowserOverlay;
     requestClosePaneRef.current = requestClosePane;
     splitPaneBelowRef.current = splitPaneBelow;
+    splitPaneRightRef.current = splitPaneRight;
     canToggleActiveTranscriptExpandedRef.current = Boolean(
       activeSurfaceRef.current === "pane" &&
         activePane &&
@@ -12209,6 +12225,17 @@ function MainApp() {
             groupsRef.current.find((group) => group.id === pane.groupId)?.scope === "terminal"
           ) {
             void splitPaneBelowRef.current(pane);
+          }
+          return;
+        }
+        case "splitPaneRight": {
+          const pane =
+            activeSurfaceRef.current === "pane" ? activePaneRef.current : undefined;
+          if (
+            pane &&
+            groupsRef.current.find((group) => group.id === pane.groupId)?.scope === "terminal"
+          ) {
+            void splitPaneRightRef.current(pane);
           }
           return;
         }

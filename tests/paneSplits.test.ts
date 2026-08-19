@@ -242,6 +242,27 @@ test("joinPaneSplit starts a new split vertical when neither pane is already spl
   assert.equal(paneSplitAxis(joined[0]), "vertical");
 });
 
+test("joinPaneSplit can start a new split as columns", () => {
+  const joined = joinPaneSplit([], panes(["pane-1", "pane-2"]), "pane-1", "pane-2", {
+    axis: "horizontal",
+  });
+
+  assert.equal(joined[0].axis, "horizontal");
+});
+
+test("joinPaneSplit keeps an existing stacked axis even if columns are requested", () => {
+  const joined = joinPaneSplit(
+    [split(["pane-1", "pane-2"])],
+    panes(["pane-1", "pane-2", "pane-3"]),
+    "pane-2",
+    "pane-3",
+    { axis: "horizontal" },
+  );
+
+  assert.equal(joined[0].axis, undefined);
+  assert.equal(paneSplitAxis(joined[0]), "vertical");
+});
+
 test("joinPaneSplit prefers the source pane's axis when merging two splits", () => {
   const joined = joinPaneSplit(
     [

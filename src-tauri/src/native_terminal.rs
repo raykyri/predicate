@@ -203,6 +203,7 @@ enum AppShortcutCommand {
     OpenFolderMenu,
     ToggleTranscriptOrBrowser,
     SplitPaneBelow,
+    SplitPaneRight,
     RestoreClosedPane,
     ClosePane,
     NewGroup,
@@ -232,6 +233,7 @@ impl AppShortcutCommand {
             Self::OpenFolderMenu => ("openFolderMenu", None),
             Self::ToggleTranscriptOrBrowser => ("toggleTranscriptOrBrowser", None),
             Self::SplitPaneBelow => ("splitPaneBelow", None),
+            Self::SplitPaneRight => ("splitPaneRight", None),
             Self::RestoreClosedPane => ("restoreClosedPane", None),
             Self::ClosePane => ("closePane", None),
             Self::NewGroup => ("newGroup", None),
@@ -322,8 +324,11 @@ fn classify_app_shortcut(
     if command && !control && !option && !shift && key == "o" {
         return Some(AppShortcutCommand::OpenFolderMenu);
     }
-    if command && !control && !option && key == "d" {
+    if command && !control && !option && !shift && key == "d" {
         return Some(AppShortcutCommand::SplitPaneBelow);
+    }
+    if command && !control && !option && shift && key == "d" {
+        return Some(AppShortcutCommand::SplitPaneRight);
     }
     if command && !control && !option && shift && key == "t" {
         return Some(AppShortcutCommand::RestoreClosedPane);
@@ -1874,6 +1879,14 @@ mod tests {
             super::classify_app_shortcut("j", true, false, false, true),
             None,
             "shift-command-j is not a qmux chord"
+        );
+        assert_eq!(
+            super::classify_app_shortcut("d", false, false, false, true),
+            Some(AppShortcutCommand::SplitPaneBelow)
+        );
+        assert_eq!(
+            super::classify_app_shortcut("d", true, false, false, true),
+            Some(AppShortcutCommand::SplitPaneRight)
         );
         for key in [";", "k", "a", "z", "Enter"] {
             assert_eq!(

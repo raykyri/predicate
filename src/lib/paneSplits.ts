@@ -21,6 +21,7 @@ interface JoinPaneSplitOptions {
   source?: PaneSplitIntentSource;
   insertedPaneId?: string;
   createdAt?: number;
+  axis?: PaneSplitAxis;
 }
 
 function panePositions(panes: PaneInfo[]) {
@@ -431,7 +432,9 @@ export function joinPaneSplit(
   };
   const axisSource =
     existing.find((split) => split.paneIds.includes(paneId)) ?? existing[0];
-  if (paneSplitAxis(axisSource) === "horizontal") {
+  // An existing split keeps its axis. `options.axis` only applies when this
+  // call is creating a new split (neither pane was already grouped).
+  if ((axisSource ? paneSplitAxis(axisSource) : options.axis) === "horizontal") {
     joinedSplit.axis = "horizontal";
   }
   const intent = joinedPaneIntent(existing, paneIds, paneId, belowPaneId, options);

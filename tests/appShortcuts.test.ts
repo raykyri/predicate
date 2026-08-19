@@ -130,6 +130,19 @@ test("uses command-d for a new document on Research and splits elsewhere", () =>
   });
 });
 
+test("uses command-shift-d to split left to right and leaves research alone", () => {
+  const command = resolveAppShortcut(
+    shortcut({ key: "d", metaKey: true, shiftKey: true }),
+  );
+  assert.deepEqual(command, { type: "splitPaneRight" });
+  assert.deepEqual(contextualizeAppShortcut(command!, "research"), {
+    type: "splitPaneRight",
+  });
+  assert.deepEqual(contextualizeAppShortcut(command!, "terminal"), {
+    type: "splitPaneRight",
+  });
+});
+
 test("binds follow-up navigation and the folder menu to research chords", () => {
   const followups = resolveAppShortcut(shortcut({ key: "j", metaKey: true }));
   assert.deepEqual(followups, { type: "focusFollowups" });
@@ -262,6 +275,9 @@ test("parses semantic commands from native payloads", () => {
   assert.deepEqual(parseAppShortcutCommand("openFolderMenu", null), {
     type: "openFolderMenu",
   });
+  assert.deepEqual(parseAppShortcutCommand("splitPaneRight", null), {
+    type: "splitPaneRight",
+  });
   assert.equal(parseAppShortcutCommand("launcherOrCycleAdapter", null), null);
   assert.equal(parseAppShortcutCommand("focusTab", -1), null);
   assert.equal(parseAppShortcutCommand("notACommand", null), null);
@@ -304,6 +320,7 @@ test("only pane-targeted commands are withheld from an unknown origin pane", () 
   // no longer knows must not run them against an unintended pane.
   assert.equal(appShortcutTargetsActivePane({ type: "closePane" }), true);
   assert.equal(appShortcutTargetsActivePane({ type: "splitPaneBelow" }), true);
+  assert.equal(appShortcutTargetsActivePane({ type: "splitPaneRight" }), true);
   assert.equal(
     appShortcutTargetsActivePane({ type: "toggleTranscriptOrBrowser" }),
     true,
