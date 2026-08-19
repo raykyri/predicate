@@ -14,7 +14,7 @@ use crate::pty::{
     spawn_pty,
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
-use crate::transcript::{Turn, start_transcript_tail};
+use crate::transcript::{Turn, TurnBlock, start_transcript_tail, unwrap_user_query_envelope};
 use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
@@ -1355,7 +1355,25 @@ fn parse_transcript_line(agent_id: &str, source_index: usize, line: &str) -> Opt
     {
         message.entry("role").or_insert(role);
     }
-    parse_claude_native_transcript_value(agent_id, source_index, &value)
+    let mut turn = parse_claude_native_transcript_value(agent_id, source_index, &value)?;
+    if turn.role == "user" {
+        normalize_cursor_user_turn(&mut turn);
+    }
+    Some(turn)
+}
+
+/// Cursor Agent persists prompts as `<timestamp>` + `<user_query>` harness.
+/// Leaving those tags in the turn makes qmux's injected-instruction detector
+/// collapse the user's words into a chip, so unwrap before the timeline sees them.
+fn normalize_cursor_user_turn(turn: &mut Turn) {
+    for block in &mut turn.blocks {
+        if let TurnBlock::Text { text } = block {
+            let unwrapped = unwrap_user_query_envelope(text);
+            if unwrapped != *text {
+                *text = unwrapped;
+            }
+        }
+    }
 }
 
 fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEvent> {
@@ -1599,6 +1617,39 @@ mod tests {
         assert_eq!(
             parse_transcript_lifecycle_event(r#"{"type":"turn_ended","status":"cancelled"}"#),
             Some(TranscriptLifecycleEvent::Interrupted)
+        );
+    }
+
+    #[test]
+    fn unwraps_cursor_user_query_envelope() {
+        let user = r#"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>Wednesday, Aug 19, 2026, 3:52 PM (UTC-4)</timestamp>\n<user_query>\ncan you cherry pick those 7 commits onto HEAD, except 3b22fc07\n</user_query>"}]}}"#;
+        let turn = parse_transcript_line("agent-1", 0, user).unwrap();
+        assert_eq!(turn.role, "user");
+        assert!(matches!(
+            &turn.blocks[0],
+            TurnBlock::Text { text }
+                if text == "can you cherry pick those 7 commits onto HEAD, except 3b22fc07"
+        ));
+    }
+
+    #[test]
+    fn unwraps_cursor_user_query_preserving_image_markers() {
+        let user = r#"{"role":"user","message":{"content":[{"type":"text","text":"[Image]\n<timestamp>Wednesday, Aug 19, 2026, 4:25 PM (UTC-4)</timestamp>\n<user_query>\ncursor-agent transcripts seem to not have user messages, they're mistakenly collapsed: [Image #1] \n</user_query>"}]}}"#;
+        let turn = parse_transcript_line("agent-1", 0, user).unwrap();
+        let TurnBlock::Text { text } = &turn.blocks[0] else {
+            panic!("expected a text block");
+        };
+        assert!(
+            text.contains("cursor-agent transcripts seem to not have user messages"),
+            "user query must survive: {text:?}"
+        );
+        assert!(
+            text.contains("[Image]") && text.contains("[Image #1]"),
+            "image markers must survive: {text:?}"
+        );
+        assert!(
+            !text.contains("<user_query>") && !text.contains("<timestamp>"),
+            "harness tags must be stripped: {text:?}"
         );
     }
 

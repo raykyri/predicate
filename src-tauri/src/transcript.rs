@@ -1352,6 +1352,7 @@ pub(crate) fn read_transcript_meta(path: &Path) -> (Option<String>, usize) {
         }
         let message = transcript_message_value(&value);
         let is_user = value.get("type").and_then(Value::as_str) == Some("user")
+            || value.get("role").and_then(Value::as_str) == Some("user")
             || message
                 .and_then(|message| message.get("role"))
                 .and_then(Value::as_str)
@@ -1360,10 +1361,11 @@ pub(crate) fn read_transcript_meta(path: &Path) -> (Option<String>, usize) {
             continue;
         }
         if let Some(text) = first_text_block(message.and_then(|message| message.get("content"))) {
-            let trimmed = text.trim();
+            let unwrapped = unwrap_user_query_envelope(&text);
+            let trimmed = unwrapped.trim();
             if !trimmed.is_empty() {
                 user_messages_seen += 1;
-                if !is_tagged_user_instruction(&text) {
+                if !is_tagged_user_instruction(&unwrapped) {
                     preview = Some(truncate_preview(trimmed));
                 }
             }
@@ -1490,8 +1492,58 @@ pub(crate) fn strip_leading_tagged_instruction_blocks(text: &str) -> Option<&str
     }
 }
 
+/// Cursor Agent (and Grok) wrap the user's words in a `<user_query>` envelope
+/// and may prefix a `<timestamp>` metadata chip. Those tags are not injected
+/// instructions — leaving them in place makes the tagged-instruction detector
+/// collapse the whole turn into a `<timestamp> <user_query>` chip.
+pub(crate) fn unwrap_user_query_envelope(text: &str) -> String {
+    if !text.contains("<user_query>") && !text.contains("<timestamp>") {
+        return text.to_string();
+    }
+    let without_timestamps = strip_named_tagged_blocks(text, "<timestamp>", "</timestamp>");
+    unwrap_named_tagged_block(&without_timestamps, "<user_query>", "</user_query>")
+        .trim()
+        .to_string()
+}
+
+fn strip_named_tagged_blocks(text: &str, open: &str, close: &str) -> String {
+    let mut result = String::new();
+    let mut rest = text;
+    loop {
+        let Some(start) = rest.find(open) else {
+            result.push_str(rest);
+            break;
+        };
+        let content_start = start + open.len();
+        let Some(close_rel) = rest[content_start..].find(close) else {
+            result.push_str(rest);
+            break;
+        };
+        result.push_str(&rest[..start]);
+        rest = &rest[content_start + close_rel + close.len()..];
+    }
+    result
+}
+
+fn unwrap_named_tagged_block(text: &str, open: &str, close: &str) -> String {
+    let Some(start) = text.find(open) else {
+        return text.to_string();
+    };
+    let content_start = start + open.len();
+    let Some(close_rel) = text[content_start..].find(close) else {
+        return text.to_string();
+    };
+    let inner = text[content_start..content_start + close_rel].trim_matches(['\r', '\n']);
+    let mut result = String::with_capacity(text.len() - open.len() - close.len());
+    result.push_str(&text[..start]);
+    result.push_str(inner);
+    result.push_str(&text[content_start + close_rel + close.len()..]);
+    result
+}
+
 pub(crate) fn is_tagged_user_instruction(text: &str) -> bool {
-    let Some(content_start) = tagged_instruction_content_start(text) else {
+    let text = unwrap_user_query_envelope(text);
+    let Some(content_start) = tagged_instruction_content_start(&text) else {
         return false;
     };
 
@@ -2838,6 +2890,46 @@ mod tests {
         let (preview, line_count) = read_transcript_meta(&path);
         assert_eq!(preview.as_deref(), Some("real prompt"));
         assert_eq!(line_count, 4);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unwrap_user_query_envelope_extracts_cursor_prompt() {
+        assert_eq!(
+            unwrap_user_query_envelope(
+                "<timestamp>Wednesday, Aug 19, 2026, 3:52 PM (UTC-4)</timestamp>\n<user_query>\ncan you cherry pick those 7 commits onto HEAD, except 3b22fc07\n</user_query>"
+            ),
+            "can you cherry pick those 7 commits onto HEAD, except 3b22fc07"
+        );
+        assert!(!is_tagged_user_instruction(
+            "<timestamp>Wednesday, Aug 19, 2026, 3:52 PM (UTC-4)</timestamp>\n<user_query>\ninspect the repo\n</user_query>"
+        ));
+    }
+
+    #[test]
+    fn read_transcript_meta_unwraps_cursor_user_query_preview() {
+        let dir = std::env::temp_dir().join(format!(
+            "qmux-transcript-cursor-meta-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"role\":\"user\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"<timestamp>Wednesday, Aug 19, 2026, 3:52 PM (UTC-4)</timestamp>\\n<user_query>\\ninspect the repo\\n</user_query>\"}]}}\n",
+                "{\"role\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let (preview, line_count) = read_transcript_meta(&path);
+        assert_eq!(preview.as_deref(), Some("inspect the repo"));
+        assert_eq!(line_count, 2);
 
         fs::remove_dir_all(&dir).ok();
     }

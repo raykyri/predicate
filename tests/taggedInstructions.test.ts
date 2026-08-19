@@ -4,6 +4,7 @@ import {
   stripTaggedInstructionBlocks,
   stripTaggedInstructionBlocksForPreview,
   stripTaggedUserInstructionBlocks,
+  taggedUserInstructionDetails,
 } from "../src/lib/taggedInstructions";
 
 test("removes embedded tagged instruction blocks from copied user messages", () => {
@@ -208,4 +209,41 @@ test("strips the research launch instruction block appended after slash commands
     stripTaggedInstructionBlocksForPreview(sent).trim(),
     "/deep-research Why is the sky blue?",
   );
+});
+
+test("unwraps cursor-agent timestamp and user_query envelopes as the prompt", () => {
+  const message = [
+    "<timestamp>Wednesday, Aug 19, 2026, 3:52 PM (UTC-4)</timestamp>",
+    "<user_query>",
+    "can you cherry pick those 7 commits onto HEAD, except 3b22fc07",
+    "</user_query>",
+  ].join("\n");
+
+  assert.equal(taggedUserInstructionDetails(message), null);
+  assert.equal(
+    stripTaggedUserInstructionBlocks(message).trim(),
+    "can you cherry pick those 7 commits onto HEAD, except 3b22fc07",
+  );
+  assert.equal(
+    stripTaggedInstructionBlocksForPreview(message).trim(),
+    "can you cherry pick those 7 commits onto HEAD, except 3b22fc07",
+  );
+});
+
+test("preserves image markers around a cursor-agent user_query envelope", () => {
+  const message = [
+    "[Image]",
+    "<timestamp>Wednesday, Aug 19, 2026, 4:25 PM (UTC-4)</timestamp>",
+    "<user_query>",
+    "cursor-agent transcripts seem to not have user messages, they're mistakenly collapsed: [Image #1]",
+    "</user_query>",
+  ].join("\n");
+
+  const copied = stripTaggedUserInstructionBlocks(message);
+  assert.equal(taggedUserInstructionDetails(message), null);
+  assert.equal(copied.includes("[Image]"), true);
+  assert.equal(copied.includes("[Image #1]"), true);
+  assert.equal(copied.includes("mistakenly collapsed"), true);
+  assert.equal(copied.includes("<timestamp>"), false);
+  assert.equal(copied.includes("<user_query>"), false);
 });

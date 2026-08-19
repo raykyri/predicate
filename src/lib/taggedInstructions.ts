@@ -4,7 +4,8 @@ export interface TaggedUserInstructionDetails {
 }
 
 export function stripTaggedUserInstructionBlocks(text: string): string {
-  const leading = stripLeadingTaggedInstructionBlocks(text);
+  const unwrapped = unwrapUserQueryEnvelope(text);
+  const leading = stripLeadingTaggedInstructionBlocks(unwrapped);
   // Protect fenced/indented code the same way the assistant path does: a
   // user message quoting XML-ish tags inside a code block (a pasted hook
   // file, a config sample) is content, not an injected instruction block,
@@ -13,7 +14,7 @@ export function stripTaggedUserInstructionBlocks(text: string): string {
     leading.text,
     markdownCodeRanges(leading.text),
   );
-  return leading.removed || stripped.removed ? stripped.text : text;
+  return leading.removed || stripped.removed ? stripped.text : unwrapped;
 }
 
 // Like stripTaggedUserInstructionBlocks, but without protecting fenced/indented
@@ -21,9 +22,10 @@ export function stripTaggedUserInstructionBlocks(text: string): string {
 // dropped — including a slash command's indented <command-args> block, which the
 // copy-safe filter leaves in place because indentation reads as a code block.
 export function stripTaggedInstructionBlocksForPreview(text: string): string {
-  const leading = stripLeadingTaggedInstructionBlocks(text);
+  const unwrapped = unwrapUserQueryEnvelope(text);
+  const leading = stripLeadingTaggedInstructionBlocks(unwrapped);
   const stripped = stripInlineTaggedInstructionBlocks(leading.text);
-  return leading.removed || stripped.removed ? stripped.text : text;
+  return leading.removed || stripped.removed ? stripped.text : unwrapped;
 }
 
 // Remove line-leading tagged blocks without treating a preceding Markdown
@@ -36,12 +38,13 @@ export function stripTaggedInstructionBlocks(text: string): string {
 }
 
 export function taggedUserInstructionDetails(text: string): TaggedUserInstructionDetails | null {
-  const contentStart = taggedInstructionContentStart(text);
+  const unwrapped = unwrapUserQueryEnvelope(text);
+  const contentStart = taggedInstructionContentStart(unwrapped);
   if (contentStart === null) {
     return null;
   }
 
-  const tags = parseTaggedInstructionSequence(text.slice(contentStart));
+  const tags = parseTaggedInstructionSequence(unwrapped.slice(contentStart));
   if (tags === null) {
     return null;
   }
@@ -50,6 +53,55 @@ export function taggedUserInstructionDetails(text: string): TaggedUserInstructio
     label: taggedInstructionLabel(tags),
     tags,
   };
+}
+
+// Cursor Agent (and Grok) wrap the user's words in a `<user_query>` envelope
+// and may prefix a `<timestamp>` metadata chip. Those tags are not injected
+// instructions — leaving them in place makes the detector collapse the whole
+// turn into a `<timestamp> <user_query>` chip and never show the prompt.
+export function unwrapUserQueryEnvelope(text: string): string {
+  if (!text.includes("<timestamp>") && !text.includes("<user_query>")) {
+    return text;
+  }
+
+  const withoutTimestamps = stripNamedTaggedBlocks(text, "<timestamp>", "</timestamp>");
+  const unwrapped = unwrapNamedTaggedBlock(withoutTimestamps, "<user_query>", "</user_query>");
+  return unwrapped.trim();
+}
+
+function stripNamedTaggedBlocks(text: string, open: string, close: string): string {
+  let result = "";
+  let index = 0;
+  while (index < text.length) {
+    const start = text.indexOf(open, index);
+    if (start === -1) {
+      result += text.slice(index);
+      break;
+    }
+    const contentStart = start + open.length;
+    const closeAt = text.indexOf(close, contentStart);
+    if (closeAt === -1) {
+      result += text.slice(index);
+      break;
+    }
+    result += text.slice(index, start);
+    index = closeAt + close.length;
+  }
+  return result;
+}
+
+function unwrapNamedTaggedBlock(text: string, open: string, close: string): string {
+  const start = text.indexOf(open);
+  if (start === -1) {
+    return text;
+  }
+  const contentStart = start + open.length;
+  const closeAt = text.indexOf(close, contentStart);
+  if (closeAt === -1) {
+    return text;
+  }
+  const inner = text.slice(contentStart, closeAt).replace(/^\r?\n/, "").replace(/\r?\n$/, "");
+  return text.slice(0, start) + inner + text.slice(closeAt + close.length);
 }
 
 function parseTaggedInstructionSequence(content: string): string[] | null {
