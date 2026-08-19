@@ -329,12 +329,20 @@
 
 .turn-pane.is-expanded .turn-timeline {
   align-items: center;
+  /* DRIFT GUARD: Expanded table bleed (see table-wrap rules below) derives its
+     single-pane clamp from these two paddings: `calc(100vw - var(--sidebar-width)
+     - 48px)` where 48px = 24px + 24px. If you change this padding, update the
+     `48px` in the `turn-markdown-table-wrap` single-pane rule. Reader mode
+     uses its own padding and is explicitly excluded from the bleed. */
   padding-right: 24px;
   padding-left: 24px;
 }
 
 /* The centered reading column: every timeline row caps at 700px, matching the
-   expanded composer rail below. */
+   expanded composer rail below.
+   DRIFT GUARD: Table-only bleed depends on this cap. The bleed's split-pane
+   rule hard-codes 700px and 1020px → 320px extra (1020-700) and -160px margins
+   ((700-1020)/2). If you change the reading column, update the table bleed. */
 .turn-pane.is-expanded .turn-timeline > * {
   width: min(700px, 100%);
 }
@@ -423,6 +431,9 @@
 
 .turn-pane.is-expanded .turn-sidebar-input-rail {
   width: 100%;
+  /* DRIFT GUARD: This 700px must stay in sync with the reading column above
+     (turn-timeline > *) and the table-bleed math below. The composer rail is
+     deliberately not widened with tables. */
   max-width: 700px;
   margin: 0 auto;
 }
@@ -1221,13 +1232,62 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
 /* Framed, rounded container. overflow-x stays a scroll fallback for content that
    genuinely cannot wrap (long tokens, code), but the table below now fits the
    column width and wraps its cells instead of forcing every wide table to
-   scroll — matching how research answers read top to bottom. */
+   scroll — matching how research answers read top to bottom.
+   DRIFT GUARD: The expanded bleed rules below assume `max-width:100%` here
+   (width is 100% of the markdown block inside a 700px card). If you change the
+   base wrap sizing, update the bleed caps. */
 .turn-markdown-table-wrap {
   max-width: 100%;
   margin: 0 0 12px;
   border: 1px solid var(--markdown-table-frame-border);
   border-radius: var(--radius-md);
   overflow-x: auto;
+}
+
+/* ── Expanded table bleed (table-only): prose stays 700px, tables bleed ──
+   Two-rule split because geometry differs:
+
+   Single expanded (.is-expanded without .is-split-expanded):
+     Pane width = 100vw - var(--sidebar-width). Timeline content box is that
+     minus 48px (24px + 24px side padding at transcript.css:turn-timeline).
+     Desired table width = min(1020px, that content box). We cannot use 100%
+     of the wrap's parent (the 700px card) — it clamps too early — so we use vw
+     and re-center with left:50%/translateX(-50%). 1020px = 700px + 320px extra;
+     320 = 1020 - 700. Prose siblings in the same markdown stay at the card's
+     700px; only this wrapper bleeds. Excluded for reader-mode (is-reader-mode)
+     which already has its own 1120px layout.
+
+   Split expanded (.is-split-expanded): each cell is flex:1 1 0 at
+   turn-pane.css, so 100vw is the whole shell, not one cell. Use the card-
+   relative bleed: +320px / -160px = (1020-700)/2 each side, centered over the
+   card (which is itself centered over its cell via align-items:center). This
+   avoids vw and stays split-safe. Narrow-window tightening is handled below.
+
+   Drift: if you change reading column (700), target (1020), timeline padding
+   (48), or sidebar width source, update all three numbers here AND the
+   drift guards at turn-timeline, turn-pane.is-expanded, and
+   turn-sidebar-input-rail. */
+.turn-pane.is-expanded:not(.is-split-expanded):not(.is-reader-mode)
+  .turn-markdown-table-wrap {
+  /* Single-pane bleed: min(1020, viewport - sidebar - timeline padding). */
+  width: min(1020px, calc(100vw - var(--sidebar-width, 268px) - 48px));
+  position: relative;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: none;
+}
+
+.turn-pane.is-split-expanded:not(.is-reader-mode) .turn-markdown-table-wrap {
+  /* Split-pane bleed: extend the 700px card by 320px, centered.
+     When the cell is narrow (3-up, small window) min(1020, calc(100%+320))
+     would still overflow the timeline content box (overflow:auto would show a
+     horizontal scrollbar). The min() already clamps: card is min(700,100%) so
+     100% here is the cell's content width minus the card, and min() picks the
+     smaller side when the cell < 700. No extra @media needed — this comment is
+     the clamp's explanation. */
+  width: min(1020px, calc(100% + 320px));
+  margin-left: -160px;
+  max-width: none;
 }
 
 .turn-markdown-table-wrap table {

@@ -1215,12 +1215,29 @@ export const MOCKUP_CSS = `
 
 .app-mockup .app-shell.is-transcript-expanded .turn-timeline {
   align-items: center;
+  /* DRIFT GUARD: Keep in sync with src/styles/features/transcript.css
+     turn-timeline padding (24+24=48) — single-pane table bleed is
+     calc(100% - 48px) via the mock's container width. */
   padding-right: 24px;
   padding-left: 24px;
 }
 
 .app-mockup .app-shell.is-transcript-expanded .turn-timeline > * {
+  /* DRIFT GUARD: Table bleed +320/-160 math depends on this 700. */
   width: min(700px, 100%);
+}
+
+/* Table-only bleed for the static mock: prose stays 700, tables bleed to
+   1020. Single-pane uses the timeline content box; the mock has no viewport
+   sidebar variable so use 100% of the pane instead of 100vw - sidebar. The
+   real app's transcript.css uses 100vw - var(--sidebar-width) - 48px. */
+.app-mockup .app-shell.is-transcript-expanded .turn-markdown-table-wrap {
+  max-width: 100%;
+}
+.app-mockup .app-shell.is-transcript-expanded .turn-markdown-table-wrap {
+  width: min(1020px, calc(100% + 320px));
+  margin-left: -160px;
+  max-width: none;
 }
 
 .app-mockup .app-shell.is-transcript-expanded .native-input {

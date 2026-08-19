@@ -213,6 +213,11 @@
   top: 0;
   right: 0;
   bottom: 0;
+  /* DRIFT GUARD: Expanded table bleed's single-pane rule derives its usable
+     width as `calc(100vw - var(--sidebar-width) - 48px)`. var(--sidebar-width)
+     is set from App.tsx:effectiveSidebarWidth (leftSidebarCollapsed ? 0 : sidebarWidth)
+     and the 48px is the timeline's 24+24 side padding at transcript.css. If either
+     changes, update that calc. */
   left: var(--sidebar-width, 268px);
   z-index: 7;
   width: auto;
