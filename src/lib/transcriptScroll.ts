@@ -13,6 +13,13 @@ export interface TranscriptScrollPosition {
    * the end, but a tab round-trip must not discard an exact offset in that band.
    */
   atEnd: boolean;
+  /**
+   * History-scan restore: the compact list's pixel `scrollTop` is not comparable
+   * to the full transcript, so tab restore places this card at `anchorOffset`.
+   */
+  anchorKey?: string;
+  /** Card top minus scroller top, matching getBoundingClientRect. */
+  anchorOffset?: number;
 }
 
 export interface TranscriptScrollMetrics {
@@ -45,6 +52,30 @@ export function transcriptScrollRestoreTop(
   scrollHeight: number,
 ): number {
   return !saved || saved.atEnd ? scrollHeight : saved.scrollTop;
+}
+
+export function withTranscriptScrollAnchor(
+  position: TranscriptScrollPosition,
+  anchor: { key: string; offset: number } | null,
+): TranscriptScrollPosition {
+  if (!anchor || position.atEnd) {
+    return position;
+  }
+  return { ...position, anchorKey: anchor.key, anchorOffset: anchor.offset };
+}
+
+export function transcriptScrollAnchorOf(
+  saved: TranscriptScrollPosition | null | undefined,
+): { key: string; offset: number } | null {
+  if (
+    !saved ||
+    saved.atEnd ||
+    saved.anchorKey === undefined ||
+    saved.anchorOffset === undefined
+  ) {
+    return null;
+  }
+  return { key: saved.anchorKey, offset: saved.anchorOffset };
 }
 
 /**

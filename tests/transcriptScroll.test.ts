@@ -3,7 +3,9 @@ import test from "node:test";
 import {
   captureTranscriptScrollPosition,
   createTranscriptScrollCaptureSlot,
+  transcriptScrollAnchorOf,
   transcriptScrollRestoreTop,
+  withTranscriptScrollAnchor,
 } from "../src/lib/transcriptScroll";
 
 test("tab capture saves the outgoing expanded transcript before replacement", () => {
@@ -78,4 +80,19 @@ test("an older scrolled position remains anchored when content grows while hidde
   assert.equal(saved.stuck, false);
   assert.equal(saved.atEnd, false);
   assert.equal(transcriptScrollRestoreTop(saved, 1_400), 300);
+});
+
+test("history-scan restore carries a card key instead of a compact-list pixel offset", () => {
+  const liveFollow = captureTranscriptScrollPosition(
+    { scrollTop: 40, scrollHeight: 200, clientHeight: 100 },
+    false,
+    100,
+  );
+  const saved = withTranscriptScrollAnchor(liveFollow, { key: "u2", offset: 12 });
+  assert.deepEqual(transcriptScrollAnchorOf(saved), { key: "u2", offset: 12 });
+  assert.equal(transcriptScrollAnchorOf({ ...saved, atEnd: true }), null);
+  assert.equal(
+    transcriptScrollAnchorOf(withTranscriptScrollAnchor({ ...liveFollow, atEnd: true }, { key: "u2", offset: 12 })),
+    null,
+  );
 });
