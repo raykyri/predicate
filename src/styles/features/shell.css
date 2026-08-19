@@ -749,34 +749,6 @@
   white-space: normal;
 }
 
-.pane-tab-row.is-btw-pane .pane-tab-title {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pane-tab-title-line {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  gap: 5px;
-}
-
-.pane-tab-title-line .pane-tab-title {
-  flex: 0 1 auto;
-}
-
-.pane-tab-btw-label {
-  flex: 0 0 auto;
-  color: var(--accent-color);
-  font-size: 9px;
-  font-weight: 750;
-  letter-spacing: 0.06em;
-  line-height: 1;
-}
-
 .pane-tab-content {
   display: flex;
   min-width: 0;

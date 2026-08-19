@@ -1285,6 +1285,18 @@ pub struct PaneInfo {
     pub depth: u16,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PaneSplitAxis {
+    #[default]
+    Vertical,
+    Horizontal,
+}
+
+fn pane_split_axis_is_vertical(axis: &PaneSplitAxis) -> bool {
+    matches!(axis, PaneSplitAxis::Vertical)
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneSplitInfo {
@@ -1294,8 +1306,8 @@ pub struct PaneSplitInfo {
     pub sizes: HashMap<String, f64>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub intent: HashMap<String, PaneSplitIntent>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub btw_pane_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "pane_split_axis_is_vertical")]
+    pub axis: PaneSplitAxis,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -10688,18 +10700,13 @@ fn normalized_pane_splits(
                     && entry.created_at >= 0.0
             })
             .collect();
-        let btw_pane_ids = pane_ids
-            .iter()
-            .filter(|pane_id| split.btw_pane_ids.contains(pane_id))
-            .cloned()
-            .collect();
 
         result.push(PaneSplitInfo {
             id,
             pane_ids,
             sizes,
             intent,
-            btw_pane_ids,
+            axis: split.axis,
         });
     }
 
@@ -13406,7 +13413,7 @@ mod tests {
                 pane_ids: vec![terminal_pane.id.clone(), research_pane.id.clone()],
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
-                btw_pane_ids: Vec::new(),
+                axis: PaneSplitAxis::Vertical,
             }],
             research_trees: HashMap::from([(tree.id.clone(), tree)]),
             research_nodes: HashMap::from([(node.id.clone(), node)]),
@@ -15824,7 +15831,7 @@ mod tests {
                 pane_ids: vec!["pane-1".to_string(), "pane-3".to_string()],
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
-                btw_pane_ids: Vec::new(),
+                axis: PaneSplitAxis::Vertical,
             }])
             .unwrap_err();
         assert!(invalid.contains("adjacent"));
@@ -15835,7 +15842,7 @@ mod tests {
                 pane_ids: vec!["pane-1".to_string(), "pane-2".to_string()],
                 sizes: HashMap::from([("pane-1".to_string(), 0.4), ("pane-2".to_string(), 0.6)]),
                 intent: HashMap::new(),
-                btw_pane_ids: Vec::new(),
+                axis: PaneSplitAxis::Vertical,
             }])
             .unwrap();
         assert_eq!(splits.len(), 1);
@@ -15889,11 +15896,12 @@ mod tests {
                         },
                     ),
                 ]),
-                btw_pane_ids: vec!["pane-3".to_string(), "pane-2".to_string()],
+                axis: PaneSplitAxis::Horizontal,
             }])
             .unwrap();
 
         assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0].axis, PaneSplitAxis::Horizontal);
         assert_eq!(
             splits[0].intent.get("pane-2"),
             Some(&PaneSplitIntent {
@@ -15905,7 +15913,26 @@ mod tests {
             })
         );
         assert!(!splits[0].intent.contains_key("pane-3"));
-        assert_eq!(splits[0].btw_pane_ids, vec!["pane-2", "pane-3"]);
+    }
+
+    #[test]
+    fn pane_split_axis_omits_vertical_and_round_trips_horizontal() {
+        let vertical: PaneSplitInfo =
+            serde_json::from_str(r#"{"id":"split-1","paneIds":["a","b"],"sizes":{}}"#).unwrap();
+        assert_eq!(vertical.axis, PaneSplitAxis::Vertical);
+        let vertical_json = serde_json::to_value(&vertical).unwrap();
+        assert!(vertical_json.get("axis").is_none());
+
+        let horizontal: PaneSplitInfo = serde_json::from_str(
+            r#"{"id":"split-1","paneIds":["a","b"],"sizes":{},"axis":"horizontal"}"#,
+        )
+        .unwrap();
+        assert_eq!(horizontal.axis, PaneSplitAxis::Horizontal);
+        let horizontal_json = serde_json::to_value(&horizontal).unwrap();
+        assert_eq!(
+            horizontal_json.get("axis").and_then(|value| value.as_str()),
+            Some("horizontal")
+        );
     }
 
     #[test]

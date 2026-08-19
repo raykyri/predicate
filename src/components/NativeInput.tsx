@@ -15,7 +15,6 @@ import {
   EllipsisVertical,
   FolderGit2,
   GitFork,
-  MessageSquareText,
   X,
 } from "lucide-react";
 import {
@@ -92,7 +91,6 @@ const SLASH_COMMAND_PRESENTATION: Record<
 > = {
   fork: { Icon: GitFork, summary: "Fork this session" },
   worktree: { Icon: FolderGit2, summary: "Fork into a new worktree" },
-  btw: { Icon: MessageSquareText, summary: "Ask in a side branch" },
 };
 
 type QueuePointerDrag = {
@@ -153,8 +151,6 @@ interface NativeInputProps {
   onForkWithPrompt: (options: {
     useWorktree: boolean;
     prompt: string;
-    btw?: boolean;
-    titlePrompt?: string;
   }) => Promise<boolean>;
   onTurnSubmitted: (agentId: string, text: string, mode: SubmitAgentTurnMode) => void;
   onUserInput: (agentId: string) => void;
@@ -728,16 +724,14 @@ export default function NativeInput({
       onError(plan.message);
       return;
     }
-    if ((plan.kind === "fork" || plan.kind === "btw") && mode !== "queue") {
+    if (plan.kind === "fork" && mode !== "queue") {
       setMenuOpen(false);
       setWaitOpen(false);
       setSubmitting(true);
       try {
         const forked = await onForkWithPrompt({
-          useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
+          useWorktree: plan.useWorktree,
           prompt: plan.prompt,
-          btw: plan.kind === "btw",
-          titlePrompt: plan.kind === "btw" ? plan.titlePrompt : undefined,
         });
         if (forked) {
           recordRecentMessage(trimmed);

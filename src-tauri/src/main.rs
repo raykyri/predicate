@@ -2235,8 +2235,7 @@ async fn spawn_claude(
 }
 
 /// Forks the session in `pane_id` into a new tab immediately after it and resumes it.
-/// When `prompt` is set, it is submitted as the fork's launch message. `btw`
-/// tags the fork event so the main window can present the pane in a BTW split.
+/// When `prompt` is set, it is submitted as the fork's launch message.
 #[tauri::command]
 async fn agent_fork(
     state: tauri::State<'_, AppState>,
@@ -2244,14 +2243,13 @@ async fn agent_fork(
     use_worktree: bool,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
-    btw: bool,
 ) -> Result<PaneInfo, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         if let Some(group_id) = state.pane_group_id(&pane_id)? {
             validate_launch_workspace(&state, Some(&group_id), LaunchOrigin::Terminal)?;
         }
-        fork_agent_pane(&state, &pane_id, use_worktree, prompt, anchor, btw)
+        fork_agent_pane(&state, &pane_id, use_worktree, prompt, anchor)
     })
     .await
     .map_err(|err| format!("agent_fork task failed: {err}"))?

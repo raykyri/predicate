@@ -166,7 +166,7 @@ struct ForkArgs {
 
 fn fork_self(state: &AppState, pane_id: &str, arguments: Value) -> Result<Value, String> {
     let args: ForkArgs = parse(arguments, "fork_self")?;
-    let pane = agent_fork(state, pane_id, args.use_worktree, args.prompt, None, false)?;
+    let pane = agent_fork(state, pane_id, args.use_worktree, args.prompt, None)?;
     let agent = state.agent_by_pane(&pane.id)?;
     Ok(json!({ "agent": agent, "pane": pane }))
 }

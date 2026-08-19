@@ -19,6 +19,7 @@ import {
   ChevronLeft,
   ChevronsDownUp,
   ChevronsUpDown,
+  Columns2,
   Eye,
   EyeOff,
   Expand,
@@ -44,6 +45,7 @@ import {
   PictureInPicture2,
   Plus,
   RotateCcw,
+  Rows2,
   Settings,
   SquareTerminal,
   Volume2,
@@ -71,7 +73,6 @@ import ArtifactTray, { type ArtifactTrayPosition } from "./components/ArtifactTr
 import AgentDebugPanel, {
   type AgentDebugPanelPosition,
 } from "./components/AgentDebugPanel";
-import BtwFloatingPane from "./components/BtwFloatingPane";
 import ImageLightbox from "./components/ImageLightbox";
 import {
   closeImageLightbox,
@@ -292,6 +293,7 @@ import {
   detachPaneFromSplitMemberships,
   joinPaneSplit,
   normalizePaneSplitsForPanes,
+  paneSplitAxis,
   paneSplitFlagIsEnabled,
   paneSplitForPane,
   paneSplitsEqual,
@@ -299,6 +301,7 @@ import {
   resizeSplitFractions,
   setPaneSplitFlagEnabled,
   splitFractions,
+  togglePaneSplitAxis,
 } from "./lib/paneSplits";
 import {
   activeSidebarScrollRegion,
@@ -795,11 +798,13 @@ function claimResizePointer(event: ReactPointerEvent<HTMLDivElement>): () => voi
 function TerminalSplitResizer({
   style,
   layoutKey,
+  orientation,
   onPointerDown,
   onKeyDown,
 }: {
   style: CSSProperties;
   layoutKey: string;
+  orientation?: "horizontal" | "vertical";
   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
 }) {
@@ -811,14 +816,15 @@ function TerminalSplitResizer({
   // first press web-owned; the normal drag claim then covers pointer motion
   // after the divider leaves that rect.
   const nativeRegionRef = useNativeWebOverlayRegion<HTMLDivElement>(IS_MAC, layoutKey);
+  const column = orientation === "vertical";
 
   return (
     <div
       ref={nativeRegionRef}
-      className="terminal-split-resizer"
+      className={`terminal-split-resizer${column ? " is-column" : ""}`}
       role="separator"
       aria-label="Resize terminal split"
-      aria-orientation="horizontal"
+      aria-orientation={column ? "vertical" : "horizontal"}
       tabIndex={0}
       style={style}
       onPointerDown={onPointerDown}
@@ -842,6 +848,7 @@ const TURN_PANE_MAX_WIDTH = 720;
 const TERMINAL_HORIZONTAL_PADDING = 10;
 const TERMINAL_VERTICAL_PADDING = 20;
 const TERMINAL_SPLIT_MIN_HEIGHT = 140;
+const TERMINAL_SPLIT_MIN_WIDTH = 200;
 const TERMINAL_SPLIT_GUTTER_PX = 8;
 const DEFAULT_INITIAL_COLS = 100;
 const DEFAULT_INITIAL_ROWS = 24;
@@ -1605,8 +1612,8 @@ function MainApp() {
   const terminalSplitResizeRef = useRef<{
     splitId: string;
     dividerIndex: number;
-    startY: number;
-    stageHeight: number;
+    startClient: number;
+    stageExtent: number;
     startSplit: PaneSplitInfo;
   } | null>(null);
   // Debounced "user is typing" hold per agent: while active the backend won't
@@ -1636,7 +1643,6 @@ function MainApp() {
   const worktreeLocationHydratedRef = useRef(false);
   const researchLaunchInstructionHydratedRef = useRef(false);
   const paneSplitsRef = useRef<PaneSplitInfo[]>([]);
-  const queuedBtwSplitPersistChainRef = useRef<Promise<void>>(Promise.resolve());
   const titleGenerationTestSeqRef = useRef(0);
   const activeTabPersistenceReadyRef = useRef(false);
   const appToastTimerRef = useRef<number | null>(null);
@@ -2969,22 +2975,15 @@ function MainApp() {
     () => paneSplitForPane(paneSplits, activePane?.id),
     [activePane?.id, paneSplits],
   );
-  const activeBtwPaneIdSet = useMemo(
-    () => new Set(activePaneSplitMembership?.btwPaneIds ?? []),
-    [activePaneSplitMembership],
-  );
-  // BTW members remain in the persisted split/tab group but consume no native
-  // terminal track. Normal terminal geometry is derived from the remaining panes.
   const activePaneSplit = useMemo(() => {
-    if (!activePaneSplitMembership) {
+    if (!activePaneSplitMembership || activePaneSplitMembership.paneIds.length < 2) {
       return null;
     }
-    const paneIds = activePaneSplitMembership.paneIds.filter(
-      (paneId) => !activeBtwPaneIdSet.has(paneId),
-    );
-    return paneIds.length > 1 ? { ...activePaneSplitMembership, paneIds } : null;
-  }, [activeBtwPaneIdSet, activePaneSplitMembership]);
-  const splitRightPaneMode = Boolean(activePaneSplit && activePaneSplit.paneIds.length > 1);
+    return activePaneSplitMembership;
+  }, [activePaneSplitMembership]);
+  const splitLayoutActive = Boolean(activePaneSplit && activePaneSplit.paneIds.length > 1);
+  const activeSplitAxis = paneSplitAxis(activePaneSplit);
+  const splitRightPaneMode = splitLayoutActive && activeSplitAxis === "vertical";
   const activeSplitFractions = useMemo(
     () => (activePaneSplit ? splitFractions(activePaneSplit) : []),
     [activePaneSplit],
@@ -2992,11 +2991,11 @@ function MainApp() {
   const visibleTerminalPaneIds = useMemo(
     () =>
       activePaneSplitMembership
-        ? activePaneSplitMembership.paneIds.filter((paneId) => !activeBtwPaneIdSet.has(paneId))
+        ? activePaneSplitMembership.paneIds
         : activePane
           ? [activePane.id]
           : [],
-    [activeBtwPaneIdSet, activePane?.id, activePaneSplitMembership],
+    [activePane?.id, activePaneSplitMembership],
   );
   const visibleTerminalPanes = useMemo(
     () =>
@@ -4782,7 +4781,7 @@ function MainApp() {
   function setTranscriptExpandedForPane(
     paneId: string,
     expanded: boolean,
-    splitMode = splitRightPaneMode,
+    splitMode = splitLayoutActive,
   ) {
     if (!expanded) {
       setFocusedAssistantTurn(null);
@@ -4834,7 +4833,7 @@ function MainApp() {
     );
   }
 
-  function toggleTranscriptExpandedForPane(paneId: string, splitMode = splitRightPaneMode) {
+  function toggleTranscriptExpandedForPane(paneId: string, splitMode = splitLayoutActive) {
     if (splitMode) {
       const paneIds = paneSplitForPane(paneSplitsRef.current, paneId)?.paneIds ?? [paneId];
       setSplitTranscriptExpandedByPane((current) =>
@@ -4847,11 +4846,15 @@ function MainApp() {
 
   function toggleActiveTranscriptExpanded() {
     const paneId = activePane?.id;
-    if (!paneId || !activePaneCanToggleTurnSidebar) {
+    const canExpandHorizontalSplit =
+      splitLayoutActive &&
+      activeSplitAxis === "horizontal" &&
+      splitOverlayTurnPaneSurfaces.length > 0;
+    if (!paneId || (!activePaneCanToggleTurnSidebar && !canExpandHorizontalSplit)) {
       return;
     }
 
-    if (rightBarCollapsed) {
+    if (rightBarCollapsed && activePaneCanToggleTurnSidebar) {
       setRightBarCollapsedForPane(false, paneId);
       return;
     }
@@ -5121,41 +5124,29 @@ function MainApp() {
         .map((pane, index) => turnPaneSurfaceForPane(pane, index))
         .filter((surface) => surface.hasTurnSidebar)
     : [];
+  const splitOverlayTurnPaneSurfaces = splitLayoutActive
+    ? visibleTerminalPanes
+        .map((pane, index) => turnPaneSurfaceForPane(pane, index))
+        .filter((surface) => surface.hasTurnSidebar)
+    : [];
   const splitTurnPaneSurfaceByPaneId = new Map(
     splitTurnPaneSurfaces.map((surface) => [surface.pane.id, surface]),
   );
-  const btwTurnPaneSurfaces = activePaneSplitMembership
-    ? activePaneSplitMembership.paneIds
-        .filter((paneId) => activeBtwPaneIdSet.has(paneId))
-        .map((paneId) => paneById.get(paneId))
-        .filter((pane): pane is PaneInfo => Boolean(pane))
-        .map((pane) => turnPaneSurfaceForPane(pane))
-        .filter((surface) => surface.hasTurnSidebar)
-    : [];
-  const btwOwnerByPaneId = new Map<string, string>();
-  if (activePaneSplitMembership) {
-    let ownerPaneId: string | null = null;
-    for (const paneId of activePaneSplitMembership.paneIds) {
-      if (activeBtwPaneIdSet.has(paneId)) {
-        if (ownerPaneId) {
-          btwOwnerByPaneId.set(paneId, ownerPaneId);
-        }
-      } else {
-        ownerPaneId = paneId;
-      }
-    }
-  }
   const visibleTurnPaneSurfaces = splitRightPaneMode
     ? splitTurnPaneSurfaces
-    : activeTurnPaneSurface?.hasTurnSidebar
-      ? [activeTurnPaneSurface]
-      : [];
+    : activeSplitAxis === "horizontal"
+      ? []
+      : activeTurnPaneSurface?.hasTurnSidebar
+        ? [activeTurnPaneSurface]
+        : [];
   const activePaneHasTurnSidebar = Boolean(activeTurnPaneSurface?.hasTurnSidebar);
-  const activePaneCanToggleTurnSidebar = canToggleTurnSidebar(
-    activePaneHasTurnSidebar,
-    splitRightPaneMode,
-    splitTurnPaneSurfaces.length,
-  );
+  const activePaneCanToggleTurnSidebar =
+    activeSplitAxis !== "horizontal" &&
+    canToggleTurnSidebar(
+      activePaneHasTurnSidebar,
+      splitRightPaneMode,
+      splitTurnPaneSurfaces.length,
+    );
   const visibleRightBarSurfaces = rightBarCollapsed ? [] : visibleTurnPaneSurfaces;
   const hasVisibleRightBar = visibleRightBarSurfaces.length > 0;
   const researchSidebarRestoreInHeader =
@@ -5172,11 +5163,22 @@ function MainApp() {
   const floatingLeftSidebarRestoreVisible =
     leftSidebarRestore.kind === "floating";
   const floatingRestoreButtonVisible = rightBarCollapsed && activePaneCanToggleTurnSidebar;
+  const floatingHorizontalTranscriptExpandVisible =
+    splitLayoutActive &&
+    activeSplitAxis === "horizontal" &&
+    splitOverlayTurnPaneSurfaces.length > 0 &&
+    !(
+      activePaneSplit &&
+      paneSplitFlagIsEnabled(splitTranscriptExpandedByPane, activePaneSplit.paneIds)
+    );
   const floatingPaneRestoreControlsVisible =
-    floatingLeftSidebarRestoreVisible || floatingRestoreButtonVisible;
+    floatingLeftSidebarRestoreVisible ||
+    floatingRestoreButtonVisible ||
+    floatingHorizontalTranscriptExpandVisible;
   const floatingPaneRestoreControlsLayoutKey = [
     floatingLeftSidebarRestoreVisible ? "left" : "",
     floatingRestoreButtonVisible ? "right" : "",
+    floatingHorizontalTranscriptExpandVisible ? "expand" : "",
     splitRightPaneMode ? activePane?.id : "",
     splitRightPaneMode ? activeTurnPaneSurface?.topFraction : "",
   ].join(":");
@@ -5192,18 +5194,22 @@ function MainApp() {
     activePaneSplit &&
       paneSplitFlagIsEnabled(splitTranscriptExpandedByPane, activePaneSplit.paneIds),
   );
-  const activeTranscriptExpanded = splitRightPaneMode
-    ? splitTranscriptExpanded && splitTurnPaneSurfaces.length > 0
+  const activeTranscriptExpanded = splitLayoutActive
+    ? splitTranscriptExpanded && splitOverlayTurnPaneSurfaces.length > 0
     : Boolean(activePane && activePaneHasTurnSidebar && transcriptExpandedByPane[activePane.id]);
-  const activeTranscriptVisibleExpanded = activeTranscriptExpanded && !rightBarCollapsed;
+  const activeTranscriptVisibleExpanded =
+    activeTranscriptExpanded && (activeSplitAxis === "horizontal" || !rightBarCollapsed);
+  const overlayTurnPaneSurfaces = splitLayoutActive
+    ? splitOverlayTurnPaneSurfaces
+    : visibleRightBarSurfaces;
   const focusedAssistantTurnSurface = focusedAssistantTurn
-    ? visibleRightBarSurfaces.find(
+    ? overlayTurnPaneSurfaces.find(
         (surface) => surface.pane.id === focusedAssistantTurn.paneId,
       )
     : undefined;
   const expandedRightBarSurfaces = focusedAssistantTurnSurface
     ? [focusedAssistantTurnSurface]
-    : visibleRightBarSurfaces;
+    : overlayTurnPaneSurfaces;
   useEffect(() => {
     if (
       focusedAssistantTurn &&
@@ -5223,9 +5229,13 @@ function MainApp() {
     focusedAssistantTurn,
     focusedAssistantTurnSurface,
   ]);
+  // Horizontal splits have no docked right pane, so PiP and assistant-turn
+  // focus follow the expanded overlay rather than the collapsed-bar flag.
+  const pipRightPaneCollapsed =
+    activeSplitAxis === "horizontal" ? false : rightBarCollapsed;
   const terminalPipToggleVisible = shouldShowTerminalPipToggle({
     transcriptExpanded: activeTranscriptExpanded,
-    rightPaneCollapsed: rightBarCollapsed,
+    rightPaneCollapsed: pipRightPaneCollapsed,
     nativeTerminalAvailable: IS_MAC,
   });
   const activeTerminalPipVisible = Boolean(
@@ -5234,12 +5244,13 @@ function MainApp() {
       shouldShowTerminalPip({
         transcriptExpanded: activeTranscriptExpanded,
         toggledOn: Boolean(terminalPipEnabledByPane[activePane.id]),
-        rightPaneCollapsed: rightBarCollapsed,
+        rightPaneCollapsed: pipRightPaneCollapsed,
         nativeTerminalAvailable: IS_MAC,
       }),
   );
-  const activePaneHasTurnPaneHeader =
-    activePaneHasTurnSidebar && !splitRightPaneMode && !rightBarCollapsed;
+  const activePaneHasTurnPaneHeader = Boolean(
+    hasGlobalTurnSidebar && activePaneHasTurnSidebar,
+  );
   const activePaneReservesTurnPaneWidth = Boolean(
     hasGlobalTurnSidebar ||
       (splitRightPaneMode &&
@@ -5896,8 +5907,21 @@ function MainApp() {
     }
   }
 
-  function estimateSplitPaneSize(nextSplitPaneCount: number): InitialPaneSize {
+  function estimateSplitPaneSize(
+    nextSplitPaneCount: number,
+    axis: ReturnType<typeof paneSplitAxis> = "vertical",
+  ): InitialPaneSize {
     const size = estimateInitialPaneSize(false);
+    if (axis === "horizontal") {
+      return {
+        ...size,
+        cols: clamp(
+          Math.floor(size.cols / Math.max(1, nextSplitPaneCount)),
+          MIN_INITIAL_COLS,
+          size.cols,
+        ),
+      };
+    }
     return {
       ...size,
       rows: clamp(
@@ -5915,7 +5939,7 @@ function MainApp() {
       const existingSplit = paneSplitForPane(paneSplits, sourcePane.id);
       const nextSplitPaneCount = (existingSplit?.paneIds.length ?? 1) + 1;
       const pane = await spawnShell(
-        estimateSplitPaneSize(nextSplitPaneCount),
+        estimateSplitPaneSize(nextSplitPaneCount, paneSplitAxis(existingSplit)),
         sourcePane.kind === "shell" ? sourcePane.id : null,
         sourcePane.groupId,
       );
@@ -5948,6 +5972,19 @@ function MainApp() {
       }),
     );
     setActivePaneId(sourcePane.id);
+  }
+
+  function toggleSplitAxisForPane(pane: PaneInfo) {
+    setPaneContextMenu(null);
+    const split = paneSplitForPane(paneSplits, pane.id);
+    if (!split || split.paneIds.length < 2) {
+      return;
+    }
+    savePaneSplits(
+      paneSplits.map((candidate) =>
+        candidate.id === split.id ? togglePaneSplitAxis(candidate) : candidate,
+      ),
+    );
   }
 
   // Detach a single tab from its split while keeping the remaining members grouped.
@@ -6513,26 +6550,39 @@ function MainApp() {
       reservedInlineTurnPaneKey ? reservedInlineTurnPaneKey.split("\n") : [],
     );
     activePaneSplit.paneIds.forEach((paneId, index) => {
-      const top = activeSplitFractions
+      const start = activeSplitFractions
         .slice(0, index)
         .reduce((sum, value) => sum + value, 0);
-      const height = activeSplitFractions[index] ?? 0;
+      const extent = activeSplitFractions[index] ?? 0;
+      if (activeSplitAxis === "horizontal") {
+        styles.set(paneId, {
+          top: 0,
+          bottom: 0,
+          height: "auto",
+          left: splitTrackPosition(start, index),
+          right: "auto",
+          width: splitTrackSize(extent),
+        });
+        return;
+      }
       // Keep reserving the inline turn-pane width while the transcript is expanded:
       // the expanded overlay covers the whole stage, so the reserved strip is
       // invisible, and holding terminal geometry constant means expand/collapse
       // never resizes the PTY. A resize would SIGWINCH full-screen TUIs (Claude
       // Code clears and re-lays-out on every resize), losing their scroll position.
       styles.set(paneId, {
-        top: splitTrackPosition(top, index),
+        top: splitTrackPosition(start, index),
         bottom: "auto",
-        height: splitTrackSize(height),
+        height: splitTrackSize(extent),
+        left: 0,
+        width: "auto",
         right: reservedInlineTurnPaneIds.has(paneId)
           ? "var(--inline-turn-pane-width)"
           : 0,
       });
     });
     return styles;
-  }, [activePaneSplit, activeSplitFractions, reservedInlineTurnPaneKey]);
+  }, [activePaneSplit, activeSplitAxis, activeSplitFractions, reservedInlineTurnPaneKey]);
 
   function terminalPaneStyle(paneId: string): CSSProperties | undefined {
     return terminalPaneStyleByPaneId.get(paneId);
@@ -6546,15 +6596,23 @@ function MainApp() {
     if (index < 0) {
       return undefined;
     }
-    const paneTop = activePaneSplit
+    const paneStart = activePaneSplit
       ? activeSplitFractions.slice(0, index).reduce((sum, value) => sum + value, 0)
       : 0;
-    const paneHeight = activePaneSplit ? (activeSplitFractions[index] ?? 0) : 1;
-    const top =
-      paneDropTarget.position === "below" ? paneTop + paneHeight / 2 : paneTop;
+    const paneExtent = activePaneSplit ? (activeSplitFractions[index] ?? 0) : 1;
+    const start =
+      paneDropTarget.position === "below" ? paneStart + paneExtent / 2 : paneStart;
+    if (activeSplitAxis === "horizontal") {
+      return {
+        left: splitTrackPosition(start, index),
+        width: splitTrackSize(paneExtent / 2),
+        top: 0,
+        bottom: 0,
+      };
+    }
     return {
-      top: splitTrackPosition(top, index),
-      height: splitTrackSize(paneHeight / 2),
+      top: splitTrackPosition(start, index),
+      height: splitTrackSize(paneExtent / 2),
     };
   }
 
@@ -6577,15 +6635,31 @@ function MainApp() {
     ) {
       return undefined;
     }
-    const topOffset = Math.min(currentOffset, terminalSplitResizeMask.startOffset);
+    const startOffset = Math.min(currentOffset, terminalSplitResizeMask.startOffset);
     const offsetSpan = Math.abs(currentOffset - terminalSplitResizeMask.startOffset);
+    if (activeSplitAxis === "horizontal") {
+      return {
+        left: splitTrackPosition(startOffset, terminalSplitResizeMask.dividerIndex),
+        width: `calc(${splitTrackExtent(offsetSpan)} + ${TERMINAL_SPLIT_GUTTER_PX}px)`,
+        top: 0,
+        bottom: 0,
+      } satisfies CSSProperties;
+    }
     return {
-      top: splitTrackPosition(topOffset, terminalSplitResizeMask.dividerIndex),
+      top: splitTrackPosition(startOffset, terminalSplitResizeMask.dividerIndex),
       height: `calc(${splitTrackExtent(offsetSpan)} + ${TERMINAL_SPLIT_GUTTER_PX}px)`,
     } satisfies CSSProperties;
   })();
 
   function terminalSplitDividerStyle(offset: number, index: number): CSSProperties {
+    if (activeSplitAxis === "horizontal") {
+      return {
+        left: splitTrackPosition(offset, index),
+        width: TERMINAL_SPLIT_GUTTER_PX,
+        top: 0,
+        bottom: 0,
+      };
+    }
     return {
       top: splitTrackPosition(offset, index),
       height: TERMINAL_SPLIT_GUTTER_PX,
@@ -6599,14 +6673,17 @@ function MainApp() {
   ) {
     event.preventDefault();
     event.stopPropagation();
-    const stageHeight = mainStageRef.current?.getBoundingClientRect().height ?? 0;
-    if (stageHeight < TERMINAL_SPLIT_MIN_HEIGHT * split.paneIds.length) {
+    const horizontal = paneSplitAxis(split) === "horizontal";
+    const stageRect = mainStageRef.current?.getBoundingClientRect();
+    const stageExtent = horizontal ? (stageRect?.width ?? 0) : (stageRect?.height ?? 0);
+    const minExtent = horizontal ? TERMINAL_SPLIT_MIN_WIDTH : TERMINAL_SPLIT_MIN_HEIGHT;
+    if (stageExtent < minExtent * split.paneIds.length) {
       return;
     }
 
-    const contentHeight =
-      stageHeight - Math.max(0, split.paneIds.length - 1) * TERMINAL_SPLIT_GUTTER_PX;
-    if (contentHeight <= 0) {
+    const contentExtent =
+      stageExtent - Math.max(0, split.paneIds.length - 1) * TERMINAL_SPLIT_GUTTER_PX;
+    if (contentExtent <= 0) {
       return;
     }
 
@@ -6625,8 +6702,8 @@ function MainApp() {
     terminalSplitResizeRef.current = {
       splitId: split.id,
       dividerIndex,
-      startY: event.clientY,
-      stageHeight: contentHeight,
+      startClient: horizontal ? event.clientX : event.clientY,
+      stageExtent: contentExtent,
       startSplit: split,
     };
 
@@ -6635,10 +6712,11 @@ function MainApp() {
       if (!drag || drag.splitId !== split.id) {
         return;
       }
+      const client = horizontal ? pointerEvent.clientX : pointerEvent.clientY;
       latestSplit = resizeSplitFractions(
         drag.startSplit,
         drag.dividerIndex,
-        (pointerEvent.clientY - drag.startY) / drag.stageHeight,
+        (client - drag.startClient) / drag.stageExtent,
       );
       setPaneSplitsState((current) =>
         current.map((candidate) => (candidate.id === latestSplit.id ? latestSplit : candidate)),
@@ -6668,13 +6746,16 @@ function MainApp() {
     split: PaneSplitInfo,
     dividerIndex: number,
   ) {
-    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    const horizontal = paneSplitAxis(split) === "horizontal";
+    const backward = horizontal ? "ArrowLeft" : "ArrowUp";
+    const forward = horizontal ? "ArrowRight" : "ArrowDown";
+    if (event.key !== backward && event.key !== forward) {
       return;
     }
     event.preventDefault();
     event.stopPropagation();
     const step = event.shiftKey ? 0.08 : 0.03;
-    const delta = event.key === "ArrowDown" ? step : -step;
+    const delta = event.key === forward ? step : -step;
     const resized = resizeSplitFractions(split, dividerIndex, delta);
     savePaneSplits(
       paneSplits.map((candidate) => (candidate.id === resized.id ? resized : candidate)),
@@ -6712,6 +6793,7 @@ function MainApp() {
   const contextMenuPaneHasSplit = Boolean(
     contextMenuPaneSplit && contextMenuPaneSplit.paneIds.length >= 2,
   );
+  const contextMenuSplitIsColumns = paneSplitAxis(contextMenuPaneSplit) === "horizontal";
   const contextMenuAdjacentBelow = adjacentPaneBelow(panes, contextMenuPane);
   const contextMenuAdjacentBelowSplit = paneSplitForPane(
     paneSplits,
@@ -9102,50 +9184,6 @@ function MainApp() {
     [],
   );
 
-  const handleQueuedBtwForked = useCallback(
-    (sourcePaneId: string, forkPaneId: string, latestPanes: PaneInfo[]) => {
-      const normalized = normalizePaneSplitsForPanes(
-        joinPaneSplit(
-          paneSplitsRef.current,
-          latestPanes,
-          sourcePaneId,
-          forkPaneId,
-          {
-            insertedPaneId: forkPaneId,
-            source: "command",
-            btwPaneId: forkPaneId,
-          },
-        ),
-        latestPanes,
-      );
-      // Queue draining can emit several BTW forks in one event batch. Advance the
-      // ref immediately so the next callback composes with this split even before
-      // React commits the state update.
-      paneSplitsRef.current = normalized;
-      setPaneSplitsState(normalized);
-      queuedBtwSplitPersistChainRef.current = queuedBtwSplitPersistChainRef.current
-        .catch(() => undefined)
-        .then(async () => {
-          const persisted = await persistPaneSplits(normalized);
-          // A later BTW callback may already have composed another pane into the
-          // split. Its queued persistence owns the eventual reconciliation.
-          if (!paneSplitsEqual(paneSplitsRef.current, normalized)) {
-            return;
-          }
-          const paneBasis = paneSnapshotForPersistedPaneSplits(
-            persisted,
-            panesRef.current,
-            latestPanes,
-          );
-          setPaneSplitsState(normalizePaneSplitsForPanes(persisted, paneBasis));
-        })
-        .catch((err) => {
-          setError(err instanceof Error ? err.message : String(err));
-        });
-    },
-    [],
-  );
-
   const testCompletionSound = useCallback(async (soundId: CompletionSoundId) => {
     try {
       await playCompletionSound(soundId);
@@ -9183,7 +9221,6 @@ function MainApp() {
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady: handleEventsReady,
     onAgentSpawned: handleAgentSpawned,
-    onQueuedBtwForked: handleQueuedBtwForked,
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
     onAcpAuthEvent: handleAcpAuthEvent,
     onArtifactEvent: handleArtifactEvent,
@@ -9279,16 +9316,6 @@ function MainApp() {
   }
 
   function focusPaneTab(paneId: string) {
-    const split = paneSplitForPane(paneSplitsRef.current, paneId);
-    const focusingBtw = Boolean(split?.btwPaneIds?.includes(paneId));
-    if (focusingBtw && split) {
-      const index = split.paneIds.indexOf(paneId);
-      paneId =
-        split.paneIds
-          .slice(0, Math.max(0, index))
-          .reverse()
-          .find((candidate) => !split.btwPaneIds?.includes(candidate)) ?? paneId;
-    }
     const treeId = researchNodeByPaneIdRef.current.get(paneId)?.treeId;
     const researchExposureChanged = Boolean(
       treeId &&
@@ -9298,14 +9325,9 @@ function MainApp() {
           activeResearchTreeIdRef.current !== treeId),
     );
     setActivePaneId(paneId);
-    // Acknowledge the pane that actually became active (after BTW remap). Split
-    // status groups include BTW members, so their Done badges clear with the
-    // owner. Pass intentional so native-terminal keyboard cycles are not gated
+    // Pass intentional so native-terminal keyboard cycles are not gated
     // on webview document focus.
     acknowledgePaneIfDone(paneId, true, true);
-    if (focusingBtw) {
-      setRightBarCollapsedForPane(false, paneId);
-    }
     if (treeId) {
       void markVisibleResearchTreeViewedRef.current(treeId, {
         force: researchExposureChanged,
@@ -9542,7 +9564,12 @@ function MainApp() {
         action: () => requestClosePaneRef.current(visiblePane),
       });
     }
-    if (visibleAgent) {
+    if (
+      visibleAgent ||
+      (splitLayoutActive &&
+        activeSplitAxis === "horizontal" &&
+        splitOverlayTurnPaneSurfaces.length > 0)
+    ) {
       commands.push({
         id: "action:toggle-transcript",
         section: "Actions",
@@ -9825,7 +9852,7 @@ function MainApp() {
   ): PaneDropTarget | null {
     const stage = mainStageRef.current;
     if (stage && pointInRect(stage.getBoundingClientRect(), clientX, clientY)) {
-      return computeTerminalSplitDropTarget(clientY, dragId);
+      return computeTerminalSplitDropTarget(clientX, clientY, dragId);
     }
 
     const list = paneListRef.current;
@@ -9937,6 +9964,7 @@ function MainApp() {
   }
 
   function computeTerminalSplitDropTarget(
+    clientX: number,
     clientY: number,
     dragId: string,
   ): PaneDropTarget | null {
@@ -9946,14 +9974,33 @@ function MainApp() {
       return null;
     }
 
-    let topFraction = 0;
+    const horizontal = activeSplitAxis === "horizontal";
+    let cursor = 0;
     for (const [index, pane] of visibleTerminalPanes.entries()) {
-      const heightFraction = activePaneSplit ? (activeSplitFractions[index] ?? 0) : 1;
-      const top = stageRect.top + topFraction * stageRect.height;
-      const height = heightFraction * stageRect.height;
+      const extentFraction = activePaneSplit ? (activeSplitFractions[index] ?? 0) : 1;
+      if (horizontal) {
+        const left = stageRect.left + cursor * stageRect.width;
+        const width = extentFraction * stageRect.width;
+        const right = left + width;
+        if (clientX < left || clientX > right) {
+          cursor += extentFraction;
+          continue;
+        }
+        if (pane.id === dragId || pane.groupId !== dragPane.groupId) {
+          return null;
+        }
+        return {
+          kind: "terminal-split",
+          groupId: pane.groupId,
+          targetPaneId: pane.id,
+          position: clientX < left + width / 2 ? "above" : "below",
+        };
+      }
+      const top = stageRect.top + cursor * stageRect.height;
+      const height = extentFraction * stageRect.height;
       const bottom = top + height;
       if (clientY < top || clientY > bottom) {
-        topFraction += heightFraction;
+        cursor += extentFraction;
         continue;
       }
       if (pane.id === dragId || pane.groupId !== dragPane.groupId) {
@@ -11040,38 +11087,27 @@ function MainApp() {
       useWorktree: boolean;
       prompt?: string;
       anchor?: MessageAnchor;
-      btw?: boolean;
       splitBelow?: boolean;
-      titlePrompt?: string;
     },
   ): Promise<boolean> {
     setError(null);
     try {
-      // This surface builds immediate fork splits optimistically below. Keep the
-      // backend event untagged so the global event handler doesn't build /btw twice.
-      const fork = await forkAgent(pane.id, { ...options, btw: false });
-      if (options.btw || options.splitBelow) {
+      const fork = await forkAgent(pane.id, options);
+      if (options.splitBelow) {
         const orderedPanes = placePaneAfterOptimistically(fork, pane.id, false);
         setPanesPreservingRecoveredDismissals(orderedPanes);
         savePaneSplits(
           joinPaneSplit(paneSplitsRef.current, orderedPanes, pane.id, fork.id, {
             insertedPaneId: fork.id,
             source: "command",
-            btwPaneId: options.btw ? fork.id : undefined,
           }),
           orderedPanes,
         );
-        if (options.btw) {
-          // The branch is already running its launch prompt; leave the calling
-          // terminal focused so /btw never interrupts the work it branched from.
-          setActivePaneId(pane.id);
-        } else {
-          setActivePaneId(fork.id);
-          setLastActiveGroupId(fork.groupId);
-          requestAnimationFrame(() => {
-            terminalPaneRefs.current.get(fork.id)?.focus();
-          });
-        }
+        setActivePaneId(fork.id);
+        setLastActiveGroupId(fork.groupId);
+        requestAnimationFrame(() => {
+          terminalPaneRefs.current.get(fork.id)?.focus();
+        });
       } else {
         setPanesPreservingRecoveredDismissals(placePaneAfterOptimistically(fork, pane.id, false));
         setActivePaneId(fork.id);
@@ -11082,7 +11118,7 @@ function MainApp() {
           fork.agentId,
           createPendingFirstMessageTitle(fork.id),
         );
-        applyPendingFirstMessageTitle(fork.agentId, options.titlePrompt ?? options.prompt);
+        applyPendingFirstMessageTitle(fork.agentId, options.prompt);
       }
       return true;
     } catch (err) {
@@ -11143,7 +11179,12 @@ function MainApp() {
     requestClosePaneRef.current = requestClosePane;
     splitPaneBelowRef.current = splitPaneBelow;
     canToggleActiveTranscriptExpandedRef.current = Boolean(
-      activeSurfaceRef.current === "pane" && activePane && activePaneCanToggleTurnSidebar,
+      activeSurfaceRef.current === "pane" &&
+        activePane &&
+        (activePaneCanToggleTurnSidebar ||
+          (splitLayoutActive &&
+            activeSplitAxis === "horizontal" &&
+            splitOverlayTurnPaneSurfaces.length > 0)),
     );
     toggleActiveTranscriptExpandedRef.current = toggleActiveTranscriptExpanded;
   });
@@ -12795,7 +12836,6 @@ function MainApp() {
           : " pane-tab-status-queued"
         : "";
     const paneSplit = paneSplitForPane(paneSplits, pane.id);
-    const isBtwPane = Boolean(paneSplit?.btwPaneIds?.includes(pane.id));
     // The panes of the active split render as one connected card in the sidebar.
     // Flag the run (and its top/bottom edges) so only the split you're viewing is
     // grouped — an inactive split keeps plain tabs. Members are contiguous within
@@ -12841,7 +12881,6 @@ function MainApp() {
       "pane-tab-row",
       pane.id === activePane?.id ? "is-selected" : "",
       paneSplit ? "is-split-member" : "",
-      isBtwPane ? "is-btw-pane" : "",
       paneInActiveSplit ? "is-split-active" : "",
       isActiveSplitFirst ? "is-split-active-first" : "",
       isActiveSplitLast ? "is-split-active-last" : "",
@@ -12894,24 +12933,15 @@ function MainApp() {
             aria-hidden="true"
           />
           <span className="pane-tab-content">
-            {isBtwPane ? (
-              <span className="pane-tab-title-line">
-                <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
-                  {paneDisplayTitle}
-                </span>
-                <span className="pane-tab-btw-label">BTW</span>
-              </span>
-            ) : (
-              <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
-                {paneDisplayTitle}
-              </span>
-            )}
-            {!isBtwPane && settings.codeMode && settings.showTabDirectories && paneDir && !hidePaneDir ? (
+            <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
+              {paneDisplayTitle}
+            </span>
+            {settings.codeMode && settings.showTabDirectories && paneDir && !hidePaneDir ? (
               <span className="pane-tab-path" title={paneDir}>
                 {formatPaneDir(paneDir)}
               </span>
             ) : null}
-            {!isBtwPane && settings.codeMode && paneGitMeta ? (
+            {settings.codeMode && paneGitMeta ? (
               <span className="pane-tab-gitmeta" title={paneGitMetaTitle}>
                 {paneGitMeta}
               </span>
@@ -13178,6 +13208,17 @@ function MainApp() {
             onClick={toggleTerminalMap}
           />
         ) : null}
+        {floatingHorizontalTranscriptExpandVisible ? (
+          <button
+            type="button"
+            className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
+            title={`Expand transcripts (${EXPAND_TOGGLE_SHORTCUT_LABEL})`}
+            aria-label="Expand transcripts"
+            onClick={() => toggleActiveTranscriptExpanded()}
+          >
+            <Expand size={14} aria-hidden="true" />
+          </button>
+        ) : null}
         {floatingRestoreButtonVisible && surface ? (
           <button
             type="button"
@@ -13247,7 +13288,9 @@ function MainApp() {
         stickyUserMessages={settings.stickyUserMessages}
         transcriptExpanded={activeTranscriptVisibleExpanded}
         showAssistantTimestamps={settings.showAssistantTimestamps}
-        assistantTurnFocusEnabled={!rightBarCollapsed}
+        assistantTurnFocusEnabled={
+          activeSplitAxis === "horizontal" || !rightBarCollapsed
+        }
         focusedAssistantTurnKey={
           focusedAssistantTurn?.paneId === surface.pane.id
             ? focusedAssistantTurn.itemKey
@@ -13261,7 +13304,7 @@ function MainApp() {
               paneId: surface.pane.id,
               itemKey,
               restoreDockedOnClose: !activeTranscriptVisibleExpanded,
-              splitMode: splitRightPaneMode,
+              splitMode: splitLayoutActive,
             });
           } else {
             if (focusedAssistantTurn?.restoreDockedOnClose) {
@@ -13480,12 +13523,10 @@ function MainApp() {
                 onDraftChange={setAgentDraft}
                 registerDraftFlusher={registerComposerDraftFlusher}
                 onWaitTargetHover={setWaitTargetHoverAgentId}
-                onForkWithPrompt={({ useWorktree, prompt, btw, titlePrompt }) =>
+                onForkWithPrompt={({ useWorktree, prompt }) =>
                   forkPane(surface.pane, {
                     useWorktree,
                     prompt,
-                    btw,
-                    titlePrompt,
                   })
                 }
                 onTurnSubmitted={(agentId, text, mode) => {
@@ -13524,26 +13565,6 @@ function MainApp() {
         }
       />
     );
-  }
-
-  function renderBtwFloatingPanes(ownerPaneId: string) {
-    return btwTurnPaneSurfaces
-      .filter((surface) => btwOwnerByPaneId.get(surface.pane.id) === ownerPaneId)
-      .map((surface, index) => (
-        <BtwFloatingPane
-          key={surface.pane.id}
-          title={displayPaneTitle(surface.pane, surface.agent)}
-          onActivate={() => {
-            // BTW floats over its owner; the owner remains the active terminal
-            // pane id. Acknowledge through the owner so split-group Done status
-            // (including this BTW agent) clears on interaction.
-            acknowledgePaneIfDone(ownerPaneId, true, true);
-          }}
-          offset={index}
-        >
-          {renderTurnPaneSurface(surface, false)}
-        </BtwFloatingPane>
-      ));
   }
 
   function artifactsForGroup(groupId: string) {
@@ -14430,7 +14451,11 @@ function MainApp() {
               type="button"
               role="menuitem"
               className="control-button context-menu-has-shortcut"
-              title="Create a new shell split below this tab"
+              title={
+                contextMenuSplitIsColumns
+                  ? "Create a new shell split to the right of this tab"
+                  : "Create a new shell split below this tab"
+              }
               onClick={() => {
                 setPaneContextMenu(null);
                 void splitPaneBelow(contextMenuPane);
@@ -14438,22 +14463,55 @@ function MainApp() {
             >
               <PanelBottomClose size={13} aria-hidden="true" />
               <span>
-                {contextMenuPaneHasSplit ? "Add split to current terminal" : "Split terminal"}
+                {contextMenuPaneHasSplit
+                  ? contextMenuSplitIsColumns
+                    ? "Add split to the right"
+                    : "Add split to current terminal"
+                  : "Split terminal"}
               </span>
               <kbd className="context-menu-shortcut">⌘D</kbd>
             </button>
+            {contextMenuPaneHasSplit ? (
+              <button
+                className="control-button"
+                type="button"
+                role="menuitem"
+                title={
+                  paneSplitAxis(contextMenuPaneSplit) === "horizontal"
+                    ? "Stack this split top to bottom"
+                    : "Arrange this split left to right and hide transcripts"
+                }
+                onClick={() => {
+                  setPaneContextMenu(null);
+                  toggleSplitAxisForPane(contextMenuPane);
+                }}
+              >
+                {paneSplitAxis(contextMenuPaneSplit) === "horizontal" ? (
+                  <Rows2 size={13} aria-hidden="true" />
+                ) : (
+                  <Columns2 size={13} aria-hidden="true" />
+                )}
+                <span>
+                  {paneSplitAxis(contextMenuPaneSplit) === "horizontal"
+                    ? "Split top and bottom"
+                    : "Split left and right"}
+                </span>
+              </button>
+            ) : null}
             {canJoinContextMenuBelow && contextMenuAdjacentBelow ? (
               <button className="control-button"
                 type="button"
                 role="menuitem"
-                title="Show this tab and the next tab in one vertical split"
+                title="Show this tab and the next tab in one split"
                 onClick={() => {
                   setPaneContextMenu(null);
                   joinPaneBelow(contextMenuPane, contextMenuAdjacentBelow);
                 }}
               >
                 <PanelBottomClose size={13} aria-hidden="true" />
-                <span>Join with terminal below</span>
+                <span>
+                  {contextMenuSplitIsColumns ? "Join with next tab" : "Join with terminal below"}
+                </span>
               </button>
             ) : null}
             {contextMenuPaneSplit ? (
@@ -14506,7 +14564,11 @@ function MainApp() {
                 <button className="control-button"
                   type="button"
                   role="menuitem"
-                  title="Fork this session into a split pane below this tab"
+                  title={
+                    contextMenuSplitIsColumns
+                      ? "Fork this session into a split pane to the right of this tab"
+                      : "Fork this session into a split pane below this tab"
+                  }
                   onClick={() => {
                     setPaneContextMenu(null);
                     void forkPane(contextMenuPane, {
@@ -16039,14 +16101,18 @@ function MainApp() {
           ))}
           {terminalSplitDropStyle ? (
             <div
-              className="terminal-split-drop-placeholder"
+              className={`terminal-split-drop-placeholder${
+                activeSplitAxis === "horizontal" ? " is-column" : ""
+              }`}
               style={terminalSplitDropStyle}
               aria-hidden="true"
             />
           ) : null}
           {terminalSplitResizeMaskStyle ? (
             <div
-              className="terminal-split-resize-mask"
+              className={`terminal-split-resize-mask${
+                activeSplitAxis === "horizontal" ? " is-column" : ""
+              }`}
               style={terminalSplitResizeMaskStyle}
               aria-hidden="true"
             />
@@ -16056,7 +16122,10 @@ function MainApp() {
                 <TerminalSplitResizer
                   key={`${activePaneSplit.id}-${index}`}
                   style={terminalSplitDividerStyle(offset, index)}
-                  layoutKey={`${activePaneSplit.id}:${index}:${offset}`}
+                  layoutKey={`${activePaneSplit.id}:${index}:${offset}:${activeSplitAxis}`}
+                  orientation={
+                    activeSplitAxis === "horizontal" ? "vertical" : "horizontal"
+                  }
                   onPointerDown={(event) =>
                     startTerminalSplitResize(event, activePaneSplit, index)
                   }
@@ -16099,7 +16168,6 @@ function MainApp() {
                 >
                   {renderTurnPaneResizer()}
                   {renderTurnPaneSurface(surface, false)}
-                  {renderBtwFloatingPanes(surface.pane.id)}
                   {renderArtifactTray(surface, index === 0)}
                   {renderAgentDebugPanel(surface)}
                   {renderFloatingTurnPaneControls(surface, false)}
@@ -16136,9 +16204,9 @@ function MainApp() {
       </section>
 
       {/* Split expansion covers the terminal stage with every open right pane.
-          The vertical split order becomes left-to-right order here, and flex
-          gives every transcript an equal-width column. */}
-      {activeTranscriptVisibleExpanded && splitRightPaneMode ? (
+          Tab order becomes left-to-right columns here, and flex gives every
+          transcript an equal-width column. */}
+      {activeTranscriptVisibleExpanded && splitLayoutActive ? (
         <aside
           className={`turn-pane is-expanded is-headerless-expanded is-split-expanded${
             focusedAssistantTurnSurface ? " is-reader-mode" : ""
@@ -16169,7 +16237,6 @@ function MainApp() {
               }}
             >
               {renderTurnPaneSurface(surface, false)}
-              {focusedAssistantTurnSurface ? null : renderBtwFloatingPanes(surface.pane.id)}
               {focusedAssistantTurnSurface ? null : renderArtifactTray(surface, index === 0)}
               {focusedAssistantTurnSurface ? null : renderAgentDebugPanel(surface)}
               {focusedAssistantTurnSurface
@@ -16194,7 +16261,6 @@ function MainApp() {
         >
           {activeTranscriptVisibleExpanded ? null : renderTurnPaneResizer()}
           {renderTurnPaneSurface(activeTurnPaneSurface, true)}
-          {focusedAssistantTurn ? null : renderBtwFloatingPanes(activeTurnPaneSurface.pane.id)}
           {focusedAssistantTurn ? null : renderArtifactTray(activeTurnPaneSurface)}
           {focusedAssistantTurn ? null : renderAgentDebugPanel(activeTurnPaneSurface)}
         </aside>

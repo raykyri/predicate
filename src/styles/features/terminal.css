@@ -45,6 +45,13 @@
   pointer-events: none;
 }
 
+.terminal-split-drop-placeholder.is-column {
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: auto;
+}
+
 .terminal-split-drop-placeholder::before {
   content: "";
   position: absolute;
@@ -54,6 +61,16 @@
   height: 2px;
   transform: translateY(-1px);
   background: var(--split-border-active);
+}
+
+.terminal-split-drop-placeholder.is-column::before {
+  left: 50%;
+  right: auto;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  height: auto;
+  transform: translateX(-1px);
 }
 
 .terminal-split-resize-mask {
@@ -67,6 +84,13 @@
   pointer-events: none;
 }
 
+.terminal-split-resize-mask.is-column {
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: auto;
+}
+
 .terminal-split-resizer,
 .turn-pane-split-divider {
   position: absolute;
@@ -75,9 +99,21 @@
   z-index: 4;
 }
 
+.terminal-split-resizer.is-column,
+.turn-pane-split-divider.is-column {
+  top: 0;
+  bottom: 0;
+  left: auto;
+  right: auto;
+}
+
 .terminal-split-resizer {
   cursor: row-resize;
   touch-action: none;
+}
+
+.terminal-split-resizer.is-column {
+  cursor: col-resize;
 }
 
 .terminal-split-resizer::before,
@@ -90,6 +126,17 @@
   height: 1px;
   transform: translateY(-0.5px);
   background: rgba(244, 244, 239, 0.12);
+}
+
+.terminal-split-resizer.is-column::before,
+.turn-pane-split-divider.is-column::before {
+  left: 50%;
+  right: auto;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  height: auto;
+  transform: translateX(-0.5px);
 }
 
 /* With native terminals the stage is a transparent hole in the webview, so the

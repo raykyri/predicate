@@ -1049,7 +1049,6 @@ pub fn agent_fork(
     use_worktree: bool,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
-    btw: bool,
 ) -> Result<PaneInfo, String> {
     let source = state
         .agent_by_pane(authed_pane)?
@@ -1060,7 +1059,6 @@ pub fn agent_fork(
         use_worktree,
         prompt.as_deref(),
         anchor.as_ref(),
-        btw,
     )
 }
 
@@ -1074,7 +1072,6 @@ fn fork_agent_in_shell(
     use_worktree: bool,
     prompt: Option<&str>,
     anchor: Option<&MessageAnchor>,
-    btw: bool,
 ) -> Result<PaneInfo, String> {
     let registry = adapter_registry(state.config());
     let adapter = registry
@@ -1195,7 +1192,7 @@ fn fork_agent_in_shell(
             return Err(err);
         }
     };
-    finish_fork_spawn(state, source, pane, agent, btw)
+    finish_fork_spawn(state, source, pane, agent)
 }
 
 /// Adapters with a native fork command. Owns the fork-eligibility check (and its
@@ -1304,17 +1301,7 @@ pub fn fork_agent_source(
     use_worktree: bool,
     prompt: Option<&str>,
 ) -> Result<PaneInfo, String> {
-    fork_agent_source_with_placement(state, source, use_worktree, prompt, false)
-}
-
-/// Queue-dispatched `/btw` fork, tagged so the frontend can build the split and keep
-/// focus on the source pane.
-pub fn fork_agent_source_btw(
-    state: &AppState,
-    source: &AgentInfo,
-    prompt: Option<&str>,
-) -> Result<PaneInfo, String> {
-    fork_agent_source_with_placement(state, source, false, prompt, true)
+    fork_agent_source_with_placement(state, source, use_worktree, prompt)
 }
 
 fn fork_agent_source_with_placement(
@@ -1322,7 +1309,6 @@ fn fork_agent_source_with_placement(
     source: &AgentInfo,
     use_worktree: bool,
     prompt: Option<&str>,
-    btw: bool,
 ) -> Result<PaneInfo, String> {
     let conversation_history = match state.capture_conversation_history(source, None) {
         Ok(history) => history,
@@ -1346,7 +1332,7 @@ fn fork_agent_source_with_placement(
             agent.id
         );
     }
-    finish_fork_spawn(state, source, pane, agent, btw)
+    finish_fork_spawn(state, source, pane, agent)
 }
 
 fn finish_fork_spawn(
@@ -1354,7 +1340,6 @@ fn finish_fork_spawn(
     source: &AgentInfo,
     pane: PaneInfo,
     agent: AgentInfo,
-    btw: bool,
 ) -> Result<PaneInfo, String> {
     if let Some(source_pane) = source.pane_id.as_deref() {
         // Placement is cosmetic and the fork has already spawned. The source
@@ -1381,7 +1366,6 @@ fn finish_fork_spawn(
             "pane": pane,
             "sourceAgentId": source.id,
             "sourcePaneId": source.pane_id,
-            "btw": btw,
         }),
     ));
     Ok(pane)
@@ -1668,7 +1652,7 @@ mod tests {
         let state = AppState::new(test_config());
 
         // No agent bound to the pane: nothing to fork.
-        let err = agent_fork(&state, "pane-1", false, None, None, false).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None).unwrap_err();
         assert!(err.contains("no agent"), "unexpected error: {err}");
 
         // An adapter without a native fork command is rejected before any spawn is attempted.
@@ -1700,7 +1684,7 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
-        let err = agent_fork(&state, "pane-1", false, None, None, false).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None).unwrap_err();
         assert_eq!(err, FORK_UNSUPPORTED_ERROR);
     }
 

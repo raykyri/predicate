@@ -1,8 +1,8 @@
-export type ComposerSlashCommandName = "fork" | "worktree" | "btw";
+export type ComposerSlashCommandName = "fork" | "worktree";
 
 /** What a command does when submitted. Fork-only fields (useWorktree) are
  * ignored for other kinds. */
-export type ComposerSlashCommandKind = "fork" | "btw";
+export type ComposerSlashCommandKind = "fork";
 
 export interface ComposerSlashCommand {
   name: ComposerSlashCommandName;
@@ -26,13 +26,6 @@ export const COMPOSER_SLASH_COMMANDS: readonly ComposerSlashCommand[] = [
     description: "Fork in a new worktree and send the following message",
     kind: "fork",
     useWorktree: true,
-  },
-  {
-    name: "btw",
-    token: "/btw",
-    description: "Fork this session below the current terminal and send the following message",
-    kind: "btw",
-    useWorktree: false,
   },
 ];
 

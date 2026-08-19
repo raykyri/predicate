@@ -6,7 +6,6 @@ import {
   parseComposerSlashCommand,
 } from "../src/lib/composerSlashCommands";
 import {
-  BTW_SAFETY_INSTRUCTION,
   composerSlashCommandSubmitLabels,
   planComposerSubmission,
 } from "../src/lib/composerActions";
@@ -14,7 +13,7 @@ import {
 test("matches command prefixes only in the first unfinished token", () => {
   assert.deepEqual(
     matchingComposerSlashCommands("/").map((command) => command.name),
-    ["fork", "worktree", "btw"],
+    ["fork", "worktree"],
   );
   assert.deepEqual(
     matchingComposerSlashCommands("/f").map((command) => command.name),
@@ -60,49 +59,18 @@ test("treats the removed loop command as ordinary agent input", () => {
   assert.deepEqual(parseComposerSlashCommand("/loop"), { kind: "none" });
 });
 
-test("parses btw as a side-branch command", () => {
-  const parsed = parseComposerSlashCommand("/btw answer this side question");
-  assert.equal(parsed.kind, "ready");
-  if (parsed.kind === "ready") {
-    assert.equal(parsed.command.kind, "btw");
-    assert.equal(parsed.prompt, "answer this side question");
-  }
-  assert.equal(parseComposerSlashCommand("/btw").kind, "incomplete");
-  assert.deepEqual(
-    matchingComposerSlashCommands("/b").map((command) => command.name),
-    ["btw"],
-  );
-});
-
-test("plans btw as an immediate fork prompt with the safety instruction", () => {
-  assert.equal(
-    BTW_SAFETY_INSTRUCTION,
-    [
-      '<qmux_instruction source="agent_driver">',
-      "Do not change the working tree or codebase unless explicitly instructed to.",
-      "</qmux_instruction>",
-    ].join("\n"),
-  );
-  const parsed = parseComposerSlashCommand("/btw inspect the failing request");
-  assert.deepEqual(planComposerSubmission(parsed, true), {
-    kind: "btw",
-    prompt: `${BTW_SAFETY_INSTRUCTION}\n\ninspect the failing request`,
-    titlePrompt: "inspect the failing request",
-  });
-  assert.deepEqual(planComposerSubmission(parseComposerSlashCommand("/btw   "), true), {
-    kind: "reject",
-    message: "Add a message after /btw",
-  });
+test("treats the removed btw command as ordinary agent input", () => {
+  assert.deepEqual(parseComposerSlashCommand("/btw answer this side question"), { kind: "none" });
+  assert.deepEqual(parseComposerSlashCommand("/btw"), { kind: "none" });
+  assert.deepEqual(matchingComposerSlashCommands("/b").map((command) => command.name), []);
 });
 
 test("labels immediate, now, and queued slash-command actions", () => {
   const fork = parseComposerSlashCommand("/fork investigate");
   const worktree = parseComposerSlashCommand("/worktree investigate");
-  const btw = parseComposerSlashCommand("/btw investigate");
   assert.equal(fork.kind, "ready");
   assert.equal(worktree.kind, "ready");
-  assert.equal(btw.kind, "ready");
-  if (fork.kind === "ready" && worktree.kind === "ready" && btw.kind === "ready") {
+  if (fork.kind === "ready" && worktree.kind === "ready") {
     assert.deepEqual(composerSlashCommandSubmitLabels(fork.command), {
       immediate: "Fork & send",
       now: "Fork now",
@@ -112,11 +80,6 @@ test("labels immediate, now, and queued slash-command actions", () => {
       immediate: "Fork in worktree & send",
       now: "Worktree now",
       queued: "Queue worktree",
-    });
-    assert.deepEqual(composerSlashCommandSubmitLabels(btw.command), {
-      immediate: "Fork below & send now",
-      now: "BTW now",
-      queued: "Queue BTW",
     });
   }
 });

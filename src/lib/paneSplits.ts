@@ -1,5 +1,6 @@
 import type {
   PaneInfo,
+  PaneSplitAxis,
   PaneSplitInfo,
   PaneSplitIntent,
   PaneSplitIntentPosition,
@@ -20,7 +21,6 @@ interface JoinPaneSplitOptions {
   source?: PaneSplitIntentSource;
   insertedPaneId?: string;
   createdAt?: number;
-  btwPaneId?: string;
 }
 
 function panePositions(panes: PaneInfo[]) {
@@ -274,18 +274,40 @@ export function normalizePaneSplitsForPanes(
         ),
       ),
     };
+    if (paneSplitAxis(split) === "horizontal") {
+      normalizedSplit.axis = "horizontal";
+    }
     const intent = normalizedIntentForPaneIds(split, paneIds);
     if (intent) {
       normalizedSplit.intent = intent;
-    }
-    const btwPaneIds = paneIds.filter((paneId) => split.btwPaneIds?.includes(paneId));
-    if (btwPaneIds.length > 0) {
-      normalizedSplit.btwPaneIds = btwPaneIds;
     }
     normalized.push(normalizedSplit);
   }
 
   return normalized;
+}
+
+export function paneSplitAxis(split: PaneSplitInfo | null | undefined): PaneSplitAxis {
+  return split?.axis === "horizontal" ? "horizontal" : "vertical";
+}
+
+export function withPaneSplitAxis(split: PaneSplitInfo, axis: PaneSplitAxis): PaneSplitInfo {
+  if (axis === "horizontal") {
+    return split.axis === "horizontal" ? split : { ...split, axis: "horizontal" };
+  }
+  if (split.axis !== "horizontal") {
+    return split;
+  }
+  const next = { ...split };
+  delete next.axis;
+  return next;
+}
+
+export function togglePaneSplitAxis(split: PaneSplitInfo): PaneSplitInfo {
+  return withPaneSplitAxis(
+    split,
+    paneSplitAxis(split) === "horizontal" ? "vertical" : "horizontal",
+  );
 }
 
 export function paneSplitForPane(splits: PaneSplitInfo[], paneId: string | null | undefined) {
@@ -386,13 +408,10 @@ export function joinPaneSplit(
     paneIds,
     sizes: joinedPaneSizes(existing, paneIds),
   };
-  const btwPaneIds = paneIds.filter(
-    (candidate) =>
-      candidate === options.btwPaneId ||
-      existing.some((split) => split.btwPaneIds?.includes(candidate)),
-  );
-  if (btwPaneIds.length > 0) {
-    joinedSplit.btwPaneIds = btwPaneIds;
+  const axisSource =
+    existing.find((split) => split.paneIds.includes(paneId)) ?? existing[0];
+  if (paneSplitAxis(axisSource) === "horizontal") {
+    joinedSplit.axis = "horizontal";
   }
   const intent = joinedPaneIntent(existing, paneIds, paneId, belowPaneId, options);
   if (intent) {
@@ -426,12 +445,6 @@ export function detachPaneFromSplitMemberships(
           Object.entries(split.sizes ?? {}).filter(([id]) => id !== paneId),
         ),
       };
-      if (nextSplit.btwPaneIds) {
-        nextSplit.btwPaneIds = nextSplit.btwPaneIds.filter((id) => id !== paneId);
-        if (nextSplit.btwPaneIds.length === 0) {
-          delete nextSplit.btwPaneIds;
-        }
-      }
       delete nextSplit.intent;
       const intent = normalizedIntentForPaneIds(
         {

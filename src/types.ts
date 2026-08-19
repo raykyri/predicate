@@ -113,6 +113,8 @@ export type PaneSplitIntentSource = "command" | "join" | "drag-half" | "drag-div
 
 export type PaneSplitIntentPosition = "above" | "below";
 
+export type PaneSplitAxis = "vertical" | "horizontal";
+
 export interface PaneSplitIntent {
   kind: "inserted-relative";
   anchorPaneId: string;
@@ -126,8 +128,8 @@ export interface PaneSplitInfo {
   paneIds: string[];
   sizes: Record<string, number>;
   intent?: Record<string, PaneSplitIntent>;
-  /** Split members presented as lightweight side branches instead of terminals. */
-  btwPaneIds?: string[];
+  /** Layout axis. Omitted or `vertical` is the stacked (top/bottom) default. */
+  axis?: PaneSplitAxis;
 }
 
 export type PaneActivity =

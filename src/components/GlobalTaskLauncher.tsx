@@ -647,12 +647,11 @@ export default function GlobalTaskLauncher() {
       setError(plan.message);
       return;
     }
-    if ((plan.kind === "fork" || plan.kind === "btw") && mode !== "queue") {
+    if (plan.kind === "fork" && mode !== "queue") {
       void finishSubmission(() =>
         forkAgent(selected.pane.id, {
-          useWorktree: plan.kind === "fork" ? plan.useWorktree : false,
+          useWorktree: plan.useWorktree,
           prompt: plan.prompt,
-          btw: plan.kind === "btw",
         }),
       );
       return;

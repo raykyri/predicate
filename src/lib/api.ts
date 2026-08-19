@@ -770,7 +770,6 @@ export function forkAgent(
     useWorktree?: boolean;
     prompt?: string;
     anchor?: MessageAnchor;
-    btw?: boolean;
   },
 ) {
   return invoke<PaneInfo>("agent_fork", {
@@ -778,7 +777,6 @@ export function forkAgent(
     useWorktree: options?.useWorktree ?? false,
     prompt: options?.prompt,
     anchor: options?.anchor,
-    btw: options?.btw ?? false,
   });
 }
 

@@ -1,6 +1,6 @@
 use crate::adapters::{
     FORK_UNSUPPORTED_ERROR, adapter_supports_fork, agent_composer_policy, fork_agent_source,
-    fork_agent_source_btw, spawn_sibling_agent_session,
+    spawn_sibling_agent_session,
 };
 use crate::events::QmuxEvent;
 use crate::pty::{PaneWriteOptions, write_pane, write_pane_detailed};
@@ -51,16 +51,9 @@ pub(crate) fn is_tui_command_turn(text: &str) -> bool {
     trimmed.starts_with('!') || trimmed.starts_with('/')
 }
 
-const BTW_SAFETY_INSTRUCTION: &str = concat!(
-    "<qmux_instruction source=\"agent_driver\">\n",
-    "Do not change the working tree or codebase unless explicitly instructed to.\n",
-    "</qmux_instruction>",
-);
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum QueuedComposerCommand<'a> {
     Fork { prompt: &'a str, use_worktree: bool },
-    Btw { prompt: &'a str },
 }
 
 /// Recognizes qMux composer commands only at byte zero, with the same exact-token
@@ -89,7 +82,7 @@ fn parse_queued_composer_command(text: &str) -> Option<QueuedComposerCommand<'_>
             use_worktree: true,
         });
     }
-    prompt_after(text, "/btw").map(|prompt| QueuedComposerCommand::Btw { prompt })
+    None
 }
 
 #[derive(Debug, Deserialize)]
@@ -1409,11 +1402,6 @@ fn deliver_queued_composer_command(
             let pane = fork_agent_source(state, source, use_worktree, Some(prompt))?;
             begin_queued_fork_barrier(state, source, &pane, resume_queue_after_fork)
         }
-        QueuedComposerCommand::Btw { prompt } => {
-            let prompt = format!("{BTW_SAFETY_INSTRUCTION}\n\n{prompt}");
-            let pane = fork_agent_source_btw(state, source, Some(&prompt))?;
-            begin_queued_fork_barrier(state, source, &pane, resume_queue_after_fork)
-        }
     }
 }
 
@@ -1889,9 +1877,7 @@ mod tests {
         );
         assert_eq!(
             parse_queued_composer_command("/btw   investigate this\n"),
-            Some(QueuedComposerCommand::Btw {
-                prompt: "investigate this",
-            })
+            None
         );
         assert_eq!(parse_queued_composer_command(" /fork not at front"), None);
         assert_eq!(parse_queued_composer_command("/forked not exact"), None);
@@ -3150,11 +3136,7 @@ mod tests {
         // so no prompt-submit echo will ever clear this record. The next idle must
         // not let that stale record block the queue behind it.
         state
-            .record_agent_send(
-                "agent-1",
-                "/model".to_string(),
-                AgentSendSource::QueuedTurn,
-            )
+            .record_agent_send("agent-1", "/model".to_string(), AgentSendSource::QueuedTurn)
             .unwrap();
         state
             .enqueue_agent_turn("agent-1", "still queued".to_string())

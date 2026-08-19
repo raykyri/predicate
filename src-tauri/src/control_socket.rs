@@ -1084,7 +1084,6 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
                 payload.use_worktree,
                 payload.prompt,
                 None,
-                false,
             )?;
             serde_json::to_value(pane).map_err(|err| format!("failed to encode forked pane: {err}"))
         }

@@ -28,8 +28,8 @@ export function terminalPaneHasUserAttention(state: TerminalAttentionState): boo
 
 /**
  * Intentional activation (tab click, keyboard cycle, menu-bar select) means the
- * user chose this pane. The active-pane match is still required so a BTW remap
- * or stale callback cannot clear a different pane, but webview document focus
+ * user chose this pane. The active-pane match is still required so a stale
+ * callback cannot clear a different pane, but webview document focus
  * is not — native terminals own first responder during keyboard navigation.
  */
 export function terminalPaneWasIntentionallyActivated(

@@ -9,12 +9,6 @@ import type {
 export const FORK_REQUIREMENT_TITLE =
   "Forking requires a supported agent session that has run a turn";
 
-export const BTW_SAFETY_INSTRUCTION = [
-  '<qmux_instruction source="agent_driver">',
-  "Do not change the working tree or codebase unless explicitly instructed to.",
-  "</qmux_instruction>",
-].join("\n");
-
 /** Capability gating shared by the right-pane composer and the global task
  * launcher, derived in one place so both surfaces enable Send/Send Now/Queue
  * and route the submit shortcut identically. */
@@ -56,7 +50,6 @@ export function deriveComposerGating(
 export type ComposerSubmissionPlan =
   | { kind: "reject"; message: string }
   | { kind: "fork"; useWorktree: boolean; prompt: string }
-  | { kind: "btw"; prompt: string; titlePrompt: string }
   | { kind: "turn" };
 
 export function planComposerSubmission(
@@ -69,13 +62,6 @@ export function planComposerSubmission(
   if (parsed.kind === "ready") {
     if (!canFork) {
       return { kind: "reject", message: FORK_REQUIREMENT_TITLE };
-    }
-    if (parsed.command.kind === "btw") {
-      return {
-        kind: "btw",
-        prompt: `${BTW_SAFETY_INSTRUCTION}\n\n${parsed.prompt}`,
-        titlePrompt: parsed.prompt,
-      };
     }
     return { kind: "fork", useWorktree: parsed.command.useWorktree, prompt: parsed.prompt };
   }
@@ -93,13 +79,6 @@ export interface ComposerSlashCommandSubmitLabels {
 export function composerSlashCommandSubmitLabels(
   command: ComposerSlashCommand,
 ): ComposerSlashCommandSubmitLabels {
-  if (command.kind === "btw") {
-    return {
-      immediate: "Fork below & send now",
-      now: "BTW now",
-      queued: "Queue BTW",
-    };
-  }
   if (command.useWorktree) {
     return {
       immediate: "Fork in worktree & send",

@@ -5,7 +5,7 @@
 //! may claim a different principal, pane, agent, or workspace.
 
 use crate::events::QmuxEvent;
-use crate::state::{AppState, PaneSplitInfo};
+use crate::state::{AppState, PaneSplitAxis, PaneSplitInfo};
 use crate::workspace::{AgentInfo, CreateGroupRequest, create_group, rename_group};
 use qmux_proto::{PUBLIC_API_VERSION, PublicControlError, PublicControlResponse};
 use serde::{Deserialize, Serialize};
@@ -705,9 +705,8 @@ fn agent_fork(state: &AppState, context: &ControlContext, arguments: Value) -> C
         .pane_id
         .as_deref()
         .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
-    let pane =
-        crate::adapters::agent_fork(state, pane_id, args.use_worktree, args.prompt, None, false)
-            .map_err(internal)?;
+    let pane = crate::adapters::agent_fork(state, pane_id, args.use_worktree, args.prompt, None)
+        .map_err(internal)?;
     let agent = state.agent_by_pane(&pane.id).map_err(internal)?;
     Ok(json!({ "pane": pane, "agent": agent }))
 }
@@ -950,10 +949,16 @@ fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> C
     let mut pane_ids = vec![args.id.clone(), args.other.clone()];
     let mut sizes = HashMap::new();
     let mut split_id = None;
+    let mut axis = PaneSplitAxis::Vertical;
     for split in &splits {
         if split.pane_ids.contains(&args.id) || split.pane_ids.contains(&args.other) {
             consumed.insert(split.id.clone());
             split_id.get_or_insert_with(|| split.id.clone());
+            if split.pane_ids.contains(&args.id) {
+                axis = split.axis;
+            } else if consumed.len() == 1 {
+                axis = split.axis;
+            }
             for pane_id in &split.pane_ids {
                 if !pane_ids.contains(pane_id) {
                     pane_ids.push(pane_id.clone());
@@ -993,7 +998,7 @@ fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> C
         pane_ids,
         sizes,
         intent: HashMap::new(),
-        btw_pane_ids: Vec::new(),
+        axis,
     };
     splits.retain(|split| !consumed.contains(&split.id));
     splits.push(joined.clone());
@@ -1020,12 +1025,6 @@ fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> 
         for (segment_index, segment) in segments.into_iter().enumerate() {
             let pane_ids = segment;
             let sizes = allocate_split_sizes(&split.sizes, &pane_ids, 1.0, MIN_SPLIT_FRACTION);
-            let btw_pane_ids = split
-                .btw_pane_ids
-                .iter()
-                .filter(|pane_id| pane_ids.contains(pane_id))
-                .cloned()
-                .collect();
             splits.push(PaneSplitInfo {
                 id: if segment_index == 0 {
                     split.id.clone()
@@ -1035,7 +1034,7 @@ fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> 
                 pane_ids,
                 sizes,
                 intent: HashMap::new(),
-                btw_pane_ids,
+                axis: split.axis,
             });
         }
     }

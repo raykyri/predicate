@@ -13,9 +13,12 @@ import {
   detachPaneFromSplitMemberships,
   joinPaneSplit,
   normalizePaneSplitsForPanes,
+  paneSplitAxis,
   paneSplitFlagIsEnabled,
   paneSnapshotForPersistedPaneSplits,
   setPaneSplitFlagEnabled,
+  togglePaneSplitAxis,
+  withPaneSplitAxis,
 } from "../src/lib/paneSplits";
 import type { PaneInfo, PaneSplitInfo } from "../src/types";
 
@@ -142,6 +145,83 @@ test("normalizePaneSplitsForPanes drops a split when fewer than two panes remain
   assert.deepEqual(normalized, []);
 });
 
+test("normalizePaneSplitsForPanes preserves a horizontal axis and omits vertical", () => {
+  const horizontal = normalizePaneSplitsForPanes(
+    [{ ...split(["pane-1", "pane-2"]), axis: "horizontal" }],
+    panes(["pane-1", "pane-2"]),
+  );
+  const vertical = normalizePaneSplitsForPanes(
+    [{ ...split(["pane-1", "pane-2"]), axis: "vertical" }],
+    panes(["pane-1", "pane-2"]),
+  );
+  const omitted = normalizePaneSplitsForPanes(
+    [split(["pane-1", "pane-2"])],
+    panes(["pane-1", "pane-2"]),
+  );
+
+  assert.equal(paneSplitAxis(horizontal[0]), "horizontal");
+  assert.equal(horizontal[0].axis, "horizontal");
+  assert.equal(paneSplitAxis(vertical[0]), "vertical");
+  assert.equal(vertical[0].axis, undefined);
+  assert.equal(omitted[0].axis, undefined);
+});
+
+test("togglePaneSplitAxis switches between stacked and columns and omits vertical", () => {
+  const stacked = split(["pane-1", "pane-2"]);
+  const columns = togglePaneSplitAxis(stacked);
+  const restored = togglePaneSplitAxis(columns);
+
+  assert.equal(paneSplitAxis(stacked), "vertical");
+  assert.equal(columns.axis, "horizontal");
+  assert.equal(restored.axis, undefined);
+  assert.equal(withPaneSplitAxis(columns, "horizontal"), columns);
+  assert.equal(withPaneSplitAxis(stacked, "vertical"), stacked);
+});
+
+test("joinPaneSplit inherits a horizontal axis from the existing split", () => {
+  const joined = joinPaneSplit(
+    [{ ...split(["pane-1", "pane-2"]), axis: "horizontal" }],
+    panes(["pane-1", "pane-2", "pane-3"]),
+    "pane-2",
+    "pane-3",
+    { insertedPaneId: "pane-3", source: "command", createdAt: 1 },
+  );
+
+  assert.equal(joined[0].axis, "horizontal");
+  assert.deepEqual(joined[0].paneIds, ["pane-1", "pane-2", "pane-3"]);
+});
+
+test("joinPaneSplit starts a new split vertical when neither pane is already split", () => {
+  const joined = joinPaneSplit([], panes(["pane-1", "pane-2"]), "pane-1", "pane-2");
+
+  assert.equal(joined[0].axis, undefined);
+  assert.equal(paneSplitAxis(joined[0]), "vertical");
+});
+
+test("joinPaneSplit prefers the source pane's axis when merging two splits", () => {
+  const joined = joinPaneSplit(
+    [
+      { ...splitWithSizes({ "pane-1": 0.5, "pane-2": 0.5 }, "split-1"), axis: "horizontal" },
+      splitWithSizes({ "pane-3": 0.5, "pane-4": 0.5 }, "split-2"),
+    ],
+    panes(["pane-1", "pane-2", "pane-3", "pane-4"]),
+    "pane-2",
+    "pane-3",
+  );
+
+  assert.equal(joined[0].axis, "horizontal");
+});
+
+test("detachPaneFromSplitMemberships keeps the remaining split's axis", () => {
+  const detached = detachPaneFromSplitMemberships(
+    [{ ...split(["pane-1", "pane-2", "pane-3"]), axis: "horizontal" }],
+    "pane-3",
+  );
+
+  assert.equal(detached[0].axis, "horizontal");
+  assert.deepEqual(detached[0].paneIds, ["pane-1", "pane-2"]);
+});
+
 test("split pane flags apply to the whole group and preserve unrelated panes", () => {
   assert.equal(
     paneSplitFlagIsEnabled({ "pane-2": true }, ["pane-1", "pane-2", "pane-3"]),
@@ -206,20 +286,6 @@ test("normalizePaneSplitsForPanes still rejects non-contiguous remaining panes",
   );
 
   assert.deepEqual(normalized, []);
-});
-
-test("btw split membership survives normalization and prunes stale panes", () => {
-  const normalized = normalizePaneSplitsForPanes(
-    [
-      {
-        ...split(["pane-1", "pane-2", "pane-3"]),
-        btwPaneIds: ["pane-2", "pane-missing"],
-      },
-    ],
-    panes(["pane-1", "pane-2", "pane-3"]),
-  );
-
-  assert.deepEqual(normalized[0].btwPaneIds, ["pane-2"]);
 });
 
 test("selectPaneAfterClose prefers the next split pane when closing the top split pane", () => {
@@ -418,23 +484,6 @@ test("joinPaneSplit records inserted pane intent", () => {
   assert.deepEqual(joined[0].intent, {
     "pane-2": insertedRelativeIntent("pane-1", "below", "command", 456),
   });
-});
-
-test("joinPaneSplit marks and preserves btw members", () => {
-  const first = joinPaneSplit([], panes(["pane-1", "pane-2"]), "pane-1", "pane-2", {
-    insertedPaneId: "pane-2",
-    btwPaneId: "pane-2",
-  });
-  const joined = joinPaneSplit(
-    first,
-    panes(["pane-1", "pane-2", "pane-3"]),
-    "pane-2",
-    "pane-3",
-    { insertedPaneId: "pane-3", btwPaneId: "pane-3" },
-  );
-
-  assert.deepEqual(joined[0].btwPaneIds, ["pane-2", "pane-3"]);
-  assert.equal(detachPaneFromSplitMemberships(joined, "pane-3")[0].btwPaneIds?.[0], "pane-2");
 });
 
 test("paneSnapshotForPersistedPaneSplits keeps a split when current panes lag a new pane", () => {
