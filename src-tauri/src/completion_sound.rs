@@ -7,9 +7,24 @@ use std::time::{Duration, Instant};
 const DEFAULT_SOUND_ID: &str = "default";
 const COMPLETION_COALESCE: Duration = Duration::from_millis(250);
 
-const DEFAULT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/default.wav");
+const SUCCESS_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/success.wav");
 const CONFIRMATION_SOUND_BYTES: &[u8] =
     include_bytes!("../../src/assets/sounds/completion/confirmation.wav");
+const CHIME_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/chime.wav");
+const LIGHT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/light.wav");
+const WATER_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/water.wav");
+
+fn bundled_sound(name: &str) -> Option<CompletionSound> {
+    let (name, bytes) = match name {
+        "success" => ("success", SUCCESS_SOUND_BYTES),
+        "confirmation" => ("confirmation", CONFIRMATION_SOUND_BYTES),
+        "chime" => ("chime", CHIME_SOUND_BYTES),
+        "light" => ("light", LIGHT_SOUND_BYTES),
+        "water" => ("water", WATER_SOUND_BYTES),
+        _ => return None,
+    };
+    Some(CompletionSound::Bundled { name, bytes })
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -44,15 +59,9 @@ pub fn sound_for_id(sound_id: &str) -> Result<Option<CompletionSound>, String> {
         option.bundled_name.as_deref(),
         option.system_name.as_deref(),
     ) {
-        (Some("default"), None) => Ok(Some(CompletionSound::Bundled {
-            name: "default",
-            bytes: DEFAULT_SOUND_BYTES,
-        })),
-        (Some("confirmation"), None) => Ok(Some(CompletionSound::Bundled {
-            name: "confirmation",
-            bytes: CONFIRMATION_SOUND_BYTES,
-        })),
-        (Some(name), None) => Err(format!("unknown bundled completion sound {name:?}")),
+        (Some(name), None) => bundled_sound(name)
+            .map(Some)
+            .ok_or_else(|| format!("unknown bundled completion sound {name:?}")),
         (None, Some(name)) => Ok(Some(CompletionSound::System(name))),
         (None, None) => Ok(None),
         (Some(_), Some(_)) => Err(format!(
@@ -205,7 +214,7 @@ mod tests {
         assert!(matches!(
             sound_for_id("default"),
             Ok(Some(CompletionSound::Bundled {
-                name: "default",
+                name: "success",
                 ..
             }))
         ));
@@ -216,19 +225,30 @@ mod tests {
                 ..
             }))
         ));
-        assert_eq!(
+        assert!(matches!(
             sound_for_id("chime"),
-            Ok(Some(CompletionSound::System("Glass")))
-        );
+            Ok(Some(CompletionSound::Bundled {
+                name: "chime",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("light"),
+            Ok(Some(CompletionSound::Bundled { name: "light", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("water"),
+            Ok(Some(CompletionSound::Bundled { name: "water", .. }))
+        ));
         assert_eq!(
             sound_for_id("ping"),
             Ok(Some(CompletionSound::System("Ping")))
         );
         assert_eq!(
-            sound_for_id("purr"),
+            sound_for_id("blip"),
             Ok(Some(CompletionSound::System("Purr")))
         );
-        for removed in ["none", "pop", "tink"] {
+        for removed in ["none", "pop", "tink", "purr"] {
             assert!(sound_for_id(removed).is_err());
         }
         assert!(sound_for_id("../../arbitrary").is_err());

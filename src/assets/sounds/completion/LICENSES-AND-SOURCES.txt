@@ -1,23 +1,20 @@
 qmux bundled completion sounds
 ==============================
 
-Both audio files in this directory are available under Creative Commons CC0
-1.0. CC0 permits copying, modification, distribution, and commercial use
-without permission or attribution.
+Audio files in this directory that list a Creative Commons CC0 1.0 license
+are available under CC0. CC0 permits copying, modification, distribution, and
+commercial use without permission or attribution.
 
 CC0 deed: https://creativecommons.org/publicdomain/zero/1.0/
 
 
-default.wav
+success.wav
 -----------
 
 Display name: Default
-Creator: fvcalderan
-Source: https://opengameart.org/content/elevator-ding
-License: Creative Commons CC0 1.0
-Original file: elevatording_0.ogg
-Changes: Renamed and transcoded from Ogg Vorbis to 16-bit, 44.1 kHz stereo WAV.
-No intentional creative changes were made.
+Source: local WAV asset (success.wav)
+Changes: Stored as the default completion sound so existing "default"
+settings play this file.
 
 
 confirmation.wav
@@ -28,8 +25,35 @@ Creator: Kenney
 Source: https://kenney.nl/assets/interface-sounds
 License: Creative Commons CC0 1.0
 Original file: Audio/confirmation_004.ogg
-Changes: Renamed and transcoded from Ogg Vorbis to 16-bit, 44.1 kHz mono WAV.
-No intentional creative changes were made.
+Changes: Renamed and transcoded from Ogg Vorbis to 16-bit, 44.1 kHz mono WAV,
+then reduced by 19.5 dB to sit with the other bundled completion sounds.
 
 Kenney confirms that its game assets are CC0, may be used commercially, and
 do not require attribution: https://kenney.nl/support
+
+
+chime.wav
+---------
+
+Display name: Chime
+Creator: fvcalderan
+Source: https://opengameart.org/content/elevator-ding
+License: Creative Commons CC0 1.0
+Original file: elevatording_0.ogg
+Changes: Renamed from default.wav and transcoded from Ogg Vorbis to 16-bit,
+44.1 kHz stereo WAV, then reduced by 14 dB to sit with the other bundled
+completion sounds.
+
+
+light.wav
+---------
+
+Display name: Light
+Source: local WAV asset (light.wav)
+
+
+water.wav
+---------
+
+Display name: Water
+Source: local WAV asset (water.wav)

@@ -1,7 +1,9 @@
 [
-  { "id": "default", "label": "Default", "bundledName": "default", "systemName": null },
+  { "id": "default", "label": "Default", "bundledName": "success", "systemName": null },
   { "id": "confirmation", "label": "Confirmation", "bundledName": "confirmation", "systemName": null },
-  { "id": "chime", "label": "Chime", "systemName": "Glass" },
+  { "id": "chime", "label": "Chime", "bundledName": "chime", "systemName": null },
+  { "id": "light", "label": "Light", "bundledName": "light", "systemName": null },
+  { "id": "water", "label": "Water", "bundledName": "water", "systemName": null },
   { "id": "ping", "label": "Ping", "systemName": "Ping" },
-  { "id": "purr", "label": "Purr", "systemName": "Purr" }
+  { "id": "blip", "label": "Blip", "systemName": "Purr" }
 ]
