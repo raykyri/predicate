@@ -287,7 +287,11 @@ fn build_menu(
     for group in &snapshot.groups {
         let header = MenuItemBuilder::with_id(
             format!("{TOGGLE_GROUP_PREFIX}{}", group.id),
-            group_header_label(&group.label, collapsed.contains(&group.id), group.tabs.len()),
+            group_header_label(
+                &group.label,
+                collapsed.contains(&group.id),
+                group.tabs.len(),
+            ),
         )
         .build(app)?;
         menu.append(&header)?;
@@ -646,7 +650,7 @@ objc2::define_class!(
 #[cfg(target_os = "macos")]
 impl GroupHeaderTarget {
     fn new() -> objc2::rc::Retained<Self> {
-        use objc2::{msg_send, AllocAnyThread};
+        use objc2::{AllocAnyThread, msg_send};
 
         let this = Self::alloc().set_ivars(());
         unsafe { msg_send![super(this), init] }
@@ -896,7 +900,10 @@ mod tests {
         let label = tab_menu_label(&tab(&title, Some("src/lib"), Some("working"), true));
         assert_eq!(
             label,
-            format!("* {}... - src/lib (working)", "a".repeat(MAX_TAB_TITLE_CHARS))
+            format!(
+                "* {}... - src/lib (working)",
+                "a".repeat(MAX_TAB_TITLE_CHARS)
+            )
         );
     }
 }

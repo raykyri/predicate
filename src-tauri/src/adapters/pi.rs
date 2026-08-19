@@ -533,8 +533,8 @@ impl PiAdapter {
 
         if let Some(current) = agent.as_ref() {
             let session_id = string_field(&notification.payload, "session_id");
-            let transcript_path = string_field(&notification.payload, "session_file")
-                .filter(|candidate| {
+            let transcript_path =
+                string_field(&notification.payload, "session_file").filter(|candidate| {
                     hook_transcript_path_acceptable(current.transcript_path.as_deref(), candidate)
                 });
             let leaf_id = pi_leaf_marker(&notification.payload);
@@ -580,7 +580,12 @@ impl PiAdapter {
             "PiExtensionReady" => "agent.integration_ready",
             "PiSessionStart" => {
                 if let Some(current) = agent.as_ref() {
-                    if let Some(path) = state.agent(&current.id).ok().flatten().and_then(|a| a.transcript_path) {
+                    if let Some(path) = state
+                        .agent(&current.id)
+                        .ok()
+                        .flatten()
+                        .and_then(|a| a.transcript_path)
+                    {
                         start_transcript_tail(
                             state.clone(),
                             current.id.clone(),

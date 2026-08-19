@@ -592,11 +592,8 @@ pub fn human_browser_hide_all(
             .lock()
             .map_err(|_| "human browser state lock poisoned".to_string())?;
         if request.generation == inner.generation {
-            let _ = inner.accept_surface_request(
-                HIDE_ALL_OWNER,
-                request.generation,
-                request.revision,
-            );
+            let _ =
+                inner.accept_surface_request(HIDE_ALL_OWNER, request.generation, request.revision);
         }
         inner.active_owner = None;
         inner.views.values().cloned().collect::<Vec<_>>()

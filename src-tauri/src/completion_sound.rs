@@ -227,10 +227,7 @@ mod tests {
         ));
         assert!(matches!(
             sound_for_id("chime"),
-            Ok(Some(CompletionSound::Bundled {
-                name: "chime",
-                ..
-            }))
+            Ok(Some(CompletionSound::Bundled { name: "chime", .. }))
         ));
         assert!(matches!(
             sound_for_id("light"),

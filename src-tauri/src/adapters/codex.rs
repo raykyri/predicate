@@ -2162,22 +2162,14 @@ fn should_add_codex_turn(turn: &Turn, seen_native_message_ids: &mut HashSet<Stri
 /// and stable across re-reads. This makes the right pane transcript keep
 /// working after Codex replaces earlier `response_item` records with a compacted
 /// summary.
-fn codex_compacted_record_turns(
-    agent_id: &str,
-    source_index: usize,
-    value: &Value,
-) -> Vec<Turn> {
+fn codex_compacted_record_turns(agent_id: &str, source_index: usize, value: &Value) -> Vec<Turn> {
     let Some(payload) = value.get("payload") else {
         return Vec::new();
     };
-    let Some(history) = payload
-        .get("replacement_history")
-        .and_then(Value::as_array)
-    else {
+    let Some(history) = payload.get("replacement_history").and_then(Value::as_array) else {
         return Vec::new();
     };
-    let session_id =
-        string_field(value, "session_id").or_else(|| string_field(value, "sessionId"));
+    let session_id = string_field(value, "session_id").or_else(|| string_field(value, "sessionId"));
     let parent_timestamp = super::native_timestamp_ms(value);
     let mut turns = Vec::new();
 

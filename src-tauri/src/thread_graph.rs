@@ -459,7 +459,7 @@ pub struct ThreadGraph {
     /// The parent graph remains independently mutable, so history must never
     /// be reconstructed from a live inter-thread pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub     conversation_history: Option<ConversationHistoryRef>,
+    pub conversation_history: Option<ConversationHistoryRef>,
     /// Legacy user-authored excerpts from assistant messages. Kept so older
     /// graph files still parse; the UI no longer creates or displays them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -515,7 +515,7 @@ pub struct TranscriptAnnotation {
     pub id: String,
     pub source_turn_id: String,
     pub text: String,
-    pub     created_at: u64,
+    pub created_at: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
