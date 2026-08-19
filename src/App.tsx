@@ -13450,6 +13450,13 @@ function MainApp() {
               }
               promptProjectDir={promptProjectDirForPane(surface.pane)}
               promptProjectPath={homeRelativePath(promptProjectDirForPane(surface.pane))}
+              stickyUserMessages={settings.stickyUserMessages}
+              onToggleStickyUserMessages={() =>
+                setSettings((current) => ({
+                  ...current,
+                  stickyUserMessages: !current.stickyUserMessages,
+                }))
+              }
             />
           ) : undefined
         }
@@ -15165,7 +15172,6 @@ function MainApp() {
                     codeMode,
                     showTabDirectories: codeMode,
                     showToolCalls: codeMode,
-                    stickyUserMessages: codeMode,
                     requireCmdEnterToSend: codeMode,
                   }));
                 }}
@@ -15224,21 +15230,6 @@ function MainApp() {
                 onChange={(event) => {
                   const requireCmdEnterToSend = event.currentTarget.checked;
                   setSettings((current) => ({ ...current, requireCmdEnterToSend }));
-                }}
-              />
-            </label>
-
-            <label className="settings-row settings-toggle">
-              <span className="settings-label settings-label-indented">
-                Pin latest user message on top of transcripts
-              </span>
-              <input
-                type="checkbox"
-                className="settings-checkbox"
-                checked={settings.stickyUserMessages}
-                onChange={(event) => {
-                  const stickyUserMessages = event.currentTarget.checked;
-                  setSettings((current) => ({ ...current, stickyUserMessages }));
                 }}
               />
             </label>

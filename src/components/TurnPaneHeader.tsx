@@ -6,6 +6,7 @@ import {
   PanelRightClose,
   Paperclip,
   PictureInPicture2,
+  Pin,
   SquareCenterlineDashedVertical,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -63,6 +64,10 @@ interface TurnPaneHeaderProps {
   // Inserts saved-prompt text into this pane's composer; absent when the pane
   // has no agent composer, which disables the prompt-library trigger.
   onInsertPrompt?: (text: string) => void;
+  // Pins the latest user message to the top of the transcript while its reply
+  // scrolls. Active chrome matches the other header toggles.
+  stickyUserMessages: boolean;
+  onToggleStickyUserMessages: () => void;
   // The pane's project directory (keys the prompt library's Project scope) and
   // its home-relative display form (shown beside the Project heading).
   promptProjectDir?: string | null;
@@ -104,6 +109,8 @@ export default function TurnPaneHeader({
   onInsertPrompt,
   promptProjectDir,
   promptProjectPath,
+  stickyUserMessages,
+  onToggleStickyUserMessages,
 }: TurnPaneHeaderProps) {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   // One pulse when a new artifact lands (the count ticks up), so an agent
@@ -336,6 +343,26 @@ export default function TurnPaneHeader({
           projectDir={promptProjectDir}
           projectPath={promptProjectPath}
         />
+        <button
+          type="button"
+          className={`control-button turn-pane-header-button${
+            stickyUserMessages ? " is-active" : ""
+          }`}
+          title={
+            stickyUserMessages
+              ? "Unpin user message from top of transcripts"
+              : "Pin user message at top of transcripts"
+          }
+          aria-label={
+            stickyUserMessages
+              ? "Unpin user message from top of transcripts"
+              : "Pin user message at top of transcripts"
+          }
+          aria-pressed={stickyUserMessages}
+          onClick={onToggleStickyUserMessages}
+        >
+          <Pin size={14} aria-hidden="true" />
+        </button>
         {showQueueSplit ? (
           <button
             type="button"
