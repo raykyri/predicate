@@ -19,7 +19,6 @@ import { ArrowDown, ArrowUpRight, Ellipsis, History, LoaderCircle, X } from "luc
 import type {
   MessageAnchor,
   ThreadParticipant,
-  TranscriptAnnotation,
   Turn,
   TurnBlock,
   TranscriptOption,
@@ -53,7 +52,6 @@ import {
 import {
   assistantGroupTimestamp,
   assistantRunForItemKey,
-  annotationsForTimeline,
   assistantRunCopyTextByItemKey,
   buildTimelineItems,
   formatAbsoluteMessageTimestamp,
@@ -101,9 +99,6 @@ interface TurnOverlayProps {
   previousConversationLoading?: boolean;
   previousConversationError?: string | null;
   onLoadPreviousConversation?: () => void;
-  annotations?: TranscriptAnnotation[];
-  onSaveAnnotation?: (sourceTurnId: string, text: string) => Promise<void>;
-  onRemoveAnnotation?: (annotationId: string) => Promise<void>;
   assistantLabel: string;
   // Top bar pinned across the top of the pane (session and browser controls).
   header?: ReactNode;
@@ -224,28 +219,6 @@ interface QueueSplitDrag {
   startHeight: number;
 }
 
-interface TranscriptSelectionAction {
-  sourceTurnId: string;
-  text: string;
-  left: number;
-  top: number;
-  offscreen: boolean;
-}
-
-function transcriptSelectionPlacement(rect: DOMRect, source: Element) {
-  const pane = turnPaneRectFrom(source);
-  const leftBound = (pane?.left ?? 0) + 8;
-  const rightBound = (pane?.right ?? window.innerWidth) - 72;
-  const topBound = (pane?.top ?? 0) + 8;
-  const bottomBound = (pane?.bottom ?? window.innerHeight) - 34;
-  return {
-    left: Math.max(leftBound, Math.min(rect.left, rightBound)),
-    top: Math.max(topBound, Math.min(rect.bottom + 4, bottomBound)),
-    offscreen:
-      rect.bottom < (pane?.top ?? 0) || rect.top > (pane?.bottom ?? window.innerHeight),
-  };
-}
-
 function timelineCardsForHistoryScan(timeline: HTMLElement) {
   return Array.from(
     timeline.querySelectorAll<HTMLElement>(".turn-card[data-timeline-key]"),
@@ -309,9 +282,6 @@ export default function TurnOverlay({
   previousConversationLoading = false,
   previousConversationError = null,
   onLoadPreviousConversation,
-  annotations = [],
-  onSaveAnnotation,
-  onRemoveAnnotation,
   assistantLabel,
   header,
   input,
@@ -386,8 +356,6 @@ export default function TurnOverlay({
   const jumpingToLatestRef = useRef(false);
   const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
   const [composerHeight, setComposerHeight] = useState(0);
-  const [selectionAction, setSelectionAction] = useState<TranscriptSelectionAction | null>(null);
-  const [savingAnnotation, setSavingAnnotation] = useState(false);
   const [composerBaseHeight, setComposerBaseHeight] = useState(0);
   // Collapses older assistant cards once the reader scrolls above the pinned
   // last-user message. Stays on until jump-to-latest or the pin is unavailable
@@ -896,13 +864,9 @@ export default function TurnOverlay({
   const readerMode =
     readerModeRequested && focusedAssistantItems.length > 0;
   const displayedTimelineItems = readerMode ? focusedAssistantItems : timelineItems;
-  const timelineAnnotations = useMemo(
-    () => annotationsForTimeline(timelineItems, annotations),
-    [annotations, timelineItems],
-  );
   const hasTimelineContent = readerMode
     ? displayedTimelineItems.length > 0
-    : timelineItems.length > 0 || annotations.length > 0 || thinking;
+    : timelineItems.length > 0 || thinking;
 
   const focusAssistantTurn = useCallback(
     (itemKey: string) => {
@@ -943,87 +907,6 @@ export default function TurnOverlay({
     }
   }, [focusedAssistantItems.length, onFocusAssistantTurn, readerModeRequested]);
 
-  const captureAnnotationSelection = useCallback(() => {
-    if (!onSaveAnnotation) {
-      setSelectionAction(null);
-      return;
-    }
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
-      setSelectionAction(null);
-      return;
-    }
-    const range = selection.getRangeAt(0);
-    const cardFor = (node: Node) =>
-      (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
-        ".turn-card.role-assistant",
-      ) ?? null;
-    const sourceFor = (node: Node) =>
-      (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
-        "[data-annotation-source-turn-id]",
-      )?.dataset.annotationSourceTurnId ?? null;
-    const startCard = cardFor(range.startContainer);
-    const endCard = cardFor(range.endContainer);
-    const timeline = timelineRef.current;
-    if (!timeline || !startCard || startCard !== endCard || !timeline.contains(startCard)) {
-      setSelectionAction(null);
-      return;
-    }
-    const startBlocks = (range.startContainer instanceof Element
-      ? range.startContainer
-      : range.startContainer.parentElement
-    )?.closest(".turn-blocks");
-    const endBlocks = (range.endContainer instanceof Element
-      ? range.endContainer
-      : range.endContainer.parentElement
-    )?.closest(".turn-blocks");
-    if (!startBlocks || startBlocks !== endBlocks || !startCard.contains(startBlocks)) {
-      setSelectionAction(null);
-      return;
-    }
-    const startSourceTurnId = sourceFor(range.startContainer);
-    const endSourceTurnId = sourceFor(range.endContainer);
-    if (
-      !startSourceTurnId ||
-      startSourceTurnId !== endSourceTurnId ||
-      !turns.some((turn) => turn.id === startSourceTurnId)
-    ) {
-      setSelectionAction(null);
-      return;
-    }
-    const text = selection.toString().trim();
-    if (!text) {
-      setSelectionAction(null);
-      return;
-    }
-    setSelectionAction({
-      sourceTurnId: startSourceTurnId,
-      text,
-      ...transcriptSelectionPlacement(range.getBoundingClientRect(), startCard),
-    });
-  }, [onSaveAnnotation, turns]);
-
-  const applyAnnotationSelection = useCallback(async () => {
-    if (!selectionAction || !onSaveAnnotation || savingAnnotation) {
-      return;
-    }
-    setSavingAnnotation(true);
-    try {
-      await onSaveAnnotation(selectionAction.sourceTurnId, selectionAction.text);
-      window.getSelection()?.removeAllRanges();
-      setSelectionAction(null);
-    } catch {
-      // App owns the user-facing error toast; keep the selection/action so the
-      // user can adjust or retry it.
-    } finally {
-      setSavingAnnotation(false);
-    }
-  }, [onSaveAnnotation, savingAnnotation, selectionAction]);
-
-  useEffect(() => {
-    setSelectionAction(null);
-  }, [agentId]);
-
   // Loading a history snapshot prepends DOM above the reader. Offset scrollTop by the
   // new height so the current conversation stays under the reader's eyes.
   useLayoutEffect(() => {
@@ -1036,32 +919,6 @@ export default function TurnOverlay({
     timeline.scrollTop = snapshot.top + (timeline.scrollHeight - snapshot.height);
   }, [conversationHistory.length]);
 
-  useEffect(() => {
-    if (!selectionAction) {
-      return;
-    }
-    const dismiss = (event: Event) => {
-      const target = event.target instanceof Element ? event.target : null;
-      if (!target?.closest(".turn-annotation-save-action")) {
-        setSelectionAction(null);
-      }
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setSelectionAction(null);
-      }
-    };
-    document.addEventListener("mousedown", dismiss);
-    document.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("resize", dismiss);
-    window.addEventListener("scroll", dismiss, true);
-    return () => {
-      document.removeEventListener("mousedown", dismiss);
-      document.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("resize", dismiss);
-      window.removeEventListener("scroll", dismiss, true);
-    };
-  }, [selectionAction]);
   // WebKit can omit a scrollable flex container's block-end padding from its
   // effective scroll range. Represent the floating composer's clearance as a
   // real, non-shrinking tail item instead, so scrollHeight and the bottom
@@ -1440,7 +1297,7 @@ export default function TurnOverlay({
       <TranscriptLinkActionsProvider actions={linkActions}>
         <div
           ref={timelineRef}
-          className={`turn-timeline${displayedTimelineItems.length === 0 && annotations.length === 0 && !thinking ? " is-empty" : ""}${
+          className={`turn-timeline${displayedTimelineItems.length === 0 && !thinking ? " is-empty" : ""}${
             stickyUserEnabled && !readerMode ? " has-sticky-user" : ""
           }`}
           style={timelineStyle}
@@ -1448,8 +1305,6 @@ export default function TurnOverlay({
           onPointerDownCapture={cancelJumpToLatest}
           onWheelCapture={cancelJumpToLatest}
           onKeyDownCapture={cancelJumpToLatest}
-          onMouseUp={captureAnnotationSelection}
-          onKeyUp={captureAnnotationSelection}
         >
         {!readerMode &&
         (hasPreviousConversation || previousConversationLoading || previousConversationError) ? (
@@ -1480,7 +1335,7 @@ export default function TurnOverlay({
             ) : null}
           </div>
         ) : null}
-        {displayedTimelineItems.length === 0 && annotations.length === 0 && !thinking ? (
+        {displayedTimelineItems.length === 0 && !thinking ? (
           <div className="empty-state turn-empty-state">
             <span>No activity yet</span>
             {/* Adapters emit both the bare "Transcript unavailable" and
@@ -1605,14 +1460,6 @@ export default function TurnOverlay({
                     ) : null}
                   </div>
                 ) : null}
-                {!readerMode &&
-                  (timelineAnnotations.byItemKey.get(item.key) ?? []).map((annotation) => (
-                    <SavedAnnotationCard
-                      key={annotation.id}
-                      annotation={annotation}
-                      onRemove={onRemoveAnnotation}
-                    />
-                  ))}
               </Fragment>
             );
           })
@@ -1627,15 +1474,6 @@ export default function TurnOverlay({
             <div className="turn-conversation-current-empty">No activity yet</div>
           </>
         ) : null}
-        {!readerMode &&
-          timelineAnnotations.orphaned.map((annotation) => (
-            <SavedAnnotationCard
-              key={annotation.id}
-              annotation={annotation}
-              sourceUnavailable
-              onRemove={onRemoveAnnotation}
-            />
-          ))}
         {!readerMode && thinking ? (
           <div className="turn-thinking" aria-live="polite">
             <span className="turn-thinking-dot" aria-hidden="true" />
@@ -1678,25 +1516,6 @@ export default function TurnOverlay({
           <div className="turn-sidebar-input-rail">{input}</div>
         </div>
       ) : null}
-      {selectionAction
-        ? createPortal(
-            <button
-              type="button"
-              className="control-button turn-annotation-save-action"
-              style={{
-                left: selectionAction.left,
-                top: selectionAction.top,
-                visibility: selectionAction.offscreen ? "hidden" : undefined,
-              }}
-              disabled={savingAnnotation}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => void applyAnnotationSelection()}
-            >
-              {savingAnnotation ? "Saving…" : "Save"}
-            </button>,
-            document.body,
-          )
-        : null}
     </section>
   );
 }
@@ -1883,53 +1702,10 @@ function MessageItemView({
       ) : null}
       <div className="turn-blocks">
         {item.blocks.map((block, index) => (
-          <div
-            key={`${item.key}-${index}`}
-            className="turn-message-block"
-            data-annotation-source-turn-id={
-              item.role === "assistant" ? item.blockSourceTurnIds[index] : undefined
-            }
-          >
+          <div key={`${item.key}-${index}`} className="turn-message-block">
             <MessageBlockView block={block} role={item.role} />
           </div>
         ))}
-      </div>
-    </article>
-  );
-}
-
-const ignoreMessageAction = () => undefined;
-
-function SavedAnnotationCard({
-  annotation,
-  sourceUnavailable = false,
-  onRemove,
-}: {
-  annotation: TranscriptAnnotation;
-  sourceUnavailable?: boolean;
-  onRemove?: (annotationId: string) => Promise<void>;
-}) {
-  return (
-    <article className="turn-card role-user turn-saved-annotation">
-      <header>
-        <span className="turn-card-role-label">
-          Saved{sourceUnavailable ? " · source unavailable" : ""}
-        </span>
-        <MessageActionsMenu
-          messageText={annotation.text}
-          copyText={annotation.text}
-          copyLabel="Copy saved highlight"
-          titleGenerationEnabled={false}
-          titleGenerationBusy={false}
-          onRegenerateTitleFromUserMessage={ignoreMessageAction}
-          onRemoveMessage={
-            onRemove ? () => onRemove(annotation.id) : undefined
-          }
-          removeLabel="Remove saved highlight"
-        />
-      </header>
-      <div className="turn-blocks">
-        <p className="turn-text">{annotation.text}</p>
       </div>
     </article>
   );
@@ -1956,8 +1732,6 @@ function MessageActionsMenu({
   onRegenerateTitleFromUserMessage,
   onForkFromMessage,
   onCopyHandoff,
-  onRemoveMessage,
-  removeLabel = "Remove",
 }: {
   savePromptAgentId?: string | null;
   messageText: string;
@@ -1968,8 +1742,6 @@ function MessageActionsMenu({
   onRegenerateTitleFromUserMessage: (message: string) => void;
   onForkFromMessage?: (() => void) | null;
   onCopyHandoff?: (() => Promise<boolean>) | null;
-  onRemoveMessage?: (() => Promise<void>) | null;
-  removeLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   // A handoff's payload is never on screen, so unlike the plain copy items this
@@ -2187,20 +1959,6 @@ function MessageActionsMenu({
                   }}
                 >
                   Save to prompt library
-                </button>
-              ) : null}
-              {onRemoveMessage ? (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="menu-item turn-message-menu-item is-destructive"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setOpen(false);
-                    void onRemoveMessage().catch(() => undefined);
-                  }}
-                >
-                  {removeLabel}
                 </button>
               ) : null}
             </div>,

@@ -503,42 +503,6 @@
   margin: 7px 0;
 }
 
-/* User-authored transcript excerpts share the real user-message bubble shape,
-   but their label makes clear they were saved locally rather than sent. */
-.turn-saved-annotation {
-  margin-top: 3px;
-}
-
-.turn-saved-annotation .turn-text {
-  white-space: pre-wrap;
-}
-
-.turn-annotation-save-action {
-  position: fixed;
-  z-index: var(--z-context-menu);
-  width: max-content;
-  min-height: 27px;
-  padding: 0 10px;
-  border: 1px solid var(--surface-border-default);
-  border-radius: 5px;
-  background: var(--research-highlight-action-bg);
-  color: var(--text-interactive);
-  font-family: var(--font-ui);
-  font-size: calc(13px + var(--turn-font-delta, 0px));
-  line-height: 1;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.38);
-  cursor: pointer;
-}
-
-.turn-annotation-save-action:hover:not(:disabled) {
-  background: var(--research-highlight-action-bg-hover);
-}
-
-.turn-annotation-save-action:disabled {
-  color: #929994;
-  cursor: default;
-}
-
 /* In the compact pane, the last user message pins to the top while the turn
    beneath it plays out, and releases as the view scrolls back up to its original slot.
    Expanded transcripts keep every message in the normal document flow.

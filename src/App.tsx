@@ -242,13 +242,10 @@ import {
 import { artifactTrayVisible, isArtifactBrowserOpen } from "./lib/artifacts";
 import { createTranscriptScrollCaptureSlot } from "./lib/transcriptScroll";
 import {
-  addThreadGraphAnnotation,
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
   pendingGraphOverlayTurns,
   overlayLiveTurnState,
-  removeThreadGraphAnnotation,
-  threadGraphAnnotationsForTurns,
   threadIdForAgent,
 } from "./lib/threadGraph";
 import { buildTimelineItems, formatPlainTextTranscript } from "./lib/turnTimeline";
@@ -416,7 +413,6 @@ import {
   cancelResearchNode,
   createResearchDocument,
   createResearchTree,
-  createTranscriptAnnotation,
   updateResearchDocument,
   exportPaneToResearch,
   forkResearchNode,
@@ -426,7 +422,6 @@ import {
   reorderResearchTrees,
   removeResearchTree,
   removeResearchBranch,
-  removeTranscriptAnnotation,
   restoreResearchTree,
   retryResearchNode,
   forkAgent,
@@ -549,7 +544,6 @@ import type {
   SavedPrompt,
   ShellAgentJobInfo,
   ThreadGraph,
-  TranscriptAnnotation,
   TranscriptHookEvent,
   TranscriptOption,
   Turn,
@@ -898,7 +892,6 @@ interface PendingFirstMessageTitle {
 
 interface AgentTurnInfo {
   turns: Turn[];
-  annotations: TranscriptAnnotation[];
   assistantLabel: string;
   // Formats transcript strings on first call and caches them. Only the copy
   // actions consume these, so eagerly formatting every agent's transcript on
@@ -920,7 +913,6 @@ interface TurnPaneSurface {
   pane: PaneInfo;
   agent: AgentInfo | undefined;
   turns: Turn[];
-  annotations: TranscriptAnnotation[];
   assistantLabel: string;
   getTranscript: () => string;
   getPlainTextTranscript: () => string;
@@ -2952,15 +2944,8 @@ function MainApp() {
       // turns" — the full string is only ever built for the copy actions.
       let transcript: string | null = null;
       let plainTextTranscript: string | null = null;
-      const visibleAnnotations = storedGraph
-        ? threadGraphAnnotationsForTurns(storedGraph, visibleTurns)
-        : [];
       const info: AgentTurnInfo = {
         turns: visibleTurns,
-        // A highlight is source-turn-global: show it on every branch containing
-        // that turn. A truly deleted source stays visible as an orphan, while a
-        // source that merely belongs to another branch remains hidden here.
-        annotations: visibleAnnotations,
         assistantLabel,
         getTranscript: () =>
           (transcript ??= formatTurnsTranscript(visibleTurns, assistantLabel)),
@@ -3233,57 +3218,6 @@ function MainApp() {
       }
     },
     [],
-  );
-  const saveTranscriptAnnotation = useCallback(
-    async (agentId: string, sourceTurnId: string, text: string) => {
-      try {
-        const annotation = await createTranscriptAnnotation(agentId, sourceTurnId, text);
-        const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
-        if (!agent) {
-          return;
-        }
-        const threadId = threadIdForAgent(agent);
-        setThreadGraphs((current) =>
-          current.map((graph) =>
-            graph.threadId === threadId
-              ? addThreadGraphAnnotation(graph, annotation)
-            : graph,
-          ),
-        );
-        // Begin a newer authoritative read immediately. This invalidates any
-        // graph request that started before the synchronous mutation and also
-        // hydrates the graph if this surface did not already retain it.
-        void fetchRetainedThreadGraph(threadId);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        throw err;
-      }
-    },
-    [fetchRetainedThreadGraph],
-  );
-  const deleteTranscriptAnnotation = useCallback(
-    async (agentId: string, annotationId: string) => {
-      try {
-        await removeTranscriptAnnotation(agentId, annotationId);
-        const agent = agentsRef.current.find((candidate) => candidate.id === agentId);
-        if (!agent) {
-          return;
-        }
-        const threadId = threadIdForAgent(agent);
-        setThreadGraphs((current) =>
-          current.map((graph) =>
-            graph.threadId === threadId
-              ? removeThreadGraphAnnotation(graph, annotationId)
-            : graph,
-          ),
-        );
-        void fetchRetainedThreadGraph(threadId);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : String(err));
-        throw err;
-      }
-    },
-    [fetchRetainedThreadGraph],
   );
   const hydrateAgentHistory = useCallback(async (agent: AgentInfo, includeGraph: boolean) => {
     const threadId = threadIdForAgent(agent);
@@ -5052,7 +4986,6 @@ function MainApp() {
     if (!agent) {
       return {
         turns: [],
-        annotations: [],
         assistantLabel: "Claude",
         getTranscript: () => "",
         getPlainTextTranscript: () => "",
@@ -5063,7 +4996,6 @@ function MainApp() {
     return (
       agentTurnInfoById.get(agent.id) ?? {
         turns: [],
-        annotations: [],
         assistantLabel: getAgentUiAdapter(agent.adapter).label,
         getTranscript: () => "",
         getPlainTextTranscript: () => "",
@@ -5154,7 +5086,6 @@ function MainApp() {
       pane,
       agent,
       turns: turnInfo.turns,
-      annotations: turnInfo.annotations,
       assistantLabel: turnInfo.assistantLabel,
       getTranscript: turnInfo.getTranscript,
       getPlainTextTranscript: turnInfo.getPlainTextTranscript,
@@ -13300,18 +13231,6 @@ function MainApp() {
                   threadIdForAgent(agent),
                   surface.previousConversationSnapshotId,
                 )
-            : undefined
-        }
-        annotations={agent ? surface.annotations : []}
-        onSaveAnnotation={
-          agent
-            ? (sourceTurnId, text) =>
-                saveTranscriptAnnotation(agent.id, sourceTurnId, text)
-            : undefined
-        }
-        onRemoveAnnotation={
-          agent
-            ? (annotationId) => deleteTranscriptAnnotation(agent.id, annotationId)
             : undefined
         }
         thinking={Boolean(

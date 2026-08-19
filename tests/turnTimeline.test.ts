@@ -3,7 +3,6 @@ import test from "node:test";
 import {
   assistantGroupTimestamp,
   assistantRunForItemKey,
-  annotationsForTimeline,
   assistantRunCopyTextByItemKey,
   assistantTextFromTimelineItems,
   buildTimelineItems,
@@ -17,7 +16,7 @@ import {
   timelineItemsAfterLastToolCall,
   timelineItemsContainTranscriptActivity,
 } from "../src/lib/turnTimeline";
-import type { TranscriptAnnotation, Turn, TurnBlock } from "../src/types";
+import type { Turn, TurnBlock } from "../src/types";
 
 let nextIndex = 0;
 
@@ -81,7 +80,7 @@ test("activities of a new reply render below the user message that triggered the
   assert.ok(activityOwner.activities.length > 0, "reply activities attach after the question");
 });
 
-test("tracks source turns through message folding and places saved highlights", () => {
+test("tracks source turns through message folding", () => {
   nextIndex = 0;
   const first = turn("assistant", [text("first")]);
   const second = turn("assistant", [text("second")]);
@@ -89,18 +88,6 @@ test("tracks source turns through message folding and places saved highlights", 
   const items = buildTimelineItems([first, second, question]);
   assert.deepEqual(items[0].sourceTurnIds, [first.id, second.id]);
   assert.deepEqual(items[0].blockSourceTurnIds, [first.id, second.id]);
-
-  const annotations: TranscriptAnnotation[] = [
-    { id: "later", sourceTurnId: second.id, text: "second", createdAt: 20 },
-    { id: "earlier", sourceTurnId: first.id, text: "first", createdAt: 10 },
-    { id: "missing", sourceTurnId: "gone", text: "gone", createdAt: 30 },
-  ];
-  const placed = annotationsForTimeline(items, annotations);
-  assert.deepEqual(
-    placed.byItemKey.get(items[0].key)?.map(({ id }) => id),
-    ["earlier", "later"],
-  );
-  assert.deepEqual(placed.orphaned.map(({ id }) => id), ["missing"]);
 });
 
 test("assistant text copy preserves original markdown and omits non-answer content", () => {

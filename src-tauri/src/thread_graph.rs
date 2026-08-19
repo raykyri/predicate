@@ -459,10 +459,9 @@ pub struct ThreadGraph {
     /// The parent graph remains independently mutable, so history must never
     /// be reconstructed from a live inter-thread pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub conversation_history: Option<ConversationHistoryRef>,
-    /// User-authored excerpts saved from assistant messages. Unlike turn nodes,
-    /// these cannot be reconstructed from a provider transcript, so annotation
-    /// mutations synchronously flush this graph before reporting success.
+    pub     conversation_history: Option<ConversationHistoryRef>,
+    /// Legacy user-authored excerpts from assistant messages. Kept so older
+    /// graph files still parse; the UI no longer creates or displays them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub annotations: Vec<TranscriptAnnotation>,
 }
@@ -516,12 +515,8 @@ pub struct TranscriptAnnotation {
     pub id: String,
     pub source_turn_id: String,
     pub text: String,
-    pub created_at: u64,
+    pub     created_at: u64,
 }
-
-pub const MAX_TRANSCRIPT_ANNOTATIONS_PER_THREAD: usize = 1_000;
-pub const MAX_TRANSCRIPT_ANNOTATION_BYTES: usize = 64 * 1024;
-pub const MAX_TRANSCRIPT_ANNOTATION_BYTES_PER_THREAD: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1242,63 +1237,6 @@ impl ThreadStore {
         .map_err(|err| format!("thread {thread_id}: {err}"))
     }
 
-    pub fn create_annotation(
-        &self,
-        agent: &AgentInfo,
-        annotation: TranscriptAnnotation,
-    ) -> Result<TranscriptAnnotation, String> {
-        let thread_id = agent_thread_id(agent);
-        let created = annotation.clone();
-        self.with_agent_graph_result(agent, |graph| {
-            let branch_id = focused_branch_id_for_agent(graph, agent);
-            let source = focused_branch_turn_nodes(graph, &branch_id)
-                .into_iter()
-                .find(|turn| turn.base.id == annotation.source_turn_id)
-                .ok_or_else(|| "the source message is no longer available".to_string())?;
-            if source.turn.role != "assistant" {
-                return Err("only assistant messages can be saved".to_string());
-            }
-            if graph.annotations.iter().any(|saved| {
-                saved.source_turn_id == annotation.source_turn_id && saved.text == annotation.text
-            }) {
-                return Err("that selection is already saved".to_string());
-            }
-            let mut next = graph.annotations.clone();
-            next.push(annotation.clone());
-            validate_annotation_collection(&next)?;
-            graph.annotations = next;
-            Ok(())
-        })
-        .map_err(|err| format!("thread {thread_id}: {err}"))?;
-        flush_dirty_thread_graph(&self.storage_root_string(), &thread_id)
-            .map_err(|err| format!("thread {thread_id}: {err}"))?;
-        Ok(created)
-    }
-
-    pub fn remove_annotation(
-        &self,
-        agent: &AgentInfo,
-        annotation_id: &str,
-    ) -> Result<TranscriptAnnotation, String> {
-        let thread_id = agent_thread_id(agent);
-        let removed = std::cell::RefCell::new(None);
-        self.with_agent_graph_result(agent, |graph| {
-            let index = graph
-                .annotations
-                .iter()
-                .position(|annotation| annotation.id == annotation_id)
-                .ok_or_else(|| "the saved highlight was not found".to_string())?;
-            *removed.borrow_mut() = Some(graph.annotations.remove(index));
-            Ok(())
-        })
-        .map_err(|err| format!("thread {thread_id}: {err}"))?;
-        flush_dirty_thread_graph(&self.storage_root_string(), &thread_id)
-            .map_err(|err| format!("thread {thread_id}: {err}"))?;
-        removed
-            .into_inner()
-            .ok_or_else(|| format!("thread {thread_id}: the saved highlight was not found"))
-    }
-
     fn with_agent_graph<F>(&self, agent: &AgentInfo, mutate: F) -> Result<ThreadGraph, String>
     where
         F: FnOnce(&mut ThreadGraph),
@@ -1355,39 +1293,6 @@ impl ThreadStore {
     fn storage_root_string(&self) -> String {
         self.storage_root.display().to_string()
     }
-}
-
-fn annotation_storage_bytes(annotation: &TranscriptAnnotation) -> usize {
-    96usize
-        .saturating_add(annotation.id.len())
-        .saturating_add(annotation.source_turn_id.len())
-        .saturating_add(annotation.text.len().saturating_mul(6))
-}
-
-fn validate_annotation_collection(annotations: &[TranscriptAnnotation]) -> Result<(), String> {
-    if annotations.len() > MAX_TRANSCRIPT_ANNOTATIONS_PER_THREAD {
-        return Err(format!(
-            "a transcript can have at most {MAX_TRANSCRIPT_ANNOTATIONS_PER_THREAD} saved highlights"
-        ));
-    }
-    let mut ids = HashSet::new();
-    let mut total_bytes = 0usize;
-    for annotation in annotations {
-        if annotation.id.is_empty() || !ids.insert(annotation.id.as_str()) {
-            return Err("saved highlights must have unique non-empty ids".to_string());
-        }
-        if annotation.source_turn_id.is_empty() || annotation.text.trim().is_empty() {
-            return Err("a saved highlight cannot be empty".to_string());
-        }
-        if annotation.text.len() > MAX_TRANSCRIPT_ANNOTATION_BYTES {
-            return Err("a saved highlight is too large".to_string());
-        }
-        total_bytes = total_bytes.saturating_add(annotation_storage_bytes(annotation));
-    }
-    if total_bytes > MAX_TRANSCRIPT_ANNOTATION_BYTES_PER_THREAD {
-        return Err("a transcript contains too much saved highlight data".to_string());
-    }
-    Ok(())
 }
 
 fn ensure_branch(graph: &mut ThreadGraph, agent: &AgentInfo, branch_id: &str) {
@@ -2023,81 +1928,6 @@ mod tests {
         assert_eq!(child_graph.conversation_history, Some(history));
 
         fs::remove_dir_all(worktree).unwrap();
-    }
-
-    #[test]
-    fn saved_highlights_persist_survive_turn_replacement_and_remove_individually() {
-        let root = temp_worktree("qmux-thread-annotations");
-        let agent = sample_agent(root.display().to_string());
-        let store = ThreadStore::new(root.display().to_string());
-        let assistant = sample_turn(&agent.id, "assistant-1", "assistant", 0);
-        store.append_turn_node(&agent, &assistant).unwrap();
-
-        let first = TranscriptAnnotation {
-            id: "annotation-1".to_string(),
-            source_turn_id: assistant.id.clone(),
-            text: "first excerpt".to_string(),
-            created_at: 10,
-        };
-        let second = TranscriptAnnotation {
-            id: "annotation-2".to_string(),
-            source_turn_id: assistant.id.clone(),
-            text: "second excerpt".to_string(),
-            created_at: 20,
-        };
-        store.create_annotation(&agent, first.clone()).unwrap();
-        store.create_annotation(&agent, second.clone()).unwrap();
-        let duplicate = TranscriptAnnotation {
-            id: "annotation-3".to_string(),
-            ..first.clone()
-        };
-        assert!(
-            store
-                .create_annotation(&agent, duplicate)
-                .unwrap_err()
-                .contains("already saved")
-        );
-
-        store.replace_agent_branch_turns(&agent, &[]).unwrap();
-        let graph = store.read_thread("thread-1").unwrap().unwrap();
-        assert!(!graph.nodes.contains_key(&assistant.id));
-        assert_eq!(graph.annotations, vec![first.clone(), second.clone()]);
-
-        assert_eq!(store.remove_annotation(&agent, &first.id).unwrap(), first);
-        assert_eq!(
-            store.read_thread("thread-1").unwrap().unwrap().annotations,
-            vec![second]
-        );
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn saved_highlights_use_graph_focus_when_legacy_agent_has_no_branch_id() {
-        let root = temp_worktree("qmux-thread-annotation-legacy-focus");
-        let mut agent = sample_agent_with(
-            "agent-1",
-            "codex",
-            "thread-1",
-            "branch-shared",
-            root.display().to_string(),
-        );
-        let store = ThreadStore::new(root.display().to_string());
-        let assistant = sample_turn(&agent.id, "assistant-1", "assistant", 0);
-        store.append_turn_node(&agent, &assistant).unwrap();
-
-        agent.branch_id = None;
-        let annotation = TranscriptAnnotation {
-            id: "annotation-legacy-focus".to_string(),
-            source_turn_id: assistant.id,
-            text: "visible excerpt".to_string(),
-            created_at: 10,
-        };
-        assert_eq!(
-            store.create_annotation(&agent, annotation.clone()).unwrap(),
-            annotation
-        );
-
-        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

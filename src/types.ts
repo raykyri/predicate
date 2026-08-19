@@ -556,6 +556,8 @@ export interface ThreadGraph {
   branches: Record<string, ThreadBranch>;
   nodes: Record<string, ThreadNode>;
   conversationHistory?: ConversationHistoryRef | null;
+  /** Legacy excerpts saved from assistant messages. Parsed so older graph
+   * files still load; the UI no longer creates or displays them. */
   annotations?: TranscriptAnnotation[];
 }
 

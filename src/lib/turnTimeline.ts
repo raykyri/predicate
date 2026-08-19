@@ -6,7 +6,6 @@
 import type {
   MessageAnchor,
   ThreadParticipant,
-  TranscriptAnnotation,
   Turn,
   TurnBlock,
 } from "../types";
@@ -44,7 +43,7 @@ export interface MessageItem {
    */
   timestamp?: number | null;
   /** Native/qmux turns whose text or activity was folded into this visible
-   * message. Saved excerpts use these ids to stay attached across card merges. */
+   * message. */
   sourceTurnIds: string[];
   /** Source turn for each entry in `blocks`, kept separately because one
    * visible assistant card can fold text from several native turns. */
@@ -752,48 +751,6 @@ export function sameMessageItem(a: MessageItem, b: MessageItem): boolean {
     a.activities.length === b.activities.length &&
     a.activities.every((activity, index) => sameActivityItem(activity, b.activities[index]))
   );
-}
-
-export interface TimelineAnnotations {
-  byItemKey: Map<string, TranscriptAnnotation[]>;
-  orphaned: TranscriptAnnotation[];
-}
-
-/** Places each saved excerpt after the visible message containing its source
- * turn. The final matching item wins when presentation folding changes, and
- * missing sources remain available for an explicit orphaned section. */
-export function annotationsForTimeline(
-  items: MessageItem[],
-  annotations: TranscriptAnnotation[],
-): TimelineAnnotations {
-  const itemKeyByTurnId = new Map<string, string>();
-  for (const item of items) {
-    if (item.role !== "assistant") {
-      continue;
-    }
-    for (const turnId of item.sourceTurnIds) {
-      itemKeyByTurnId.set(turnId, item.key);
-    }
-  }
-  const byItemKey = new Map<string, TranscriptAnnotation[]>();
-  const orphaned: TranscriptAnnotation[] = [];
-  const ordered = [...annotations].sort(
-    (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
-  );
-  for (const annotation of ordered) {
-    const itemKey = itemKeyByTurnId.get(annotation.sourceTurnId);
-    if (!itemKey) {
-      orphaned.push(annotation);
-      continue;
-    }
-    const existing = byItemKey.get(itemKey);
-    if (existing) {
-      existing.push(annotation);
-    } else {
-      byItemKey.set(itemKey, [annotation]);
-    }
-  }
-  return { byItemKey, orphaned };
 }
 
 /**

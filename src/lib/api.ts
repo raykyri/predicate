@@ -60,7 +60,6 @@ import type {
   SubmitAgentTurnMode,
   SubmitAgentTurnResult,
   TranscriptOption,
-  TranscriptAnnotation,
   ThreadGraph,
   Turn,
   WorktreeStatus,
@@ -459,25 +458,6 @@ export function getThreadGraph(threadId: string) {
 export function getConversationHistorySnapshot(snapshotId: string) {
   return invoke<ConversationHistorySnapshot | null>("get_conversation_history_snapshot", {
     snapshotId,
-  });
-}
-
-export function createTranscriptAnnotation(
-  agentId: string,
-  sourceTurnId: string,
-  text: string,
-) {
-  return invoke<TranscriptAnnotation>("create_transcript_annotation", {
-    agentId,
-    sourceTurnId,
-    text,
-  });
-}
-
-export function removeTranscriptAnnotation(agentId: string, annotationId: string) {
-  return invoke<TranscriptAnnotation>("remove_transcript_annotation", {
-    agentId,
-    annotationId,
   });
 }
 
