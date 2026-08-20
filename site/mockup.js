@@ -15,6 +15,9 @@
 //   panes   — collapses and restores the sidebar and the transcript, and expands
 //             the transcript over the window, with the app's own restore
 //             affordances.
+//   terminal-map — opens the sidebar dashboard's modal: every pane's queue side
+//             by side, with working stream chips, per-rail composers, and rail
+//             heads that hand you to their session.
 //   panels  — the four surfaces the right pane's header opens: the prompt
 //             library, the split queue, the browser overlay, and the artifact
 //             tray. They interlock: a saved prompt lands in the composer, and
@@ -349,6 +352,10 @@
     for (const attribute of node.attributes) {
       replacement.setAttribute(attribute.name, attribute.value);
     }
+    // A promoted control is by definition meant to be reachable, so it never
+    // inherits the decorative subtree's aria-hidden (the sidebar header ships
+    // hidden wholesale and its buttons become real one feature at a time).
+    replacement.removeAttribute("aria-hidden");
     replacement.innerHTML = node.innerHTML;
     if (replacement instanceof HTMLButtonElement) {
       replacement.type = "button";
@@ -648,6 +655,415 @@
       }
       button.addEventListener("click", handler);
     }
+    return {};
+  }
+
+  // ---------------------------------------------------------- terminal-map
+
+  const CHECK_ICON =
+    '<svg class="lucide" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" ' +
+    'aria-hidden="true" focusable="false"><path d="M20 6 9 17l-5-5"/></svg>';
+  const MINUS_ICON =
+    '<svg class="lucide" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" ' +
+    'stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" ' +
+    'aria-hidden="true" focusable="false"><path d="M5 12h14"/></svg>';
+
+  /** Sentinel rail id for the drafts column, matching the app's Home board. */
+  const DRAFTS_RAIL_ID = "__drafts__";
+
+  function createTerminalMap() {
+    const foundBackdrop = mockup.querySelector("[data-mock-terminal-map]");
+    const triggerNode = mockup.querySelector('[data-mock-action="open-terminal-map"]');
+    if (!(foundBackdrop instanceof HTMLElement) || !triggerNode) {
+      return null;
+    }
+    const backdrop = /** @type {HTMLElement} */ (foundBackdrop);
+    const dialogNode = backdrop.querySelector("[data-mock-terminal-map-dialog]");
+    const trigger = promote(triggerNode, "button");
+    if (!trigger || !(dialogNode instanceof HTMLElement)) {
+      return null;
+    }
+    const dialog = /** @type {HTMLElement} */ (dialogNode);
+    // Re-bound so the hoisted setOpen closure sees a non-null trigger.
+    const openTrigger = trigger;
+    openTrigger.setAttribute("aria-haspopup", "dialog");
+    openTrigger.setAttribute("aria-label", "Open the terminal map");
+    openTrigger.setAttribute("title", "Open the terminal map");
+
+    // One caret menu open at a time, like every other popover here.
+    /** @type {HTMLElement | null} */
+    let openMenu = null;
+    /** @type {HTMLElement | null} */
+    let openCaret = null;
+
+    /** @param {boolean} refocus */
+    function closeMenu(refocus) {
+      if (openMenu && openCaret) {
+        openMenu.hidden = true;
+        openCaret.classList.remove("is-open");
+        openCaret.setAttribute("aria-expanded", "false");
+        if (refocus) {
+          openCaret.focus();
+        }
+      }
+      openMenu = null;
+      openCaret = null;
+    }
+
+    /** @param {string} name */
+    function streamRails(name) {
+      return /** @type {HTMLElement[]} */ (
+        [...backdrop.querySelectorAll(`[data-mock-rail-group="${name}"]`)]
+      );
+    }
+
+    /**
+     * A chip reads its rails' visibility from the DOM: filled when every rail
+     * shows, hollow when none does, a dash on a hollow box when mixed.
+     * @param {HTMLElement} chip
+     */
+    function syncChip(chip) {
+      const name = chip.dataset.mockHomeChip ?? "";
+      const rails = streamRails(name);
+      if (rails.length === 0) {
+        return;
+      }
+      const visible = rails.filter((rail) => !rail.hidden).length;
+      chip.classList.toggle("is-off", visible === 0);
+      chip.classList.toggle("is-mixed", visible > 0 && visible < rails.length);
+      const checkbox = chip.querySelector(".home-group-checkbox");
+      if (checkbox) {
+        checkbox.innerHTML =
+          visible === rails.length ? CHECK_ICON : visible > 0 ? MINUS_ICON : "";
+      }
+      const count = chip.querySelector(".home-group-count");
+      if (count) {
+        count.textContent = `${visible}/${rails.length}`;
+      }
+    }
+
+    /**
+     * @param {string} name
+     * @param {boolean} show
+     */
+    function setStream(name, show) {
+      for (const rail of streamRails(name)) {
+        rail.hidden = !show;
+      }
+      const chip = backdrop.querySelector(`[data-mock-home-chip="${name}"]`);
+      if (chip instanceof HTMLElement) {
+        syncChip(chip);
+      }
+      announce(
+        name === DRAFTS_RAIL_ID
+          ? `Drafts rail ${show ? "shown" : "hidden"}.`
+          : `${name} streams ${show ? "shown" : "hidden"}.`,
+      );
+    }
+
+    // Anything short of fully shown reveals the whole stream; a fully-shown
+    // one hides — the app's tristate checkbox resolving to all-on.
+    /** @param {string} name */
+    function toggleStream(name) {
+      const rails = streamRails(name);
+      const allVisible = rails.length > 0 && rails.every((rail) => !rail.hidden);
+      setStream(name, !allVisible);
+    }
+
+    /** @param {HTMLElement} rail */
+    function railTitle(rail) {
+      return rail.querySelector(".home-rail-title")?.textContent?.trim() || "pane";
+    }
+
+    /**
+     * The count pill follows the cards, the way the sidebar tab mirrors the
+     * composer's queue. Drafts count everything; agent rails exclude the
+     * settled and current turns that only give a column its history.
+     * @param {HTMLElement} rail
+     */
+    function syncRailCount(rail) {
+      const scroll = rail.querySelector(".home-rail-scroll");
+      const head = rail.querySelector(".home-rail-head");
+      if (!(scroll instanceof HTMLElement) || !(head instanceof HTMLElement)) {
+        return;
+      }
+      const isDrafts = rail.dataset.mockRail === DRAFTS_RAIL_ID;
+      const count = [...scroll.querySelectorAll(".queued-turn")].filter(
+        (card) =>
+          isDrafts ||
+          !(card.classList.contains("is-current") || card.classList.contains("is-past")),
+      ).length;
+      let pill = head.querySelector(".home-rail-count");
+      if (count === 0) {
+        pill?.remove();
+        return;
+      }
+      if (!(pill instanceof HTMLElement)) {
+        pill = document.createElement("span");
+        pill.className = "home-rail-count";
+        const paused = head.querySelector(".home-rail-paused");
+        if (paused) {
+          head.insertBefore(pill, paused);
+        } else {
+          head.append(pill);
+        }
+      }
+      pill.textContent = isDrafts ? String(count) : `${count} queued`;
+    }
+
+    /**
+     * @param {HTMLElement} rail
+     * @param {string} text
+     */
+    function addRailCard(rail, text) {
+      const scroll = rail.querySelector(".home-rail-scroll");
+      if (!(scroll instanceof HTMLElement)) {
+        return;
+      }
+      const isDrafts = rail.dataset.mockRail === DRAFTS_RAIL_ID;
+      const card = document.createElement("div");
+      card.className = "queued-turn";
+      const body = document.createElement("div");
+      body.className = "queued-turn-text";
+      body.textContent = text;
+      const actions = document.createElement("div");
+      actions.className = "queued-turn-actions";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "control-button home-rail-turn-remove";
+      remove.setAttribute(
+        "aria-label",
+        `${isDrafts ? "Delete draft" : "Remove queued turn"}: ${text}`,
+      );
+      remove.innerHTML = X_ICON;
+      remove.addEventListener("click", () => {
+        card.remove();
+        syncRailCount(rail);
+        announce(isDrafts ? "Draft deleted." : "Removed.");
+      });
+      actions.append(remove);
+      card.append(body, actions);
+      scroll.append(card);
+      scroll.scrollTop = scroll.scrollHeight;
+      syncRailCount(rail);
+      announce(isDrafts ? "Draft saved." : `Queued on ${railTitle(rail)}.`);
+    }
+
+    // aria-modal semantics: while the map is up, nothing behind it takes
+    // focus or clicks. Only children this feature inerted are restored, so
+    // a pane the panes feature had already collapsed stays collapsed.
+    /** @type {Element[]} */
+    let inertedByMap = [];
+
+    /** @param {boolean} open */
+    function setOpen(open) {
+      closeMenu(false);
+      backdrop.hidden = !open;
+      if (open) {
+        for (const child of mockup.children) {
+          if (child !== backdrop && !child.hasAttribute("inert")) {
+            child.setAttribute("inert", "");
+            inertedByMap.push(child);
+          }
+        }
+        dialog.focus();
+        announce("Terminal map open: every pane's queue, side by side.");
+      } else {
+        for (const child of inertedByMap) {
+          child.removeAttribute("inert");
+        }
+        inertedByMap = [];
+        openTrigger.focus();
+        announce("Terminal map closed.");
+      }
+    }
+
+    openTrigger.addEventListener("click", () => setOpen(backdrop.hidden));
+
+    // The app dismisses on a click that lands on the scrim itself.
+    backdrop.addEventListener("mousedown", (event) => {
+      if (event.target === backdrop) {
+        setOpen(false);
+      }
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (openMenu && openCaret) {
+        closeMenu(true);
+        return;
+      }
+      if (!backdrop.hidden) {
+        setOpen(false);
+      }
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (
+        openMenu &&
+        openCaret &&
+        target instanceof Element &&
+        !openMenu.contains(target) &&
+        !openCaret.contains(target)
+      ) {
+        closeMenu(false);
+      }
+    });
+
+    for (const node of [...backdrop.querySelectorAll('[data-mock-action="toggle-home-stream"]')]) {
+      const chip = node.closest(".home-group-chip");
+      const name = node instanceof HTMLElement ? node.dataset.mockStream ?? "" : "";
+      const toggle = promote(node, "button");
+      if (!toggle || !(chip instanceof HTMLElement) || !name) {
+        continue;
+      }
+      toggle.setAttribute(
+        "aria-label",
+        name === DRAFTS_RAIL_ID
+          ? "Show or hide the drafts rail"
+          : `Show or hide the ${name} streams`,
+      );
+      toggle.addEventListener("click", () => toggleStream(name));
+    }
+
+    for (const node of [...backdrop.querySelectorAll("[data-mock-home-caret]")]) {
+      const chip = node.closest(".home-group-chip");
+      const menu = chip ? chip.querySelector("[data-mock-home-menu]") : null;
+      if (!(node instanceof HTMLElement) || !(menu instanceof HTMLElement)) {
+        continue;
+      }
+      const caret = promote(node, "button");
+      if (!caret) {
+        continue;
+      }
+      caret.addEventListener("click", () => {
+        const opening = menu.hidden;
+        closeMenu(false);
+        if (opening) {
+          // Unhide before measuring: a menu that would run past the dialog's
+          // right edge anchors to the chip's right corner instead — the same
+          // clamp the app applies to its portaled menus.
+          menu.classList.remove("is-flipped");
+          menu.hidden = false;
+          const dialogRect = dialog.getBoundingClientRect();
+          const menuRect = menu.getBoundingClientRect();
+          if (menuRect.right > dialogRect.right - 8) {
+            menu.classList.add("is-flipped");
+          }
+          openMenu = menu;
+          openCaret = caret;
+        } else {
+          menu.hidden = true;
+        }
+        caret.classList.toggle("is-open", opening);
+        caret.setAttribute("aria-expanded", String(opening));
+      });
+      for (const itemNode of [...menu.querySelectorAll("[data-mock-home-menu-item]")]) {
+        const item = promote(itemNode, "button");
+        if (!(item instanceof HTMLElement)) {
+          continue;
+        }
+        item.addEventListener("click", () => {
+          const sessionId = item.dataset.mockHomeMenuItem ?? "";
+          const shown = item.classList.toggle("is-shown");
+          item.setAttribute("aria-checked", String(shown));
+          const box = item.querySelector(".home-group-checkbox");
+          if (box) {
+            box.innerHTML = shown ? CHECK_ICON : "";
+          }
+          const rail = backdrop.querySelector(`[data-mock-rail="${sessionId}"]`);
+          if (rail instanceof HTMLElement) {
+            rail.hidden = !shown;
+          }
+          if (chip instanceof HTMLElement) {
+            syncChip(chip);
+          }
+        });
+      }
+    }
+
+    // A rail head hands you to its session: the map closes and the matching
+    // sidebar tab — already a real control once the sessions feature ran —
+    // does the switching, exactly as closing Home focuses the pane.
+    for (const node of [...backdrop.querySelectorAll("[data-mock-open-session]")]) {
+      const sessionId = node instanceof HTMLElement ? node.dataset.mockOpenSession ?? "" : "";
+      const head = promote(node, "button");
+      if (!head || !sessionId) {
+        continue;
+      }
+      head.setAttribute(
+        "aria-label",
+        `Open session: ${head.querySelector(".home-rail-title")?.textContent?.trim() || sessionId}`,
+      );
+      head.addEventListener("click", () => {
+        setOpen(false);
+        const tab = mockup.querySelector(`[data-mock-session-tab="${sessionId}"] .pane-tab`);
+        if (tab instanceof HTMLButtonElement) {
+          tab.click();
+        }
+      });
+    }
+
+    // Server-rendered remove buttons become real, one per shipped card.
+    for (const node of [
+      ...backdrop.querySelectorAll("[data-mock-remove-queued], [data-mock-remove-draft]"),
+    ]) {
+      const isDrafts = node.hasAttribute("data-mock-remove-draft");
+      const rail = node.closest("[data-mock-rail]");
+      const button = promote(node, "button");
+      if (!button || !(rail instanceof HTMLElement)) {
+        continue;
+      }
+      button.addEventListener("click", () => {
+        button.closest(".queued-turn")?.remove();
+        syncRailCount(rail);
+        announce(isDrafts ? "Draft deleted." : "Removed.");
+      });
+    }
+
+    // Per-rail ghost composers: Enter queues onto that column, Shift+Enter
+    // adds a line, exactly as the app's Home composers behave.
+    for (const field of [...backdrop.querySelectorAll(".mock-rail-composer")]) {
+      if (!(field instanceof HTMLElement)) {
+        continue;
+      }
+      const rail = field.closest("[data-mock-rail]");
+      if (!(rail instanceof HTMLElement)) {
+        continue;
+      }
+      const isDrafts = rail.dataset.mockRail === DRAFTS_RAIL_ID;
+      const textarea = document.createElement("textarea");
+      textarea.className = field.className;
+      textarea.rows = 1;
+      textarea.placeholder = field.textContent || "";
+      textarea.setAttribute(
+        "aria-label",
+        isDrafts ? "New draft" : `Queue a follow-up for ${railTitle(rail)}`,
+      );
+      field.replaceWith(textarea);
+      textarea.addEventListener("input", () => {
+        textarea.style.height = "auto";
+        textarea.style.height = `${Math.min(textarea.scrollHeight, 120)}px`;
+      });
+      textarea.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" || event.shiftKey) {
+          return;
+        }
+        event.preventDefault();
+        const text = textarea.value.trim();
+        if (!text) {
+          return;
+        }
+        addRailCard(rail, text);
+        textarea.value = "";
+        textarea.style.height = "auto";
+      });
+    }
+
     return {};
   }
 
@@ -1016,6 +1432,50 @@
     let activeTrigger = null;
 
     /**
+     * Pin an open menu to its trigger the way the app's placePanePopover does:
+     * right-aligned so it grows toward the pane's center, opening above the
+     * composer trigger or below a message's, flipping to whichever side has
+     * room, and clamped inside the turn pane so no edge ever cuts it.
+     * @param {HTMLElement} menu
+     * @param {HTMLElement} trigger
+     */
+    function placeMenu(menu, trigger) {
+      const composer = menu.dataset.mockMenu === "composer";
+      const gap = composer ? 5 : 4;
+      const margin = 8;
+      const pane = trigger.closest(".turn-pane");
+      const bounds = (pane ?? mockup).getBoundingClientRect();
+      const origin = mockup.getBoundingClientRect();
+      const triggerRect = trigger.getBoundingClientRect();
+      const width = menu.offsetWidth;
+      const height = menu.offsetHeight;
+
+      let left = Math.max(
+        bounds.left + margin,
+        Math.min(triggerRect.right - width, bounds.right - margin - width),
+      );
+
+      const roomAbove = Math.max(0, triggerRect.top - gap - bounds.top);
+      const roomBelow = Math.max(0, bounds.bottom - (triggerRect.bottom + gap));
+      let above = composer;
+      if (above && height > roomAbove && roomBelow > roomAbove) {
+        above = false;
+      } else if (!above && height > roomBelow && roomAbove > roomBelow) {
+        above = true;
+      }
+
+      const maxHeight = above ? roomAbove : roomBelow;
+      const top = above
+        ? triggerRect.top - gap - Math.min(height, maxHeight)
+        : triggerRect.bottom + gap;
+
+      menu.style.left = `${Math.round(left - origin.left)}px`;
+      menu.style.top = `${Math.round(top - origin.top)}px`;
+      menu.style.maxHeight = `${Math.floor(maxHeight)}px`;
+      menu.style.maxWidth = `${Math.floor(bounds.right - bounds.left - margin * 2)}px`;
+    }
+
+    /**
      * @param {HTMLElement} menu
      * @param {HTMLElement} trigger
      * @param {boolean} open
@@ -1029,6 +1489,7 @@
       trigger.classList.toggle("is-active", open);
       trigger.setAttribute("aria-expanded", String(open));
       if (open) {
+        placeMenu(menu, trigger);
         activeMenu = menu;
         activeTrigger = trigger;
       } else if (activeMenu === menu) {
@@ -1056,6 +1517,11 @@
       trigger.setAttribute("aria-expanded", "false");
       menu.hidden = true;
       menu.setAttribute("inert", "");
+      // Portal out of the panes: both the composer rail and the scrolling
+      // transcript clip their overflow, and a menu anchored inside them opens
+      // with its far edge cut off. From the mockup root, placeMenu owns the
+      // geometry instead.
+      mockup.append(menu);
       trigger.addEventListener("click", () => setOpen(menu, trigger, menu.hidden));
 
       for (const itemNode of [...menu.querySelectorAll("[data-mock-menu-item]")]) {
@@ -1110,13 +1576,14 @@
   const sessions = features.has("sessions") ? createSessions(replay) : null;
   const queue = features.has("queue") ? createQueue() : null;
   const panes = features.has("panes") ? createPanes() : null;
+  const terminalMap = features.has("terminal-map") ? createTerminalMap() : null;
   const panels = features.has("panels") ? createPanels() : null;
   const menus = features.has("menus") ? createMenus() : null;
   if (document.documentElement.classList.contains("mock-replay-boot")) {
     replay?.prepare();
     document.documentElement.classList.remove("mock-replay-boot");
   }
-  if (!replay && !queue && !groups && !sessions && !panes && !panels && !menus) {
+  if (!replay && !queue && !groups && !sessions && !panes && !terminalMap && !panels && !menus) {
     return;
   }
 
@@ -1128,7 +1595,9 @@
   hideFromAssistiveTech([
     ".mock-traffic-lights",
     ".sidebar-mode-toggle",
-    ".sidebar-header-controls",
+    // The sidebar header's buttons are promoted to real controls (hide-sidebar
+    // by panes, the terminal map by terminal-map), so the subtree as a whole
+    // must stay exposed; promote() strips aria-hidden from each swap.
     ".sidebar-actions",
     ".mock-terminal-screen",
     ".turn-pane-session-control",

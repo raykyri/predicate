@@ -887,12 +887,15 @@ test("the landing page renders the app replica and its own image policy", async 
   const response = await fetch(`http://127.0.0.1:${address.port}/`);
   const body = await response.text();
   assert.equal(response.status, 200);
-  assert.match(body, /All-in-one terminal for CLI coding agents/);
-  assert.match(body, /qmux is a terminal for CLI agents, with easy-to-read transcripts/);
-  assert.match(body, /full-featured terminal built on libghostty, with tabs, split terminals/);
+  assert.match(body, /All-in-one terminal for agents/);
   assert.match(
     body,
-    /class="hero-lead">\s*<h1[^>]*>\s*All-in-one terminal for CLI coding agents\s*<\/h1>\s*<div class="intro-copy">/,
+    /qmux is a terminal for CLI agents with easy-to-read transcripts, artifacts, cross-agent queues/,
+  );
+  assert.match(body, /Built on libghostty/);
+  assert.match(
+    body,
+    /class="hero-lead">\s*<h1[^>]*>\s*All-in-one terminal for agents\s*<\/h1>\s*<div class="intro-copy">/,
   );
   assert.match(body, /aria-label="Supported agents"/);
   assert.match(body, /class="hero-agents"/);
@@ -944,7 +947,10 @@ test("the landing page renders the app replica and its own image policy", async 
 
   // The replica is complete before any script runs, and it carries the shared
   // step timeline the enhancement replays from.
-  assert.match(body, /data-mock-features="replay queue groups sessions panes panels menus"/);
+  assert.match(
+    body,
+    /data-mock-features="replay queue groups sessions panes terminal-map panels menus"/,
+  );
   // Every visible sidebar tab ships a complete terminal/transcript pair. The
   // default is visible without JavaScript and the enhancement swaps the rest.
   assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 14);
@@ -991,6 +997,17 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /data-mock-action="hide-sidebar"/);
   assert.match(body, /data-mock-action="show-sidebar"/);
   assert.match(body, /data-mock-action="show-right"/);
+  // The terminal map ships as closed modal markup: one rail per sidebar pane
+  // plus the drafts column, each with its queue cards and ghost composer.
+  assert.match(body, /data-mock-action="open-terminal-map"/);
+  assert.match(body, /data-mock-terminal-map="true" hidden/);
+  assert.match(body, /class="terminal-map-popover"/);
+  assert.equal((body.match(/class="home-rail"/g) ?? []).length, 15);
+  assert.equal((body.match(/data-mock-open-session=/g) ?? []).length, 14);
+  assert.equal((body.match(/class="mock-rail-composer"/g) ?? []).length, 15);
+  assert.match(body, /data-mock-home-chip="__drafts__"/);
+  assert.match(body, /data-mock-home-menu="qmux" hidden/);
+  assert.match(body, /home-rail-paused">paused</);
   assert.match(body, /data-step="5"/);
   // Replay staging is inert unless the pre-paint bootstrap activates it, so the
   // serialized default session remains complete when JavaScript is unavailable.

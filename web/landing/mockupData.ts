@@ -200,6 +200,27 @@ export const MOCK_GROUPS: MockGroup[] = [
   },
 ];
 
+// Card and rail shapes for the terminal map (see MOCK_HOME_RAILS below).
+export interface MockHomePastTurn {
+  text: string;
+  /** Rendered after the receipt check: "3h ago". */
+  receipt: string;
+}
+
+export interface MockHomeCurrentTurn {
+  text: string;
+  tone: "active" | "done";
+  /** "working · 4m" while running, "Done · 2h" once settled. */
+  receipt: string;
+}
+
+export interface MockHomeRail {
+  past?: MockHomePastTurn[];
+  current: MockHomeCurrentTurn;
+  queued?: string[];
+  paused?: boolean;
+}
+
 export interface TranscriptParagraph {
   type: "paragraph";
   step: number;
@@ -1297,6 +1318,77 @@ export const MOCK_SESSIONS: Record<string, MockSession> = {
     ],
   },
 };
+
+// The terminal map's rails: one column per sidebar pane, showing what each
+// agent settled, what it is working on, and what is queued behind it. The
+// current card carries each session's own prompt — the same text its
+// transcript opens with — so a rail and its pane never disagree.
+const rail = (
+  sessionId: string,
+  rest: Omit<MockHomeRail, "current"> &
+    Partial<Pick<MockHomeCurrentTurn, "tone" | "receipt">>,
+): MockHomeRail => ({
+  ...rest,
+  current: {
+    text: MOCK_SESSIONS[sessionId].userTurn.text,
+    tone: rest.tone ?? "done",
+    receipt: rest.receipt ?? "Done · just now",
+  },
+});
+
+export const MOCK_HOME_RAILS: Record<string, MockHomeRail> = {
+  "qmux-landing-transcript": rail("qmux-landing-transcript", {
+    tone: "active",
+    receipt: "working · 4m",
+    queued: [
+      "narrow the replay window once the image step lands",
+      "commit the landing copy pass",
+    ],
+  }),
+  "porffor-replace-all": rail("porffor-replace-all", {
+    past: [{ text: "reproduce the empty-search hang on main", receipt: "4h ago" }],
+    receipt: "Done · 22m",
+    queued: ["backport the match-width split to replace"],
+  }),
+  "porffor-codegen-casts": rail("porffor-codegen-casts", { receipt: "Done · 1h" }),
+  "porffor-math-hypot": rail("porffor-math-hypot", { receipt: "Done · 3h" }),
+  "autoresearch-muon-ramp": rail("autoresearch-muon-ramp", {
+    past: [{ text: "baseline the constant-momentum schedule", receipt: "6h ago" }],
+    tone: "active",
+    receipt: "working · 12m",
+    queued: [
+      "hold the ramp only if memory stays under 45 GB",
+      "rank tonight's keeps in results.tsv",
+    ],
+  }),
+  "autoresearch-qk-norm": rail("autoresearch-qk-norm", {
+    receipt: "Done · 2h",
+    queued: ["retry QK norm at half the head dim", "discard unless val_bpb beats 0.996841"],
+    paused: true,
+  }),
+  "autoresearch-results": rail("autoresearch-results", { receipt: "Done · 5h" }),
+  "nanochat-tokenizer": rail("nanochat-tokenizer", {
+    tone: "active",
+    receipt: "working · 2m",
+    queued: ["extend coverage to the byte-fallback path"],
+  }),
+  "nanochat-task-mixture": rail("nanochat-task-mixture", { receipt: "Done · 6h" }),
+  "llmc-layernorm": rail("llmc-layernorm", { receipt: "Done · 1d" }),
+  "tinygrad-movement": rail("tinygrad-movement", { receipt: "Done · 1d" }),
+  "tinygrad-metal": rail("tinygrad-metal", { receipt: "Done · 2d" }),
+  "wiki-compiler-index": rail("wiki-compiler-index", {
+    tone: "active",
+    receipt: "working · 7m",
+    queued: ["link the new summaries from the wiki home"],
+  }),
+  "wiki-glossary": rail("wiki-glossary", { receipt: "Done · 3d" }),
+};
+
+// The application-global drafts rail, shown left of the agent columns.
+export const MOCK_HOME_DRAFTS = [
+  "profile the cold-start path before touching the bundler",
+  "ask upstream how the test262 harness flags stale results",
+];
 
 export const DEFAULT_SESSION_ID = "qmux-landing-transcript";
 

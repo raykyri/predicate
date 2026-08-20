@@ -25,6 +25,7 @@ export const MOCKUP_CSS = `
   --text-body-soft: #d9ddd9;
   --text-muted: #8a938e;
   --text-activity: #8f9994;
+  --text-faint: #6f7773;
   --text-interactive: #edf0ec;
   --text-subtle: #7f8884;
   --text-disabled: #797d80;
@@ -35,10 +36,14 @@ export const MOCKUP_CSS = `
   --control-h-sm: 26px;
 
   --status-active-fg: #d7a84f;
+  --status-active-border: rgba(215, 168, 79, 0.42);
   --status-pending-fg: #7f8884;
+  --status-warning-fg: #d8b878;
+  --status-success-fg: #81c784;
   --split-border-active: rgba(255, 220, 143, 0.78);
 
   --surface-border-subtle: rgba(255, 255, 255, 0.075);
+  --surface-border-default: rgba(255, 255, 255, 0.12);
   --sidebar-switcher-bg: rgba(0, 0, 0, 0.18);
   --sidebar-switcher-active-bg: rgba(255, 255, 255, 0.105);
   --sidebar-group-bg: rgba(255, 255, 255, 0.013);
@@ -47,6 +52,7 @@ export const MOCKUP_CSS = `
   --terminal-pane-bg: #111315;
   --right-pane-bg: #171b1d;
   --workspace-bg: #17191b;
+  --research-workspace-bg: #151719;
   --field-bg: #111315;
   --chrome-header-bg: #14171a;
   --content-card-bg: #1d2224;
@@ -57,8 +63,11 @@ export const MOCKUP_CSS = `
   --chrome-control-bg-hover: rgba(32, 38, 40, 0.95);
   --accent-color: #8fd6c7;
   --accent-shadow: rgba(143, 214, 199, 0.35);
+  --accent-strong: #6cae9d;
   --content-inset-bg: #15191b;
   --queued-turn-border: #384246;
+  --home-cascade-card-border: #2b3235;
+  --home-cascade-current-bg: #171d1b;
   --control-bg: #24282b;
   --control-bg-hover: #2c3134;
   --control-border: #3a3d3f;
@@ -67,6 +76,8 @@ export const MOCKUP_CSS = `
   --popover-bg: #1d2224;
   --popover-item-hover-bg: #1b1f21;
   --popover-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  --dialog-border: #3b4447;
+  --dialog-shadow: 0 22px 70px rgba(0, 0, 0, 0.5);
   --context-menu-bg: #1b1f21;
   --context-menu-shadow:
     0 0 0 0.5px rgba(0, 0, 0, 0.45),
@@ -874,6 +885,14 @@ export const MOCKUP_CSS = `
   display: none;
 }
 
+/* Once the page's script enhances a menu it portals it to the mockup root, the
+   way the app portals popovers to <body>: positioned against the window, no
+   pane's overflow clipping can cut it, and placeMenu pins each open to its
+   trigger. The static page keeps these hidden inside their triggers. */
+.app-mockup > [data-mock-menu] {
+  position: absolute;
+}
+
 .app-mockup .popover-surface {
   display: flex;
   min-width: 0;
@@ -899,9 +918,6 @@ export const MOCKUP_CSS = `
 }
 
 .app-mockup .turn-message-menu-popover {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
   width: 188px;
 }
 
@@ -1103,11 +1119,7 @@ export const MOCKUP_CSS = `
 }
 
 .app-mockup .composer-menu-popover {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 5px);
   width: 220px;
-  max-height: 230px;
 }
 
 .app-mockup .queue-button-group {
@@ -1771,6 +1783,442 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 /* ------------------------------------------------------------------ */
+/* Terminal map (shell.css). The sidebar's dashboard button opens the Home
+   board over the window: a stream chip per sidebar group and one rail column
+   per pane, each showing its settled turns, current turn, and queue. The app
+   fixes its backdrop to the viewport; the replica covers only its own window,
+   which absolute positioning against .app-mockup gives it. */
+.app-mockup [data-mock-terminal-map][hidden] {
+  display: none;
+}
+
+.app-mockup .confirm-dialog-backdrop.terminal-map-backdrop {
+  position: absolute;
+  z-index: 20;
+  align-items: center;
+  padding: 24px;
+}
+
+.app-mockup .terminal-map-popover {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(1180px, 100%);
+  height: min(600px, 100%);
+  min-height: 0;
+  padding: 18px 18px 16px;
+  overflow: hidden;
+  border: 1px solid var(--dialog-border);
+  border-radius: 12px;
+  background: var(--research-workspace-bg);
+  box-shadow: var(--dialog-shadow);
+}
+
+.app-mockup .terminal-map-popover:focus {
+  outline: none;
+}
+
+.app-mockup .home-board {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.app-mockup .home-group-selector {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* The chip stays unclipped so its dropdown menu can escape it; the toggle
+   carries the left rounding the chip's overflow would have given it. */
+.app-mockup .home-group-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--control-border-hover-accent);
+  border-radius: var(--radius-md);
+  background: var(--control-bg-hover);
+}
+
+.app-mockup .home-group-chip.is-off {
+  border-color: var(--surface-border-default);
+  background: transparent;
+}
+
+.app-mockup .home-group-toggle,
+.app-mockup .home-group-caret {
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.app-mockup .home-group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 5px 0 0 5px;
+  color: var(--text-heading);
+}
+
+.app-mockup .home-group-chip.is-off .home-group-toggle {
+  color: var(--text-secondary);
+}
+
+.app-mockup .home-group-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-inline: 6px;
+  border-left: 1px solid var(--surface-border-default);
+  border-radius: 0 5px 5px 0;
+  color: var(--text-secondary);
+}
+
+/* The checkbox glyph box — filled with the accent when every rail in the
+   stream is shown; hollow when none is; a dash on a hollow box when mixed. */
+.app-mockup .home-group-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 1px solid var(--accent-strong);
+  border-radius: 4px;
+  background: var(--accent-strong);
+  color: #fff;
+}
+
+.app-mockup .home-group-chip.is-mixed .home-group-checkbox {
+  background: transparent;
+  color: var(--accent-strong);
+}
+
+.app-mockup .home-group-chip.is-off .home-group-checkbox {
+  border-color: var(--surface-border-default);
+  background: transparent;
+}
+
+.app-mockup .home-group-name {
+  white-space: nowrap;
+}
+
+.app-mockup .home-group-count {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.app-mockup .home-group-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 2;
+  width: 240px;
+  max-height: 240px;
+  gap: 2px;
+  padding: 4px;
+  overflow-y: auto;
+}
+
+/* Set by the script when the default anchoring would clip against the
+   dialog's right edge. */
+.app-mockup .home-group-menu.is-flipped {
+  left: auto;
+  right: 0;
+}
+
+.app-mockup [data-mock-home-menu][hidden] {
+  display: none;
+}
+
+.app-mockup .home-group-menu-item {
+  gap: 8px;
+}
+
+.app-mockup .home-group-menu-item-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Unchecked rows dim the checkbox so the "shown" set reads at a glance. */
+.app-mockup .home-group-menu-item:not(.is-shown) .home-group-checkbox {
+  border-color: var(--surface-border-default);
+  background: transparent;
+}
+
+.app-mockup .home-rails-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* Fixed column width, horizontal scroll by default. The faint frame lives on
+   the scroll viewport, not the content, so it fully encloses the columns. */
+.app-mockup .home-rails {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: var(--radius-lg);
+  scrollbar-width: thin;
+}
+
+.app-mockup .home-rails-inner {
+  position: relative;
+  width: max-content;
+  min-width: 100%;
+  height: 100%;
+}
+
+.app-mockup .home-rails-columns {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 280px;
+  gap: 16px;
+  height: 100%;
+}
+
+.app-mockup .home-rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* Stream chips hide rails by flipping hidden; the flex display above would
+   otherwise out-rank the UA's own [hidden] rule. */
+.app-mockup .home-rail[hidden] {
+  display: none;
+}
+
+/* Faint hairline centered in each gutter, between columns only. */
+.app-mockup .home-rail + .home-rail::before {
+  content: "";
+  position: absolute;
+  left: -8.5px;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.05);
+  pointer-events: none;
+}
+
+.app-mockup .home-rail-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 25px;
+  padding: 2px 2px 8px;
+  border: none;
+  background: none;
+  color: var(--control-fg);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+}
+
+.app-mockup .home-rail-head .pane-tab-dot {
+  flex: none;
+  animation: none;
+}
+
+/* The Drafts rail header isn't a control: same layout, no affordance. */
+.app-mockup .home-rail-head.is-static {
+  cursor: default;
+}
+
+.app-mockup .home-rail-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mockup .home-rail-count {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Paused-queue badge — the rail-level twin of the composer's "Queue Paused". */
+.app-mockup .home-rail-paused {
+  flex: none;
+  margin-left: auto;
+  font-size: var(--fs-sm);
+  color: var(--status-warning-fg);
+  white-space: nowrap;
+}
+
+/* The queued count already pushed right; sit beside it on the flex gap. */
+.app-mockup .home-rail-count + .home-rail-paused {
+  margin-left: 0;
+}
+
+.app-mockup .home-rail-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 1px 2px;
+  scrollbar-width: none;
+  mask-image: linear-gradient(to bottom, transparent 0, black 34px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 34px);
+}
+
+.app-mockup .home-rail-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+/* Bottom-anchor short columns while keeping long ones scrollable. */
+.app-mockup .home-rail-scroll > :first-child {
+  margin-top: auto;
+}
+
+/* Rails clamp card text; the full text lives one click away in the pane. */
+.app-mockup .home-rail-scroll .queued-turn-text {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+/* ---- Card variants used by the rails (inert in the composer queue) ---- */
+
+/* The turn an agent is working on now; border tone mirrors agent status. */
+.app-mockup .queued-turn.is-current {
+  background: var(--home-cascade-current-bg);
+  cursor: default;
+}
+
+.app-mockup .queued-turn.is-current .queued-turn-text {
+  color: var(--control-fg);
+}
+
+.app-mockup .queued-turn.is-current.tone-active {
+  border-color: var(--status-active-border);
+}
+
+/* A settled turn recedes to the calm rail background so an inactive terminal
+   never reads as actively working. */
+.app-mockup .queued-turn.is-current.tone-done {
+  border-color: var(--home-cascade-card-border);
+  background: transparent;
+}
+
+/* Already-settled turns recede so live work stands out. */
+.app-mockup .queued-turn.is-past {
+  opacity: 0.55;
+  background: transparent;
+  border-color: var(--home-cascade-card-border);
+  cursor: default;
+}
+
+/* Plain meta row under a card's text: "✓ 2h ago", "● working · 4m". */
+.app-mockup .queued-turn-receipt {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  line-height: 1.2;
+}
+
+.app-mockup .queued-turn-receipt-ok {
+  color: var(--status-success-fg);
+  vertical-align: -1.5px;
+  margin-right: 2px;
+}
+
+.app-mockup .queued-turn-receipt-live {
+  color: var(--status-active-fg);
+}
+
+/* Per-rail ghost composer — queue a follow-up without leaving the map. */
+.app-mockup .home-rail-composer {
+  flex: none;
+  margin-top: 8px;
+}
+
+.app-mockup .home-rail-composer textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 30px;
+  max-height: 120px;
+  padding: 5px 10px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--field-bg);
+  color: var(--text-body-soft);
+  font: inherit;
+  font-size: var(--fs-base);
+  line-height: 1.4;
+  resize: none;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+.app-mockup .home-rail-composer textarea::-webkit-scrollbar {
+  display: none;
+}
+
+.app-mockup .home-rail-composer textarea::placeholder {
+  color: var(--placeholder-color);
+}
+
+.app-mockup .home-rail-composer textarea:focus-visible {
+  outline: none;
+  border-color: var(--control-border-hover-accent);
+}
+
+/* The remove affordance on a rail card: a small button floated over the
+   card's top-right corner that materializes on hover (or while focused),
+   leaving the full card width to the text. */
+.app-mockup .home-rail-scroll .queued-turn-actions {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  z-index: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.app-mockup .home-rail-scroll .queued-turn-actions > button {
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: var(--content-inset-bg);
+  color: var(--text-faint);
+}
+
+.app-mockup .home-rail-scroll .queued-turn-actions > button svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Enhanced-only affordances. Hover and focus states are scoped to
    .is-interactive so the static replica never advertises a control that
    would not respond. */
@@ -1820,6 +2268,36 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 .app-mockup.is-interactive .sidebar-header-button:hover {
   background: var(--hover-bg);
   color: var(--hover-chrome-fg);
+}
+
+/* Terminal map controls. The rail head is the target, so hovering it brightens
+   the title rather than boxing the whole row. */
+.app-mockup.is-interactive .home-rail-head:not(.is-static) {
+  cursor: pointer;
+}
+
+.app-mockup.is-interactive .home-rail-head:hover .home-rail-title {
+  color: var(--text-heading);
+}
+
+.app-mockup.is-interactive .home-group-toggle:hover,
+.app-mockup.is-interactive .home-group-caret:hover,
+.app-mockup.is-interactive .home-group-caret.is-open {
+  background: var(--hover-bg);
+}
+
+.app-mockup.is-interactive .home-group-caret.is-open {
+  color: var(--text-heading);
+}
+
+.app-mockup.is-interactive .home-rail-scroll .queued-turn:hover .queued-turn-actions,
+.app-mockup.is-interactive .home-rail-scroll .queued-turn-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.app-mockup.is-interactive .home-rail-scroll .queued-turn-actions > button:hover {
+  color: var(--text-heading);
 }
 
 .app-mockup.is-interactive .turn-pane-header-button:hover {
