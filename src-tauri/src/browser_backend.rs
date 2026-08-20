@@ -696,6 +696,8 @@ pub struct BrowserAutomationSnapshot {
     tab_id: Option<u64>,
     url: Option<String>,
     title: Option<String>,
+    can_go_back: bool,
+    can_go_forward: bool,
     image_data_url: Option<String>,
     width: u64,
     height: u64,
@@ -803,6 +805,8 @@ struct AgentMirrorTarget {
     viewport: BrowserViewport,
     url: Option<String>,
     title: Option<String>,
+    can_go_back: bool,
+    can_go_forward: bool,
 }
 
 impl AgentMirrorTarget {
@@ -812,6 +816,8 @@ impl AgentMirrorTarget {
             tab_id: Some(self.viewport.tab_id),
             url: self.url,
             title: self.title,
+            can_go_back: self.can_go_back,
+            can_go_forward: self.can_go_forward,
             image_data_url,
             width: u64::from(self.viewport.width),
             height: u64::from(self.viewport.height),
@@ -881,10 +887,14 @@ fn prepare_agent_mirror(
         )?;
         lock_or_recover(&browser._backend.viewport_by_pane).insert(pane_id.to_string(), viewport);
     }
+    let history = browser.execute_for_pane(pane_id, "Page.getNavigationHistory", json!({}))?;
+    let (can_go_back, can_go_forward) = browser_history_state(&history)?;
     Ok(AgentMirrorTarget {
         viewport,
         url: tab.get("url").and_then(Value::as_str).map(str::to_string),
         title: tab.get("title").and_then(Value::as_str).map(str::to_string),
+        can_go_back,
+        can_go_forward,
     })
 }
 
@@ -894,6 +904,8 @@ fn unavailable_snapshot(width: u32, height: u32, error: String) -> BrowserAutoma
         tab_id: None,
         url: None,
         title: None,
+        can_go_back: false,
+        can_go_forward: false,
         image_data_url: None,
         width: u64::from(width.clamp(320, 4096)),
         height: u64::from(height.clamp(240, 4096)),
@@ -1134,6 +1146,61 @@ pub fn browser_automation_reload(
     browser: tauri::State<'_, BrowserDiscoverySocket>,
 ) -> Result<(), String> {
     browser.execute_for_pane(&pane_id, "Page.reload", json!({}))?;
+    Ok(())
+}
+
+fn browser_history_state(history: &Value) -> Result<(bool, bool), String> {
+    let current_index = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Page.getNavigationHistory returned no current index".to_string())?;
+    let entry_count = history
+        .get("entries")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| "Page.getNavigationHistory returned no entries".to_string())?;
+    Ok((
+        current_index > 0,
+        current_index >= 0 && (current_index as usize + 1) < entry_count,
+    ))
+}
+
+fn browser_history_entry_id(history: &Value, direction: &str) -> Result<Option<u64>, String> {
+    let offset = match direction {
+        "back" => -1,
+        "forward" => 1,
+        _ => return Err("invalid browser history direction".to_string()),
+    };
+    let current_index = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| "Page.getNavigationHistory returned no current index".to_string())?;
+    let target_index = current_index + offset;
+    if target_index < 0 {
+        return Ok(None);
+    }
+    Ok(history
+        .get("entries")
+        .and_then(Value::as_array)
+        .and_then(|entries| entries.get(target_index as usize))
+        .and_then(|entry| entry.get("id"))
+        .and_then(Value::as_u64))
+}
+
+#[tauri::command(async)]
+pub fn browser_automation_navigate_history(
+    pane_id: String,
+    direction: String,
+    browser: tauri::State<'_, BrowserDiscoverySocket>,
+) -> Result<(), String> {
+    let history = browser.execute_for_pane(&pane_id, "Page.getNavigationHistory", json!({}))?;
+    if let Some(entry_id) = browser_history_entry_id(&history, &direction)? {
+        browser.execute_for_pane(
+            &pane_id,
+            "Page.navigateToHistoryEntry",
+            json!({ "entryId": entry_id }),
+        )?;
+    }
     Ok(())
 }
 
@@ -1494,6 +1561,29 @@ mod tests {
         assert_eq!(browser_scale_factor(1.5), 1.5);
         assert_eq!(browser_scale_factor(3.0), 2.0);
         assert_eq!(browser_scale_factor(f64::NAN), 1.0);
+    }
+
+    #[test]
+    fn browser_history_selects_adjacent_entries_and_reports_boundaries() {
+        let history = json!({
+            "currentIndex": 1,
+            "entries": [{ "id": 10 }, { "id": 11 }, { "id": 12 }]
+        });
+        assert_eq!(browser_history_state(&history).unwrap(), (true, true));
+        assert_eq!(
+            browser_history_entry_id(&history, "back").unwrap(),
+            Some(10)
+        );
+        assert_eq!(
+            browser_history_entry_id(&history, "forward").unwrap(),
+            Some(12)
+        );
+
+        let first = json!({ "currentIndex": 0, "entries": [{ "id": 10 }] });
+        assert_eq!(browser_history_state(&first).unwrap(), (false, false));
+        assert_eq!(browser_history_entry_id(&first, "back").unwrap(), None);
+        assert_eq!(browser_history_entry_id(&first, "forward").unwrap(), None);
+        assert!(browser_history_entry_id(&history, "sideways").is_err());
     }
 
     #[test]

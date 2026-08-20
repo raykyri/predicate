@@ -1,4 +1,14 @@
-import { Bot, Expand, ExternalLink, Globe, Minimize2, RotateCw, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Bot,
+  Expand,
+  ExternalLink,
+  Globe,
+  Minimize2,
+  RotateCw,
+  X,
+} from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type {
   CSSProperties,
@@ -15,6 +25,8 @@ import {
   listenToBrowserScreencastFrames,
   listenToHumanBrowserEvents,
   navigateBrowserAutomation,
+  navigateBrowserAutomationHistory,
+  navigateHumanBrowserHistory,
   reloadBrowserAutomation,
   sendBrowserAutomationKey,
   sendBrowserAutomationMouse,
@@ -23,7 +35,7 @@ import {
   stopBrowserScreencast,
   syncHumanBrowser,
 } from "../lib/api";
-import type { BrowserAutomationSnapshot } from "../lib/api";
+import type { BrowserAutomationSnapshot, HumanBrowserSnapshot } from "../lib/api";
 
 const MIN_BROWSER_OVERLAY_WIDTH = 360;
 const MIN_BROWSER_OVERLAY_HEIGHT = 240;
@@ -148,6 +160,9 @@ export default function BrowserOverlay({
   const [draft, setDraft] = useState(url ?? "");
   const [resizing, setResizing] = useState(false);
   const [humanBrowserError, setHumanBrowserError] = useState<string | null>(null);
+  const [humanBrowserSnapshot, setHumanBrowserSnapshot] = useState<HumanBrowserSnapshot | null>(
+    null,
+  );
   const [automationSnapshot, setAutomationSnapshot] = useState<BrowserAutomationSnapshot | null>(
     null,
   );
@@ -188,6 +203,7 @@ export default function BrowserOverlay({
   useLayoutEffect(() => {
     if (!humanBrowser) {
       setHumanBrowserError(null);
+      setHumanBrowserSnapshot(null);
       syncHumanBrowserSlotRef.current = () => undefined;
       return;
     }
@@ -225,7 +241,7 @@ export default function BrowserOverlay({
       }
       lastSyncedUrl = currentUrl;
       try {
-        await syncHumanBrowser({
+        const snapshot = await syncHumanBrowser({
           ownerId: paneId,
           url: currentUrl,
           x: rect.left,
@@ -238,6 +254,9 @@ export default function BrowserOverlay({
         });
         if (!cancelled && sequence === syncSequence) {
           setHumanBrowserError(null);
+          if (snapshot) {
+            setHumanBrowserSnapshot(snapshot);
+          }
         }
       } catch (error) {
         if (!cancelled && sequence === syncSequence) {
@@ -306,6 +325,9 @@ export default function BrowserOverlay({
       locationPollInFlight = true;
       try {
         const snapshot = await getHumanBrowserSnapshot(paneId);
+        if (!cancelled && snapshot) {
+          setHumanBrowserSnapshot(snapshot);
+        }
         if (
           !cancelled &&
           navigationRevision === humanBrowserNavigationRevisionRef.current &&
@@ -400,6 +422,8 @@ export default function BrowserOverlay({
         tabId: null,
         url: currentUrl,
         title: null,
+        canGoBack: false,
+        canGoForward: false,
         imageDataUrl: null,
         width: 1280,
         height: 900,
@@ -817,6 +841,16 @@ export default function BrowserOverlay({
     }
   }
 
+  function navigateHistory(direction: "back" | "forward") {
+    if (automated) {
+      ignoreBrowserCommand(navigateBrowserAutomationHistory(paneId, direction));
+      return;
+    }
+    if (humanBrowser) {
+      ignoreBrowserCommand(navigateHumanBrowserHistory(paneId, direction));
+    }
+  }
+
   return (
     <div
       ref={overlayRef}
@@ -835,6 +869,36 @@ export default function BrowserOverlay({
         >
           <X size={14} aria-hidden="true" />
         </button>
+        <div className="browser-overlay-history-controls" role="group" aria-label="Page history">
+          <button
+            type="button"
+            className="icon-button browser-overlay-button"
+            title="Go back"
+            aria-label="Go back"
+            onClick={() => navigateHistory("back")}
+            disabled={
+              automated
+                ? !automationSnapshot?.canGoBack
+                : !humanBrowser || !humanBrowserSnapshot?.canGoBack
+            }
+          >
+            <ArrowLeft size={14} aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className="icon-button browser-overlay-button"
+            title="Go forward"
+            aria-label="Go forward"
+            onClick={() => navigateHistory("forward")}
+            disabled={
+              automated
+                ? !automationSnapshot?.canGoForward
+                : !humanBrowser || !humanBrowserSnapshot?.canGoForward
+            }
+          >
+            <ArrowRight size={14} aria-hidden="true" />
+          </button>
+        </div>
         {fullWidth ? null : (
           <div
             className="browser-overlay-resize-handle"

@@ -66,6 +66,12 @@
   flex: 0 0 auto;
 }
 
+.browser-overlay-history-controls {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+}
+
 .browser-overlay-mode-group {
   display: flex;
   gap: 6px;

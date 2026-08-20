@@ -934,6 +934,8 @@ export function artifactFileUrl(artifactId: string) {
 export type HumanBrowserSnapshot = {
   ownerId: string;
   url: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
 };
 
 export type HumanBrowserEvent = {
@@ -1023,6 +1025,16 @@ export function reloadHumanBrowser(ownerId: string) {
   });
 }
 
+export function navigateHumanBrowserHistory(ownerId: string, direction: "back" | "forward") {
+  return humanBrowserLifecycleQueue.enqueue(async () => {
+    const generation = await getHumanBrowserGeneration();
+    return invoke<void>("human_browser_navigate_history", {
+      request: { ownerId, generation },
+      direction,
+    });
+  });
+}
+
 export function listenToHumanBrowserEvents(
   onEvent: (event: HumanBrowserEvent) => void,
 ): Promise<UnlistenFn> {
@@ -1034,6 +1046,8 @@ export type BrowserAutomationSnapshot = {
   tabId: number | null;
   url: string | null;
   title: string | null;
+  canGoBack: boolean;
+  canGoForward: boolean;
   imageDataUrl: string | null;
   width: number;
   height: number;
@@ -1102,6 +1116,13 @@ export function navigateBrowserAutomation(paneId: string, url: string) {
 
 export function reloadBrowserAutomation(paneId: string) {
   return invoke<void>("browser_automation_reload", { paneId });
+}
+
+export function navigateBrowserAutomationHistory(
+  paneId: string,
+  direction: "back" | "forward",
+) {
+  return invoke<void>("browser_automation_navigate_history", { paneId, direction });
 }
 
 export function sendBrowserAutomationMouse(

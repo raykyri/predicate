@@ -321,6 +321,23 @@ public func qmuxNativeTerminalSetHumanBrowserLoadingBackground(
     }
 }
 
+@_cdecl("qmux_native_terminal_human_browser_history_state")
+public func qmuxNativeTerminalHumanBrowserHistoryState(
+    _ nativeView: UnsafeMutableRawPointer?
+) -> Int32 {
+    let nativeViewAddress = nativeView.map(UInt.init(bitPattern:))
+    return onTerminalMain {
+        guard let webView = nativeViewAddress.flatMap({
+            UnsafeMutableRawPointer(bitPattern: $0)
+        }).map({
+            Unmanaged<WKWebView>.fromOpaque($0).takeUnretainedValue()
+        }) else {
+            return 0
+        }
+        return (webView.canGoBack ? 1 : 0) | (webView.canGoForward ? 2 : 0)
+    }
+}
+
 @_cdecl("qmux_native_terminal_prepare_for_webview_reload")
 public func qmuxNativeTerminalPrepareForWebViewReload() -> Int32 {
     onTerminalMain {

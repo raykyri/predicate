@@ -9,7 +9,7 @@ use crate::native_terminal;
 use crate::state::AppState;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{
@@ -56,6 +56,8 @@ pub struct HumanBrowserOwnerRequest {
 pub struct HumanBrowserSnapshot {
     owner_id: String,
     url: String,
+    can_go_back: bool,
+    can_go_forward: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,6 +75,7 @@ struct HumanBrowserView {
     webview: Webview,
     requested_url: String,
     navigation_revision: u64,
+    history_state: Arc<AtomicU8>,
 }
 
 struct HumanBrowserInner {
@@ -304,6 +307,28 @@ fn set_native_browser_loading_background(_webview: &Webview, _active: bool) -> R
     Ok(())
 }
 
+#[cfg(target_os = "macos")]
+fn refresh_human_browser_history_state(webview: &Webview, history_state: Arc<AtomicU8>) {
+    let _ = webview.with_webview(move |platform| {
+        history_state.store(
+            native_terminal::human_browser_history_state(platform.inner()),
+            Ordering::Release,
+        );
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refresh_human_browser_history_state(webview: &Webview, history_state: Arc<AtomicU8>) {
+    let _ = webview.eval_with_callback(
+        "(() => { const nav = window.navigation; return nav ? (nav.canGoBack ? 1 : 0) | (nav.canGoForward ? 2 : 0) : (window.history.length > 1 ? 1 : 0); })()",
+        move |value| {
+            if let Ok(value) = serde_json::from_str::<u8>(&value) {
+                history_state.store(value & 3, Ordering::Release);
+            }
+        },
+    );
+}
+
 fn deactivate_view(view: &HumanBrowserView) {
     let _ = set_native_browser_active(&view.webview, false);
     // A child WKWebView sits above the main document's compositor, so a hide
@@ -324,7 +349,7 @@ fn create_webview(
     owner_id: &str,
     initial_url: Url,
     bounds: Rect,
-) -> Result<Webview, String> {
+) -> Result<(Webview, Arc<AtomicU8>), String> {
     let label = format!(
         "human-browser-{}",
         NEXT_WEBVIEW_LABEL.fetch_add(1, Ordering::Relaxed)
@@ -340,6 +365,8 @@ fn create_webview(
     let popup_owner = owner_id.to_string();
     let loading_background_active = Arc::new(AtomicBool::new(true));
     let page_loading_background_active = loading_background_active.clone();
+    let history_state = Arc::new(AtomicU8::new(0));
+    let page_history_state = history_state.clone();
 
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(initial_url))
         .on_navigation(move |url| {
@@ -349,6 +376,7 @@ fn create_webview(
             let loading = payload.event() == PageLoadEvent::Started;
             page_loading_background_active.store(loading, Ordering::Release);
             let _ = set_native_browser_loading_background(&webview, loading);
+            refresh_human_browser_history_state(&webview, page_history_state.clone());
             emit_event(
                 &page_app,
                 HumanBrowserEvent {
@@ -413,10 +441,12 @@ fn create_webview(
         return Err(format!("failed to hide the new human browser: {error}"));
     }
     let _ = set_native_browser_loading_background_from_state(&webview, loading_background_active);
-    Ok(webview)
+    Ok((webview, history_state))
 }
 
 fn current_snapshot(owner_id: &str, view: &HumanBrowserView) -> HumanBrowserSnapshot {
+    refresh_human_browser_history_state(&view.webview, view.history_state.clone());
+    let history_state = view.history_state.load(Ordering::Acquire);
     HumanBrowserSnapshot {
         owner_id: owner_id.to_string(),
         url: view
@@ -424,6 +454,8 @@ fn current_snapshot(owner_id: &str, view: &HumanBrowserView) -> HumanBrowserSnap
             .url()
             .map(|url| url.to_string())
             .unwrap_or_else(|_| view.requested_url.clone()),
+        can_go_back: history_state & 1 != 0,
+        can_go_forward: history_state & 2 != 0,
     }
 }
 
@@ -492,11 +524,13 @@ pub async fn human_browser_sync(
     let mut view = if let Some(current) = current {
         current
     } else {
-        let webview = create_webview(&app, &state, &request.owner_id, url.clone(), bounds)?;
+        let (webview, history_state) =
+            create_webview(&app, &state, &request.owner_id, url.clone(), bounds)?;
         let created = HumanBrowserView {
             webview,
             requested_url: url.to_string(),
             navigation_revision: request.navigation_revision,
+            history_state,
         };
         let mut inner = manager
             .inner
@@ -682,6 +716,37 @@ pub fn human_browser_reload(
         view.webview
             .reload()
             .map_err(|error| format!("failed to reload the human browser: {error}"))?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn human_browser_navigate_history(
+    request: HumanBrowserOwnerRequest,
+    direction: String,
+    manager: State<'_, HumanBrowserManager>,
+) -> Result<(), String> {
+    validate_owner_id(&request.owner_id)?;
+    let script = match direction.as_str() {
+        "back" => "window.history.back()",
+        "forward" => "window.history.forward()",
+        _ => return Err("invalid human browser history direction".to_string()),
+    };
+    let _lifecycle = manager.try_begin_lifecycle()?;
+    let view = {
+        let inner = manager
+            .inner
+            .lock()
+            .map_err(|_| "human browser state lock poisoned".to_string())?;
+        if request.generation != inner.generation {
+            return Ok(());
+        }
+        inner.views.get(&request.owner_id).cloned()
+    };
+    if let Some(view) = view {
+        view.webview
+            .eval(script)
+            .map_err(|error| format!("failed to navigate human browser history: {error}"))?;
     }
     Ok(())
 }

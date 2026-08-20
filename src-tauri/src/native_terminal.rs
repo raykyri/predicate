@@ -461,6 +461,7 @@ mod imp {
             native_view: *mut c_void,
             active: i32,
         ) -> i32;
+        fn qmux_native_terminal_human_browser_history_state(native_view: *mut c_void) -> i32;
         fn qmux_native_terminal_prepare_for_webview_reload() -> i32;
         fn qmux_native_terminal_focus(pane_id: *const c_char) -> i32;
         fn qmux_native_terminal_send_text(pane_id: *const c_char, text: *const c_char) -> i32;
@@ -832,6 +833,15 @@ mod imp {
         }
     }
 
+    pub fn human_browser_history_state(native_view: *mut c_void) -> u8 {
+        if native_view.is_null() {
+            return 0;
+        }
+        // SAFETY: Tauri owns the WKWebView for this synchronous query. Swift
+        // reads only WebKit's navigation-list state on the main actor.
+        unsafe { qmux_native_terminal_human_browser_history_state(native_view) }.clamp(0, 3) as u8
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         // SAFETY: the reset is synchronous main-actor state bookkeeping. It
         // preserves every pane and Ghostty surface.
@@ -1157,6 +1167,10 @@ mod imp {
         Ok(())
     }
 
+    pub fn human_browser_history_state(_native_view: *mut c_void) -> u8 {
+        0
+    }
+
     pub fn prepare_for_webview_reload() -> Result<(), String> {
         Ok(())
     }
@@ -1204,12 +1218,12 @@ mod imp {
 
 #[allow(unused_imports)]
 pub use imp::{
-    action, application_is_active, available, create_host_managed, focus, initialize,
-    is_ready_for_replay, paste_approved_text, play_bundled_sound, play_system_sound,
-    prepare_for_webview_reload, read_viewport_text, receive, remove, seed_settings, send_text,
-    set_human_browser_loading_background, set_human_browser_webview, set_iframe_shortcut_fallback,
-    set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
-    submit, update_settings,
+    action, application_is_active, available, create_host_managed, focus,
+    human_browser_history_state, initialize, is_ready_for_replay, paste_approved_text,
+    play_bundled_sound, play_system_sound, prepare_for_webview_reload, read_viewport_text, receive,
+    remove, seed_settings, send_text, set_human_browser_loading_background,
+    set_human_browser_webview, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
+    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
