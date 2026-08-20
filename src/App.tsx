@@ -12081,7 +12081,7 @@ function MainApp() {
   }, [settings]);
 
   // Automatic completion playback is backend-owned so it survives WebKit
-  // process reloads. Synchronize the persisted Display choice on boot/change;
+  // process reloads. Synchronize the persisted settings choice on boot/change;
   // the backend retains the last value while the document is temporarily gone.
   useEffect(() => {
     void setCompletionSound(settings.completionSound).catch(() => undefined);
@@ -15414,37 +15414,6 @@ function MainApp() {
 
             <div className="settings-divider" role="separator" />
 
-            <div className="settings-row">
-              <label htmlFor="settings-completion-sound" className="settings-label">
-                Completion sound
-              </label>
-              <div className="settings-completion-sound-controls">
-                <select
-                  id="settings-completion-sound"
-                  className="settings-select settings-completion-sound-select"
-                  value={settings.completionSound}
-                  onChange={(event) => {
-                    const completionSound = event.currentTarget.value as CompletionSoundId;
-                    setSettings((current) => ({ ...current, completionSound }));
-                  }}
-                >
-                  {COMPLETION_SOUND_OPTIONS.map((option) => (
-                    <option key={option.id} value={option.id}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  className="control-button settings-completion-sound-test"
-                  onClick={() => void testCompletionSound(settings.completionSound)}
-                >
-                  <Volume2 size={14} aria-hidden="true" />
-                  Test
-                </button>
-              </div>
-            </div>
-
             <label className="settings-row settings-toggle">
               <span className="settings-label">Show debug panel</span>
               <input
@@ -15538,6 +15507,38 @@ function MainApp() {
             </label>
 
             <div className="settings-row">
+              <label htmlFor="settings-completion-sound" className="settings-label">
+                Completion sound
+              </label>
+              <div className="settings-completion-sound-controls">
+                <select
+                  id="settings-completion-sound"
+                  className="settings-select settings-completion-sound-select"
+                  value={settings.completionSound}
+                  onChange={(event) => {
+                    const completionSound = event.currentTarget.value as CompletionSoundId;
+                    setSettings((current) => ({ ...current, completionSound }));
+                    void testCompletionSound(completionSound);
+                  }}
+                >
+                  {COMPLETION_SOUND_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  className="control-button settings-completion-sound-test"
+                  onClick={() => void testCompletionSound(settings.completionSound)}
+                >
+                  <Volume2 size={14} aria-hidden="true" />
+                  Test
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-row">
               <div className="settings-label-stack">
                 <label htmlFor="settings-worktree-location" className="settings-label">
                   Worktree location
@@ -15580,7 +15581,7 @@ function MainApp() {
               <textarea
                 id="settings-research-instructions"
                 className="form-field settings-input settings-textarea"
-                rows={2}
+                rows={1}
                 placeholder={DEFAULT_RESEARCH_LAUNCH_INSTRUCTION}
                 value={settings.researchLaunchInstruction}
                 onChange={(event) => {

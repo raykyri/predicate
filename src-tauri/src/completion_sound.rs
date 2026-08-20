@@ -232,6 +232,7 @@ mod tests {
 
     #[test]
     fn catalog_is_the_expected_allowlist() {
+        assert_eq!(sound_for_id("none"), Ok(None));
         assert!(matches!(
             sound_for_id("default"),
             Ok(Some(CompletionSound::Bundled {
@@ -304,7 +305,7 @@ mod tests {
             sound_for_id("bell"),
             Ok(Some(CompletionSound::Bundled { name: "bell", .. }))
         ));
-        for removed in ["none", "pop", "tink", "purr", "ping", "blip"] {
+        for removed in ["pop", "tink", "purr", "ping", "blip"] {
             assert!(sound_for_id(removed).is_err());
         }
         assert!(sound_for_id("../../arbitrary").is_err());

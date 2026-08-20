@@ -2328,7 +2328,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   flex: 0 0 190px;
   width: 190px;
   height: auto;
-  min-height: 64px;
+  min-height: 44px;
   padding: 8px 10px;
   resize: vertical;
   line-height: 1.4;

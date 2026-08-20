@@ -1,4 +1,5 @@
 [
+  { "id": "none", "label": "None", "systemName": null },
   { "id": "default", "label": "Default", "bundledName": "success", "systemName": null },
   { "id": "confirmation", "label": "Confirmation", "bundledName": "confirmation", "systemName": null },
   { "id": "chime", "label": "Chime", "bundledName": "chime", "systemName": null },
