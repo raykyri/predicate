@@ -747,8 +747,6 @@ mod tests {
             model: None,
             effort: None,
             approval_mode: None,
-            acp_agent: None,
-            acp_config_options: Vec::new(),
             parent_id: parent.map(str::to_string),
             fork_point: None,
             root_session_id: None,

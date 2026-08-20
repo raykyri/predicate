@@ -18,12 +18,6 @@ Agent has no native fork, and Devin's `/fork` is TUI-only. New agents
 can be added by implementing the adapter trait in Rust and adding a
 matching UI adapter on the frontend.
 
-There is also an adapter for the [Agent Client
-Protocol](https://agentclientprotocol.com) (ACP), which is a wire protocol
-rather than a specific CLI: any ACP agent — Gemini CLI, Cline, Goose,
-OpenHands, Qwen Code, Cursor, and others — is a config entry rather than new
-Rust. See [ACP agents](#acp-agents).
-
 ## Features
 
 - Native Ghostty terminals: each pane hosts a Metal-rendered Ghostty
@@ -32,8 +26,6 @@ Rust. See [ACP agents](#acp-agents).
 - Agent panes for Claude Code, Codex, OpenCode, Grok, Muse, Pi, Cursor Agent, and Devin CLI, launched from the app
   or by running `claude` / `codex` / `opencode` / `grok` / `agent` / `muse` / `pi` / `cursor-agent` / `devin` inside a shell
   pane.
-- Agent panes for any ACP agent, configured under `adapters.acp` and launched
-  from the app.
 - Transcript tailing and a native follow-up composer: send, queue,
   steer, edit/reorder queued turns, and approve/deny permission prompts where
   supported.
@@ -401,13 +393,11 @@ builds can point `QMUX_CURSOR_PLUGIN_DIR` at another copy of the bundled
 Interactive `cursor-agent` commands typed in a qmux shell are supervised like
 launches from the app. Management and metadata utilities (`login`, `logout`,
 `status`, `whoami`, `about`, `models`, `mcp`, `plugin`, `worker`, `update`,
-`ls`, `create-chat`, `generate-rule`, `rule`, `sandbox`, `acp`,
+`ls`, `create-chat`, `generate-rule`, `rule`, `sandbox`,
 `install-shell-integration`, `uninstall-shell-integration`, `bedrock`, `help`,
 and `--help` / `--version` / `--print` / `--list-models`) pass through unchanged
 and do not create an agent record. `cursor-agent resume` and `--continue` are
-supervised TUI resumes, not passthroughs. `cursor-agent acp` stays a passthrough:
-the ACP adapter remains a separate config entry if you want qmux-owned ACP
-rendering instead of the TUI.
+supervised TUI resumes, not passthroughs.
 
 The qmux launcher can pass an optional `--mode plan` or `--mode ask`, plus a
 model when one is selected. It does not pass `--force` or `--yolo`.
@@ -422,7 +412,7 @@ does not offer session branching.
 Interactive `devin` commands typed in a qmux shell are supervised like
 launches from the app. Management and metadata utilities (`auth`, `mcp`,
 `models`, `rules`, `skills`, `plugins`, `cloud`, `list`, `update`, `migrate`,
-`sandbox`, `setup`, `uninstall`, `acp`, `help`, and `--help` / `--version` /
+`sandbox`, `setup`, `uninstall`, `help`, and `--help` / `--version` /
 `--print`) pass through unchanged and do not create an agent record.
 `devin --resume` / `-c` are supervised TUI resumes. `--config` and `--export`
 are reserved: qmux copies the user's Devin config, injects lifecycle hooks,
@@ -487,98 +477,12 @@ Two things a remote group cannot do yet, both refused rather than half-done.
 Shell panes: their integration is delivered as files written to the local
 filesystem and referenced by `ZDOTDIR`, and on the far side those paths don't
 exist, so a shell would come up silently missing cwd reporting and the agent
-wrappers. And every adapter except ACP: they resolve their binary against the
+wrappers. And every adapter: they resolve their binary against the
 local `PATH`, point flags at locally-materialized plugin directories, and rely
 on the pane's cwd being the worktree — all of which start fine over there and
 are then wrong in ways that look like the agent misbehaving. Adapters opt in
 through `AgentAdapter::supports_remote` once they've been checked for all
 three.
-
-### ACP agents
-
-The `acp` adapter speaks the [Agent Client
-Protocol](https://agentclientprotocol.com) instead of driving one vendor's
-TUI, so agents are declared in config rather than compiled in:
-
-```json
-{
-  "adapters": {
-    "acp": {
-      "defaultAgent": "gemini",
-      "agents": {
-        "gemini": { "name": "Gemini CLI", "command": "gemini", "args": ["--experimental-acp"] },
-        "goose":  { "name": "Goose", "command": "goose", "args": ["acp"] }
-      }
-    }
-  }
-}
-```
-
-Each entry needs a `command` (looked up on `PATH`, or an absolute/`~/…` path);
-`name`, `args`, and `env` are optional. `defaultAgent` picks the one a launch
-without an explicit choice gets, and is unnecessary when only one agent is
-configured. Consult your agent's own docs for the flag that puts it in ACP
-mode — it is not standardized.
-
-Agents can also be added from the published [ACP
-registry](https://agentclientprotocol.com/get-started/registry) instead of being
-written out by hand. Open **Settings → Agents** to browse the registry, add or
-remove agents, and pin a default. qmux reads the registry index, shows what it
-can run, and pins the resolved command line into its own store
-(`.qmux/acp-agents.json`) — `qmux.config.json` is yours and qmux never writes to
-it. A hand-written entry always wins over a registry one with the same id.
-
-Only the `npx` and `uvx` distribution channels are supported, which is 23 of the
-38 agents currently listed; those need no install because the package manager
-fetches on demand. Agents shipping only a prebuilt binary are listed with the
-reason they're unavailable rather than hidden. Note that adding an agent this
-way records a command line but downloads nothing — the package is fetched and
-executed by `npx`/`uvx` the first time you launch that agent.
-
-The process qmux runs in the pane is `qmux acp`, a bridge that is an ACP client
-on one side and an ordinary qmux agent on the other. ACP agents have no TUI —
-the protocol makes the *client* responsible for rendering, the filesystem,
-permissions, and terminals — so the bridge supplies all four: it renders the
-session as text, takes prompts on stdin (which is how the follow-up composer
-delivers turns), writes the transcript the sidebar tails, and reports status
-through the usual lifecycle hooks. Ctrl-C sends `session/cancel`.
-
-Notable properties and limits:
-
-- `terminal/create` runs commands on a real pty, so anything checking `isatty`
-  behaves the way it does for a human rather than taking its piped-output
-  branch.
-- `fs/read_text_file` and `fs/write_text_file` are confined to the session's
-  directory. ACP hands the *client* the filesystem, so nothing but qmux stands
-  between an agent asking for `~/.ssh/id_rsa` and it being read; the tree the
-  session was pointed at is the boundary. `..`, an absolute path, and a symlink
-  the agent planted itself are all refused by name rather than quietly served.
-- Elicitation is supported in both modes. A form is filled in field by field in
-  the pane, with enums numbered, defaults pre-filled, and `/decline` and
-  `/cancel` distinguished — agents are required to branch on which they got. A
-  URL elicitation shows the full link, warns about plain HTTP, punycode
-  domains, and embedded credentials, and opens it in the qmux browser overlay
-  only after you say yes; the overlay's isolated tab is the "context the client
-  and the agent's model cannot inspect" the spec asks for. ACP forbids
-  collecting secrets through a form — that is what URL mode is for — so a form
-  asking for something that looks like a token or password is flagged before
-  you answer it.
-- Session config options are displayed but not yet settable. An agent's `model`
-  and `thought_level` show up as the pane's model and effort; changing them
-  from qmux is not wired up.
-- Follow-ups queue rather than steer. ACP has one `session/prompt` per turn and
-  no mid-turn steering; `session/cancel` is the only in-flight control.
-- Resume is best-effort: `session/load` is an optional agent capability, and
-  the bridge starts a fresh session (saying so in the pane) when it is refused.
-- First-run authentication follows ACP order (`initialize` → `authenticate` →
-  `session/new`). A previously successful method is tried silently; otherwise
-  the pane lists methods and the desktop UI shows a sign-in card that answers
-  into the same prompt. URL/OAuth flows reuse elicitation and the browser
-  overlay.
-- No shell-command integration — ACP agents are launched from qmux, not by
-  typing their name in a shell pane.
-- No fork. The protocol has no branch operation, so `/fork` and per-message
-  forking are hidden for ACP sessions.
 
 ## License
 

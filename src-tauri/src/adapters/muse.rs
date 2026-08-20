@@ -1715,8 +1715,8 @@ fn parse_transcript_lifecycle_event(line: &str) -> Option<TranscriptLifecycleEve
 mod tests {
     use super::*;
     use crate::config::{
-        AcpAdapterConfig, AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig,
-        GrokAdapterConfig, MuseAdapterConfig, OpencodeAdapterConfig,
+        AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
     };
 
     fn test_config() -> QmuxConfig {
@@ -1725,7 +1725,6 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-muse-tests"),
             socket_path: PathBuf::from("/tmp/qmux-muse-tests.sock"),
             adapters: AdapterConfigs {
-                acp: AcpAdapterConfig::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),

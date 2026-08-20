@@ -53,14 +53,11 @@ import {
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapters";
-import { ACP_ADAPTER_ID } from "./adapters/acp";
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
 import CommandPalette, { type PaletteCommand } from "./components/CommandPalette";
 import GlobalTaskLauncher from "./components/GlobalTaskLauncher";
-import AcpAgentsSettings from "./components/AcpAgentsSettings";
-import AcpAuthCard from "./components/AcpAuthCard";
 import NativeInput from "./components/NativeInput";
 import {
   ComposerSubmitShortcutGlyph,
@@ -541,8 +538,6 @@ import {
   worktreeStatus,
 } from "./lib/api";
 import type {
-  AcpAuthMethod,
-  AcpAuthPrompt,
   AgentInfo,
   ArtifactInfo,
   ClaudeSkill,
@@ -585,32 +580,6 @@ const LEFT_SIDEBAR_MAX_WIDTH = 420;
 // labels readable. (The icon-only Settings cog always keeps its icon.)
 const LEFT_SIDEBAR_COMPACT_WIDTH = 270;
 
-function parseAcpAuthMethods(value: unknown): AcpAuthMethod[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-  const methods: AcpAuthMethod[] = [];
-  for (const entry of value) {
-    if (typeof entry !== "object" || entry === null) {
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
-    const id = typeof record.id === "string" ? record.id.trim() : "";
-    if (!id) {
-      continue;
-    }
-    const name =
-      typeof record.name === "string" && record.name.trim()
-        ? record.name.trim()
-        : id;
-    const description =
-      typeof record.description === "string" && record.description.trim()
-        ? record.description.trim()
-        : null;
-    methods.push({ id, name, description });
-  }
-  return methods;
-}
 const PANE_TAB_DRAG_START_THRESHOLD = 4;
 const PANE_TAB_DRAG_CLICK_SUPPRESS_MS = 100;
 type ResearchViewedAckOptions = {
@@ -2412,13 +2381,7 @@ function MainApp() {
     () => lastUserInputSeqRef.current > lastWindowFocusSeqRef.current,
     [],
   );
-  const [settingsTab, setSettingsTab] = useState<
-    "basic" | "theme" | "mouseCursor" | "agents"
-  >("basic");
-  /** ACP first-run auth prompts keyed by agent id (desktop card + pane prompt). */
-  const [acpAuthByAgent, setAcpAuthByAgent] = useState<Record<string, AcpAuthPrompt>>(
-    {},
-  );
+  const [settingsTab, setSettingsTab] = useState<"basic" | "theme" | "mouseCursor">("basic");
   const [openRouterKeyVisible, setOpenRouterKeyVisible] = useState(false);
   const [showHideShortcutSetting, setShowHideShortcutSetting] =
     useState<ShowHideShortcutSetting>({
@@ -4326,79 +4289,6 @@ function MainApp() {
     applyPendingFirstMessageTitle(agentId, prompt);
   }
 
-  function handleAcpAuthEvent(event: QmuxEvent) {
-    const agentId = event.agentId;
-    if (!agentId) {
-      return;
-    }
-    if (event.type === "agent.auth_succeeded" || event.type === "agent.session_start") {
-      setAcpAuthByAgent((current) => {
-        if (!(agentId in current)) {
-          return current;
-        }
-        const next = { ...current };
-        delete next[agentId];
-        return next;
-      });
-      return;
-    }
-
-    const hookPayload =
-      typeof event.payload.payload === "object" && event.payload.payload !== null
-        ? (event.payload.payload as Record<string, unknown>)
-        : event.payload;
-
-    if (event.type === "agent.auth_required") {
-      const methods = parseAcpAuthMethods(hookPayload.authMethods);
-      if (methods.length === 0) {
-        return;
-      }
-      setAcpAuthByAgent((current) => ({
-        ...current,
-        [agentId]: {
-          agentId,
-          paneId: event.paneId ?? null,
-          methods,
-          error: null,
-        },
-      }));
-      return;
-    }
-
-    if (event.type === "agent.auth_failed") {
-      const error =
-        typeof hookPayload.error === "string" ? hookPayload.error : "Sign-in failed";
-      setAcpAuthByAgent((current) => {
-        const existing = current[agentId];
-        if (!existing) {
-          return current;
-        }
-        return {
-          ...current,
-          [agentId]: { ...existing, error },
-        };
-      });
-    }
-  }
-
-  function selectAcpAuthMethod(prompt: AcpAuthPrompt, methodId: string, index: number) {
-    const paneId =
-      prompt.paneId ??
-      agents.find((agent) => agent.id === prompt.agentId)?.paneId ??
-      null;
-    if (!paneId) {
-      setError("No terminal pane is attached to answer the sign-in prompt.");
-      return;
-    }
-    // The bridge always reads the pane for the choice (and also accepts a raw
-    // method id). Prefer the numbered choice so it stays aligned with the
-    // pane's printed list.
-    void submitPaneInput(paneId, String(index)).catch((err) => {
-      setError(err instanceof Error ? err.message : String(err));
-    });
-    void methodId;
-  }
-
   // Drop browser/UI state only when its real owner disappears. Browser owners
   // include research trees as well as terminal panes; unrelated pane metadata
   // updates must not retire a research document's preserved browser.
@@ -4608,14 +4498,7 @@ function MainApp() {
   const launcherAdapters = useMemo(() => {
     const runtimeAdapters = config?.adapters
       .map((adapter) => findAgentUiAdapter(adapter.id))
-      .filter((adapter): adapter is NonNullable<typeof adapter> => Boolean(adapter))
-      // The ACP adapter's id names a protocol, not a program: with nothing
-      // under adapters.acp.agents and nothing added from the registry there is
-      // no agent behind it, so offering it would only produce a launch that
-      // fails.
-      .filter(
-        (adapter) => adapter.id !== ACP_ADAPTER_ID || (config?.acpAgents?.length ?? 0) > 0,
-      );
+      .filter((adapter): adapter is NonNullable<typeof adapter> => Boolean(adapter));
     return runtimeAdapters && runtimeAdapters.length > 0 ? runtimeAdapters : agentUiAdapters;
   }, [config]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
@@ -5990,8 +5873,7 @@ function MainApp() {
    *
    * Deliberately not `group_create_with_shell`: a remote group cannot host a
    * shell pane yet — shell integration is delivered as files on this machine —
-   * so bundling one would fail every remote creation. The group opens empty and
-   * an ACP agent is launched into it. */
+   * so bundling one would fail every remote creation. The group opens empty. */
   async function createRemoteGroup(remoteId: string, dir: string) {
     setSettingsMenu(null);
     setRemoteGroupDraft(null);
@@ -9466,7 +9348,6 @@ function MainApp() {
     onEventsReady: handleEventsReady,
     onAgentSpawned: handleAgentSpawned,
     onAgentPromptSubmitted: handleAgentPromptSubmitted,
-    onAcpAuthEvent: handleAcpAuthEvent,
     onArtifactEvent: handleArtifactEvent,
     onPaneFocusRequested: (paneId: string) => {
       if (!panesRef.current.some((pane) => pane.id === paneId)) {
@@ -13731,14 +13612,6 @@ function MainApp() {
                 (follow-ups branch from the research document instead). Keyed
                 off group scope so the composer never flashes in the debounce
                 window before the node index catches up. */}
-            {agent && acpAuthByAgent[agent.id] ? (
-              <AcpAuthCard
-                prompt={acpAuthByAgent[agent.id]}
-                onSelectMethod={(methodId, index) =>
-                  selectAcpAuthMethod(acpAuthByAgent[agent.id], methodId, index)
-                }
-              />
-            ) : null}
             {agent && groupById.get(surface.pane.groupId)?.scope !== "research" ? (
               <NativeInput
                 pane={surface.pane}
@@ -14987,7 +14860,7 @@ function MainApp() {
             </div>
 
             <div
-              className="settings-tabs settings-tabs--four"
+              className="settings-tabs"
               role="tablist"
               aria-label="Settings sections"
             >
@@ -15018,25 +14891,7 @@ function MainApp() {
               >
                 Cursor
               </button>
-              <button
-                type="button"
-                role="tab"
-                aria-selected={settingsTab === "agents"}
-                className={`control-button${settingsTab === "agents" ? " is-active" : ""}`}
-                onClick={() => setSettingsTab("agents")}
-              >
-                Agents
-              </button>
             </div>
-
-            {settingsTab === "agents" ? (
-              <div className="settings-content" role="tabpanel">
-                <AcpAgentsSettings
-                  config={config}
-                  onConfigChange={setConfig}
-                />
-              </div>
-            ) : null}
 
             {settingsTab === "basic" || settingsTab === "theme" ? (
               <div className="settings-content" role="tabpanel">

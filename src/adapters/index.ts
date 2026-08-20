@@ -1,5 +1,4 @@
 import type { ComponentType, ReactNode } from "react";
-import { acpUiAdapter } from "./acp";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
 import { cursorUiAdapter } from "./cursor";
@@ -28,8 +27,7 @@ export interface ComposerPolicy {
 export interface LauncherOptionsProps {
   value: Record<string, unknown>;
   onChange: (next: Record<string, unknown>) => void;
-  /** The runtime config, for options whose choices are declared rather than
-   * compiled in — the ACP agent list is read from it. */
+  /** Runtime configuration for adapter-specific launcher options. */
   config: RuntimeConfig | null;
 }
 
@@ -55,7 +53,6 @@ export const agentUiAdapters = [
   piUiAdapter,
   cursorUiAdapter,
   devinUiAdapter,
-  acpUiAdapter,
 ];
 
 export function findAgentUiAdapter(adapterId: string | null | undefined): AgentUiAdapter | null {

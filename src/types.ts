@@ -4,11 +4,6 @@ export interface RuntimeConfig {
   workspaceRoot: string;
   socketPath: string;
   adapters: AgentAdapterMetadata[];
-  /** ACP agents that can be launched right now — `qmux.config.json` entries
-   * merged with ones added from the registry. The `acp` adapter's id names a
-   * protocol, so this is the actual choice a launcher offers; pass the id as
-   * the adapter's `agent` launch option. */
-  acpAgents: AcpAgentChoice[];
   /** Machines a workspace can be created on. Empty means local-only. Pass a
    * choice's `id` as `remoteId` when creating a group to bind it there. */
   remotes: RemoteChoice[];
@@ -19,51 +14,6 @@ export interface RuntimeConfig {
   // Port of the loopback file server, so the UI can recognize token-bearing file-server
   // URLs (see isFileServerUrl) and always sandbox them. Null until the server has bound.
   fileServerPort: number | null;
-}
-
-export interface AcpAgentChoice {
-  id: string;
-  label: string;
-  /** Whether `adapters.acp.defaultAgent` names this one. */
-  default: boolean;
-  /** Added from the registry rather than hand-written into qmux.config.json,
-   * so only these are qmux's to remove. */
-  fromRegistry: boolean;
-}
-
-/** An entry in the published ACP agent registry, annotated with whether qmux
- * can launch it. Returned by the `acp_registry_list` command. */
-export interface AcpRegistryEntry {
-  id: string;
-  name: string;
-  version: string;
-  description?: string | null;
-  repository?: string | null;
-  website?: string | null;
-  icon?: string | null;
-  authors?: string[];
-  license?: string | null;
-  /** `available` for agents distributed via npx/uvx; `unavailable` carries the
-   * reason, most often that the agent ships only as a prebuilt binary. */
-  availability:
-    | { available: { channel: string } }
-    | { unavailable: { reason: string } };
-  installed: boolean;
-}
-
-/** One `initialize.authMethods` entry, as raised by the ACP bridge. */
-export interface AcpAuthMethod {
-  id: string;
-  name: string;
-  description?: string | null;
-}
-
-/** Prompt shown while an ACP agent needs first-run sign-in. */
-export interface AcpAuthPrompt {
-  agentId: string;
-  paneId: string | null;
-  methods: AcpAuthMethod[];
-  error?: string | null;
 }
 
 export interface TabTitleGenerationRuntimeConfig {
@@ -217,25 +167,6 @@ export interface GroupInfo {
   agents: string[];
 }
 
-/** One ACP session config option. `category` is a rendering hint — `model`
- * and `thought_level` are already surfaced as the agent's model and effort;
- * agent-specific categories are `_`-prefixed. */
-export interface AcpConfigOption {
-  id: string;
-  name: string;
-  description?: string | null;
-  category?: string | null;
-  type: "select" | "boolean";
-  currentValue: string | boolean | null;
-  options?: AcpConfigChoice[];
-}
-
-export interface AcpConfigChoice {
-  value: string;
-  name: string;
-  description?: string | null;
-}
-
 export interface AgentInfo {
   id: string;
   groupId: string;
@@ -265,15 +196,6 @@ export interface AgentInfo {
   model?: string | null;
   /** Reasoning effort the session was launched with; absent for the default. */
   effort?: string | null;
-  /** For `adapter: "acp"`, which `adapters.acp.agents` entry is running. The
-   * ACP adapter's id names a protocol rather than a program, so this is what
-   * identifies the actual agent. Absent for every other adapter. */
-  acpAgent?: string | null;
-  /** Session settings an ACP agent exposes for itself (model, mode, reasoning
-   * level). Read-only: the agent owns this state and pushes the complete list
-   * whenever any of it changes, so replace rather than merge. Empty for every
-   * other adapter. */
-  acpConfigOptions?: AcpConfigOption[];
   // True when the queue has paused after a pause-after turn finished.
   paused?: boolean;
   createdAt: number;

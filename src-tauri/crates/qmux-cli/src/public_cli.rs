@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 pub const SKILL: &str = include_str!("qmux_skill.md");
 
-pub const HELP: &str = "usage: qmux <command> [options]\n\nControl commands:\n  context\n  workspace <list|get|create|rename>\n  pane <list|current|get|read|create|send|run|wait-output|rename|focus|close>\n  agent <list|get|read|start|fork|prompt|wait|focus|release>\n  artifact <list|open>\n  split <list|join|leave|resize>\n\nIntegrations:\n  mcp, open, fork, claude, codex, grok, muse, acp\n\nRun `qmux <group> --help` for group commands or `qmux --skill` for agent instructions.";
+pub const HELP: &str = "usage: qmux <command> [options]\n\nControl commands:\n  context\n  workspace <list|get|create|rename>\n  pane <list|current|get|read|create|send|run|wait-output|rename|focus|close>\n  agent <list|get|read|start|fork|prompt|wait|focus|release>\n  artifact <list|open>\n  split <list|join|leave|resize>\n\nIntegrations:\n  mcp, open, fork, claude, codex, grok, muse\n\nRun `qmux <group> --help` for group commands or `qmux --skill` for agent instructions.";
 
 pub fn run(command: &str, args: Vec<String>) -> Result<bool, String> {
     if let Some(help) = group_help(command)

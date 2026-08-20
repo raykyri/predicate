@@ -1,4 +1,3 @@
-pub mod acp;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
@@ -22,7 +21,6 @@ use crate::workspace::{
     ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
 };
-use acp::AcpAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
 use cursor::CursorAdapter;
@@ -1020,7 +1018,6 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(PiAdapter::new(config)),
         Box::new(CursorAdapter::new(config)),
         Box::new(DevinAdapter::new(config)),
-        Box::new(AcpAdapter::new(config)),
     ])
 }
 
@@ -1564,7 +1561,6 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-adapter-tests"),
             socket_path: PathBuf::from("/tmp/qmux-adapter-tests.sock"),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -1609,7 +1605,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 9);
+        assert_eq!(metadata.len(), 8);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -1626,8 +1622,6 @@ mod tests {
         assert!(!metadata[6].default);
         assert_eq!(metadata[7].id, "devin");
         assert!(!metadata[7].default);
-        assert_eq!(metadata[8].id, "acp");
-        assert!(!metadata[8].default);
         let config = test_config();
         assert!(!adapter_supports_fork(&config, "cursor"));
         assert!(!adapter_supports_fork_at_message(&config, "cursor"));
@@ -1635,10 +1629,6 @@ mod tests {
         assert!(adapter_supports_fork(&config, "opencode"));
         assert!(adapter_supports_fork(&config, "pi"));
         assert!(adapter_supports_fork_at_message(&config, "pi"));
-        // ACP has no native fork command: the protocol has no such method, and
-        // `session/load` resumes rather than branches.
-        assert!(!adapter_supports_fork(&config, "acp"));
-        assert!(!adapter_supports_fork_at_message(&config, "acp"));
         // Muse has no fork command either — no `--fork-session` flag and no
         // `fork` subcommand — so branching a session is not offered.
         assert!(!adapter_supports_fork(&config, "muse"));
@@ -1658,8 +1648,6 @@ mod tests {
         // An adapter without a native fork command is rejected before any spawn is attempted.
         state
             .insert_agent(AgentInfo {
-                acp_config_options: Vec::new(),
-                acp_agent: None,
                 id: "agent-1".to_string(),
                 group_id: "group-1".to_string(),
                 adapter: "unsupported".to_string(),
@@ -1690,8 +1678,6 @@ mod tests {
 
     fn session_agent(id: &str, pane_id: Option<&str>, dir: &str, session: &str) -> AgentInfo {
         AgentInfo {
-            acp_config_options: Vec::new(),
-            acp_agent: None,
             id: id.to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),

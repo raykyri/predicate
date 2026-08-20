@@ -5,7 +5,6 @@
 //! the app — a remote box reached over ssh — can still service hooks, cwd
 //! reporting, and forks once a transport exists.
 
-mod acp;
 mod cursor;
 mod mcp;
 mod muse;
@@ -190,10 +189,6 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         "mcp" => {
             mcp::run()?;
-            Ok(true)
-        }
-        "acp" => {
-            acp::run(args.collect())?;
             Ok(true)
         }
         "fork" => {

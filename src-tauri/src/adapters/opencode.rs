@@ -1385,7 +1385,6 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-opencode-tests"),
             socket_path: PathBuf::from("/tmp/qmux-opencode-tests.sock"),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -1419,8 +1418,6 @@ mod tests {
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
-            acp_config_options: Vec::new(),
-            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "opencode".to_string(),

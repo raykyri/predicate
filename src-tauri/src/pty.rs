@@ -1408,18 +1408,6 @@ fn scrub_inherited_qmux_context(command: &mut CommandBuilder) {
         "QMUX_AGENT_FUNCTIONS_ERROR",
         "QMUX_ORIGINAL_ZDOTDIR",
         "QMUX_ORIGINAL_BASHRC",
-        "QMUX_ACP_AGENT",
-        "QMUX_ACP_ARGS",
-        "QMUX_ACP_AUTH_METHOD",
-        "QMUX_ACP_COMMAND",
-        "QMUX_ACP_CWD",
-        "QMUX_ACP_ENV",
-        "QMUX_ACP_LOAD_SESSION",
-        "QMUX_ACP_LOG",
-        "QMUX_ACP_NAME",
-        "QMUX_ACP_PROMPT",
-        "QMUX_ACP_TRANSCRIPT",
-        "QMUX_ACP_TRANSCRIPT_STREAM",
     ];
     for key in CONTEXT_KEYS {
         command.env_remove(key);
@@ -3073,7 +3061,6 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-workspaces"),
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -3107,7 +3094,6 @@ mod tests {
             workspace_root,
             socket_path: PathBuf::from("/tmp/qmux.sock"),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -3154,7 +3140,7 @@ mod tests {
         crate::workspace::AgentInfo {
             id: "agent-remote".to_string(),
             group_id: group_id.to_string(),
-            adapter: "acp".to_string(),
+            adapter: "claude".to_string(),
             worktree_dir: "/srv/code/project".to_string(),
             branch: None,
             active_workspace: None,
@@ -3166,8 +3152,6 @@ mod tests {
             model: None,
             effort: None,
             approval_mode: None,
-            acp_agent: None,
-            acp_config_options: Vec::new(),
             parent_id: None,
             fork_point: None,
             root_session_id: None,
@@ -3432,8 +3416,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut agent = sample_remote_agent(&group.id);
-        agent.adapter = "claude".to_string();
+        let agent = sample_remote_agent(&group.id);
         state.insert_agent(agent.clone()).unwrap();
 
         let error = plan_to_spec(
@@ -3463,67 +3446,6 @@ mod tests {
         // resolved here and a plugin directory that only exists here.
         assert!(error.contains("claude"), "{error}");
         assert!(error.contains("cannot run on remote"), "{error}");
-    }
-
-    #[test]
-    fn plan_to_spec_wraps_a_remote_agent_pane_in_ssh_and_tmux() {
-        let state = test_state_with_workspace(temp_workspace());
-        let group = create_group(
-            &state,
-            CreateGroupRequest {
-                remote_id: None,
-                name: None,
-                dir: Some("/srv/code/project".to_string()),
-                after_group_id: None,
-                base_repo: None,
-                base_ref: None,
-                remote: Some(test_remote()),
-            },
-        )
-        .unwrap();
-
-        let agent = sample_remote_agent(&group.id);
-        state.insert_agent(agent.clone()).unwrap();
-
-        // An ACP pane carries no support files, so nothing local is needed.
-        let spec = plan_to_spec(
-            &state,
-            PaneMeta {
-                pane_id: Some("pane-9".to_string()),
-                agent_id: Some(agent.id.clone()),
-                group_id: group.id.clone(),
-                kind: PaneKind::Agent,
-                title: "ACP".to_string(),
-                last_osc_title: None,
-                initial_size: None,
-                recovered: false,
-            },
-            CommandPlan {
-                program: "/Applications/qmux".to_string(),
-                args: vec!["acp".to_string()],
-                cwd: PathBuf::from("/srv/code/project"),
-                envs: vec![("QMUX_TOKEN".to_string(), "tok".to_string())],
-                support_files: Vec::new(),
-                support_file_fallback: None,
-            },
-        )
-        .expect("a remote agent pane is wrapped rather than refused");
-
-        // The pty still runs one local process; it is just ssh.
-        assert_eq!(spec.program, "ssh");
-        let line = spec.args.last().expect("remote command line");
-        assert!(
-            line.contains("'tmux' 'new-session' '-A' '-s' 'qmux-pane-9'"),
-            "{line}"
-        );
-        assert!(line.ends_with("'/Applications/qmux' 'acp'"), "{line}");
-        assert!(line.contains("QMUX_TOKEN='tok'"), "{line}");
-        // The plan's cwd is the far side's, so the local pty cannot use it.
-        assert_ne!(spec.cwd, PathBuf::from("/srv/code/project"));
-        assert!(
-            spec.envs.is_empty(),
-            "the remote reads its env from the command line"
-        );
     }
 
     #[test]
@@ -3822,13 +3744,13 @@ mod tests {
         let mut command = CommandBuilder::new("/usr/bin/true");
         command.env("QMUX_USER_TOKEN", "outer-user-token");
         command.env("QMUX_AGENT_ID", "outer-agent");
-        command.env("QMUX_ACP_PROMPT", "outer-prompt");
+        command.env("QMUX_FORK_POINT", "outer-fork-point");
 
         scrub_inherited_qmux_context(&mut command);
 
         assert!(command.get_env("QMUX_USER_TOKEN").is_none());
         assert!(command.get_env("QMUX_AGENT_ID").is_none());
-        assert!(command.get_env("QMUX_ACP_PROMPT").is_none());
+        assert!(command.get_env("QMUX_FORK_POINT").is_none());
         command.env("QMUX_TOKEN", "fresh-pane-token");
         assert_eq!(
             command.get_env("QMUX_TOKEN"),
@@ -4308,8 +4230,6 @@ mod tests {
         );
         state
             .insert_agent(AgentInfo {
-                acp_config_options: Vec::new(),
-                acp_agent: None,
                 id: "agent-1".to_string(),
                 group_id: "group-1".to_string(),
                 adapter: "claude".to_string(),

@@ -115,8 +115,6 @@ export interface UseQmuxEventsHandlers {
   onEventsReady: () => void;
   onAgentSpawned?: (agent: AgentInfo, paneId: string | null, source: string | null) => void;
   onAgentPromptSubmitted?: (agentId: string, prompt: string) => void;
-  /** ACP first-run auth: show methods, update error, or clear the prompt. */
-  onAcpAuthEvent?: (event: QmuxEvent) => void;
   /** Artifact tray: `artifact.added` / `artifact.removed`. App owns the state. */
   onArtifactEvent?: (event: QmuxEvent) => void;
   onPaneFocusRequested?: (paneId: string) => void;
@@ -176,7 +174,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onEventsReady,
     onAgentSpawned,
     onAgentPromptSubmitted,
-    onAcpAuthEvent,
     onArtifactEvent,
     onPaneFocusRequested,
     onPaneSplitsChanged,
@@ -425,14 +422,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         if (prompt) {
           onAgentPromptSubmitted?.(event.agentId, prompt);
         }
-      }
-      if (
-        event.type === "agent.auth_required" ||
-        event.type === "agent.auth_failed" ||
-        event.type === "agent.auth_succeeded" ||
-        event.type === "agent.session_start"
-      ) {
-        onAcpAuthEvent?.(event);
       }
       if (event.type === "browser.open" && event.paneId) {
         const url = event.payload.url;

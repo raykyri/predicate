@@ -53,8 +53,6 @@ import type {
   ResearchNodeContent,
   UpdateResearchDocumentResult,
   SendNextQueuedAgentTurnResult,
-  AcpAgentChoice,
-  AcpRegistryEntry,
   RuntimeConfig,
   SpawnAgentRequest,
   SubmitAgentTurnMode,
@@ -77,29 +75,6 @@ export function playCompletionSound(soundId: CompletionSoundId) {
 /** Keeps the reload-safe backend lifecycle player aligned with Display settings. */
 export function setCompletionSound(soundId: CompletionSoundId) {
   return invoke<void>("completion_sound_set", { soundId });
-}
-
-/** Published ACP agent registry, annotated with installability. */
-export function listAcpRegistry(refresh = false) {
-  return invoke<AcpRegistryEntry[]>("acp_registry_list", { refresh });
-}
-
-/** Pin a registry agent into `.qmux/acp-agents.json`. Returns refreshed choices. */
-export function installAcpRegistryAgent(id: string) {
-  return invoke<AcpAgentChoice[]>("acp_registry_install", { id });
-}
-
-/** Remove a registry-pinned agent. Hand-written config entries are untouched. */
-export function uninstallAcpRegistryAgent(id: string) {
-  return invoke<AcpAgentChoice[]>("acp_registry_uninstall", { id });
-}
-
-/**
- * Preferred ACP agent when `adapters.acp.defaultAgent` is unset. Pass `null` to
- * clear. Returns refreshed launcher choices.
- */
-export function setAcpDefaultAgent(id: string | null) {
-  return invoke<AcpAgentChoice[]>("acp_default_agent_set", { id });
 }
 
 export function listShellAgentJobs() {

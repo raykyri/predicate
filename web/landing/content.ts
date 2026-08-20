@@ -18,8 +18,7 @@ export interface SupportedAgent {
   label: string;
 }
 
-// First-party adapters with a native TUI. ACP is omitted: it is a wire
-// protocol for other agents, not a product with its own mark.
+// Product adapters represented in the marketing-page icon row.
 export const SUPPORTED_AGENTS: SupportedAgent[] = [
   { id: "claude", label: "Claude Code" },
   { id: "codex", label: "Codex" },

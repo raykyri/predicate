@@ -12,10 +12,9 @@
 //! the group is what keeps an agent from ending up on a different machine from
 //! the code it is editing.
 //!
-//! The reason this is a seam rather than an ssh call bolted onto the ACP
-//! adapter is that `prepare_agent_workspace` runs for *every* adapter. Teaching
-//! the workspace layer where it is buys remote panes for Claude and Codex too,
-//! not just ACP.
+//! This is a shared seam because `prepare_agent_workspace` runs for every
+//! adapter. Teaching the workspace layer where it is keeps remote execution
+//! concerns out of individual adapters.
 //!
 //! ## Quoting is the whole problem
 //!
@@ -51,8 +50,7 @@ pub struct RemoteTarget {
     /// Connection target: an ssh-config alias or `user@host`. Auth and address
     /// resolution belong to the system `ssh` client, never to qmux.
     pub ssh: String,
-    /// How to invoke the qmux CLI over there. It services hooks and runs the
-    /// ACP bridge.
+    /// How to invoke the qmux CLI over there. It services hooks for remote panes.
     pub qmux_cli: String,
     /// Where agent worktrees live on that machine.
     pub workspace_root: Option<String>,
@@ -584,7 +582,7 @@ mod tests {
             &remote_host(),
             RemoteCommand {
                 program: "qmux-cli",
-                args: vec!["acp".to_string()],
+                args: vec!["agent".to_string()],
                 ..Default::default()
             },
             Interaction::Interactive,
@@ -648,10 +646,10 @@ mod tests {
             &remote_host(),
             RemoteCommand {
                 program: "qmux-cli",
-                args: vec!["acp".to_string()],
+                args: vec!["agent".to_string()],
                 envs: vec![
                     ("QMUX_TOKEN".to_string(), "tok'en".to_string()),
-                    ("QMUX_ACP_CWD".to_string(), "/a b".to_string()),
+                    ("AGENT_CWD".to_string(), "/a b".to_string()),
                 ],
                 ..Default::default()
             },
@@ -659,7 +657,7 @@ mod tests {
         );
         assert_eq!(
             argv.last().unwrap(),
-            r"env QMUX_TOKEN='tok'\''en' QMUX_ACP_CWD='/a b' 'qmux-cli' 'acp'"
+            r"env QMUX_TOKEN='tok'\''en' AGENT_CWD='/a b' 'qmux-cli' 'agent'"
         );
     }
 
@@ -693,7 +691,7 @@ mod tests {
                 "pane-7",
                 "/local/run/qmux.sock",
                 "/Applications/qmux",
-                &["acp".to_string()],
+                &["agent".to_string()],
                 &[
                     ("QMUX_SOCK".to_string(), "/local/run/qmux.sock".to_string()),
                     ("QMUX_CLI".to_string(), "/Applications/qmux".to_string()),
@@ -714,7 +712,7 @@ mod tests {
             line.contains("'tmux' 'new-session' '-A' '-s' 'qmux-pane-7' '--'"),
             "{line}"
         );
-        assert!(line.ends_with("'/Applications/qmux' 'acp'"), "{line}");
+        assert!(line.ends_with("'/Applications/qmux' 'agent'"), "{line}");
 
         // Both local paths are rewritten; leaving either would point the remote
         // process at something that does not exist there.
@@ -765,7 +763,7 @@ mod tests {
             &remote_host(),
             RemoteCommand {
                 program: "qmux-cli",
-                args: vec!["acp".to_string()],
+                args: vec!["agent".to_string()],
                 forwards: vec![SocketForward {
                     remote_path: "/tmp/qmux-remote.sock".to_string(),
                     local_path: "/run/qmux.sock".to_string(),

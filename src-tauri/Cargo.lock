@@ -3054,7 +3054,6 @@ name = "qmux-cli"
 version = "0.3.1"
 dependencies = [
  "libc",
- "portable-pty",
  "qmux-proto",
  "serde",
  "serde_json",

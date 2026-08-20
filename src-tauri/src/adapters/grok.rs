@@ -643,7 +643,7 @@ impl GrokAdapter {
                         .filter(|cwd| grok_session_cwd_acceptable(&current.worktree_dir, cwd));
                     // Grok's SessionStart hook reports a transcript path when it has one.
                     // Prefer it so the timeline tails Grok's own conversation file — but
-                    // map `updates.jsonl` (ACP UI stream) to sibling `chat_history.jsonl`
+                    // map the UI `updates.jsonl` stream to sibling `chat_history.jsonl`
                     // first. Resumes commonly report the updates stream; accepting it
                     // leaves the right pane blank because that file parses to zero turns.
                     let reported_transcript_path =
@@ -1117,7 +1117,7 @@ fn grok_hook_transcript_path_acceptable(current: Option<&str>, candidate: &str) 
         && !grok_transcript_path_is_updates_stream(candidate)
 }
 
-/// Maps Grok's unusable ACP `updates.jsonl` stream to the sibling conversation file
+/// Maps Grok's unusable UI `updates.jsonl` stream to the sibling conversation file
 /// qMux can render. Leaves every other path unchanged (including legacy rollouts).
 ///
 /// Prefer this rewrite over discarding the hook path and rediscovering via cwd
@@ -2086,7 +2086,6 @@ mod tests {
             workspace_root: PathBuf::from("/tmp/qmux-grok-tests"),
             socket_path: PathBuf::from("/tmp/qmux-grok-tests.sock"),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -2120,8 +2119,6 @@ mod tests {
 
     fn sample_agent() -> AgentInfo {
         AgentInfo {
-            acp_config_options: Vec::new(),
-            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "grok".to_string(),

@@ -1286,7 +1286,6 @@ mod tests {
             workspace_root,
             socket_path: socket_path.clone(),
             adapters: AdapterConfigs {
-                acp: Default::default(),
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
                     binary: Some("claude".to_string()),
@@ -1382,8 +1381,6 @@ mod tests {
 
     fn agent_bound_to(pane_id: &str) -> AgentInfo {
         AgentInfo {
-            acp_config_options: Vec::new(),
-            acp_agent: None,
             id: "agent-1".to_string(),
             group_id: "group-1".to_string(),
             adapter: "claude".to_string(),
