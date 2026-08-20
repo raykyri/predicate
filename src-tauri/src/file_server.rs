@@ -922,6 +922,14 @@ fn mime_type(path: &Path) -> String {
     mime.to_string()
 }
 
+/// Whether the protected browser surface has an explicit rendering type for a
+/// local file. Unknown extensions stay `application/octet-stream`; navigating
+/// the overlay to them would only trigger a download, so callers should reveal
+/// those files in the OS file manager instead.
+pub(crate) fn is_browser_previewable_path(path: &Path) -> bool {
+    mime_type(path) != "application/octet-stream"
+}
+
 /// Percent-encodes a path, leaving `/` (the separator) and the RFC 3986 unreserved
 /// set intact so the encoded form is a normal multi-segment URL path.
 fn percent_encode_path(path: &str) -> String {
@@ -1029,6 +1037,17 @@ mod tests {
         // The general file-content CSP, by contrast, still permits (contained) inline
         // script for self-hosted reports.
         assert!(file_content_csp(12345).contains("script-src 'unsafe-inline'"));
+    }
+
+    #[test]
+    fn browser_previewability_is_an_explicit_mime_allowlist() {
+        assert!(is_browser_previewable_path(Path::new("report.HTML")));
+        assert!(is_browser_previewable_path(Path::new("notes.md")));
+        assert!(is_browser_previewable_path(Path::new("diagram.svg")));
+        assert!(!is_browser_previewable_path(Path::new("release.dmg")));
+        assert!(!is_browser_previewable_path(Path::new("installer.pkg")));
+        assert!(!is_browser_previewable_path(Path::new("archive.zip")));
+        assert!(!is_browser_previewable_path(Path::new("unknown")));
     }
 
     #[test]

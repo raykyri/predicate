@@ -883,13 +883,30 @@ export function browserOpenPreviewExternal(url: string) {
   return invoke<void>("browser_open_preview_external", { url });
 }
 
-/** Open an absolute local file path in the pane's browser overlay (sandboxed). */
+export type BrowserOpenLocalPathResult = {
+  disposition: "preview" | "revealed";
+  url: string | null;
+  sandbox: boolean;
+};
+
+/** Safely open an absolute local path: preview known renderable files in the
+ * sandboxed overlay and reveal unknown/binary formats in the OS file manager. */
 export function browserOpenLocalPath(paneId: string, path: string, artifactId?: string) {
-  return invoke<{ url: string; sandbox: boolean }>("browser_open_local_path", {
+  return invoke<BrowserOpenLocalPathResult>("browser_open_local_path", {
     paneId,
     path,
     artifactId,
   });
+}
+
+/** Reveal a root-confined local path without opening or executing it. */
+export function browserRevealLocalPath(paneId: string, path: string) {
+  return invoke<void>("browser_reveal_local_path", { paneId, path });
+}
+
+/** Deliberately hand a root-confined local path to its OS default app. */
+export function browserOpenLocalPathExternal(paneId: string, path: string) {
+  return invoke<void>("browser_open_local_path_external", { paneId, path });
 }
 
 /** Resolve a Codex inline-visualization basename within the pane's own session

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   QMUX_FILE_HREF_PREFIX,
   absoluteLocalFilePath,
+  canPreviewLocalFilePath,
   isFileServerUrl,
   isQmuxFileHref,
   loopbackHtmlUrl,
@@ -85,6 +86,16 @@ test("isQmuxFileHref and pathFromQmuxFileHref round-trip", () => {
   assert.equal(isQmuxFileHref("https://example.com"), false);
   assert.equal(pathFromQmuxFileHref(href), path);
   assert.equal(pathFromQmuxFileHref("https://example.com"), undefined);
+});
+
+test("local preview hints allow renderable files and reject binary packages", () => {
+  assert.equal(canPreviewLocalFilePath("/tmp/report.HTML"), true);
+  assert.equal(canPreviewLocalFilePath("/tmp/notes.markdown"), true);
+  assert.equal(canPreviewLocalFilePath("C:\\tmp\\chart.PNG"), true);
+  assert.equal(canPreviewLocalFilePath("/tmp/qmux_0.3.1_universal.dmg"), false);
+  assert.equal(canPreviewLocalFilePath("/tmp/installer.pkg"), false);
+  assert.equal(canPreviewLocalFilePath("/tmp/archive.zip"), false);
+  assert.equal(canPreviewLocalFilePath("/tmp/no-extension"), false);
 });
 
 test("isFileServerUrl recognizes token-bearing loopback paths", () => {

@@ -1,15 +1,18 @@
 import { useEffect, useRef } from "react";
-import { ExternalLink, Globe } from "lucide-react";
+import { ExternalLink, FolderOpen, Globe } from "lucide-react";
 
-// Right-click chooser for a link: open it in the internal browser overlay or the OS
-// browser. Positioned at the pointer (viewport coords); closes on outside click,
-// Escape, or either choice.
+// Right-click chooser for a link. Web links choose between the internal and OS
+// browsers; local links can preview, reveal, or deliberately use the default app.
+// Positioned at the pointer (viewport coords); closes on outside click or Escape.
 interface LinkContextMenuProps {
   x: number;
   y: number;
   canOpenInternal: boolean;
   onOpenInternal: () => void;
+  externalLabel?: string;
+  externalKind?: "browser" | "reveal";
   onOpenExternal: () => void;
+  onOpenWithDefaultApp?: (() => void) | null;
   onClose: () => void;
 }
 
@@ -18,7 +21,10 @@ export default function LinkContextMenu({
   y,
   canOpenInternal,
   onOpenInternal,
+  externalLabel = "Open in browser",
+  externalKind = "browser",
   onOpenExternal,
+  onOpenWithDefaultApp = null,
   onClose,
 }: LinkContextMenuProps) {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -66,9 +72,24 @@ export default function LinkContextMenu({
         className="menu-item link-context-menu-item"
         onClick={onOpenExternal}
       >
-        <ExternalLink size={14} aria-hidden="true" />
-        <span>Open in browser</span>
+        {externalKind === "reveal" ? (
+          <FolderOpen size={14} aria-hidden="true" />
+        ) : (
+          <ExternalLink size={14} aria-hidden="true" />
+        )}
+        <span>{externalLabel}</span>
       </button>
+      {onOpenWithDefaultApp ? (
+        <button
+          type="button"
+          role="menuitem"
+          className="menu-item link-context-menu-item"
+          onClick={onOpenWithDefaultApp}
+        >
+          <ExternalLink size={14} aria-hidden="true" />
+          <span>Open with default app</span>
+        </button>
+      ) : null}
     </div>
   );
 }

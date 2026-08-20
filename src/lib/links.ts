@@ -103,6 +103,46 @@ export function pathFromQmuxFileHref(url: string): string | undefined {
   return path.length > 0 ? path : undefined;
 }
 
+// Mirrors the file server's explicit browser-renderable MIME allowlist. This is
+// only a UI hint for whether the context menu should offer an internal preview;
+// the backend resolves the canonical path and makes the authoritative decision.
+const INTERNAL_FILE_PREVIEW_EXTENSIONS = new Set([
+  "avif",
+  "csv",
+  "css",
+  "gif",
+  "htm",
+  "html",
+  "ico",
+  "jpeg",
+  "jpg",
+  "js",
+  "json",
+  "log",
+  "markdown",
+  "md",
+  "mjs",
+  "mp3",
+  "mp4",
+  "pdf",
+  "png",
+  "svg",
+  "toml",
+  "txt",
+  "wav",
+  "webm",
+  "webp",
+  "xml",
+  "yaml",
+  "yml",
+]);
+
+export function canPreviewLocalFilePath(path: string): boolean {
+  const filename = path.replace(/\\/g, "/").split("/").pop() ?? "";
+  const extension = filename.includes(".") ? filename.split(".").pop()?.toLowerCase() : undefined;
+  return extension !== undefined && INTERNAL_FILE_PREVIEW_EXTENSIONS.has(extension);
+}
+
 /**
  * A loopback HTML document that qmux can offer as an explicit browser preview.
  * Parse the URL instead of matching a prefix so lookalike hosts such as

@@ -330,6 +330,7 @@ import {
   TERMINAL_FONT_SIZE_MIN,
 } from "./lib/terminalFont";
 import {
+  canPreviewLocalFilePath,
   canRenderInInternalBrowser,
   isFileServerUrl,
   pathFromQmuxFileHref,
@@ -413,7 +414,9 @@ import {
   artifactRestore,
   artifactReveal,
   attachPane,
+  browserOpenLocalPathExternal,
   browserOpenPreviewExternal,
+  browserRevealLocalPath,
   claimNativeTerminalPointerForWebDrag,
   clearAgentWorkingStatus,
   closeWorktreePane,
@@ -2909,7 +2912,8 @@ function MainApp() {
   const [queueSplitHeightByAgent, setQueueSplitHeightByAgent] = useState<Record<string, number>>(
     {},
   );
-  // Right-click chooser for a link (transcript or terminal): internal vs external.
+  // Right-click chooser for a link: web URLs choose internal vs external;
+  // local paths choose protected preview, reveal, or an explicit OS open.
   const [linkMenu, setLinkMenu] = useState<{
     url: string;
     x: number;
@@ -7733,9 +7737,9 @@ function MainApp() {
   }
 
   // Opens a tray entry, or closes the browser when that entry already owns it.
-  // Files go through browserOpenLocalPath, which mints a
-  // fresh token URL and re-validates the path against the target pane's roots —
-  // stored file-server URLs would be stale across restarts. Entries whose source
+  // Files go through browserOpenLocalPath, which re-validates the path against
+  // the target pane's roots, previews renderable formats with a fresh token URL,
+  // and reveals binaries safely. Entries whose source
   // pane still exists open there (activating that tab, which is what the muted
   // cross-pane rows promise); if the pane is gone the tray's own pane hosts it.
   const openArtifact = useCallback(
@@ -13989,6 +13993,8 @@ function MainApp() {
   const renamingGroup = renameGroupId ? groupById.get(renameGroupId) : undefined;
   const renamingResearchFolder =
     renamingGroup?.scope === "research" ? renamingGroup : undefined;
+  const linkMenuLocalPath = linkMenu ? pathFromQmuxFileHref(linkMenu.url) : undefined;
+  const linkMenuPaneId = linkMenu?.paneId ?? null;
 
   return (
     <main
@@ -16744,22 +16750,47 @@ function MainApp() {
           x={linkMenu.x}
           y={linkMenu.y}
           canOpenInternal={
-            linkMenu.paneId !== null &&
+            linkMenuPaneId !== null &&
             (canRenderInInternalBrowser(linkMenu.url) ||
-              pathFromQmuxFileHref(linkMenu.url) !== undefined)
+              (linkMenuLocalPath !== undefined &&
+                canPreviewLocalFilePath(linkMenuLocalPath)))
           }
           onOpenInternal={() => {
             openLinkForPane(linkMenu.paneId, linkMenu.url);
             setLinkMenu(null);
           }}
           onOpenExternal={() => {
-            // Local file previews have no public URL; refuse rather than sending
-            // a qmux-file: sentinel (or a file-server token URL) to the OS.
-            if (pathFromQmuxFileHref(linkMenu.url) === undefined) {
-              void openExternalUrl(linkMenu.url);
+            if (linkMenuLocalPath !== undefined && linkMenuPaneId !== null) {
+              void browserRevealLocalPath(linkMenuPaneId, linkMenuLocalPath).catch((err) => {
+                setError(err instanceof Error ? err.message : String(err));
+              });
+            } else {
+              void openExternalUrl(linkMenu.url).catch((err) => {
+                setError(err instanceof Error ? err.message : String(err));
+              });
             }
             setLinkMenu(null);
           }}
+          externalLabel={
+            linkMenuLocalPath !== undefined
+              ? IS_MAC
+                ? "Reveal in Finder"
+                : "Reveal in file manager"
+              : undefined
+          }
+          externalKind={linkMenuLocalPath !== undefined ? "reveal" : undefined}
+          onOpenWithDefaultApp={
+            linkMenuLocalPath !== undefined && linkMenuPaneId !== null
+              ? () => {
+                  void browserOpenLocalPathExternal(linkMenuPaneId, linkMenuLocalPath).catch(
+                    (err) => {
+                      setError(err instanceof Error ? err.message : String(err));
+                    },
+                  );
+                  setLinkMenu(null);
+                }
+              : null
+          }
           onClose={() => setLinkMenu(null)}
         />
       ) : null}

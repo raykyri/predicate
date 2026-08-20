@@ -622,18 +622,12 @@ fn browser_open_preview_external(
     open_in_os_browser(file_url.as_str())
 }
 
-/// Mint a token-scoped file-server URL for an absolute local path under the
-/// pane's roots and open it in that pane's browser overlay (sandboxed). Used
-/// when transcript markdown links to a filesystem path such as
-/// `/Users/…/report.html` instead of a loopback http URL.
-#[tauri::command(async)]
-fn browser_open_local_path(
-    state: tauri::State<'_, AppState>,
-    pane_id: String,
-    path: String,
-    artifact_id: Option<String>,
-) -> Result<serde_json::Value, String> {
-    if !state.pane_exists(&pane_id)? {
+fn resolve_local_link_target(
+    state: &AppState,
+    pane_id: &str,
+    path: &str,
+) -> Result<control_socket::ResolvedBrowserTarget, String> {
+    if !state.pane_exists(pane_id)? {
         return Err(format!("pane {pane_id} was not found"));
     }
     let trimmed = path.trim();
@@ -648,7 +642,34 @@ fn browser_open_local_path(
             "refusing to open relative path '{trimmed}'; use an absolute path or `qmux open`"
         ));
     }
-    let resolved = control_socket::resolve_browser_target(&state, &pane_id, trimmed, None)?;
+    control_socket::resolve_browser_target(state, pane_id, trimmed, None)
+}
+
+/// Open a validated local link using the safest useful default: known
+/// browser-renderable files get a token-scoped sandboxed preview, while
+/// directories and unknown/binary formats are only revealed in the OS file
+/// manager. In particular, clicking an installer or disk image never mounts or
+/// launches it.
+#[tauri::command(async)]
+fn browser_open_local_path(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+    artifact_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
+    let source = resolved
+        .path
+        .as_deref()
+        .ok_or_else(|| "local path resolution returned no source file".to_string())?;
+    if !source.is_file() || !file_server::is_browser_previewable_path(source) {
+        reveal_path_in_file_manager(source)?;
+        return Ok(serde_json::json!({
+            "disposition": "revealed",
+            "url": null,
+            "sandbox": false,
+        }));
+    }
     state.emit(events::QmuxEvent::new(
         "browser.open",
         Some(pane_id),
@@ -659,7 +680,43 @@ fn browser_open_local_path(
             "artifactId": artifact_id,
         }),
     ));
-    Ok(serde_json::json!({ "url": resolved.url, "sandbox": resolved.sandbox }))
+    Ok(serde_json::json!({
+        "disposition": "preview",
+        "url": resolved.url,
+        "sandbox": resolved.sandbox,
+    }))
+}
+
+/// Reveal a validated local link without opening or executing it.
+#[tauri::command(async)]
+fn browser_reveal_local_path(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<(), String> {
+    let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
+    let source = resolved
+        .path
+        .as_deref()
+        .ok_or_else(|| "local path resolution returned no source file".to_string())?;
+    reveal_path_in_file_manager(source)
+}
+
+/// Deliberate context-menu action for handing a validated local link to its OS
+/// default application. Unlike the primary click path, this may mount a disk
+/// image or launch an application, so the frontend never calls it implicitly.
+#[tauri::command(async)]
+fn browser_open_local_path_external(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<(), String> {
+    let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
+    let source = resolved
+        .path
+        .as_deref()
+        .ok_or_else(|| "local path resolution returned no source file".to_string())?;
+    open_path_with_default_app(source)
 }
 
 #[tauri::command]
@@ -3224,6 +3281,8 @@ fn main() {
             open_external_url,
             browser_open_preview_external,
             browser_open_local_path,
+            browser_reveal_local_path,
+            browser_open_local_path_external,
             browser_open_codex_inline_visualization,
             artifact_list,
             artifact_remove,
