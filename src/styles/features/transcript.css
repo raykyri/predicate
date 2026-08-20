@@ -507,10 +507,7 @@
    beneath it plays out, and releases as the view scrolls back up to its original slot.
    Expanded transcripts keep every message in the normal document flow.
    TurnOverlay arms this (has-sticky-user) only while the bubble is short
-   relative to the pane, so a tall message never blankets the transcript.
-   Scrolling above that pin in the compact pane collapses older non-user cards
-   (history scan); the live turn under the pin stays intact. Expanded transcripts
-   keep every message in the normal document flow and do not enter scan. */
+   relative to the pane, so a tall message never blankets the transcript. */
 .turn-pane:not(.is-expanded)
   .turn-timeline.has-sticky-user
   .turn-card.is-sticky-user-message {

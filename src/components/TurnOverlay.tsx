@@ -36,19 +36,9 @@ import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import {
   captureTranscriptScrollPosition,
-  transcriptScrollAnchorOf,
   transcriptScrollRestoreTop,
-  withTranscriptScrollAnchor,
   type TranscriptScrollPosition,
 } from "../lib/transcriptScroll";
-import {
-  collapseOlderNonUserItems,
-  historyScanCollapsesItems,
-  pickHistoryScanAnchor,
-  remapSectionLabels,
-  scrollTopDeltaToKeepOffset,
-  type HistoryScanAnchor,
-} from "../lib/transcriptHistoryScan";
 import {
   assistantGroupTimestamp,
   assistantRunForItemKey,
@@ -144,10 +134,8 @@ interface TurnOverlayProps {
   // activity from the visible transcript while keeping normal messages.
   showActivityDetail?: boolean;
   // When false, the latest user message never pins to the top of the pane —
-  // it scrolls with the rest of the transcript (header pin toggle).
+  // it scrolls with the rest of the transcript (Settings → sticky messages).
   stickyUserMessages?: boolean;
-  // CSS sticky (and therefore history scan) only runs on the compact pane.
-  transcriptExpanded?: boolean;
   // When true, show a wall-clock timestamp after each consecutive run of
   // assistant messages (before the next non-assistant message, or at the tail).
   showAssistantTimestamps?: boolean;
@@ -219,58 +207,6 @@ interface QueueSplitDrag {
   startHeight: number;
 }
 
-function timelineCardsForHistoryScan(timeline: HTMLElement) {
-  return Array.from(
-    timeline.querySelectorAll<HTMLElement>(".turn-card[data-timeline-key]"),
-  ).flatMap((card) => {
-    const key = card.dataset.timelineKey;
-    if (!key) {
-      return [];
-    }
-    const rect = card.getBoundingClientRect();
-    return [
-      {
-        key,
-        role: card.classList.contains("role-user") ? "user" : "assistant",
-        top: rect.top,
-        bottom: rect.bottom,
-      },
-    ];
-  });
-}
-
-function captureHistoryScanAnchor(timeline: HTMLElement): HistoryScanAnchor | null {
-  const rect = timeline.getBoundingClientRect();
-  const paddingTop = Number.parseFloat(window.getComputedStyle(timeline).paddingTop || "0");
-  return pickHistoryScanAnchor(timelineCardsForHistoryScan(timeline), rect.top, paddingTop);
-}
-
-function timelineCardByKey(timeline: HTMLElement, key: string): HTMLElement | null {
-  const escaped =
-    typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(key) : key;
-  return timeline.querySelector(`[data-timeline-key="${escaped}"]`);
-}
-
-function applyHistoryScanAnchor(timeline: HTMLElement, anchor: HistoryScanAnchor) {
-  const card = timelineCardByKey(timeline, anchor.key);
-  if (!card) {
-    return;
-  }
-  const currentOffset =
-    card.getBoundingClientRect().top - timeline.getBoundingClientRect().top;
-  timeline.scrollTop += scrollTopDeltaToKeepOffset(currentOffset, anchor.offset);
-}
-
-type PendingHistoryScanAnchor =
-  | (HistoryScanAnchor & { forScan: boolean })
-  | { forScan: false; bottom: true };
-
-function isBottomHistoryScanAnchor(
-  pending: PendingHistoryScanAnchor,
-): pending is { forScan: false; bottom: true } {
-  return "bottom" in pending && pending.bottom === true;
-}
-
 export function formatTurnsTranscript(turns: Turn[], assistantLabel: string) {
   return turns.map((turn) => formatTurnTranscript(turn, assistantLabel)).join("\n\n");
 }
@@ -302,7 +238,6 @@ export default function TurnOverlay({
   thinkingLabel = "Working…",
   showActivityDetail = true,
   stickyUserMessages = true,
-  transcriptExpanded = false,
   showAssistantTimestamps = false,
   assistantTurnFocusEnabled = false,
   focusedAssistantTurnKey = null,
@@ -357,15 +292,6 @@ export default function TurnOverlay({
   const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
   const [composerHeight, setComposerHeight] = useState(0);
   const [composerBaseHeight, setComposerBaseHeight] = useState(0);
-  // Collapses older assistant cards once the reader scrolls above the pinned
-  // last-user message. Stays on until jump-to-latest or the pin is unavailable
-  // (expanded pane, pin off, no collapse work) so a short compact list cannot
-  // flip the mode via the live-follow tail band.
-  const [historyScan, setHistoryScan] = useState(false);
-  const [historyScanEpoch, setHistoryScanEpoch] = useState(0);
-  const historyScanRef = useRef(false);
-  const historyScanAnchorRef = useRef<PendingHistoryScanAnchor | null>(null);
-  const historyScanAgentRef = useRef(agentId);
   // When the shared timeline swaps transcripts, the browser clamps the previous
   // scrollTop onto the new content and fires onScroll *before* layout effects
   // run. That intermediate event would overwrite the incoming agent's saved
@@ -379,19 +305,6 @@ export default function TurnOverlay({
     prevTranscriptAgentIdRef.current = agentId;
     restoringScrollRef.current = true;
     pendingRestoreRef.current = agentId ? getTranscriptScroll?.(agentId) : undefined;
-  }
-  if (agentId !== historyScanAgentRef.current) {
-    historyScanAgentRef.current = agentId;
-    historyScanAnchorRef.current = null;
-    const restoreScan = Boolean(
-      !transcriptExpanded && transcriptScrollAnchorOf(pendingRestoreRef.current),
-    );
-    historyScanRef.current = restoreScan;
-    if (historyScan !== restoreScan) {
-      setHistoryScan(restoreScan);
-    }
-  } else {
-    historyScanRef.current = historyScan;
   }
   const historyRenderRef = useRef({ agentId, count: conversationHistory.length });
   const historyPrependSnapshotRef = useRef<{ height: number; top: number } | null>(null);
@@ -424,14 +337,6 @@ export default function TurnOverlay({
       STICK_TO_BOTTOM_THRESHOLD,
     );
 
-  const snapshotTimelineScroll = (timeline: HTMLDivElement): TranscriptScrollPosition => {
-    const position = currentTimelineScrollPosition(timeline);
-    if (!historyScanRef.current) {
-      return position;
-    }
-    return withTranscriptScrollAnchor(position, captureHistoryScanAnchor(timeline));
-  };
-
   const handleTimelineScroll = () => {
     const timeline = timelineRef.current;
     if (!timeline || readerModeRequested || readerModeWasActiveRef.current) {
@@ -445,7 +350,7 @@ export default function TurnOverlay({
     // The stick-to-bottom ref must update synchronously (layout effects read it
     // on the very next commit); the sticky-message geometry can wait for the
     // next frame — see scheduleStickyUserStuckUpdate.
-    const position = snapshotTimelineScroll(timeline);
+    const position = currentTimelineScrollPosition(timeline);
     const reachedLatest =
       timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight <=
       STICK_TO_BOTTOM_THRESHOLD;
@@ -475,7 +380,7 @@ export default function TurnOverlay({
     return registerScrollCapture(() => {
       const timeline = timelineRef.current;
       if (timeline) {
-        saveTranscriptScroll?.(agentId, snapshotTimelineScroll(timeline));
+        saveTranscriptScroll?.(agentId, currentTimelineScrollPosition(timeline));
       }
     });
   }, [agentId, readerModeRequested, registerScrollCapture, saveTranscriptScroll]);
@@ -490,11 +395,6 @@ export default function TurnOverlay({
     // transcript still lands at its current physical end.
     jumpingToLatestRef.current = true;
     stickToBottomRef.current = true;
-    if (historyScanRef.current) {
-      historyScanRef.current = false;
-      historyScanAnchorRef.current = { forScan: false, bottom: true };
-      setHistoryScan(false);
-    }
     setJumpToLatestVisible(false);
     timeline.scrollTo({
       top: timeline.scrollHeight,
@@ -617,29 +517,20 @@ export default function TurnOverlay({
       // Publish the settled position now that clamp events are done, so the
       // store matches what the user actually sees (and stickiness is correct).
       handleTimelineScroll();
-      updateStickyUserStuckRef.current();
-      setHistoryScanEpoch((epoch) => epoch + 1);
     };
 
     if (saved && !saved.atEnd) {
-      const scanAnchor = transcriptScrollAnchorOf(saved);
-      stickToBottomRef.current = scanAnchor ? false : saved.stuck;
+      stickToBottomRef.current = saved.stuck;
       const restore = () => {
         const timeline = timelineRef.current;
-        if (!timeline) {
-          return;
+        if (timeline) {
+          timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
+          const distanceFromBottom =
+            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
+          setJumpToLatestVisible(
+            !saved.stuck && distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD,
+          );
         }
-        if (scanAnchor) {
-          applyHistoryScanAnchor(timeline, scanAnchor);
-          setJumpToLatestVisible(true);
-          return;
-        }
-        timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
-        const distanceFromBottom =
-          timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-        setJumpToLatestVisible(
-          !saved.stuck && distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD,
-        );
       };
       restore();
       const frame = requestAnimationFrame(() => {
@@ -1033,22 +924,6 @@ export default function TurnOverlay({
   const [stickyUserFits, setStickyUserFits] = useState(false);
   const [stickyUserStuck, setStickyUserStuck] = useState(false);
   const stickyUserEnabled = Boolean(stickyUserKey) && stickyUserFits;
-  const visibleTimelineItems = useMemo(() => {
-    if (readerMode || !historyScan || !stickyUserKey) {
-      return displayedTimelineItems;
-    }
-    return collapseOlderNonUserItems(displayedTimelineItems, stickyUserKey);
-  }, [displayedTimelineItems, historyScan, readerMode, stickyUserKey]);
-  const visibleSectionLabels = useMemo(() => {
-    if (visibleTimelineItems === displayedTimelineItems) {
-      return sectionLabelsByFirstItemKey;
-    }
-    return remapSectionLabels(
-      sectionLabelsByFirstItemKey,
-      displayedTimelineItems,
-      visibleTimelineItems,
-    );
-  }, [displayedTimelineItems, sectionLabelsByFirstItemKey, visibleTimelineItems]);
 
   // Whether the candidate is pinned right now. Drives the stuck-only styling
   // (shadow + backfill mask) so the bubble renders exactly as before whenever
@@ -1136,83 +1011,7 @@ export default function TurnOverlay({
     // The update reads live geometry from refs; these deps are the renders
     // after which that geometry can have changed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stickyUserEnabled, historyScan, visibleTimelineItems, composerHeight, effectiveQueueSplitHeight, agentId, thinking]);
-
-  useLayoutEffect(() => {
-    if (restoringScrollRef.current) {
-      return;
-    }
-    const timeline = timelineRef.current;
-    const pinAvailable =
-      Boolean(stickyUserKey) && !transcriptExpanded && !readerMode;
-    const canCollapse =
-      pinAvailable && historyScanCollapsesItems(displayedTimelineItems, stickyUserKey);
-    if (!canCollapse) {
-      if (historyScan) {
-        if (timeline && !stickToBottomRef.current) {
-          const anchor = captureHistoryScanAnchor(timeline);
-          if (anchor) {
-            historyScanAnchorRef.current = { ...anchor, forScan: false };
-          }
-        } else {
-          historyScanAnchorRef.current = { forScan: false, bottom: true };
-        }
-        historyScanRef.current = false;
-        setHistoryScan(false);
-      }
-      return;
-    }
-    // Wait until the pin actually fits before entering. Keep an already-on
-    // scan (including tab restore) so a one-frame unmeasured card cannot
-    // expand and throw away the compact-list restore.
-    if (!stickyUserEnabled) {
-      return;
-    }
-    if (stickToBottomRef.current) {
-      return;
-    }
-    if (!historyScan && !stickyUserStuck && timeline) {
-      const anchor = captureHistoryScanAnchor(timeline);
-      historyScanAnchorRef.current = anchor ? { ...anchor, forScan: true } : null;
-      historyScanRef.current = true;
-      setHistoryScan(true);
-    }
-  }, [
-    displayedTimelineItems,
-    historyScan,
-    readerMode,
-    stickyUserEnabled,
-    stickyUserKey,
-    stickyUserStuck,
-    historyScanEpoch,
-    transcriptExpanded,
-    agentId,
-  ]);
-
-  useLayoutEffect(() => {
-    const timeline = timelineRef.current;
-    const pending = historyScanAnchorRef.current;
-    if (!timeline || !pending) {
-      return;
-    }
-    if (isBottomHistoryScanAnchor(pending)) {
-      if (historyScan === pending.forScan) {
-        historyScanAnchorRef.current = null;
-        if (stickToBottomRef.current) {
-          scrollToBottom();
-        }
-      }
-      return;
-    }
-    if (historyScan !== pending.forScan) {
-      return;
-    }
-    historyScanAnchorRef.current = null;
-    applyHistoryScanAnchor(timeline, pending);
-    handleTimelineScroll();
-    // Apply only after the matching collapsed/expanded render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [historyScan, visibleTimelineItems]);
+  }, [stickyUserEnabled, timelineItems, composerHeight, effectiveQueueSplitHeight, agentId, thinking]);
 
   const visibleHeader = readerMode ? null : header;
 
@@ -1360,9 +1159,9 @@ export default function TurnOverlay({
             )}
           </div>
         ) : (
-          visibleTimelineItems.map((item, index) => {
+          displayedTimelineItems.map((item, index) => {
             const historical = historyItemKeys.has(item.key);
-            const sectionLabel = visibleSectionLabels.get(item.key);
+            const sectionLabel = sectionLabelsByFirstItemKey.get(item.key);
             const sectionPosition = timelineSectionPositionByItemKey.get(item.key);
             // A continued agent turn — agent text, then a tool-call group, then
             // more agent text — is still the same speaker, so drop the repeated
@@ -1383,7 +1182,7 @@ export default function TurnOverlay({
               item.role === "assistant" &&
               (next === undefined || next.role !== "assistant")
                 ? assistantGroupTimestamp(
-                    sectionPosition?.items ?? visibleTimelineItems,
+                    sectionPosition?.items ?? displayedTimelineItems,
                     sectionPosition?.index ?? index,
                   )
                 : null;
@@ -1673,7 +1472,6 @@ function MessageItemView({
       }${timelineStatusClass(item.status)}${timelineContextStatusClass(
         item.contextStatus,
       )}${stickyClassName}`}
-      data-timeline-key={item.key}
     >
       {showHeader ? (
         <header className={showName ? undefined : "is-actions-only"}>

@@ -13432,7 +13432,6 @@ function MainApp() {
         }
         showActivityDetail={settings.showToolCalls}
         stickyUserMessages={settings.stickyUserMessages}
-        transcriptExpanded={activeTranscriptVisibleExpanded}
         showAssistantTimestamps={settings.showAssistantTimestamps}
         assistantTurnFocusEnabled={splitOverlayTranscriptMode || !rightBarCollapsed}
         focusedAssistantTurnKey={
