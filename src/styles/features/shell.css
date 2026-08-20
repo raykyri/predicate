@@ -1355,6 +1355,11 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   color: #e6b673;
 }
 
+.confirm-dialog-field-label {
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+}
+
 .rename-dialog-input {
   width: 100%;
   min-height: var(--control-h-lg);

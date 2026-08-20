@@ -721,12 +721,18 @@ export function spawnShell(
 
 export function openPaneWorktree(
   paneId: string,
+  worktreeName: string,
   initialSize?: InitialPaneSize | null,
 ) {
   return invoke<PaneInfo>("open_pane_worktree", {
     paneId,
+    worktreeName,
     initialSize: initialSize ?? null,
   });
+}
+
+export function suggestPaneWorktreeName(paneId: string) {
+  return invoke<string>("suggest_pane_worktree_name", { paneId });
 }
 
 export function getUseLoginShell() {

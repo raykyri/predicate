@@ -91,7 +91,8 @@ use workspace::{
     create_group, create_research_workspace, create_shell_worktree,
     ensure_default_research_workspace, group_recoverable_dir, move_research_workspace,
     remove_agent_worktree, remove_pristine_group_scaffold, remove_research_workspace, rename_group,
-    rename_research_workspace, set_group_collapsed, set_group_dir, validate_launch_workspace,
+    rename_research_workspace, set_group_collapsed, set_group_dir, suggested_shell_worktree_name,
+    validate_launch_workspace,
 };
 
 fn handle_global_shortcut(
@@ -2110,9 +2111,25 @@ fn pane_worktree_seed_cwd(
 }
 
 #[tauri::command]
+fn suggest_pane_worktree_name(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+) -> Result<String, String> {
+    let pane = state
+        .list_panes()?
+        .into_iter()
+        .find(|candidate| candidate.id == pane_id)
+        .ok_or_else(|| format!("pane {pane_id} was not found"))?;
+    let group = validate_launch_workspace(&state, Some(&pane.group_id), LaunchOrigin::Terminal)?
+        .ok_or_else(|| format!("workspace {} was not found", pane.group_id))?;
+    Ok(suggested_shell_worktree_name(&group))
+}
+
+#[tauri::command]
 async fn open_pane_worktree(
     state: tauri::State<'_, AppState>,
     pane_id: String,
+    worktree_name: String,
     initial_size: Option<InitialPaneSize>,
 ) -> Result<PaneInfo, String> {
     let state = state.inner().clone();
@@ -2127,7 +2144,7 @@ async fn open_pane_worktree(
                 .ok_or_else(|| format!("workspace {} was not found", pane.group_id))?;
         let host = host::for_group(group.remote.as_ref());
         let seed = pane_worktree_seed_cwd(&state, &pane, &group)?;
-        let worktree = create_shell_worktree(&state, &host, &group, &seed)?;
+        let worktree = create_shell_worktree(&state, &host, &group, &seed, &worktree_name)?;
         let cwd = worktree
             .to_str()
             .ok_or_else(|| "worktree path is not valid UTF-8".to_string())?;
@@ -3273,6 +3290,7 @@ fn main() {
             group_create_with_shell,
             group_pick_dir,
             spawn_shell,
+            suggest_pane_worktree_name,
             open_pane_worktree,
             use_login_shell_get,
             use_login_shell_set,

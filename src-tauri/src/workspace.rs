@@ -1903,6 +1903,25 @@ fn unique_worktree_dir(root: &Path, requested_name: &str) -> Result<PathBuf, Str
     unique_dir(root, &bounded_path_segment(requested_name, 240), "worktree")
 }
 
+fn validate_worktree_name(requested_name: &str) -> Result<&str, String> {
+    let name = requested_name.trim();
+    if name.is_empty() {
+        return Err("worktree name cannot be empty".to_string());
+    }
+    if name.len() > 240 {
+        return Err("worktree name must be at most 240 characters".to_string());
+    }
+    if !name
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        return Err(
+            "worktree name may contain only letters, numbers, hyphens, and underscores".to_string(),
+        );
+    }
+    Ok(name)
+}
+
 fn unique_dir(root: &Path, requested_name: &str, kind: &str) -> Result<PathBuf, String> {
     let base = sanitize_path_segment(requested_name);
     for index in 0..1000 {
@@ -1929,19 +1948,42 @@ fn allocate_agent_worktree_dir(
     group: &GroupInfo,
     agent_name: &str,
 ) -> Result<PathBuf, String> {
+    // Preserve the existing compact agent paths for remote/global storage;
+    // project-local storage includes the group label to avoid collisions across
+    // groups sharing the same repository root.
+    if let Some(root) = host.remote_workspace_root()? {
+        return Ok(PathBuf::from(root).join(&group.id).join(agent_name));
+    }
+    let location = persistence::load_preferences(&state.config().workspace_root)?
+        .worktree_location
+        .unwrap_or_default();
+    if location == WorktreeLocation::Global {
+        return Ok(PathBuf::from(&group.managed_dir).join(agent_name));
+    }
+    let root = worktree_root(state, host, base_repo, group)?;
+    let display_name = group.name_override.as_deref().unwrap_or(&group.name);
+    unique_worktree_dir(&root, &format!("{display_name}-{agent_name}"))
+}
+
+fn worktree_root(
+    state: &AppState,
+    host: &Host,
+    base_repo: Option<&str>,
+    group: &GroupInfo,
+) -> Result<PathBuf, String> {
     // A remote worktree has to live under the *host's* root. The group's
     // managed directory and the project-local placements below are all resolved
     // against this filesystem — canonicalizing a remote path here would silently
     // produce a local directory and the agent would edit the wrong tree.
     if let Some(root) = host.remote_workspace_root()? {
-        return Ok(PathBuf::from(root).join(&group.id).join(agent_name));
+        return Ok(PathBuf::from(root).join(&group.id));
     }
 
     let location = persistence::load_preferences(&state.config().workspace_root)?
         .worktree_location
         .unwrap_or_default();
     if location == WorktreeLocation::Global {
-        return Ok(PathBuf::from(&group.managed_dir).join(agent_name));
+        return Ok(PathBuf::from(&group.managed_dir));
     }
 
     let base_repo = base_repo.ok_or_else(|| {
@@ -1966,8 +2008,22 @@ fn allocate_agent_worktree_dir(
     let root = project_root.join(relative_root);
     fs::create_dir_all(&root)
         .map_err(|err| format!("failed to create worktree root {}: {err}", root.display()))?;
-    let display_name = group.name_override.as_deref().unwrap_or(&group.name);
-    unique_worktree_dir(&root, &format!("{display_name}-{agent_name}"))
+    Ok(root)
+}
+
+fn allocate_named_worktree_dir(
+    state: &AppState,
+    host: &Host,
+    base_repo: &str,
+    group: &GroupInfo,
+    requested_name: &str,
+) -> Result<PathBuf, String> {
+    let name = validate_worktree_name(requested_name)?;
+    let dir = worktree_root(state, host, Some(base_repo), group)?.join(name);
+    if host.is_local() && dir.exists() {
+        return Err(format!("a file or directory named {name:?} already exists"));
+    }
+    Ok(dir)
 }
 
 fn git_project_root(host: &Host, base_repo: &str) -> Result<PathBuf, String> {
@@ -2157,11 +2213,17 @@ pub(crate) fn git_main_checkout(host: &Host, cwd: &str) -> Result<PathBuf, Strin
 /// Creates a linked worktree from the current checkout's HEAD and returns its
 /// path. Allocation uses the main checkout so project-local worktrees do not
 /// nest inside an existing linked worktree.
+pub fn suggested_shell_worktree_name(group: &GroupInfo) -> String {
+    let display_name = group.name_override.as_deref().unwrap_or(&group.name);
+    bounded_path_segment(&format!("{display_name}-{}", default_group_name()), 240)
+}
+
 pub fn create_shell_worktree(
     state: &AppState,
     host: &Host,
     group: &GroupInfo,
     seed_cwd: &str,
+    requested_name: &str,
 ) -> Result<PathBuf, String> {
     let _guard = AGENT_WORKSPACE_CREATION_LOCK
         .lock()
@@ -2177,8 +2239,8 @@ pub fn create_shell_worktree(
     let main = main_checkout
         .to_str()
         .ok_or_else(|| "main checkout path is not valid UTF-8".to_string())?;
-    let name = default_group_name();
-    let dir = allocate_agent_worktree_dir(state, host, Some(main), group, &name)?;
+    let name = validate_worktree_name(requested_name)?;
+    let dir = allocate_named_worktree_dir(state, host, main, group, name)?;
     let head = git_rev_parse_field(host, current, "HEAD")?;
     let branch = format!(
         "qmux/{}/{}",
@@ -2900,10 +2962,20 @@ mod tests {
         )
         .unwrap();
         let group = allocation_group(&repo, &managed);
-        let created =
-            create_shell_worktree(&state, &Host::Local, &group, linked.to_str().unwrap()).unwrap();
+        let created = create_shell_worktree(
+            &state,
+            &Host::Local,
+            &group,
+            linked.to_str().unwrap(),
+            "qmux-feature-shell",
+        )
+        .unwrap();
         let canonical_repo = fs::canonicalize(&repo).unwrap();
         let canonical_created = fs::canonicalize(&created).unwrap();
+        assert_eq!(
+            created.file_name().and_then(|name| name.to_str()),
+            Some("qmux-feature-shell")
+        );
         assert!(
             canonical_created.starts_with(canonical_repo.join(".qmux/worktrees")),
             "{canonical_created:?}"
@@ -2926,11 +2998,64 @@ mod tests {
         .to_string();
         assert_eq!(created_head, feature_head);
 
-        let err = create_shell_worktree(&state, &Host::Local, &group, workspace.to_str().unwrap())
-            .unwrap_err();
+        let collision = create_shell_worktree(
+            &state,
+            &Host::Local,
+            &group,
+            linked.to_str().unwrap(),
+            "qmux-feature-shell",
+        )
+        .unwrap_err();
+        assert!(collision.contains("already exists"), "{collision}");
+        assert!(!repo.join(".qmux/worktrees/qmux-feature-shell-1").exists());
+
+        persistence::save_preferences(
+            &state.config().workspace_root,
+            &persistence::AppPreferences {
+                worktree_location: Some(WorktreeLocation::Global),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let global_created = create_shell_worktree(
+            &state,
+            &Host::Local,
+            &group,
+            linked.to_str().unwrap(),
+            "qmux-global-shell",
+        )
+        .unwrap();
+        assert_eq!(global_created, managed.join("qmux-global-shell"));
+
+        let err = create_shell_worktree(
+            &state,
+            &Host::Local,
+            &group,
+            workspace.to_str().unwrap(),
+            "qmux-invalid-shell",
+        )
+        .unwrap_err();
         assert!(err.contains("not inside a git repository"), "{err}");
 
+        let invalid_name = create_shell_worktree(
+            &state,
+            &Host::Local,
+            &group,
+            linked.to_str().unwrap(),
+            "feature/with-slash",
+        )
+        .unwrap_err();
+        assert!(invalid_name.contains("letters, numbers"), "{invalid_name}");
+
         fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn suggested_shell_worktree_name_includes_the_group_name() {
+        let group = allocation_group(Path::new("/tmp/qmux"), Path::new("/tmp/managed"));
+        let name = suggested_shell_worktree_name(&group);
+        assert!(name.starts_with("brave-otter-"), "{name}");
+        assert!(validate_worktree_name(&name).is_ok());
     }
 
     #[test]

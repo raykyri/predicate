@@ -528,6 +528,7 @@ import {
   spawnAgent,
   spawnShell,
   openPaneWorktree,
+  suggestPaneWorktreeName,
   sendNextQueuedAgentTurn,
   setQueuedTurnPause,
   submitAgentTurn,
@@ -2776,6 +2777,13 @@ function MainApp() {
     tone: "normal" | "warning";
   } | null>(null);
   const [folderPickerStatus, setFolderPickerStatus] = useState<string | null>(null);
+  const [worktreeCreateDialog, setWorktreeCreateDialog] = useState<{
+    pane: PaneInfo;
+    name: string;
+    creating: boolean;
+    error: string | null;
+  } | null>(null);
+  const worktreeNameInputRef = useRef<HTMLInputElement | null>(null);
   const [closeDialog, setCloseDialog] = useState<CloseDialogState | null>(null);
   const [researchFolderRemovalError, setResearchFolderRemovalError] = useState<string | null>(null);
   // Monotonic id for worktree-dialog git-status probes (see closeDialogForPane).
@@ -5429,6 +5437,7 @@ function MainApp() {
       newResearchFolderRequest !== null ||
       publicationTarget ||
       commandPaletteOpen ||
+      worktreeCreateDialog ||
       closeDialog ||
       exitDialog ||
       exportResearchPane ||
@@ -8192,6 +8201,7 @@ function MainApp() {
     commandPaletteOpen ||
     Boolean(
       closeDialog ||
+        worktreeCreateDialog ||
         exitDialog ||
         exportResearchPane ||
         exitPreflightRequest ||
@@ -9485,18 +9495,49 @@ function MainApp() {
     setError(null);
     setPaneContextMenu(null);
     try {
-      const created = await openPaneWorktree(pane.id, estimateInitialPaneSize(false));
-      const orderedPanes = placePaneAfterOptimistically(created, pane.id);
-      setPanesPreservingRecoveredDismissals(orderedPanes);
-      setActivePaneId(created.id);
-      setLastActiveGroupId(created.groupId);
-      await refreshGroups();
-      requestAnimationFrame(() => {
-        terminalPaneRefs.current.get(created.id)?.focus();
-      });
+      const name = await suggestPaneWorktreeName(pane.id);
+      setWorktreeCreateDialog({ pane, name, creating: false, error: null });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function createWorktreeFromDialog() {
+    const dialog = worktreeCreateDialog;
+    if (!dialog || dialog.creating || !dialog.name.trim()) {
+      return;
+    }
+    setWorktreeCreateDialog({ ...dialog, creating: true, error: null });
+    let created: PaneInfo;
+    try {
+      created = await openPaneWorktree(
+        dialog.pane.id,
+        dialog.name.trim(),
+        estimateInitialPaneSize(false),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setWorktreeCreateDialog((current) =>
+        current && current.pane.id === dialog.pane.id
+          ? { ...current, creating: false, error: message }
+          : current,
+      );
+      return;
+    }
+
+    const orderedPanes = placePaneAfterOptimistically(created, dialog.pane.id);
+    setPanesPreservingRecoveredDismissals(orderedPanes);
+    setActivePaneId(created.id);
+    setLastActiveGroupId(created.groupId);
+    setWorktreeCreateDialog(null);
+    try {
+      await refreshGroups();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+    requestAnimationFrame(() => {
+      terminalPaneRefs.current.get(created.id)?.focus();
+    });
   }
 
   async function restoreClosedPane() {
@@ -11760,6 +11801,7 @@ function MainApp() {
     paneContextMenu,
     groupMenu,
     settingsMenu,
+    worktreeCreateDialog,
     closeDialog,
     exitDialog,
     renamePaneId,
@@ -11775,6 +11817,7 @@ function MainApp() {
       paneContextMenu,
       groupMenu,
       settingsMenu,
+      worktreeCreateDialog,
       closeDialog,
       exitDialog,
       renamePaneId,
@@ -11841,7 +11884,9 @@ function MainApp() {
       const menusOpen = Boolean(
         overlays.paneContextMenu || overlays.groupMenu || overlays.settingsMenu,
       );
-      const dialogsOpen = Boolean(overlays.closeDialog || overlays.exitDialog);
+      const dialogsOpen = Boolean(
+        overlays.worktreeCreateDialog || overlays.closeDialog || overlays.exitDialog,
+      );
       let stopPropagation = false;
       if (menusOpen) {
         event.preventDefault();
@@ -11855,6 +11900,9 @@ function MainApp() {
         // Don't dismiss the worktree dialog while its close/delete is running.
         if (!overlays.resolvingClose) {
           setCloseDialog(null);
+        }
+        if (!overlays.worktreeCreateDialog?.creating) {
+          setWorktreeCreateDialog(null);
         }
         if (!overlays.quitting) {
           setExitDialog(null);
@@ -12177,6 +12225,14 @@ function MainApp() {
       input?.select();
     }
   }, [renamePaneId, renameGroupId]);
+
+  useEffect(() => {
+    if (worktreeCreateDialog) {
+      const input = worktreeNameInputRef.current;
+      input?.focus();
+      input?.select();
+    }
+  }, [worktreeCreateDialog?.pane.id]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -15868,6 +15924,77 @@ function MainApp() {
               </div>
             ) : null}
           </div>
+        </div>
+      ) : null}
+
+      {worktreeCreateDialog ? (
+        <div
+          className="confirm-dialog-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !worktreeCreateDialog.creating) {
+              setWorktreeCreateDialog(null);
+            }
+          }}
+        >
+          <form
+            className="confirm-dialog rename-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-worktree-dialog-title"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createWorktreeFromDialog();
+            }}
+          >
+            <h2 id="create-worktree-dialog-title">Create worktree</h2>
+            <label className="confirm-dialog-field-label" htmlFor="create-worktree-name">
+              Worktree name
+            </label>
+            <input
+              ref={worktreeNameInputRef}
+              id="create-worktree-name"
+              className="rename-dialog-input"
+              value={worktreeCreateDialog.name}
+              disabled={worktreeCreateDialog.creating}
+              spellCheck={false}
+              maxLength={240}
+              onChange={(event) => {
+                const name = event.currentTarget.value;
+                setWorktreeCreateDialog((current) =>
+                  current ? { ...current, name, error: null } : current,
+                );
+              }}
+              aria-describedby="create-worktree-name-hint"
+            />
+            <p id="create-worktree-name-hint" className="rename-dialog-hint">
+              Use letters, numbers, hyphens, or underscores. The worktree starts at this tab’s
+              current commit.
+            </p>
+            {worktreeCreateDialog.error ? (
+              <p className="confirm-dialog-error" role="alert">
+                {worktreeCreateDialog.error}
+              </p>
+            ) : null}
+            <div className="confirm-dialog-actions">
+              <button
+                className="control-button"
+                type="button"
+                disabled={worktreeCreateDialog.creating}
+                onClick={() => setWorktreeCreateDialog(null)}
+              >
+                Cancel
+              </button>
+              <ConfirmDialogActionButton
+                type="submit"
+                disabled={!worktreeCreateDialog.name.trim() || worktreeCreateDialog.creating}
+                pending={worktreeCreateDialog.creating}
+                pendingLabel="Creating…"
+              >
+                Create worktree
+              </ConfirmDialogActionButton>
+            </div>
+          </form>
         </div>
       ) : null}
 
