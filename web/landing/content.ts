@@ -65,7 +65,7 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "Saved prompt library",
-    copy: "Reuse Markdown prompts globally or per project, with placeholders for common inputs.",
+    copy: "Reuse Markdown prompts globally or per project.",
   },
   {
     name: "Research trees",

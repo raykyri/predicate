@@ -2538,11 +2538,6 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   opacity: 0.9;
 }
 
-.launcher-select-icon.is-compact {
-  width: 13px;
-  height: 13px;
-}
-
 /* The chevron stays muted even when the value takes a tone, so only the label reads
    as danger. */
 .launcher-select-chevron {

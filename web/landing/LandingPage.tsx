@@ -34,16 +34,12 @@ function Hero() {
     <section className="grid-section" aria-labelledby="hero-title">
       <div className="hero-lead">
         <h1 className="hero-title" id="hero-title">
-          All-in-one terminal for CLI coding agents
+          All-in-one terminal for agents
         </h1>
         <div className="intro-copy">
           <p>
-            qmux is a terminal for CLI agents, with easy-to-read transcripts, artifacts,
-            cross-agent queues, and more.
-          </p>
-          <p>
-            It's also a full-featured terminal built on libghostty, with tabs, split terminals,
-            agent restoration, and more.
+            qmux is a terminal for CLI agents with easy-to-read transcripts, artifacts,
+            cross-agent queues, and more. Built on libghostty.
           </p>
         </div>
         <HeroAgents />
