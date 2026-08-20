@@ -3,6 +3,21 @@ import { setNativeTerminalWebOverlayRegion } from "../lib/api";
 
 let nextRegionSequence = 0;
 
+/** Publishes the element's current rect, grown by `padding` on every side. The
+ * slop exists so the native hit region matches a control whose DOM hit area is
+ * deliberately larger than its painted box (the split resizer). */
+function publishRegion(regionId: string, element: HTMLElement, padding: number) {
+  const rect = element.getBoundingClientRect();
+  void setNativeTerminalWebOverlayRegion({
+    regionId,
+    x: rect.left - padding,
+    y: rect.top - padding,
+    width: rect.width + padding * 2,
+    height: rect.height + padding * 2,
+    visible: rect.width > 0 && rect.height > 0,
+  }).catch(() => undefined);
+}
+
 /**
  * Keeps the referenced element's bounding rect registered as a web-owned
  * pointer region with the native terminal event router. Without this, any
@@ -11,17 +26,25 @@ let nextRegionSequence = 0;
  *
  * Attach the returned ref to the floating element; pass `enabled: false` (or
  * unmount) to release the region. `layoutKey` should change when the element
- * moves without resizing (for example, between terminal split tracks).
+ * moves without resizing (for example, between terminal split tracks), and
+ * `undefined` freezes position tracking without releasing the region — used
+ * while a drag owns the whole pointer stream anyway. `padding` grows the
+ * registered rect beyond the element's own box.
  */
 export function useNativeWebOverlayRegion<T extends HTMLElement>(
   enabled: boolean,
   layoutKey?: unknown,
+  padding = 0,
 ) {
   const elementRef = useRef<T | null>(null);
   const regionIdRef = useRef<string | null>(null);
   // Bumped on every registration; release retries from an earlier
   // registration stop the moment a newer one owns the region.
   const registrationRef = useRef(0);
+  // Read through a ref so the ResizeObserver sync (registered once) always
+  // uses the current slop without tearing the registration down.
+  const paddingRef = useRef(padding);
+  paddingRef.current = padding;
   if (regionIdRef.current === null) {
     nextRegionSequence += 1;
     regionIdRef.current = `web-overlay-${nextRegionSequence}`;
@@ -37,15 +60,7 @@ export function useNativeWebOverlayRegion<T extends HTMLElement>(
     let frame: number | null = null;
     const sync = () => {
       frame = null;
-      const rect = element.getBoundingClientRect();
-      void setNativeTerminalWebOverlayRegion({
-        regionId,
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
-        visible: rect.width > 0 && rect.height > 0,
-      }).catch(() => undefined);
+      publishRegion(regionId, element, paddingRef.current);
     };
     const schedule = () => {
       if (frame !== null) {
@@ -102,16 +117,8 @@ export function useNativeWebOverlayRegion<T extends HTMLElement>(
     if (!enabled || layoutKey === undefined || !regionId || !element) {
       return;
     }
-    const rect = element.getBoundingClientRect();
-    void setNativeTerminalWebOverlayRegion({
-      regionId,
-      x: rect.left,
-      y: rect.top,
-      width: rect.width,
-      height: rect.height,
-      visible: rect.width > 0 && rect.height > 0,
-    }).catch(() => undefined);
-  }, [enabled, layoutKey]);
+    publishRegion(regionId, element, padding);
+  }, [enabled, layoutKey, padding]);
 
   return elementRef;
 }

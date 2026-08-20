@@ -819,7 +819,8 @@ function TerminalSplitResizer({
   onKeyDown,
 }: {
   style: CSSProperties;
-  layoutKey: string;
+  /** Undefined freezes position tracking (the drag already owns the pointer). */
+  layoutKey: string | undefined;
   orientation?: "horizontal" | "vertical";
   onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
@@ -829,10 +830,66 @@ function TerminalSplitResizer({
   // divider lands on a terminal frame boundary (including a temporarily stale
   // frame), Ghostty can otherwise capture and consume the first drag event.
   // Registering the resting divider rect ahead of the gesture makes its very
-  // first press web-owned; the normal drag claim then covers pointer motion
-  // after the divider leaves that rect.
-  const nativeRegionRef = useNativeWebOverlayRegion<HTMLDivElement>(IS_MAC, layoutKey);
+  // first press web-owned, with the same slop the DOM hit area uses so the two
+  // agree about presses just inside a neighbouring surface.
+  const nativeRegionRef = useNativeWebOverlayRegion<HTMLDivElement>(
+    IS_MAC,
+    layoutKey,
+    TERMINAL_SPLIT_RESIZER_SLOP_PX,
+  );
+  const hoverClaimRef = useRef<(() => void) | null>(null);
   const column = orientation === "vertical";
+
+  // Claim the whole pointer stream on hover rather than on press. The claim is
+  // an IPC round trip, so issuing it from pointerdown leaves a window in which
+  // Ghostty still owns motion: a press followed immediately by a fast flick
+  // spends all of its movement inside that window, and since the divider only
+  // moves on pointermove the gesture produces no movement at all. Hovering
+  // always precedes the press, so by mouse-down the claim has landed.
+  const releaseHoverClaim = useCallback(() => {
+    hoverClaimRef.current?.();
+    hoverClaimRef.current = null;
+  }, []);
+  const claimOnHover = useCallback(() => {
+    if (!IS_MAC || hoverClaimRef.current) {
+      return;
+    }
+    const releaseNativePointer = claimNativeTerminalPointerForWebDrag();
+    // Safety nets for a hover that never reports its exit — the window losing
+    // key while the pointer rests on the divider, or the pointer leaving during
+    // an occlusion. A claim nobody releases leaves every terminal mouse-dead,
+    // and unlike a claim taken mid-press this one is sticky natively (no button
+    // is down when it lands), so AppKit's own pointer-up retirement never
+    // covers it. Events on this divider — including a captured drag, which
+    // retargets them here — are the gesture itself and must not retire it.
+    const onThisDivider = (target: EventTarget | null) => {
+      const element = nativeRegionRef.current;
+      return Boolean(element && target instanceof Node && element.contains(target));
+    };
+    const watchForExit = (pointerEvent: PointerEvent) => {
+      if (onThisDivider(pointerEvent.target)) {
+        return;
+      }
+      releaseHoverClaim();
+    };
+    // A press elsewhere is the case motion cannot catch: the app regains key
+    // with the cursor already off the divider and the user clicks without
+    // moving first, which would otherwise spend that click on the webview.
+    window.addEventListener("pointermove", watchForExit, true);
+    window.addEventListener("pointerdown", watchForExit, true);
+    // Losing key focus (another app, another window, focus entering the browser
+    // overlay's frame) ends the hover as far as this window can observe it.
+    window.addEventListener("blur", releaseHoverClaim);
+    hoverClaimRef.current = () => {
+      window.removeEventListener("pointermove", watchForExit, true);
+      window.removeEventListener("pointerdown", watchForExit, true);
+      window.removeEventListener("blur", releaseHoverClaim);
+      releaseNativePointer();
+    };
+  }, [nativeRegionRef, releaseHoverClaim]);
+  // A claim that outlives its control leaves every terminal mouse-dead, so the
+  // unmount path releases whatever the pointer-leave never got to.
+  useEffect(() => releaseHoverClaim, [releaseHoverClaim]);
 
   return (
     <div
@@ -843,7 +900,21 @@ function TerminalSplitResizer({
       aria-orientation={column ? "vertical" : "horizontal"}
       tabIndex={0}
       style={style}
-      onPointerDown={onPointerDown}
+      onPointerEnter={claimOnHover}
+      // Re-arms a claim the guards above retired while the pointer never left
+      // (a blur with the cursor resting here): pointerenter will not fire
+      // again, and this is a no-op whenever the claim is still held.
+      onPointerMove={claimOnHover}
+      onPointerDown={(event) => {
+        // A press can arrive without a hover (the divider moving under a
+        // resting cursor, a synthesized press): claim before starting so the
+        // gesture is never left to the drag claim alone.
+        claimOnHover();
+        onPointerDown(event);
+      }}
+      // Pointer capture suppresses boundary events until the drag releases it,
+      // so this fires once the gesture is over, not while it crosses a pane.
+      onPointerLeave={releaseHoverClaim}
       onKeyDown={onKeyDown}
     />
   );
@@ -866,6 +937,10 @@ const TERMINAL_VERTICAL_PADDING = 20;
 const TERMINAL_SPLIT_MIN_HEIGHT = 140;
 const TERMINAL_SPLIT_MIN_WIDTH = 200;
 const TERMINAL_SPLIT_GUTTER_PX = 8;
+// Hit slop grown around the gutter on both sides, so a press that lands a
+// couple of pixels inside a neighbouring terminal still grabs the divider.
+// Kept in sync with `.terminal-split-resizer::after` in terminal.css.
+const TERMINAL_SPLIT_RESIZER_SLOP_PX = 3;
 const DEFAULT_INITIAL_COLS = 100;
 const DEFAULT_INITIAL_ROWS = 24;
 const MIN_INITIAL_COLS = 20;
@@ -6822,6 +6897,14 @@ function MainApp() {
     const releasePointer = claimResizePointer(event);
     let latestSplit = split;
     const startOffset = splitBranchOffsets(branch)[divider.index + 1];
+    // Hold the resize cursor and suppress selection for the whole gesture, as
+    // the sidebar and turn-pane drags do. Without it the cursor reverts to the
+    // terminal I-beam the moment the pointer leaves the 8px gutter and WebKit
+    // starts selecting stage content behind the drag.
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = horizontal ? "col-resize" : "row-resize";
+    document.body.style.userSelect = "none";
     setTerminalGeometryResizing(true);
     setTerminalSplitResizeMask({
       splitId: split.id,
@@ -6859,6 +6942,8 @@ function MainApp() {
       window.removeEventListener("pointermove", handlePointerMove, true);
       window.removeEventListener("pointerup", finishResize, true);
       window.removeEventListener("pointercancel", finishResize, true);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
       releasePointer();
       terminalSplitResizeRef.current = null;
       setTerminalGeometryResizing(false);
@@ -16299,11 +16384,22 @@ function MainApp() {
                   // leaves a resizer mid-drag.
                   key={`${activePaneSplit.id}:${divider.path}:${divider.index}`}
                   style={splitRectStyle(divider.rect)}
-                  layoutKey={`${activePaneSplit.id}:${divider.path}:${divider.index}:${
-                    divider.axis === "horizontal"
-                      ? divider.rect.leftFraction
-                      : divider.rect.topFraction
-                  }:${divider.axis}`}
+                  // Frozen while a split drag runs: the live fraction would
+                  // otherwise re-register every divider's native region on
+                  // every pointermove. Those invokes are not serialized, so a
+                  // stale one can land last and leave the region behind the
+                  // divider it describes. The gesture is pointer-claimed
+                  // anyway, and dropping the key resyncs every region once the
+                  // drag commits.
+                  layoutKey={
+                    terminalSplitResizeMask
+                      ? undefined
+                      : `${activePaneSplit.id}:${divider.path}:${divider.index}:${
+                          divider.axis === "horizontal"
+                            ? divider.rect.leftFraction
+                            : divider.rect.topFraction
+                        }:${divider.axis}`
+                  }
                   orientation={divider.axis === "horizontal" ? "vertical" : "horizontal"}
                   onPointerDown={(event) =>
                     startTerminalSplitResize(event, activePaneSplit, divider)

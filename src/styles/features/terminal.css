@@ -146,6 +146,21 @@
   background: var(--terminal-bg, var(--terminal-pane-bg));
 }
 
+/* Hit slop: the painted box is the 8px gutter, but a press a few pixels inside
+   a neighbouring terminal should still grab the divider. A pseudo-element grows
+   only the hit area — the element's own rect stays the gutter, which is what
+   paints it. The native pointer router is told about the same slop through
+   TERMINAL_SPLIT_RESIZER_SLOP_PX. */
+.terminal-split-resizer::after {
+  content: "";
+  position: absolute;
+  inset: -3px 0;
+}
+
+.terminal-split-resizer.is-column::after {
+  inset: 0 -3px;
+}
+
 .terminal-split-resizer:hover::before,
 .terminal-split-resizer:focus-visible::before {
   background: var(--split-border-hover);
