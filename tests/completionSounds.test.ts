@@ -17,15 +17,63 @@ test("the shared completion sound catalog is curated and Default is the default"
   assert.equal(DEFAULT_COMPLETION_SOUND, "default");
   assert.deepEqual(
     COMPLETION_SOUND_OPTIONS.map((option) => option.label),
-    ["Default", "Confirmation", "Chime", "Light", "Water", "Ping", "Blip"],
+    [
+      "Default",
+      "Confirmation",
+      "Chime",
+      "Light",
+      "Water",
+      "Warp",
+      "Switch",
+      "Digital",
+      "Power Up",
+      "Event",
+      "Drum",
+      "Quest",
+      "Impact",
+      "Pots",
+      "Bell",
+    ],
   );
   assert.deepEqual(
     COMPLETION_SOUND_OPTIONS.map((option) => option.systemName),
-    [null, null, null, null, null, "Ping", "Purr"],
+    [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ],
   );
   assert.deepEqual(
     COMPLETION_SOUND_OPTIONS.map((option) => option.bundledName ?? null),
-    ["success", "confirmation", "chime", "light", "water", null, null],
+    [
+      "success",
+      "confirmation",
+      "chime",
+      "light",
+      "water",
+      "warp",
+      "switch",
+      "digital",
+      "power-up",
+      "event",
+      "drum",
+      "quest",
+      "impact",
+      "pots",
+      "bell",
+    ],
   );
 });
 
@@ -33,8 +81,8 @@ test("completion sound settings round-trip and reject unknown ids", () => {
   store.clear();
   assert.equal(loadSettings().completionSound, "default");
 
-  saveSettings({ ...DEFAULT_SETTINGS, completionSound: "blip" });
-  assert.equal(loadSettings().completionSound, "blip");
+  saveSettings({ ...DEFAULT_SETTINGS, completionSound: "digital" });
+  assert.equal(loadSettings().completionSound, "digital");
 
   saveSettings({
     ...DEFAULT_SETTINGS,

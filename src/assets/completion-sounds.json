@@ -4,6 +4,14 @@
   { "id": "chime", "label": "Chime", "bundledName": "chime", "systemName": null },
   { "id": "light", "label": "Light", "bundledName": "light", "systemName": null },
   { "id": "water", "label": "Water", "bundledName": "water", "systemName": null },
-  { "id": "ping", "label": "Ping", "systemName": "Ping" },
-  { "id": "blip", "label": "Blip", "systemName": "Purr" }
+  { "id": "warp", "label": "Warp", "bundledName": "warp", "systemName": null },
+  { "id": "switch", "label": "Switch", "bundledName": "switch", "systemName": null },
+  { "id": "digital", "label": "Digital", "bundledName": "digital", "systemName": null },
+  { "id": "power-up", "label": "Power Up", "bundledName": "power-up", "systemName": null },
+  { "id": "event", "label": "Event", "bundledName": "event", "systemName": null },
+  { "id": "drum", "label": "Drum", "bundledName": "drum", "systemName": null },
+  { "id": "quest", "label": "Quest", "bundledName": "quest", "systemName": null },
+  { "id": "impact", "label": "Impact", "bundledName": "impact", "systemName": null },
+  { "id": "pots", "label": "Pots", "bundledName": "pots", "systemName": null },
+  { "id": "bell", "label": "Bell", "bundledName": "bell", "systemName": null }
 ]

@@ -17,19 +17,16 @@ Changes: Stored as the default completion sound so existing "default"
 settings play this file.
 
 
-confirmation.wav
+confirmation.mp3
 ----------------
 
 Display name: Confirmation
 Creator: Kenney
-Source: https://kenney.nl/assets/interface-sounds
+Source: https://soundcn.xyz/r/confirmation-001.json
 License: Creative Commons CC0 1.0
-Original file: Audio/confirmation_004.ogg
-Changes: Renamed and transcoded from Ogg Vorbis to 16-bit, 44.1 kHz mono WAV,
-then reduced by 19.5 dB to sit with the other bundled completion sounds.
-
-Kenney confirms that its game assets are CC0, may be used commercially, and
-do not require attribution: https://kenney.nl/support
+Original registry asset: @soundcn/confirmation-001
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
 
 
 chime.wav
@@ -57,3 +54,123 @@ water.wav
 
 Display name: Water
 Source: local WAV asset (water.wav)
+
+
+warp.mp3
+--------
+
+Display name: Warp
+Creator: Kenney
+Source: https://soundcn.xyz/r/select-005.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/select-005
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+switch.mp3
+----------
+
+Display name: Switch
+Creator: Kenney
+Source: https://soundcn.xyz/r/switch-002.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/switch-002
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+digital.mp3
+-----------
+
+Display name: Digital
+Creator: Kenney
+Source: https://soundcn.xyz/r/switch-003.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/switch-003
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+power-up.mp3
+------------
+
+Display name: Power Up
+Creator: Kenney
+Source: https://soundcn.xyz/r/power-up-8.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/power-up-8
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+event.mp3
+---------
+
+Display name: Event
+Creator: Kenney
+Source: https://soundcn.xyz/r/three-tone-2.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/three-tone-2
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+drum.mp3
+--------
+
+Display name: Drum
+Creator: Kenney
+Source: https://soundcn.xyz/r/i-quest-update.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/i-quest-update
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+quest.mp3
+---------
+
+Display name: Quest
+Creator: Kenney
+Source: https://soundcn.xyz/r/i-quest-activate.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/i-quest-activate
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+impact.mp3
+----------
+
+Display name: Impact
+Creator: Kenney
+Source: https://soundcn.xyz/r/impact-mining-003.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/impact-mining-003
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+pots.mp3
+--------
+
+Display name: Pots
+Creator: Kenney
+Source: https://soundcn.xyz/r/metal-pot-1.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/metal-pot-1
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.
+
+
+bell.mp3
+--------
+
+Display name: Bell
+Creator: Kenney
+Source: https://soundcn.xyz/r/bell-toll-alliance.json
+License: Creative Commons CC0 1.0
+Original registry asset: @soundcn/bell-toll-alliance
+Changes: Extracted the MP3 bytes unchanged from the registry's inline base64
+data URI and renamed the file.

@@ -9,10 +9,21 @@ const COMPLETION_COALESCE: Duration = Duration::from_millis(250);
 
 const SUCCESS_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/success.wav");
 const CONFIRMATION_SOUND_BYTES: &[u8] =
-    include_bytes!("../../src/assets/sounds/completion/confirmation.wav");
+    include_bytes!("../../src/assets/sounds/completion/confirmation.mp3");
 const CHIME_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/chime.wav");
 const LIGHT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/light.wav");
 const WATER_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/water.wav");
+const WARP_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/warp.mp3");
+const SWITCH_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/switch.mp3");
+const DIGITAL_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/digital.mp3");
+const POWER_UP_SOUND_BYTES: &[u8] =
+    include_bytes!("../../src/assets/sounds/completion/power-up.mp3");
+const EVENT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/event.mp3");
+const DRUM_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/drum.mp3");
+const QUEST_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/quest.mp3");
+const IMPACT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/impact.mp3");
+const POTS_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/pots.mp3");
+const BELL_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/bell.mp3");
 
 fn bundled_sound(name: &str) -> Option<CompletionSound> {
     let (name, bytes) = match name {
@@ -21,6 +32,16 @@ fn bundled_sound(name: &str) -> Option<CompletionSound> {
         "chime" => ("chime", CHIME_SOUND_BYTES),
         "light" => ("light", LIGHT_SOUND_BYTES),
         "water" => ("water", WATER_SOUND_BYTES),
+        "warp" => ("warp", WARP_SOUND_BYTES),
+        "switch" => ("switch", SWITCH_SOUND_BYTES),
+        "digital" => ("digital", DIGITAL_SOUND_BYTES),
+        "power-up" => ("power-up", POWER_UP_SOUND_BYTES),
+        "event" => ("event", EVENT_SOUND_BYTES),
+        "drum" => ("drum", DRUM_SOUND_BYTES),
+        "quest" => ("quest", QUEST_SOUND_BYTES),
+        "impact" => ("impact", IMPACT_SOUND_BYTES),
+        "pots" => ("pots", POTS_SOUND_BYTES),
+        "bell" => ("bell", BELL_SOUND_BYTES),
         _ => return None,
     };
     Some(CompletionSound::Bundled { name, bytes })
@@ -237,15 +258,53 @@ mod tests {
             sound_for_id("water"),
             Ok(Some(CompletionSound::Bundled { name: "water", .. }))
         ));
-        assert_eq!(
-            sound_for_id("ping"),
-            Ok(Some(CompletionSound::System("Ping")))
-        );
-        assert_eq!(
-            sound_for_id("blip"),
-            Ok(Some(CompletionSound::System("Purr")))
-        );
-        for removed in ["none", "pop", "tink", "purr"] {
+        assert!(matches!(
+            sound_for_id("warp"),
+            Ok(Some(CompletionSound::Bundled { name: "warp", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("switch"),
+            Ok(Some(CompletionSound::Bundled { name: "switch", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("digital"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "digital",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("power-up"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "power-up",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("event"),
+            Ok(Some(CompletionSound::Bundled { name: "event", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("drum"),
+            Ok(Some(CompletionSound::Bundled { name: "drum", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("quest"),
+            Ok(Some(CompletionSound::Bundled { name: "quest", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("impact"),
+            Ok(Some(CompletionSound::Bundled { name: "impact", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("pots"),
+            Ok(Some(CompletionSound::Bundled { name: "pots", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("bell"),
+            Ok(Some(CompletionSound::Bundled { name: "bell", .. }))
+        ));
+        for removed in ["none", "pop", "tink", "purr", "ping", "blip"] {
             assert!(sound_for_id(removed).is_err());
         }
         assert!(sound_for_id("../../arbitrary").is_err());
