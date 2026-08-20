@@ -54,10 +54,12 @@ matching UI adapter on the frontend.
 - (Experimental spike) qmux appears in Codex's `agent.browsers.list()` through
   its current private in-app-browser socket and implements tab, Playwright,
   Computer Use, screenshot, and raw CDP operations through a dedicated
-  `chrome-headless-shell` process. qmux finds a bundled or PATH installation,
-  then `PLAYWRIGHT_BROWSERS_PATH` and the newest default Playwright cache entry;
-  `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery. This does not use a
-  browser extension or the user's normal browser profile.
+  `chrome-headless-shell` process. qmux finds a bundled installation, then a
+  PATH installation in a directory your account cannot write to (writable PATH
+  entries and the default per-user Playwright cache are skipped so an agent
+  cannot plant a binary qmux would execute), then a `PLAYWRIGHT_BROWSERS_PATH`
+  cache; `QMUX_CHROME_HEADLESS_SHELL_PATH` can override discovery outright.
+  This does not use a browser extension or the user's normal browser profile.
 - macOS-only at this time. Linux support is planned for the future.
 
 ## Install

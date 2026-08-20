@@ -1162,6 +1162,19 @@ fn validate_cdp_command(method: &str, params: &Value) -> Result<(), String> {
     Err("qmux automation only navigates to http(s) URLs".to_string())
 }
 
+/// Locates the `chrome-headless-shell` binary for the automation backend.
+///
+/// Trust model: every location searched implicitly must be one a process
+/// running as the same user as qmux cannot plant binaries in. A planted binary
+/// would be executed by qmux outside any agent sandbox, so implicit discovery
+/// is limited to the app bundle and to PATH directories the effective user
+/// cannot write to — `$HOME` entries, `/opt/homebrew/bin`, and the default
+/// per-user Playwright cache are all same-user-writable and therefore excluded.
+/// Two explicit operator overrides bypass the restriction (both are read from
+/// qmux's own environment, which a terminal process cannot change after
+/// launch): `QMUX_CHROME_HEADLESS_SHELL_PATH` names the executable directly,
+/// and `PLAYWRIGHT_BROWSERS_PATH` names a Playwright cache root. Best-effort:
+/// the writability probe runs at discovery time, not at exec.
 fn find_headless_shell_executable() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("QMUX_CHROME_HEADLESS_SHELL_PATH") {
         let path = PathBuf::from(path);
@@ -1180,27 +1193,59 @@ fn find_headless_shell_executable() -> Option<PathBuf> {
         candidates
             .push(executable_dir.join("../Resources/chrome-headless-shell/chrome-headless-shell"));
     }
-    if let Some(path) = std::env::var_os("PATH") {
-        for directory in std::env::split_paths(&path) {
-            candidates.push(directory.join("chrome-headless-shell"));
-            candidates.push(directory.join("headless_shell"));
-        }
-    }
     if let Some(candidate) = candidates.into_iter().find(|path| is_executable_file(path)) {
         return Some(candidate);
     }
 
-    let mut playwright_caches = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(candidate) = headless_shell_from_path(&path)
+    {
+        return Some(candidate);
+    }
+
+    playwright_cache_roots()
+        .into_iter()
+        .find_map(|cache| find_playwright_headless_shell(&cache))
+}
+
+/// Scans a `PATH`-shaped value for a headless-shell executable, skipping
+/// directories the effective user can write to: a candidate found there could
+/// equally well have been planted by any same-user process (an agent), so
+/// executing it would hand that process a launch point inside qmux.
+fn headless_shell_from_path(path_value: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path_value)
+        .filter(|directory| !is_user_writable_directory(directory))
+        .flat_map(|directory| {
+            [
+                directory.join("chrome-headless-shell"),
+                directory.join("headless_shell"),
+            ]
+        })
+        .find(|path| is_executable_file(path))
+}
+
+/// Playwright cache roots qmux may scan. Only explicitly configured roots are
+/// searched; the default per-user cache (`~/Library/Caches/ms-playwright`) is
+/// deliberately absent because it exists precisely to be user-writable.
+fn playwright_cache_roots() -> Vec<PathBuf> {
+    std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
         .filter(|path| path != "0")
         .map(PathBuf::from)
         .into_iter()
-        .collect::<Vec<_>>();
-    if let Some(cache) = dirs::cache_dir() {
-        playwright_caches.push(cache.join("ms-playwright"));
-    }
-    playwright_caches
-        .into_iter()
-        .find_map(|cache| find_playwright_headless_shell(&cache))
+        .collect()
+}
+
+/// Whether the effective user can create files in `directory` — the condition
+/// under which a same-user process could have pre-planted a candidate there.
+/// Undeterminable paths fail closed (treated as writable). Best-effort probe:
+/// checked when discovery runs, with the usual `access(2)` TOCTOU caveat.
+fn is_user_writable_directory(directory: &Path) -> bool {
+    let Ok(c_path) = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes()) else {
+        return true;
+    };
+    // SAFETY: c_path is a valid NUL-terminated string for the duration of the call,
+    // and access does not retain the pointer.
+    unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
 }
 
 fn find_playwright_headless_shell(cache: &Path) -> Option<PathBuf> {
@@ -1536,6 +1581,63 @@ mod tests {
         let selected = find_playwright_headless_shell(&cache).unwrap();
         assert!(selected.starts_with(cache.join("chromium_headless_shell-1223")));
         fs::remove_dir_all(cache).unwrap();
+    }
+
+    #[test]
+    fn writability_probe_flags_temp_and_read_only_directories() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // Root can write anywhere; the filter cannot be exercised.
+        }
+        let directory = unique_profile_dir();
+        fs::create_dir_all(&directory).unwrap();
+        assert!(is_user_writable_directory(&directory));
+
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o555)).unwrap();
+        let read_only = !is_user_writable_directory(&directory);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(read_only);
+
+        // A missing path cannot be written through, so it is not "writable".
+        assert!(!is_user_writable_directory(&directory.join("missing")));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn path_discovery_refuses_user_writable_directories() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let planted = unique_profile_dir();
+        fs::create_dir_all(&planted).unwrap();
+        let executable = planted.join("chrome-headless-shell");
+        fs::write(&executable, []).unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The file itself is executable...
+        assert!(is_executable_file(&executable));
+
+        // ...but its directory is user-writable, so PATH discovery must refuse it.
+        let path = std::env::join_paths([&planted]).unwrap();
+        assert_eq!(headless_shell_from_path(&path), None);
+
+        // A read-only directory remains searchable.
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o555)).unwrap();
+        let found = headless_shell_from_path(&path);
+        fs::set_permissions(&planted, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(found.as_deref(), Some(executable.as_path()));
+
+        fs::remove_dir_all(planted).unwrap();
+    }
+
+    #[test]
+    fn playwright_discovery_uses_only_explicit_configuration() {
+        // With PLAYWRIGHT_BROWSERS_PATH unset, qmux must not fall back to
+        // scanning the default per-user Playwright cache: it is user-writable,
+        // so a planted chrome-headless-shell there would be executed by qmux.
+        if std::env::var_os("PLAYWRIGHT_BROWSERS_PATH").is_some() {
+            return; // Externally configured environment; nothing to assert.
+        }
+        assert!(playwright_cache_roots().is_empty());
     }
 
     #[test]
