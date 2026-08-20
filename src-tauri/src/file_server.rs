@@ -521,6 +521,28 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
         return response;
     }
 
+    // Source-code files get the same serve-time rendering treatment: their
+    // mime would be application/octet-stream, which the overlay's webview
+    // cannot display at all. The rendered page is escaped text with line
+    // anchors (so `#L<n>` fragments work) and carries the no-script Markdown
+    // CSP. `?raw=1` opts out; oversized files fall through unchanged.
+    if !raw_requested && is_renderable_source(&canonical) && total <= MAX_INLINE_BYTES {
+        let Ok(source) = read_slice(file, 0, total) else {
+            return Response::error(500, "Internal Server Error");
+        };
+        let page = render_source_page(&canonical, &String::from_utf8_lossy(&source));
+        let mut response = Response::new(200, "OK");
+        response.header("Content-Type", "text/html; charset=utf-8");
+        response.header("Content-Length", &page.len().to_string());
+        if let Some(port) = state.file_server_port() {
+            response.header("Content-Security-Policy", &markdown_page_csp(port));
+        }
+        if !is_head {
+            response.body = page.into_bytes();
+        }
+        return response;
+    }
+
     if let Some(range_raw) = &head.range {
         let Some((start, requested_end)) = parse_range(range_raw, total) else {
             let mut response = Response::error(416, "Range Not Satisfiable");
@@ -716,6 +738,141 @@ fn is_markdown(path: &Path) -> bool {
             .map(|ext| ext.to_ascii_lowercase())
             .as_deref(),
         Some("md" | "markdown")
+    )
+}
+
+/// Source-code files rendered as a line-numbered HTML page. Deliberately
+/// limited to types the mime map would otherwise serve as
+/// `application/octet-stream` — which the embedded browser cannot display —
+/// so everything that already renders (html, js, css, txt, images, …) keeps
+/// its current serving, including as subresources of served HTML reports.
+fn is_renderable_source(path: &Path) -> bool {
+    if matches!(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.to_ascii_lowercase())
+            .as_deref(),
+        Some("makefile" | "dockerfile" | "justfile")
+    ) {
+        return true;
+    }
+    matches!(
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "rs" | "ts"
+                | "tsx"
+                | "jsx"
+                | "py"
+                | "go"
+                | "c"
+                | "h"
+                | "cc"
+                | "cpp"
+                | "cxx"
+                | "hpp"
+                | "hh"
+                | "java"
+                | "kt"
+                | "kts"
+                | "swift"
+                | "m"
+                | "mm"
+                | "rb"
+                | "php"
+                | "cs"
+                | "scala"
+                | "clj"
+                | "cljs"
+                | "ex"
+                | "exs"
+                | "erl"
+                | "hs"
+                | "ml"
+                | "mli"
+                | "lua"
+                | "pl"
+                | "pm"
+                | "r"
+                | "jl"
+                | "zig"
+                | "nim"
+                | "dart"
+                | "sql"
+                | "proto"
+                | "graphql"
+                | "gql"
+                | "vue"
+                | "svelte"
+                | "astro"
+                | "tf"
+                | "hcl"
+                | "nix"
+                | "cmake"
+                | "gradle"
+                | "groovy"
+                | "ps1"
+                | "bat"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "fish"
+                | "awk"
+                | "sed"
+                | "diff"
+                | "patch"
+        )
+    )
+}
+
+/// Inline stylesheet for rendered source files. Explicit per-scheme colors for
+/// the same reason as MARKDOWN_PAGE_CSS: the overlay's sandboxed frame has a
+/// transparent canvas. `tr:target` highlights the line addressed by a `#L<n>`
+/// fragment (minted from grep-style `path:line` links); scroll-margin keeps
+/// that line away from the very top edge. The line-number cells are
+/// unselectable so copying code doesn't drag the gutter along.
+const SOURCE_PAGE_CSS: &str = "\
+:root { color-scheme: light dark; }\
+body { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; background: #ffffff; color: #1f2328; }\
+@media (prefers-color-scheme: dark) { body { background: #1e2227; color: #e2e6ea; } }\
+table { border-collapse: collapse; width: 100%; }\
+td { padding: 0 0.75em 0 0; vertical-align: top; }\
+td.ln { position: sticky; left: 0; min-width: 3.5em; padding: 0 0.75em; text-align: right; color: rgba(127, 127, 127, 0.8); background: inherit; user-select: none; -webkit-user-select: none; }\
+td.code { white-space: pre; }\
+td.code:empty::before { content: '\\a0'; }\
+tr { scroll-margin-top: 35vh; background: inherit; }\
+tr:target { background: rgba(255, 208, 90, 0.35); }\
+@media (prefers-color-scheme: dark) { tr:target { background: rgba(210, 170, 60, 0.25); } }\
+main { padding: 0.75rem 0; overflow-x: auto; }";
+
+/// Renders a source file into a line-numbered standalone HTML page with
+/// `L<n>` row anchors, so a `#L8` fragment scrolls to and highlights line 8.
+/// Escaped text only — served under the same no-script CSP as rendered
+/// Markdown.
+fn render_source_page(path: &Path, source: &str) -> String {
+    let title = escape_html(
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("Source"),
+    );
+    let mut rows = String::with_capacity(source.len() * 2);
+    for (index, line) in source.lines().enumerate() {
+        let number = index + 1;
+        rows.push_str("<tr id=\"L");
+        rows.push_str(&number.to_string());
+        rows.push_str("\"><td class=\"ln\">");
+        rows.push_str(&number.to_string());
+        rows.push_str("</td><td class=\"code\">");
+        rows.push_str(&escape_html(line));
+        rows.push_str("</td></tr>\n");
+    }
+    format!(
+        "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{title}</title>\n<style>{SOURCE_PAGE_CSS}</style>\n</head>\n\
+         <body>\n<main>\n<table>\n{rows}</table>\n</main>\n</body>\n</html>\n"
     )
 }
 
@@ -1402,6 +1559,45 @@ mod tests {
             String::from_utf8(body).unwrap().contains("<h1>Hello</h1>"),
             "range response should carry the full rendered page"
         );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn renders_source_files_as_line_anchored_html_unless_raw_is_requested() {
+        let base = std::env::temp_dir().join(format!("qmux-fs-src-{}", std::process::id()));
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let source = "fn main() {\n    println!(\"<hello>\");\n}\n";
+        std::fs::write(root.join("main.rs"), source).unwrap();
+
+        let state = test_state(&root, &base, "pane-src");
+        let info = start_file_server(state.clone()).unwrap();
+        let token = state.pane_file_token("pane-src").unwrap();
+        let file = std::fs::canonicalize(root.join("main.rs")).unwrap();
+        let path = url_path(info.port, &token, &file);
+
+        // A plain GET returns a rendered HTML page with per-line anchors and
+        // escaped source text.
+        let (head, body) = http_get_full(info.port, &path, None);
+        let body_text = String::from_utf8(body).unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "head: {head}");
+        assert!(head.contains("Content-Type: text/html"), "head: {head}");
+        assert!(body_text.contains("<tr id=\"L2\">"), "body: {body_text}");
+        assert!(
+            body_text.contains("println!(&quot;&lt;hello&gt;&quot;);"),
+            "body: {body_text}"
+        );
+        assert!(!body_text.contains("<hello>"), "body: {body_text}");
+
+        // `?raw=1` opts out and serves the bytes unrendered.
+        let (head, body) = http_get_full(info.port, &format!("{path}?raw=1"), None);
+        assert!(head.starts_with("HTTP/1.1 200"), "head: {head}");
+        assert!(
+            head.contains("Content-Type: application/octet-stream"),
+            "head: {head}"
+        );
+        assert_eq!(body, source.as_bytes());
 
         let _ = std::fs::remove_dir_all(&base);
     }
