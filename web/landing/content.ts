@@ -33,7 +33,7 @@ export const SUPPORTED_AGENTS: SupportedAgent[] = [
 export const FEATURES: Feature[] = [
   {
     name: "Rich text transcripts",
-    copy: "Your agent’s transcript renders, just like in the native app. Markdown, tables, code blocks, diagrams.",
+    copy: "Easy-to-read transcripts with Markdown, tables, code blocks, and diagrams.",
   },
   {
     name: "Cross-agent queueing",
@@ -41,11 +41,11 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "Automatic recovery",
-    copy: "Agents automatically respawn on restart, along with tab groups, queued turns, and full history.",
+    copy: "Agents and tab groups automatically respawn on restart.",
   },
   {
-    name: "Session forking and worktrees",
-    copy: "First-class support for forking and queue-forking sessions. Schedule multiple branches of work.",
+    name: "Session forking",
+    copy: "Fork sessions while they're working. Easily create worktrees with one click.",
   },
   {
     name: "Based on libghostty",
@@ -54,5 +54,29 @@ export const FEATURES: Feature[] = [
   {
     name: "Open source",
     copy: "Fully open-source, local-first, free forever.",
+  },
+  {
+    name: "Artifacts and previews",
+    copy: "Open Markdown, images, and local files without leaving qmux.",
+  },
+  {
+    name: "Vertical tabs and splits",
+    copy: "Organize terminal and agent panes with vertical tabs and flexible split layouts.",
+  },
+  {
+    name: "Saved prompt library",
+    copy: "Reuse Markdown prompts globally or per project, with placeholders for common inputs.",
+  },
+  {
+    name: "Research trees",
+    copy: "Explore questions in branching research trees and publish browsable results.",
+  },
+  {
+    name: "Built-in browser",
+    copy: "Keep local previews and web pages beside the agent working with them.",
+  },
+  {
+    name: "Keyboard-first workflow",
+    copy: "Launch agents, navigate tabs, and manage panes without reaching for the mouse.",
   },
 ];

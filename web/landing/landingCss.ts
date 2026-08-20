@@ -279,8 +279,6 @@ code {
 }
 
 .intro-copy {
-  grid-column: 5 / 9;
-  align-self: end;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -373,11 +371,24 @@ code {
   :root {
     --gutter: 3rem;
   }
+
+  .feature-list {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .feature-list li {
+    font-size: 16px;
+    line-height: 22px;
+  }
+
+  .feature-list strong {
+    font-size: 17px;
+    line-height: 22px;
+  }
 }
 
 @media (max-width: 52rem) {
-  .hero-lead,
-  .intro-copy {
+  .hero-lead {
     grid-column: 1 / 9;
     text-align: left;
   }
@@ -409,7 +420,6 @@ code {
   }
 
   .hero-lead,
-  .intro-copy,
   .product-shot,
   .feature-list {
     grid-column: 1 / 9;

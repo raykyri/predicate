@@ -887,9 +887,13 @@ test("the landing page renders the app replica and its own image policy", async 
   const response = await fetch(`http://127.0.0.1:${address.port}/`);
   const body = await response.text();
   assert.equal(response.status, 200);
-  assert.match(body, /Your terminal, extended/);
-  assert.match(body, /A simpler approach to coding agent orchestration\./);
-  assert.match(body, /qmux powers up the terminal with artifacts, visual transcripts/);
+  assert.match(body, /All-in-one terminal for CLI coding agents/);
+  assert.match(body, /qmux is a terminal for CLI agents, with easy-to-read transcripts/);
+  assert.match(body, /full-featured terminal built on libghostty, with tabs, split terminals/);
+  assert.match(
+    body,
+    /class="hero-lead">\s*<h1[^>]*>\s*All-in-one terminal for CLI coding agents\s*<\/h1>\s*<div class="intro-copy">/,
+  );
   assert.match(body, /aria-label="Supported agents"/);
   assert.match(body, /class="hero-agents"/);
   for (const label of [
@@ -922,6 +926,8 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /Based on libghostty/);
   assert.match(body, /<strong>Open source<\/strong>/);
   assert.match(body, /Fully open-source, local-first, free forever\./);
+  assert.match(body, /<strong>Artifacts and previews<\/strong>/);
+  assert.doesNotMatch(body, /Lorem ipsum/);
   assert.doesNotMatch(body, /<strong>First-class agents<\/strong>/);
   assert.doesNotMatch(body, /<strong>Vertical splittable tabs<\/strong>/);
   assert.doesNotMatch(body, /<strong>Git worktrees<\/strong>/);
