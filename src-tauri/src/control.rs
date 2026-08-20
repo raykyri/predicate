@@ -999,6 +999,9 @@ fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> C
         sizes,
         intent: HashMap::new(),
         axis,
+        // A join rewrites membership wholesale, so there is no tree left to
+        // extend: the control API produces flat splits.
+        root: None,
     };
     splits.retain(|split| !consumed.contains(&split.id));
     splits.push(joined.clone());
@@ -1035,6 +1038,10 @@ fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> 
                 sizes,
                 intent: HashMap::new(),
                 axis: split.axis,
+                // Carried through so leaving from an edge keeps a nested layout;
+                // normalization drops the tree if the remaining panes no longer
+                // match it.
+                root: split.root.clone(),
             });
         }
     }
@@ -1066,6 +1073,18 @@ fn split_resize(state: &AppState, context: &ControlContext, arguments: Value) ->
         return Err(ControlFailure::new(
             "invalid_argument",
             format!("pane {} does not belong to split {}", args.pane, args.id),
+        ));
+    }
+    // A nested split's sizes are derived from its tree, so writing this flat
+    // map would be silently discarded. Refuse rather than report a no-op as a
+    // success; nested layouts resize by their dividers in the app.
+    if split.root.is_some() {
+        return Err(ControlFailure::new(
+            "invalid_argument",
+            format!(
+                "split {} is nested; resize its dividers in the app",
+                args.id
+            ),
         ));
     }
     ensure_pane_read(state, context, &args.pane)?;

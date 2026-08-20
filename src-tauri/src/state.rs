@@ -1297,6 +1297,258 @@ fn pane_split_axis_is_vertical(axis: &PaneSplitAxis) -> bool {
     matches!(axis, PaneSplitAxis::Vertical)
 }
 
+/// Depth ceiling for a persisted layout tree. A deeper tree is treated as
+/// invalid so a corrupt file degrades to a flat split rather than recursing
+/// without bound. Real layouts never approach this.
+const MAX_PANE_SPLIT_DEPTH: usize = 16;
+
+/// One node of a nested split's layout tree. `size` is the node's fraction of
+/// its parent along the parent's axis; absent means an equal share.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "kind")]
+pub enum PaneSplitNode {
+    #[serde(rename = "pane")]
+    Pane {
+        #[serde(rename = "paneId")]
+        pane_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f64>,
+    },
+    #[serde(rename = "split")]
+    Split {
+        #[serde(default)]
+        axis: PaneSplitAxis,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<f64>,
+        children: Vec<PaneSplitNode>,
+    },
+}
+
+impl PaneSplitNode {
+    fn size(&self) -> Option<f64> {
+        match self {
+            Self::Pane { size, .. } | Self::Split { size, .. } => *size,
+        }
+    }
+
+    fn with_size(self, size: Option<f64>) -> Self {
+        match self {
+            Self::Pane { pane_id, .. } => Self::Pane { pane_id, size },
+            Self::Split { axis, children, .. } => Self::Split {
+                axis,
+                size,
+                children,
+            },
+        }
+    }
+
+    fn collect_leaves(&self, out: &mut Vec<String>) {
+        match self {
+            Self::Pane { pane_id, .. } => out.push(pane_id.clone()),
+            Self::Split { children, .. } => {
+                for child in children {
+                    child.collect_leaves(out);
+                }
+            }
+        }
+    }
+
+    fn leaves(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.collect_leaves(&mut out);
+        out
+    }
+}
+
+fn valid_node_size(size: Option<f64>) -> Option<f64> {
+    size.filter(|value| value.is_finite() && *value > 0.0)
+}
+
+/// Child fractions normalized to sum to 1, mirroring the frontend so both sides
+/// derive the same flat `sizes` map from the same tree.
+fn normalized_node_fractions(children: &[PaneSplitNode]) -> Vec<f64> {
+    let clean = children
+        .iter()
+        .map(|child| valid_node_size(child.size()).unwrap_or(0.0))
+        .collect::<Vec<_>>();
+    let total = clean.iter().sum::<f64>();
+    if total <= 0.0 {
+        let share = if clean.is_empty() {
+            1.0
+        } else {
+            1.0 / clean.len() as f64
+        };
+        return vec![share; clean.len()];
+    }
+    clean.iter().map(|value| value / total).collect()
+}
+
+/// Rejects a structurally broken node and drops sizes that are not positive
+/// finite numbers. Membership and ordering are checked separately, against the
+/// split's `pane_ids`.
+fn sanitized_split_node(node: PaneSplitNode, depth: usize) -> Option<PaneSplitNode> {
+    if depth > MAX_PANE_SPLIT_DEPTH {
+        return None;
+    }
+    match node {
+        PaneSplitNode::Pane { pane_id, size } => {
+            if pane_id.trim().is_empty() {
+                return None;
+            }
+            Some(PaneSplitNode::Pane {
+                pane_id,
+                size: valid_node_size(size),
+            })
+        }
+        PaneSplitNode::Split {
+            axis,
+            size,
+            children,
+        } => {
+            let count = children.len();
+            let children = children
+                .into_iter()
+                .filter_map(|child| sanitized_split_node(child, depth + 1))
+                .collect::<Vec<_>>();
+            if children.len() != count {
+                return None;
+            }
+            Some(PaneSplitNode::Split {
+                axis,
+                size: valid_node_size(size),
+                children,
+            })
+        }
+    }
+}
+
+/// Splices a same-axis child into its parent, scaling the grandchildren by the
+/// child's own share. Collapsing a pruned branch can produce that shape, and one
+/// layout must not have two representations.
+fn merged_same_axis_children(
+    axis: PaneSplitAxis,
+    size: Option<f64>,
+    children: Vec<PaneSplitNode>,
+) -> PaneSplitNode {
+    let nested = children.iter().any(
+        |child| matches!(child, PaneSplitNode::Split { axis: child_axis, .. } if *child_axis == axis),
+    );
+    if !nested {
+        return PaneSplitNode::Split {
+            axis,
+            size,
+            children,
+        };
+    }
+    let fractions = normalized_node_fractions(&children);
+    let mut merged = Vec::new();
+    for (index, child) in children.into_iter().enumerate() {
+        match child {
+            PaneSplitNode::Split {
+                axis: child_axis,
+                children: grandchildren,
+                ..
+            } if child_axis == axis => {
+                let inner = normalized_node_fractions(&grandchildren);
+                for (grand_index, grandchild) in grandchildren.into_iter().enumerate() {
+                    merged.push(grandchild.with_size(Some(fractions[index] * inner[grand_index])));
+                }
+            }
+            other => merged.push(other.with_size(Some(fractions[index]))),
+        }
+    }
+    PaneSplitNode::Split {
+        axis,
+        size,
+        children: merged,
+    }
+}
+
+/// Drops leaves outside `keep`, removes emptied branches, collapses single-child
+/// branches into their child, and merges same-axis nesting. This is what lets a
+/// nested layout survive a pane exiting instead of reverting to flat.
+fn pruned_split_node(
+    node: PaneSplitNode,
+    keep: &HashSet<String>,
+    depth: usize,
+) -> Option<PaneSplitNode> {
+    if depth > MAX_PANE_SPLIT_DEPTH {
+        return None;
+    }
+    match node {
+        PaneSplitNode::Pane { pane_id, size } => {
+            if keep.contains(&pane_id) {
+                Some(PaneSplitNode::Pane { pane_id, size })
+            } else {
+                None
+            }
+        }
+        PaneSplitNode::Split {
+            axis,
+            size,
+            children,
+        } => {
+            let children = children
+                .into_iter()
+                .filter_map(|child| pruned_split_node(child, keep, depth + 1))
+                .collect::<Vec<_>>();
+            match children.len() {
+                0 => None,
+                // A collapsing branch hands its share of the grandparent to the
+                // survivor, so the surrounding layout does not shift.
+                1 => children
+                    .into_iter()
+                    .next()
+                    .map(|child| child.with_size(size)),
+                _ => Some(merged_same_axis_children(axis, size, children)),
+            }
+        }
+    }
+}
+
+fn leaf_sizes_from_root(node: &PaneSplitNode, out: &mut HashMap<String, f64>) {
+    let PaneSplitNode::Split { children, .. } = node else {
+        return;
+    };
+    let fractions = normalized_node_fractions(children);
+    for (index, child) in children.iter().enumerate() {
+        match child {
+            PaneSplitNode::Pane { pane_id, .. } => {
+                out.insert(pane_id.clone(), fractions[index]);
+            }
+            other => leaf_sizes_from_root(other, out),
+        }
+    }
+}
+
+/// The pruned tree for a split whose flat membership is `pane_ids`, or None when
+/// the stored tree cannot be trusted. Structural problems repair to flat rather
+/// than failing the write: a frontend bug must not be able to make the whole
+/// layout unpersistable.
+///
+/// The bool says whether the tree still needs storing. A tree whose children are
+/// all panes is exactly a flat split, so `root` is dropped — but its axis and
+/// leaf fractions are still the ones to keep, because collapsing a pruned branch
+/// can turn columns into a stack.
+fn normalized_split_root(
+    root: Option<PaneSplitNode>,
+    pane_ids: &[String],
+) -> Option<(PaneSplitNode, bool)> {
+    let sanitized = sanitized_split_node(root?, 0)?;
+    let keep = pane_ids.iter().cloned().collect::<HashSet<_>>();
+    let pruned = pruned_split_node(sanitized, &keep, 0)?.with_size(None);
+    let PaneSplitNode::Split { ref children, .. } = pruned else {
+        return None;
+    };
+    if children.len() < 2 || pruned.leaves() != pane_ids {
+        return None;
+    }
+    let nested = children
+        .iter()
+        .any(|child| matches!(child, PaneSplitNode::Split { .. }));
+    Some((pruned, nested))
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneSplitInfo {
@@ -1308,6 +1560,10 @@ pub struct PaneSplitInfo {
     pub intent: HashMap<String, PaneSplitIntent>,
     #[serde(default, skip_serializing_if = "pane_split_axis_is_vertical")]
     pub axis: PaneSplitAxis,
+    /// Nesting structure over `pane_ids`, present only when the layout is
+    /// actually nested. The tree's in-order leaves always equal `pane_ids`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<PaneSplitNode>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -10676,13 +10932,30 @@ fn normalized_pane_splits(
         }
         used_split_ids.insert(id.clone());
         let pane_id_set = pane_ids.iter().cloned().collect::<HashSet<_>>();
-        let sizes = split
-            .sizes
-            .into_iter()
-            .filter(|(pane_id, size)| {
-                pane_id_set.contains(pane_id) && size.is_finite() && *size > 0.0
-            })
-            .collect();
+        // A nested tree owns the geometry: `axis` mirrors its root — so a
+        // collapse can flip the split from columns to rows — and `sizes` is
+        // derived from its leaves, keeping the flat fallback plausible for a
+        // build that predates nesting.
+        let tree = normalized_split_root(split.root, &pane_ids);
+        let axis = match &tree {
+            Some((PaneSplitNode::Split { axis, .. }, _)) => *axis,
+            _ => split.axis,
+        };
+        let sizes = match &tree {
+            Some((node, _)) => {
+                let mut derived = HashMap::new();
+                leaf_sizes_from_root(node, &mut derived);
+                derived
+            }
+            None => split
+                .sizes
+                .into_iter()
+                .filter(|(pane_id, size)| {
+                    pane_id_set.contains(pane_id) && size.is_finite() && *size > 0.0
+                })
+                .collect(),
+        };
+        let root = tree.and_then(|(node, nested)| nested.then_some(node));
         let intent = split
             .intent
             .into_iter()
@@ -10706,7 +10979,8 @@ fn normalized_pane_splits(
             pane_ids,
             sizes,
             intent,
-            axis: split.axis,
+            axis,
+            root,
         });
     }
 
@@ -13414,6 +13688,7 @@ mod tests {
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
                 axis: PaneSplitAxis::Vertical,
+                root: None,
             }],
             research_trees: HashMap::from([(tree.id.clone(), tree)]),
             research_nodes: HashMap::from([(node.id.clone(), node)]),
@@ -15832,6 +16107,7 @@ mod tests {
                 sizes: HashMap::new(),
                 intent: HashMap::new(),
                 axis: PaneSplitAxis::Vertical,
+                root: None,
             }])
             .unwrap_err();
         assert!(invalid.contains("adjacent"));
@@ -15843,6 +16119,7 @@ mod tests {
                 sizes: HashMap::from([("pane-1".to_string(), 0.4), ("pane-2".to_string(), 0.6)]),
                 intent: HashMap::new(),
                 axis: PaneSplitAxis::Vertical,
+                root: None,
             }])
             .unwrap();
         assert_eq!(splits.len(), 1);
@@ -15897,6 +16174,7 @@ mod tests {
                     ),
                 ]),
                 axis: PaneSplitAxis::Horizontal,
+                root: None,
             }])
             .unwrap();
 
@@ -15933,6 +16211,290 @@ mod tests {
             horizontal_json.get("axis").and_then(|value| value.as_str()),
             Some("horizontal")
         );
+    }
+
+    fn pane_node(pane_id: &str, size: f64) -> PaneSplitNode {
+        PaneSplitNode::Pane {
+            pane_id: pane_id.to_string(),
+            size: Some(size),
+        }
+    }
+
+    fn branch_node(
+        axis: PaneSplitAxis,
+        size: Option<f64>,
+        children: Vec<PaneSplitNode>,
+    ) -> PaneSplitNode {
+        PaneSplitNode::Split {
+            axis,
+            size,
+            children,
+        }
+    }
+
+    fn nested_split(id: &str, pane_ids: &[&str], root: PaneSplitNode) -> PaneSplitInfo {
+        let axis = match &root {
+            PaneSplitNode::Split { axis, .. } => *axis,
+            PaneSplitNode::Pane { .. } => PaneSplitAxis::Vertical,
+        };
+        PaneSplitInfo {
+            id: id.to_string(),
+            pane_ids: pane_ids.iter().map(|pane_id| pane_id.to_string()).collect(),
+            sizes: HashMap::new(),
+            intent: HashMap::new(),
+            axis,
+            root: Some(root),
+        }
+    }
+
+    fn split_state_with_panes(count: usize) -> AppState {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        for index in 1..=count {
+            state
+                .insert_pane(sample_pane_runtime(&format!("pane-{index}")))
+                .unwrap();
+        }
+        state
+    }
+
+    #[test]
+    fn pane_split_node_round_trips_through_json() {
+        let json = r#"{
+            "id": "split-1",
+            "paneIds": ["a", "b", "c"],
+            "sizes": {},
+            "axis": "horizontal",
+            "root": {
+                "kind": "split",
+                "axis": "horizontal",
+                "children": [
+                    { "kind": "pane", "paneId": "a", "size": 0.5 },
+                    {
+                        "kind": "split",
+                        "axis": "vertical",
+                        "size": 0.5,
+                        "children": [
+                            { "kind": "pane", "paneId": "b", "size": 0.5 },
+                            { "kind": "pane", "paneId": "c", "size": 0.5 }
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let split: PaneSplitInfo = serde_json::from_str(json).unwrap();
+        let root = split.root.clone().unwrap();
+        assert_eq!(root.leaves(), vec!["a", "b", "c"]);
+
+        // The wire shape matches the frontend's discriminated union.
+        let value = serde_json::to_value(&split).unwrap();
+        let root_value = value.get("root").unwrap();
+        assert_eq!(root_value.get("kind").unwrap(), "split");
+        let children = root_value.get("children").unwrap().as_array().unwrap();
+        assert_eq!(children[0].get("kind").unwrap(), "pane");
+        assert_eq!(children[0].get("paneId").unwrap(), "a");
+        // An absent size stays absent rather than serializing as null.
+        let sizeless: PaneSplitNode =
+            serde_json::from_str(r#"{"kind":"pane","paneId":"a"}"#).unwrap();
+        let sizeless_value = serde_json::to_value(&sizeless).unwrap();
+        assert!(sizeless_value.get("size").is_none());
+
+        // A split with no tree omits the field entirely, so files written by
+        // older builds round-trip untouched.
+        let flat: PaneSplitInfo =
+            serde_json::from_str(r#"{"id":"s","paneIds":["a","b"],"sizes":{}}"#).unwrap();
+        assert!(flat.root.is_none());
+        assert!(serde_json::to_value(&flat).unwrap().get("root").is_none());
+    }
+
+    #[test]
+    fn pane_splits_keep_a_nested_tree_and_derive_its_sizes() {
+        let state = split_state_with_panes(3);
+
+        let splits = state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2", "pane-3"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![
+                        pane_node("pane-1", 0.5),
+                        branch_node(
+                            PaneSplitAxis::Vertical,
+                            Some(0.5),
+                            vec![pane_node("pane-2", 0.25), pane_node("pane-3", 0.75)],
+                        ),
+                    ],
+                ),
+            )])
+            .unwrap();
+
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0].axis, PaneSplitAxis::Horizontal);
+        let root = splits[0].root.clone().unwrap();
+        assert_eq!(root.leaves(), vec!["pane-1", "pane-2", "pane-3"]);
+        // `sizes` mirrors each leaf's share of its own parent for older builds.
+        assert_eq!(splits[0].sizes.get("pane-1"), Some(&0.5));
+        assert_eq!(splits[0].sizes.get("pane-2"), Some(&0.25));
+        assert_eq!(splits[0].sizes.get("pane-3"), Some(&0.75));
+
+        // Re-normalizing must be a fixed point or the frontend and backend would
+        // disagree on every read.
+        assert_eq!(state.pane_splits().unwrap(), splits);
+    }
+
+    #[test]
+    fn pane_splits_prune_a_nested_tree_when_a_pane_closes() {
+        let state = split_state_with_panes(4);
+        state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2", "pane-3", "pane-4"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![
+                        branch_node(
+                            PaneSplitAxis::Vertical,
+                            Some(0.5),
+                            vec![pane_node("pane-1", 0.5), pane_node("pane-2", 0.5)],
+                        ),
+                        branch_node(
+                            PaneSplitAxis::Vertical,
+                            Some(0.5),
+                            vec![pane_node("pane-3", 0.5), pane_node("pane-4", 0.5)],
+                        ),
+                    ],
+                ),
+            )])
+            .unwrap();
+
+        // Closing one pane of the right column collapses that column to its
+        // survivor; the nesting on the left has to live on.
+        state.remove_pane("pane-4").unwrap();
+        let splits = state.pane_splits().unwrap();
+        assert_eq!(splits.len(), 1);
+        assert_eq!(splits[0].pane_ids, vec!["pane-1", "pane-2", "pane-3"]);
+        let root = splits[0].root.clone().unwrap();
+        assert_eq!(root.leaves(), vec!["pane-1", "pane-2", "pane-3"]);
+        assert_eq!(splits[0].axis, PaneSplitAxis::Horizontal);
+
+        // Closing the lone right pane leaves only the stack, which is flat — and
+        // the split's axis has to follow the collapsed tree, not the old root.
+        state.remove_pane("pane-3").unwrap();
+        let splits = state.pane_splits().unwrap();
+        assert_eq!(splits[0].pane_ids, vec!["pane-1", "pane-2"]);
+        assert!(splits[0].root.is_none());
+        assert_eq!(splits[0].axis, PaneSplitAxis::Vertical);
+    }
+
+    #[test]
+    fn pane_splits_merge_same_axis_nesting_into_one_branch() {
+        let state = split_state_with_panes(3);
+
+        let splits = state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2", "pane-3"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![
+                        pane_node("pane-1", 0.5),
+                        branch_node(
+                            PaneSplitAxis::Horizontal,
+                            Some(0.5),
+                            vec![pane_node("pane-2", 0.5), pane_node("pane-3", 0.5)],
+                        ),
+                    ],
+                ),
+            )])
+            .unwrap();
+
+        // Three columns have one representation, so the tree is stored flat.
+        assert!(splits[0].root.is_none());
+        assert_eq!(splits[0].axis, PaneSplitAxis::Horizontal);
+        assert_eq!(splits[0].sizes.get("pane-1"), Some(&0.5));
+        assert_eq!(splits[0].sizes.get("pane-2"), Some(&0.25));
+        assert_eq!(splits[0].sizes.get("pane-3"), Some(&0.25));
+    }
+
+    #[test]
+    fn pane_splits_repair_an_untrustworthy_tree_to_flat() {
+        let state = split_state_with_panes(3);
+
+        // Leaves out of tab order: geometry and the sidebar would disagree.
+        let splits = state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2", "pane-3"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![
+                        pane_node("pane-1", 0.5),
+                        branch_node(
+                            PaneSplitAxis::Vertical,
+                            Some(0.5),
+                            vec![pane_node("pane-3", 0.5), pane_node("pane-2", 0.5)],
+                        ),
+                    ],
+                ),
+            )])
+            .unwrap();
+        // Repaired, not rejected: a frontend bug must not make the layout
+        // unpersistable.
+        assert_eq!(splits.len(), 1);
+        assert!(splits[0].root.is_none());
+        assert_eq!(splits[0].pane_ids, vec!["pane-1", "pane-2", "pane-3"]);
+
+        // A tree naming a pane outside the split.
+        let splits = state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![
+                        pane_node("pane-1", 0.5),
+                        branch_node(
+                            PaneSplitAxis::Vertical,
+                            Some(0.5),
+                            vec![pane_node("pane-2", 0.5), pane_node("pane-9", 0.5)],
+                        ),
+                    ],
+                ),
+            )])
+            .unwrap();
+        assert!(splits[0].root.is_none());
+
+        // Past the depth ceiling.
+        let mut deep = pane_node("pane-2", 0.5);
+        for level in 0..20 {
+            deep = branch_node(
+                if level % 2 == 0 {
+                    PaneSplitAxis::Vertical
+                } else {
+                    PaneSplitAxis::Horizontal
+                },
+                Some(1.0),
+                vec![deep],
+            );
+        }
+        let splits = state
+            .set_pane_splits(vec![nested_split(
+                "split-a",
+                &["pane-1", "pane-2"],
+                branch_node(
+                    PaneSplitAxis::Horizontal,
+                    None,
+                    vec![pane_node("pane-1", 0.5), deep],
+                ),
+            )])
+            .unwrap();
+        assert!(splits[0].root.is_none());
     }
 
     #[test]
