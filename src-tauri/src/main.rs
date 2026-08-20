@@ -627,7 +627,13 @@ fn resolve_local_link_target(
     pane_id: &str,
     path: &str,
 ) -> Result<control_socket::ResolvedBrowserTarget, String> {
-    if !state.pane_exists(pane_id)? {
+    // Research documents open links under a synthetic `__research_document__:`
+    // owner id (not a pane); their roots resolve to the tree's workspace dir.
+    if let Some(tree_id) = research::tree_id_from_browser_owner(pane_id) {
+        if !state.research_tree_exists(tree_id)? {
+            return Err(format!("research tree {tree_id} was not found"));
+        }
+    } else if !state.pane_exists(pane_id)? {
         return Err(format!("pane {pane_id} was not found"));
     }
     let trimmed = path.trim();

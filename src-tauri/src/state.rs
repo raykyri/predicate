@@ -901,6 +901,23 @@ fn path_is_ancestor_or_equal(ancestor: &std::path::Path, descendant: &std::path:
     descendant.starts_with(&ancestor)
 }
 
+/// Shared temporary directories every file-preview owner may read: agents
+/// commonly write disposable HTML artifacts there rather than beneath their
+/// cwd. Include both conventional macOS spellings even though `/tmp` normally
+/// canonicalizes to `/private/tmp`; `temp_dir` also covers a host whose
+/// configured temporary directory lives elsewhere.
+fn push_shared_temp_roots(roots: &mut Vec<std::path::PathBuf>) {
+    for temp_root in [
+        std::env::temp_dir(),
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/private/tmp"),
+    ] {
+        if !roots.contains(&temp_root) {
+            roots.push(temp_root);
+        }
+    }
+}
+
 fn queued_turn_wait_is_resolved_locked(model: &Model, wait_for: &QueuedTurnWait) -> bool {
     let Some(target) = model.agents.get(&wait_for.agent_id) else {
         // The target agent is gone entirely (e.g. its pane closed and the agent was
@@ -1978,6 +1995,26 @@ impl AppState {
             .model
             .lock()
             .unwrap_or_else(|err| err.into_inner());
+        // A research document is not a pane but reuses this plumbing under a
+        // synthetic owner id. Its preview scope is the tree's research
+        // workspace directory — the folder the tree's runs read — plus the
+        // shared temporary roots runs may have written artifacts to.
+        if let Some(tree_id) = research::tree_id_from_browser_owner(pane_id) {
+            let Some(tree) = model.research_trees.get(tree_id) else {
+                return Vec::new();
+            };
+            let Some(workspace) = model.groups.get(&tree.workspace_id) else {
+                return Vec::new();
+            };
+            // A remote workspace's dir is a path on its host; serving it
+            // locally would resolve against the wrong filesystem.
+            if workspace.is_remote() {
+                return Vec::new();
+            }
+            let mut roots = vec![std::path::PathBuf::from(&workspace.dir)];
+            push_shared_temp_roots(&mut roots);
+            return roots;
+        }
         if let Some(pane) = model.panes.get(pane_id) {
             // A remote group's dir and cwd are paths on its host. Serving them
             // through the local file server would resolve those strings against
@@ -2013,18 +2050,7 @@ impl AppState {
                     roots.push(std::path::PathBuf::from(&agent.worktree_dir));
                 }
             }
-            // Include both conventional macOS spellings even though `/tmp`
-            // normally canonicalizes to `/private/tmp`; `temp_dir` also covers
-            // a host whose configured temporary directory lives elsewhere.
-            for temp_root in [
-                std::env::temp_dir(),
-                std::path::PathBuf::from("/tmp"),
-                std::path::PathBuf::from("/private/tmp"),
-            ] {
-                if !roots.contains(&temp_root) {
-                    roots.push(temp_root);
-                }
-            }
+            push_shared_temp_roots(&mut roots);
             return roots;
         }
         Vec::new()
@@ -5498,6 +5524,12 @@ impl AppState {
         };
         if !removed {
             return Err(format!("research tree {tree_id} was not found"));
+        }
+        // The tree's document view may have minted a file-preview token under
+        // its synthetic browser-owner id; a removed tree resolves no roots, so
+        // drop the credential rather than leave it dangling.
+        if let Ok(mut tokens) = self.inner.file_tokens.lock() {
+            tokens.remove(&research::document_browser_owner_id(tree_id));
         }
         self.persist();
         self.emit(QmuxEvent::new(
@@ -9501,6 +9533,16 @@ impl AppState {
                 tails.remove(&key);
             }
         }
+    }
+
+    /// Whether a research tree is currently registered.
+    pub fn research_tree_exists(&self, tree_id: &str) -> Result<bool, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model.research_trees.contains_key(tree_id))
     }
 
     /// Whether a pane is currently registered, regardless of backend.
@@ -17550,6 +17592,67 @@ mod tests {
         assert!(roots.contains(&std::env::temp_dir()));
         assert!(roots.contains(&std::path::PathBuf::from("/tmp")));
         assert!(roots.contains(&std::path::PathBuf::from("/private/tmp")));
+    }
+
+    #[test]
+    fn research_document_file_preview_roots_resolve_to_the_tree_workspace() {
+        let root = temp_workspace();
+        let state = AppState::new(test_config(root.clone()));
+        let mut group = sample_group();
+        group.dir = root.display().to_string();
+        state.insert_group_after(group.clone(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: group.id.clone(),
+            })
+            .unwrap();
+
+        let owner = research::document_browser_owner_id(&detail.tree.id);
+        let roots = state.pane_file_roots(&owner);
+        assert!(roots.contains(&std::path::PathBuf::from(&group.dir)));
+        assert!(roots.contains(&std::path::PathBuf::from("/tmp")));
+
+        // Unknown trees fail closed, like unknown panes.
+        assert!(
+            state
+                .pane_file_roots(&research::document_browser_owner_id("missing-tree"))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn remove_research_tree_reclaims_its_document_file_preview_token() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let owner = research::document_browser_owner_id(&detail.tree.id);
+        let token = state.pane_file_token(&owner).unwrap();
+        assert_eq!(
+            state.pane_for_file_token(&token).as_deref(),
+            Some(owner.as_str())
+        );
+
+        // Settle the queued root run so the tree is removable.
+        state
+            .fail_research_node(&detail.tree.root_node_id, "cancelled".to_string())
+            .unwrap();
+        state.remove_research_tree(&detail.tree.id).unwrap();
+
+        assert!(state.pane_for_file_token(&token).is_none());
     }
 
     #[test]
