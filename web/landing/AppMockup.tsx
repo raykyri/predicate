@@ -625,7 +625,9 @@ function HomeDraftsRail() {
 
 function HomeRail({ group, pane }: { group: MockGroup; pane: MockPane }) {
   const rail = MOCK_HOME_RAILS[pane.sessionId];
-  const queued = rail?.queued ?? [];
+  // The fixture keeps follow-ups in newest-first order; the map presents the
+  // queue head first, matching the live queue surfaces.
+  const queued = [...(rail?.queued ?? [])].reverse();
   return (
     <div
       className="home-rail"

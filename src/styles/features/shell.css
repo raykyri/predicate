@@ -2712,6 +2712,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   flex-direction: column;
   gap: 12px;
   width: min(1180px, 100%);
+  min-width: 0;
   flex: 1 1 auto;
   min-height: 0;
   pointer-events: auto;
@@ -2727,6 +2728,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   flex-direction: column;
   gap: 12px;
   width: min(1180px, 100%);
+  min-width: 0;
   height: min(780px, calc(100vh - 48px));
   min-height: 0;
   padding: 18px 18px 16px;
@@ -2868,6 +2870,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 .home-rails-section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   flex: 1 1 auto;
   min-height: 0;
   pointer-events: auto;
@@ -2878,6 +2881,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
    at all times and the rails pan inside its rounded corners. */
 .home-rails {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;

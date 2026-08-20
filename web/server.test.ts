@@ -890,7 +890,7 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /All-in-one terminal for agents/);
   assert.match(
     body,
-    /qmux is a terminal for CLI agents with easy-to-read transcripts, artifacts, cross-agent queues/,
+    /qmux is a terminal for CLI agents with visual transcripts, artifacts, cross-agent queues/,
   );
   assert.match(body, /Built on libghostty/);
   assert.match(
@@ -922,6 +922,9 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="app-mockup"/);
   assert.match(body, /class="app-shell has-turn-sidebar"/);
   assert.match(body, /What should we investigate next\?/);
+  const queueHead = body.indexOf("commit the landing copy pass");
+  const queueTail = body.indexOf("narrow the replay window once the image step lands");
+  assert.ok(queueHead >= 0 && queueTail >= 0 && queueHead < queueTail);
   assert.doesNotMatch(body, /qmux running a Codex agent over the Porffor JavaScript engine/);
   assert.doesNotMatch(body, /Play the session/);
   assert.doesNotMatch(body, /Type in the composer to queue a turn/);
@@ -1016,6 +1019,13 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /Export to Research…/);
   assert.match(body, /data-mock-menu-collapse/);
   assert.match(body, /Close group/);
+  // Four miniature feature replicas sit above the window replica in the hero,
+  // each an inert illustration captioned like a feature card.
+  assert.equal((body.match(/class="mini-mockup"/g) ?? []).length, 4);
+  assert.match(body, /Never forget the command for creating a worktree again/);
+  assert.match(body, /View mockups and documents at a glance/);
+  assert.match(body, /Scroll back thousands of messages, even across auto-compactions/);
+  assert.match(body, /class="composer-slash-token">\/fork</);
   assert.match(body, /data-step="5"/);
   // Replay staging is inert unless the pre-paint bootstrap activates it, so the
   // serialized default session remains complete when JavaScript is unavailable.

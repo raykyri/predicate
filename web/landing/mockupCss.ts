@@ -7,7 +7,10 @@
 // 13px UI type), so it reads as a screenshot rather than a diagram. When the app's
 // look changes, port the values.
 export const MOCKUP_CSS = `
-.app-mockup {
+/* The token block is shared with .mini-mockup: the hero's miniature feature
+   replicas render the same surfaces at the same type ramp. */
+.app-mockup,
+.mini-mockup {
   /* --- tokens.css --- */
   --fs-xs: 11px;
   --fs-sm: 12px;
@@ -1796,8 +1799,18 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   display: none;
 }
 
-.app-mockup .confirm-dialog-backdrop.terminal-map-backdrop {
+.app-mockup .confirm-dialog-backdrop {
   position: absolute;
+  inset: 0;
+  z-index: 19;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  background: rgba(8, 10, 12, 0.58);
+}
+
+.app-mockup .confirm-dialog-backdrop.terminal-map-backdrop {
   z-index: 20;
   align-items: center;
   padding: 24px;
@@ -1808,6 +1821,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   flex-direction: column;
   gap: 12px;
   width: min(1180px, 100%);
+  min-width: 0;
   height: min(600px, 100%);
   min-height: 0;
   padding: 18px 18px 16px;
@@ -1827,6 +1841,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   flex-direction: column;
   gap: 12px;
   width: 100%;
+  min-width: 0;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -1963,6 +1978,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 .app-mockup .home-rails-section {
   display: flex;
   flex-direction: column;
+  min-width: 0;
   flex: 1 1 auto;
   min-height: 0;
 }
@@ -1971,6 +1987,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
    the scroll viewport, not the content, so it fully encloses the columns. */
 .app-mockup .home-rails {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -2692,5 +2709,409 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   .app-mockup .mock-terminal-cursor {
     animation: none;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Feature mini-mockups (MiniMockups.tsx). Four frozen app surfaces above
+   the full window replica, each captioned like a feature card. The stages
+   share .app-mockup's tokens but carry no behavior: every control inside is
+   a span, and the whole stage is aria-hidden behind its caption. */
+.mini-mockups {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.mini-mockup {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mini-mockup-stage {
+  position: relative;
+  height: 264px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: var(--workspace-bg);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--fs-base);
+  line-height: 1.45;
+  user-select: none;
+}
+
+.mini-mockup-stage-inner {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+/* Modules whose content runs past the fold fade out instead of stopping at a
+   hard line — the way a cropped screenshot reads. */
+.mini-mockup-stage.has-fade::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 30px;
+  background: linear-gradient(to bottom, transparent, var(--workspace-bg));
+  pointer-events: none;
+}
+
+@media (prefers-color-scheme: light) {
+  .mini-mockup-stage {
+    border-color: rgba(0, 0, 0, 0.16);
+  }
+}
+
+.mini-mockup-label {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 22px;
+  margin: 0 14px;
+}
+
+.mini-mockup-sub {
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 19px;
+  text-wrap: pretty;
+  margin: 0 14px 10px;
+}
+
+@media (max-width: 64rem) {
+  .mini-mockups {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 40rem) {
+  .mini-mockups {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* --- Worktrees: the tab context menu, "Open worktree" under the pointer --- */
+.mini-mockup .pane-context-menu {
+  position: absolute;
+  inset: 12px 12px auto;
+  border: 0.5px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--context-menu-bg);
+  box-shadow: var(--context-menu-shadow);
+  padding: 4px;
+  user-select: none;
+}
+
+.mini-mockup .pane-context-actions {
+  display: grid;
+  gap: 1px;
+}
+
+.mini-mockup .context-menu-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--text-body-soft);
+  font-size: inherit;
+  line-height: 1.2;
+}
+
+.mini-mockup .context-menu-item.context-menu-has-shortcut {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+}
+
+.mini-mockup .context-menu-item > svg {
+  justify-self: center;
+}
+
+.mini-mockup .context-menu-item > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pointer's row, frozen the way the app paints a hover. */
+.mini-mockup .context-menu-item.is-selected {
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+}
+
+.mini-mockup .context-menu-shortcut {
+  min-width: 0;
+  justify-self: end;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+.mini-mockup .context-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--surface-border-default);
+}
+
+/* --- Artifacts: the tray floating over the workspace --- */
+.mini-mockup .artifact-tray {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  width: 208px;
+  max-width: calc(100% - 20px);
+  flex-direction: column;
+  border: 1px solid var(--control-border);
+  border-radius: 10px;
+  background: var(--right-pane-bg);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 38%);
+}
+
+.mini-mockup .artifact-tray-titlebar {
+  display: flex;
+  height: 26px;
+  flex: 0 0 26px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--surface-divider);
+  border-radius: 9px 9px 0 0;
+  background: var(--chrome-header-bg);
+}
+
+.mini-mockup .artifact-tray-clip,
+.mini-mockup .artifact-tray-label {
+  color: var(--accent-color);
+}
+
+.mini-mockup .artifact-tray-label {
+  flex: 1;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mini-mockup .artifact-tray-chrome-button {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-faint);
+}
+
+.mini-mockup .artifact-tray-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 3px;
+}
+
+.mini-mockup .artifact-tray-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 26px;
+  padding: 3px 6px;
+  border-radius: var(--radius-md);
+}
+
+.mini-mockup .artifact-tray-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.mini-mockup .artifact-tray-meta {
+  flex: none;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+/* --- Slash commands: the composer's typeahead over the message input --- */
+.mini-mockup .mini-composer {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+}
+
+.mini-mockup .composer-slash-popover {
+  box-sizing: border-box;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 4px;
+  overflow: hidden;
+  border: 0.5px solid var(--control-border);
+  border-radius: var(--radius-lg);
+  background: var(--popover-bg);
+  box-shadow: var(--popover-shadow);
+}
+
+.mini-mockup .composer-slash-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mini-mockup .composer-slash-option {
+  display: grid;
+  grid-template-columns: auto 76px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  padding: 4px 8px;
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-size: var(--fs-base);
+}
+
+.mini-mockup .composer-slash-option.is-selected {
+  background: var(--control-bg-hover);
+}
+
+.mini-mockup .composer-slash-icon {
+  display: grid;
+  place-items: center;
+  color: var(--text-muted);
+}
+
+.mini-mockup .composer-slash-token {
+  color: var(--accent-color);
+  font-family: var(--font-mono);
+  font-size: calc(var(--fs-base) - 1px);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.mini-mockup .composer-slash-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--control-fg-muted);
+  font-size: calc(var(--fs-base) - 1px);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.mini-mockup .mini-composer-field {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  /* The focused composer's accent edge, as the app draws it. */
+  border: 1px solid var(--control-border-hover-accent);
+  border-radius: 10px;
+  background: var(--field-bg);
+}
+
+.mini-mockup .mini-composer-text {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+}
+
+.mini-mockup .mini-composer-caret {
+  width: 1px;
+  height: 14px;
+  margin-left: 1px;
+  background: var(--accent-color);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mini-mockup .mini-composer-caret {
+    animation: mini-caret-blink 1.1s steps(1) infinite;
+  }
+}
+
+@keyframes mini-caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* --- Keep working: a transcript scrolled back to its earliest turns --- */
+.mini-mockup .mini-scrollback {
+  position: absolute;
+  inset: 0;
+  padding: 12px;
+}
+
+.mini-mockup .mini-scrollback-thread {
+  height: 100%;
+  /* The top of the thread has scrolled past the fold. */
+  mask-image: linear-gradient(to bottom, transparent 0, black 30px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 30px);
+}
+
+.mini-mockup .turn-card {
+  border: 1px solid var(--surface-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--content-card-bg);
+  padding: 7px 8px;
+}
+
+.mini-mockup .turn-card.role-user {
+  margin: 0 0 8px;
+}
+
+.mini-mockup .turn-card.role-assistant {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 2px 8px;
+}
+
+.mini-mockup .turn-card header {
+  margin-bottom: 3px;
+  color: var(--accent-color);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.mini-mockup .turn-text {
+  color: var(--text-strong);
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.mini-mockup .activity-group-block {
+  padding: 2px 2px 8px;
+}
+
+.mini-mockup .activity-group-label {
+  color: var(--text-activity);
+  font-size: 11.5px;
+}
+
+/* The scrollbar thumb rides high: thousands of messages sit below the fold. */
+.mini-mockup .mini-scrollback-thumb {
+  position: absolute;
+  top: 16px;
+  right: 4px;
+  width: 3px;
+  height: 58px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.16);
 }
 `;

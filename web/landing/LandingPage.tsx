@@ -4,6 +4,7 @@
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import AppMockup from "./AppMockup";
+import FeatureMiniMockups from "./MiniMockups";
 import { HeroAgents } from "./agentIcons";
 import { FEATURES, GITHUB_URL, RELEASES_URL, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import { LANDING_CSS } from "./landingCss";
@@ -38,13 +39,14 @@ function Hero() {
         </h1>
         <div className="intro-copy">
           <p>
-            qmux is a terminal for CLI agents with easy-to-read transcripts, artifacts,
+            qmux is a terminal for CLI agents with visual transcripts, artifacts,
             cross-agent queues, and more. Built on libghostty.
           </p>
         </div>
         <HeroAgents />
       </div>
       <figure className="product-shot">
+        <FeatureMiniMockups />
         <AppMockup />
       </figure>
     </section>
