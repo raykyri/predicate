@@ -36,6 +36,10 @@ import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
 import {
   captureTranscriptScrollPosition,
+  shouldPersistTranscriptScroll,
+  transcriptPointerDownSignalsScrollIntent,
+  transcriptRestoreHasSettled,
+  transcriptScrollKeySignalsIntent,
   transcriptScrollRestoreTop,
   type TranscriptScrollPosition,
 } from "../lib/transcriptScroll";
@@ -176,6 +180,16 @@ const DEFAULT_COMPOSER_RESERVE = 132;
 // How close to the bottom (in px) the user must be for new turns or a growing
 // composer to keep the transcript pinned to the bottom.
 const STICK_TO_BOTTOM_THRESHOLD = 100;
+// WebKit can deliver a focus-driven scroll well after the tab's React commit.
+// Keep restores authoritative across that first-responder/layout settling
+// window, while still bounding the transaction if content keeps animating.
+const TRANSCRIPT_RESTORE_MIN_SETTLE_MS = 120;
+const TRANSCRIPT_RESTORE_MAX_SETTLE_MS = 400;
+const TRANSCRIPT_RESTORE_STABLE_FRAMES = 2;
+const TRANSCRIPT_RESTORE_TOP_EPSILON = 1;
+// Wheel/key scroll events can arrive after the input event that caused them.
+// Pointer moves refresh this window during a scrollbar or touch drag.
+const TRANSCRIPT_USER_SCROLL_INTENT_MS = 800;
 const MIN_TRANSCRIPT_SPLIT_HEIGHT = 96;
 const MIN_QUEUE_SPLIT_HEIGHT = 120;
 const MIN_QUEUE_AREA_HEIGHT = 56;
@@ -300,10 +314,19 @@ export default function TurnOverlay({
   // before any DOM mutation — and ignore scroll events until restore finishes.
   const prevTranscriptAgentIdRef = useRef<string | undefined>(undefined);
   const restoringScrollRef = useRef(false);
+  const restoreGenerationRef = useRef(0);
+  const userScrollIntentUntilRef = useRef(0);
+  const pointerScrollIntentRef = useRef(false);
   const pendingRestoreRef = useRef<TranscriptScrollPosition | null | undefined>(undefined);
   if (agentId !== prevTranscriptAgentIdRef.current) {
     prevTranscriptAgentIdRef.current = agentId;
+    restoreGenerationRef.current += 1;
     restoringScrollRef.current = true;
+    // Intent belongs to the outgoing DOM interaction. Carrying its deadline
+    // onto the reused incoming scroller would let a focus clamp masquerade as
+    // the tail of the old wheel/drag gesture.
+    userScrollIntentUntilRef.current = 0;
+    pointerScrollIntentRef.current = false;
     pendingRestoreRef.current = agentId ? getTranscriptScroll?.(agentId) : undefined;
   }
   const historyRenderRef = useRef({ agentId, count: conversationHistory.length });
@@ -342,10 +365,24 @@ export default function TurnOverlay({
     if (!timeline || readerModeRequested || readerModeWasActiveRef.current) {
       return;
     }
+    const now = performance.now();
+    const pointerIntent = pointerScrollIntentRef.current;
+    if (pointerIntent) {
+      // The scroll confirms that the pending scrollbar/touch/selection drag
+      // really moved the viewport. Preserve a short tail for momentum events
+      // that can arrive after pointerup.
+      userScrollIntentUntilRef.current = now + TRANSCRIPT_USER_SCROLL_INTENT_MS;
+    }
+    const userScrollIntent = pointerIntent || now <= userScrollIntentUntilRef.current;
     // Clamp/restore churn while switching agents is not user intent — leave
     // stickiness and the store alone until the agentId layout effect settles.
+    // A genuine gesture cancels the transaction instead of being fought.
     if (restoringScrollRef.current) {
-      return;
+      if (!userScrollIntent) {
+        return;
+      }
+      restoreGenerationRef.current += 1;
+      restoringScrollRef.current = false;
     }
     // The stick-to-bottom ref must update synchronously (layout effects read it
     // on the very next commit); the sticky-message geometry can wait for the
@@ -359,10 +396,17 @@ export default function TurnOverlay({
     }
     stickToBottomRef.current = position.stuck;
     setJumpToLatestVisible(!position.stuck);
-    // Remember where this transcript is parked so switching tabs (or away to
-    // Home/Research) and back restores it. This fires for programmatic scrolls
-    // too (auto-pin to bottom, restore), so the stored value stays current.
-    if (agentId) {
+    // WebKit reports focus clamps and our own scrollTop assignments through the
+    // same event as a wheel/scrollbar gesture. Only user-intent-backed events
+    // may replace the durable per-agent snapshot; tab selection also performs
+    // an explicit synchronous capture before React touches this DOM.
+    if (
+      agentId &&
+      shouldPersistTranscriptScroll(
+        restoringScrollRef.current,
+        userScrollIntent,
+      )
+    ) {
       saveTranscriptScroll?.(agentId, position);
     }
     scheduleStickyUserStuckUpdate();
@@ -411,6 +455,52 @@ export default function TurnOverlay({
     }
     jumpingToLatestRef.current = false;
     handleTimelineScroll();
+  };
+
+  const noteTimelineUserScrollIntent = () => {
+    userScrollIntentUntilRef.current = performance.now() + TRANSCRIPT_USER_SCROLL_INTENT_MS;
+    // A real gesture owns the viewport immediately. Cancel an in-flight restore
+    // generation so its next settling frame cannot pull against the user.
+    if (restoringScrollRef.current) {
+      restoreGenerationRef.current += 1;
+      restoringScrollRef.current = false;
+    }
+  };
+
+  const handleTimelinePointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const timeline = event.currentTarget;
+    const rect = timeline.getBoundingClientRect();
+    pointerScrollIntentRef.current = transcriptPointerDownSignalsScrollIntent(
+      event.pointerType,
+      event.clientX,
+      rect.right,
+      timeline.offsetWidth - timeline.clientWidth,
+    );
+    cancelJumpToLatest();
+  };
+
+  const handleTimelinePointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.buttons !== 0) {
+      // A drag inside the content can autoscroll a text selection even when it
+      // did not begin on the scrollbar gutter.
+      pointerScrollIntentRef.current = true;
+    }
+  };
+
+  const handleTimelinePointerEnd = () => {
+    pointerScrollIntentRef.current = false;
+  };
+
+  const handleTimelineWheel = () => {
+    noteTimelineUserScrollIntent();
+    cancelJumpToLatest();
+  };
+
+  const handleTimelineKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (transcriptScrollKeySignalsIntent(event.key)) {
+      noteTimelineUserScrollIntent();
+    }
+    cancelJumpToLatest();
   };
 
   const splitBounds = () => {
@@ -494,9 +584,10 @@ export default function TurnOverlay({
   // when the latest user card is sticky: it can be pinned while the viewport is
   // near the tail, but tabbing must not turn "near" into "at the end".
   // useLayoutEffect runs before paint, so the pane never flashes at the wrong
-  // spot first; the rAF re-assert catches the composer's measured tail-spacer
-  // reflow, most visibly on a fresh remount where the composer measures from
-  // zero.
+  // spot first. A generation-scoped rAF transaction then keeps reasserting the
+  // target until focus and layout have remained stable: WebKit can clamp the
+  // shared scroller after the first frame when first responder moves between
+  // the right pane and Ghostty.
   //
   // The restore target is snapshotted during render (pendingRestoreRef), not
   // re-read from the store here: content-swap scroll events can poison the
@@ -505,53 +596,86 @@ export default function TurnOverlay({
   // effect re-run still sees the unpoisoned value.
   useLayoutEffect(() => {
     const saved = pendingRestoreRef.current;
+    const generation = restoreGenerationRef.current;
     jumpingToLatestRef.current = false;
+    stickToBottomRef.current = saved?.atEnd === false ? saved.stuck : true;
+    setJumpToLatestVisible(false);
+
+    let frame: number | null = null;
+    let lastRestoredTop: number | null = null;
+    let lastGeometry = "";
+    let stableFrames = 0;
+    const startedAt = performance.now();
+
+    const restore = () => {
+      const timeline = timelineRef.current;
+      if (!timeline) {
+        return;
+      }
+      const displaced =
+        lastRestoredTop !== null &&
+        Math.abs(timeline.scrollTop - lastRestoredTop) > TRANSCRIPT_RESTORE_TOP_EPSILON;
+      timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
+      const restoredTop = timeline.scrollTop;
+      const geometry = `${timeline.scrollHeight}:${timeline.clientHeight}:${restoredTop}`;
+      stableFrames = !displaced && geometry === lastGeometry ? stableFrames + 1 : 0;
+      lastRestoredTop = restoredTop;
+      lastGeometry = geometry;
+      if (saved && !saved.atEnd) {
+        const distanceFromBottom =
+          timeline.scrollHeight - restoredTop - timeline.clientHeight;
+        setJumpToLatestVisible(
+          !saved.stuck && distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD,
+        );
+      }
+    };
 
     const finishRestore = () => {
       // Only release the gate if we are still restoring this same agent —
-      // a newer agentId change will have re-armed the ref during render.
-      if (prevTranscriptAgentIdRef.current !== agentId) {
+      // a newer agentId change or real user gesture invalidates this generation.
+      if (
+        prevTranscriptAgentIdRef.current !== agentId ||
+        restoreGenerationRef.current !== generation
+      ) {
         return;
       }
       restoringScrollRef.current = false;
-      // Publish the settled position now that clamp events are done, so the
-      // store matches what the user actually sees (and stickiness is correct).
+      // Synchronize live-follow UI, but do not publish: restoration and focus
+      // clamps are programmatic. The next tab switch captures the DOM directly,
+      // while only a real scroll gesture may replace the stored snapshot.
       handleTimelineScroll();
     };
 
-    if (saved && !saved.atEnd) {
-      stickToBottomRef.current = saved.stuck;
-      const restore = () => {
-        const timeline = timelineRef.current;
-        if (timeline) {
-          timeline.scrollTop = transcriptScrollRestoreTop(saved, timeline.scrollHeight);
-          const distanceFromBottom =
-            timeline.scrollHeight - timeline.scrollTop - timeline.clientHeight;
-          setJumpToLatestVisible(
-            !saved.stuck && distanceFromBottom > STICK_TO_BOTTOM_THRESHOLD,
-          );
-        }
-      };
+    const settle = () => {
+      frame = null;
+      if (
+        prevTranscriptAgentIdRef.current !== agentId ||
+        restoreGenerationRef.current !== generation
+      ) {
+        return;
+      }
       restore();
-      const frame = requestAnimationFrame(() => {
-        restore();
+      if (
+        transcriptRestoreHasSettled(
+          performance.now() - startedAt,
+          stableFrames,
+          TRANSCRIPT_RESTORE_MIN_SETTLE_MS,
+          TRANSCRIPT_RESTORE_MAX_SETTLE_MS,
+          TRANSCRIPT_RESTORE_STABLE_FRAMES,
+        )
+      ) {
         finishRestore();
-      });
-      return () => {
-        cancelAnimationFrame(frame);
-        // If agentId changes again before rAF, the next render already set
-        // restoringScrollRef; don't clear it here and reopen the race.
-      };
-    }
-    stickToBottomRef.current = true;
-    setJumpToLatestVisible(false);
-    scrollToBottom();
-    const frame = requestAnimationFrame(() => {
-      scrollToBottom();
-      finishRestore();
-    });
+        return;
+      }
+      frame = requestAnimationFrame(settle);
+    };
+
+    restore();
+    frame = requestAnimationFrame(settle);
     return () => {
-      cancelAnimationFrame(frame);
+      if (frame !== null) {
+        cancelAnimationFrame(frame);
+      }
     };
     // handleTimelineScroll reads live refs/props; agentId is the real trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1101,9 +1225,12 @@ export default function TurnOverlay({
           }`}
           style={timelineStyle}
           onScroll={handleTimelineScroll}
-          onPointerDownCapture={cancelJumpToLatest}
-          onWheelCapture={cancelJumpToLatest}
-          onKeyDownCapture={cancelJumpToLatest}
+          onPointerDownCapture={handleTimelinePointerDown}
+          onPointerMoveCapture={handleTimelinePointerMove}
+          onPointerUpCapture={handleTimelinePointerEnd}
+          onPointerCancelCapture={handleTimelinePointerEnd}
+          onWheelCapture={handleTimelineWheel}
+          onKeyDownCapture={handleTimelineKeyDown}
         >
         {!readerMode &&
         (hasPreviousConversation || previousConversationLoading || previousConversationError) ? (

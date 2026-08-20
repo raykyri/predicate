@@ -23,6 +23,66 @@ export interface TranscriptScrollMetrics {
 
 const TRANSCRIPT_END_EPSILON = 2;
 
+/**
+ * Scroll events do not identify their cause: WebKit emits the same event for a
+ * wheel gesture, a focus-driven clamp, and an assignment to `scrollTop`.
+ * Persist only while the transcript has observed explicit user scroll intent;
+ * synchronous tab capture remains the authoritative non-event save path.
+ */
+export function shouldPersistTranscriptScroll(
+  restoring: boolean,
+  userScrollIntent: boolean,
+): boolean {
+  return !restoring && userScrollIntent;
+}
+
+/** Keys whose default action can move a focused transcript scroll container. */
+export function transcriptScrollKeySignalsIntent(key: string): boolean {
+  return (
+    key === "ArrowUp" ||
+    key === "ArrowDown" ||
+    key === "PageUp" ||
+    key === "PageDown" ||
+    key === "Home" ||
+    key === "End" ||
+    key === " "
+  );
+}
+
+/**
+ * A plain content click only gives WebKit first responder and must not authorize
+ * its later focus clamp. Touch starts and the scrollbar gutter can initiate a
+ * scroll before any pointer movement, so they establish pending intent.
+ */
+export function transcriptPointerDownSignalsScrollIntent(
+  pointerType: string,
+  clientX: number,
+  rightEdge: number,
+  scrollbarWidth: number,
+): boolean {
+  return (
+    pointerType === "touch" || clientX >= rightEdge - Math.max(12, scrollbarWidth)
+  );
+}
+
+/**
+ * A restore is allowed to commit only after a minimum focus/layout settling
+ * window and consecutive undisturbed frames. The maximum keeps a continuously
+ * animating transcript from retaining the restore gate indefinitely.
+ */
+export function transcriptRestoreHasSettled(
+  elapsedMs: number,
+  stableFrames: number,
+  minimumMs: number,
+  maximumMs: number,
+  requiredStableFrames: number,
+): boolean {
+  return (
+    elapsedMs >= maximumMs ||
+    (elapsedMs >= minimumMs && stableFrames >= requiredStableFrames)
+  );
+}
+
 export function captureTranscriptScrollPosition(
   metrics: TranscriptScrollMetrics,
   followingLatest: boolean,

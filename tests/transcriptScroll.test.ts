@@ -3,6 +3,10 @@ import test from "node:test";
 import {
   captureTranscriptScrollPosition,
   createTranscriptScrollCaptureSlot,
+  shouldPersistTranscriptScroll,
+  transcriptPointerDownSignalsScrollIntent,
+  transcriptRestoreHasSettled,
+  transcriptScrollKeySignalsIntent,
   transcriptScrollRestoreTop,
 } from "../src/lib/transcriptScroll";
 
@@ -78,4 +82,33 @@ test("an older scrolled position remains anchored when content grows while hidde
   assert.equal(saved.stuck, false);
   assert.equal(saved.atEnd, false);
   assert.equal(transcriptScrollRestoreTop(saved, 1_400), 300);
+});
+
+test("programmatic and restore scroll events never overwrite a saved position", () => {
+  assert.equal(shouldPersistTranscriptScroll(false, false), false);
+  assert.equal(shouldPersistTranscriptScroll(true, false), false);
+  assert.equal(shouldPersistTranscriptScroll(true, true), false);
+  assert.equal(shouldPersistTranscriptScroll(false, true), true);
+});
+
+test("only scroll-navigation keys establish transcript scroll intent", () => {
+  for (const key of ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "]) {
+    assert.equal(transcriptScrollKeySignalsIntent(key), true, key);
+  }
+  for (const key of ["Enter", "Escape", "Tab", "a"]) {
+    assert.equal(transcriptScrollKeySignalsIntent(key), false, key);
+  }
+});
+
+test("a content click does not authorize WebKit focus scrolling", () => {
+  assert.equal(transcriptPointerDownSignalsScrollIntent("mouse", 500, 1_000, 0), false);
+  assert.equal(transcriptPointerDownSignalsScrollIntent("mouse", 995, 1_000, 0), true);
+  assert.equal(transcriptPointerDownSignalsScrollIntent("touch", 500, 1_000, 0), true);
+});
+
+test("restore waits for both elapsed time and stable frames, with a bounded fallback", () => {
+  assert.equal(transcriptRestoreHasSettled(119, 20, 120, 400, 2), false);
+  assert.equal(transcriptRestoreHasSettled(120, 1, 120, 400, 2), false);
+  assert.equal(transcriptRestoreHasSettled(120, 2, 120, 400, 2), true);
+  assert.equal(transcriptRestoreHasSettled(400, 0, 120, 400, 2), true);
 });
