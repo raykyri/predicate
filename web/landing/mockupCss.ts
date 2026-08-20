@@ -40,10 +40,14 @@ export const MOCKUP_CSS = `
   --status-pending-fg: #7f8884;
   --status-warning-fg: #d8b878;
   --status-success-fg: #81c784;
+  --status-attention-fg: #e0796d;
+  --pane-status-active-dot: #5fb89f;
+  --danger-fg-strong: #ffb4a3;
   --split-border-active: rgba(255, 220, 143, 0.78);
 
   --surface-border-subtle: rgba(255, 255, 255, 0.075);
   --surface-border-default: rgba(255, 255, 255, 0.12);
+  --surface-border-faint: rgba(255, 255, 255, 0.06);
   --sidebar-switcher-bg: rgba(0, 0, 0, 0.18);
   --sidebar-switcher-active-bg: rgba(255, 255, 255, 0.105);
   --sidebar-group-bg: rgba(255, 255, 255, 0.013);
@@ -2219,6 +2223,193 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 /* ------------------------------------------------------------------ */
+/* Sidebar context menus (shell.css). Right-clicking a terminal tab opens
+   its details menu; a group's … button or a right-click on its background
+   opens the group menu. The script positions them against the window and
+   clamps them inside it, as the app clamps to the viewport. */
+.app-mockup [data-mock-tab-menu][hidden],
+.app-mockup [data-mock-group-menu][hidden] {
+  display: none;
+}
+
+.app-mockup .pane-context-menu {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 17;
+  width: min(320px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  overflow: auto;
+  padding: 6px;
+  color: var(--text-body-soft);
+  font-size: 13.5px;
+  user-select: text;
+}
+
+.app-mockup .pane-context-details {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 10px;
+  row-gap: 1px;
+  margin: 0;
+  font-size: var(--fs-sm);
+}
+
+.app-mockup .pane-context-details div {
+  display: contents;
+}
+
+.app-mockup .pane-context-details dt {
+  min-width: 0;
+  padding: 3px 0 3px 6px;
+  white-space: nowrap;
+  color: var(--text-muted);
+}
+
+.app-mockup .pane-context-details dd {
+  min-width: 0;
+  margin: 0;
+  padding: 3px 6px 3px 0;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+}
+
+/* Agent status is just another row; a small status dot sits before its value. */
+.app-mockup .pane-context-status-row dd {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-mockup .pane-context-status-row dd::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.app-mockup .pane-context-status-row.status-active dd::before {
+  background: var(--pane-status-active-dot);
+}
+
+.app-mockup .pane-context-status-row.status-attention dd::before {
+  background: #e0a96d;
+}
+
+.app-mockup .pane-context-status-row.status-done dd::before {
+  background: var(--accent-strong);
+}
+
+.app-mockup .pane-context-actions,
+.app-mockup .group-context-actions {
+  display: grid;
+  gap: 1px;
+}
+
+.app-mockup .pane-context-actions {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 0.5px solid var(--surface-border-default);
+  user-select: none;
+}
+
+.app-mockup .group-context-actions {
+  margin: 0;
+  padding: 0;
+}
+
+.app-mockup .pane-context-actions button,
+.app-mockup .group-context-actions button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  align-items: center;
+  justify-content: start;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-body-soft);
+  font-size: inherit;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.app-mockup .pane-context-actions button.context-menu-has-shortcut,
+.app-mockup .group-context-actions button.context-menu-has-shortcut {
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+}
+
+.app-mockup .pane-context-actions svg,
+.app-mockup .group-context-actions svg {
+  justify-self: center;
+}
+
+.app-mockup .pane-context-actions span,
+.app-mockup .group-context-actions span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mockup .context-menu-shortcut {
+  min-width: 0;
+  color: var(--text-muted);
+  font: inherit;
+  white-space: nowrap;
+}
+
+.app-mockup .context-menu-shortcut.is-keycap {
+  display: inline-grid;
+  min-width: 17px;
+  height: 17px;
+  place-items: center;
+  justify-self: end;
+  padding: 0 4px;
+  border: 1px solid rgba(170, 180, 174, 0.4);
+  border-radius: var(--radius-sm);
+  color: #aeb7b2;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: inset 0 -1px 0 var(--surface-border-faint);
+}
+
+.app-mockup .context-menu-shortcut-options {
+  display: inline-flex;
+  align-items: center;
+  justify-self: end;
+  gap: 3px;
+  overflow: visible;
+}
+
+.app-mockup .context-menu-shortcut-options > span {
+  overflow: visible;
+  color: #68716d;
+  font-size: 9px;
+}
+
+.app-mockup .context-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--surface-border-default);
+}
+
+/* The action-only group menu tightens the chrome and drops text selection. */
+.app-mockup .group-context-menu {
+  width: min(220px, calc(100% - 16px));
+  padding: 4px;
+  user-select: none;
+}
+
+/* ------------------------------------------------------------------ */
 /* Enhanced-only affordances. Hover and focus states are scoped to
    .is-interactive so the static replica never advertises a control that
    would not respond. */
@@ -2263,6 +2454,46 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   border-color: transparent;
   background: var(--popover-item-hover-bg);
   color: var(--text-primary);
+}
+
+.app-mockup.is-interactive .pane-context-actions button:hover:not(:disabled),
+.app-mockup.is-interactive .pane-context-actions button:focus-visible:not(:disabled),
+.app-mockup.is-interactive .group-context-actions button:hover:not(:disabled),
+.app-mockup.is-interactive .group-context-actions button:focus-visible:not(:disabled) {
+  border-color: transparent;
+  background: rgba(255, 255, 255, 0.09);
+  color: #ffffff;
+  outline: none;
+  box-shadow: none;
+}
+
+.app-mockup.is-interactive .pane-context-actions .context-menu-danger:hover:not(:disabled) span,
+.app-mockup.is-interactive
+  .pane-context-actions
+  .context-menu-danger:focus-visible:not(:disabled)
+  span,
+.app-mockup.is-interactive
+  .group-context-actions
+  .context-menu-danger:hover:not(:disabled)
+  span,
+.app-mockup.is-interactive
+  .group-context-actions
+  .context-menu-danger:focus-visible:not(:disabled)
+  span,
+.app-mockup.is-interactive .pane-context-actions .context-menu-danger:hover:not(:disabled) svg,
+.app-mockup.is-interactive
+  .pane-context-actions
+  .context-menu-danger:focus-visible:not(:disabled)
+  svg,
+.app-mockup.is-interactive
+  .group-context-actions
+  .context-menu-danger:hover:not(:disabled)
+  svg,
+.app-mockup.is-interactive
+  .group-context-actions
+  .context-menu-danger:focus-visible:not(:disabled)
+  svg {
+  color: var(--danger-fg-strong);
 }
 
 .app-mockup.is-interactive .sidebar-header-button:hover {

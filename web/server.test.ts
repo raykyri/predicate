@@ -949,7 +949,7 @@ test("the landing page renders the app replica and its own image policy", async 
   // step timeline the enhancement replays from.
   assert.match(
     body,
-    /data-mock-features="replay queue groups sessions panes terminal-map panels menus"/,
+    /data-mock-features="replay queue groups sessions panes terminal-map panels menus sidebar-menus"/,
   );
   // Every visible sidebar tab ships a complete terminal/transcript pair. The
   // default is visible without JavaScript and the enhancement swaps the rest.
@@ -1008,6 +1008,14 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /data-mock-home-chip="__drafts__"/);
   assert.match(body, /data-mock-home-menu="qmux" hidden/);
   assert.match(body, /home-rail-paused">paused</);
+  // The sidebar's right-click menus ship closed: one details menu per tab and
+  // one group menu per group, mirroring the app's pairing.
+  assert.equal((body.match(/data-mock-tab-menu=/g) ?? []).length, 14);
+  assert.equal((body.match(/data-mock-group-menu=/g) ?? []).length, 7);
+  assert.match(body, /class="pane-context-details"/);
+  assert.match(body, /Export to Research…/);
+  assert.match(body, /data-mock-menu-collapse/);
+  assert.match(body, /Close group/);
   assert.match(body, /data-step="5"/);
   // Replay staging is inert unless the pre-paint bootstrap activates it, so the
   // serialized default session remains complete when JavaScript is unavailable.

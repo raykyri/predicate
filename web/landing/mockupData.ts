@@ -1390,6 +1390,24 @@ export const MOCK_HOME_DRAFTS = [
   "ask upstream how the test262 harness flags stale results",
 ];
 
+// Extra rows for a tab's right-click details menu. The app omits any row it
+// has no data for, so only branches are called out here — the directory comes
+// from the session's project and the status from its pane.
+export interface MockTabDetails {
+  branch?: string;
+}
+
+export const MOCK_TAB_DETAILS: Record<string, MockTabDetails> = {
+  "qmux-landing-transcript": { branch: "main" },
+  "porffor-replace-all": { branch: "main" },
+  "porffor-codegen-casts": { branch: "main" },
+  "autoresearch-muon-ramp": { branch: "autoresearch/aug12" },
+  "autoresearch-qk-norm": { branch: "autoresearch/aug12" },
+  "nanochat-tokenizer": { branch: "main" },
+  "tinygrad-movement": { branch: "main" },
+  "tinygrad-metal": { branch: "main" },
+};
+
 export const DEFAULT_SESSION_ID = "qmux-landing-transcript";
 
 // Backwards-compatible names keep the selected server-rendered session easy to

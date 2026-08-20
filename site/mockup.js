@@ -25,6 +25,9 @@
 //   menus   — opens the transcript-message and composer overflow menus. Their
 //             items are intentionally inert: this is a product tour, not a
 //             clipboard, publishing, or session-management surface.
+//   sidebar-menus — the sidebar's right-click menus: a tab's details menu and
+//             the group menu behind the … button. Only the collapse item does
+//             work; the rest dismiss, like every other menu here.
 //
 // Each is independent: `data-mock-features` on the replica selects which ones
 // run, and any that is dropped leaves the rendered finished state in place.
@@ -1569,6 +1572,216 @@
     return {};
   }
 
+  // ---------------------------------------------------------- sidebar-menus
+
+  function createSidebarMenus() {
+    const paneList = mockup.querySelector(".pane-list");
+    const menus = [
+      ...mockup.querySelectorAll("[data-mock-tab-menu], [data-mock-group-menu]"),
+    ].filter((menu) => menu instanceof HTMLElement);
+    if (!paneList || menus.length === 0) {
+      return null;
+    }
+
+    // Group sections by their rendered name, so a group menu can find the
+    // section it describes (the collapse item reads and flips its state).
+    /** @type {Map<string, Element>} */
+    const groupSectionByName = new Map();
+    for (const section of mockup.querySelectorAll(".pane-group")) {
+      const name = section.querySelector(".pane-group-name")?.textContent?.trim();
+      if (name && !groupSectionByName.has(name)) {
+        groupSectionByName.set(name, section);
+      }
+    }
+
+    /** @type {HTMLElement | null} */
+    let openMenu = null;
+    /** @type {HTMLElement | null} */
+    let openTrigger = null;
+
+    /** @param {boolean} refocus */
+    function close(refocus) {
+      if (openMenu) {
+        openMenu.hidden = true;
+        openMenu = null;
+      }
+      if (openTrigger) {
+        openTrigger.setAttribute("aria-expanded", "false");
+        if (refocus) {
+          openTrigger.focus();
+        }
+        openTrigger = null;
+      }
+    }
+
+    /**
+     * The collapse item mirrors the group's live state — the app keeps its
+     * menu open across a collapse and flips the item in place.
+     * @param {HTMLElement} menu
+     */
+    function syncCollapseItem(menu) {
+      const name = menu.dataset.mockGroupMenu ?? "";
+      const item = menu.querySelector("[data-mock-menu-collapse]");
+      const section = groupSectionByName.get(name);
+      if (!(item instanceof HTMLElement) || !(section instanceof Element)) {
+        return;
+      }
+      const collapsed = section.classList.contains("is-collapsed");
+      const show = (/** @type {string} */ selector, /** @type {boolean} */ visible) => {
+        const node = item.querySelector(selector);
+        if (node instanceof HTMLElement) {
+          node.hidden = !visible;
+        }
+      };
+      show(".mock-menu-icon-expand", collapsed);
+      show(".mock-menu-icon-collapse", !collapsed);
+      show(".mock-menu-label-expand", collapsed);
+      show(".mock-menu-label-collapse", !collapsed);
+      show(".context-menu-shortcut-options", collapsed);
+      show(".mock-menu-keycap", !collapsed);
+    }
+
+    /**
+     * Positions at window coordinates already relative to the replica, then
+     * clamps inside it — the app's clampContextMenuToViewport.
+     * @param {HTMLElement} menu
+     * @param {number} x
+     * @param {number} y
+     * @param {HTMLElement | null} trigger
+     */
+    function open(menu, x, y, trigger) {
+      close(openTrigger != null);
+      syncCollapseItem(menu);
+      menu.hidden = false;
+      const width = mockup.clientWidth;
+      const height = mockup.clientHeight;
+      menu.style.left = `${Math.max(8, Math.min(x, width - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.max(8, Math.min(y, height - menu.offsetHeight - 8))}px`;
+      openMenu = menu;
+      openTrigger = trigger;
+    }
+
+    // Right-click: a tab opens its own details menu; anywhere else in a group
+    // opens that group's menu. The tab row wins, as the app's stopPropagation
+    // makes it.
+    paneList.addEventListener("contextmenu", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !(event instanceof MouseEvent)) {
+        return;
+      }
+      const rect = mockup.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      const y = event.clientY - rect.top;
+      const row = target.closest(".pane-tab-row");
+      if (row instanceof HTMLElement) {
+        const sessionId = row.dataset.mockSessionTab ?? "";
+        const menu = sessionId
+          ? mockup.querySelector(`[data-mock-tab-menu="${sessionId}"]`)
+          : null;
+        if (menu instanceof HTMLElement) {
+          event.preventDefault();
+          open(menu, x, y, null);
+        }
+        return;
+      }
+      const section = target.closest(".pane-group");
+      if (!section) {
+        return;
+      }
+      const name = section.querySelector(".pane-group-name")?.textContent?.trim() ?? "";
+      const menu = name ? mockup.querySelector(`[data-mock-group-menu="${name}"]`) : null;
+      if (menu instanceof HTMLElement) {
+        event.preventDefault();
+        open(menu, x, y, null);
+      }
+    });
+
+    // The … button toggles its group's menu, anchored past its corner.
+    for (const node of [...mockup.querySelectorAll(".pane-group-menu-button")]) {
+      const section = node.closest(".pane-group");
+      const name = section
+        ? section.querySelector(".pane-group-name")?.textContent?.trim() ?? ""
+        : "";
+      const menu = name ? mockup.querySelector(`[data-mock-group-menu="${name}"]`) : null;
+      const button = promote(node, "button");
+      if (!button || !(menu instanceof HTMLElement)) {
+        continue;
+      }
+      button.setAttribute("aria-haspopup", "menu");
+      button.setAttribute("aria-expanded", "false");
+      button.setAttribute("aria-label", "Group options");
+      button.setAttribute("title", "Group options");
+      button.addEventListener("click", (event) => {
+        // The groups feature's delegated header click collapses the group;
+        // the app's … button stops propagation for the same reason.
+        event.stopPropagation();
+        if (openMenu === menu) {
+          close(true);
+          return;
+        }
+        const rect = mockup.getBoundingClientRect();
+        const buttonRect = button.getBoundingClientRect();
+        open(menu, buttonRect.right - rect.left, buttonRect.bottom - rect.top + 2, button);
+        button.setAttribute("aria-expanded", String(openMenu === menu));
+      });
+    }
+
+    // Every item dismisses except the collapse toggle, which works and keeps
+    // the menu up — this is a tour, not a session-management surface.
+    for (const menu of menus) {
+      if (!(menu instanceof HTMLElement)) {
+        continue;
+      }
+      menu.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return;
+        }
+        const item = target.closest("[data-mock-context-item]");
+        if (!(item instanceof HTMLElement)) {
+          return;
+        }
+        if (item.hasAttribute("data-mock-menu-collapse")) {
+          const section = groupSectionByName.get(menu.dataset.mockGroupMenu ?? "");
+          if (section instanceof HTMLElement) {
+            const collapsed = section.classList.toggle("is-collapsed");
+            const toggleButton = section.querySelector(".pane-group-collapse-button");
+            toggleButton?.setAttribute("aria-expanded", String(!collapsed));
+            syncCollapseItem(menu);
+            announce(
+              `${menu.dataset.mockGroupMenu} agents ${collapsed ? "collapsed" : "expanded"}.`,
+            );
+          }
+          return;
+        }
+        close(true);
+      });
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && openMenu) {
+        close(openTrigger != null);
+      }
+    });
+
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (
+        openMenu &&
+        target instanceof Element &&
+        !openMenu.contains(target) &&
+        !(openTrigger && openTrigger.contains(target))
+      ) {
+        close(false);
+      }
+    });
+
+    // A scrolling sidebar leaves the menu pointing at nothing.
+    paneList.addEventListener("scroll", () => close(false), { passive: true });
+
+    return {};
+  }
+
   // ------------------------------------------------------------- bootstrap
 
   const replay = features.has("replay") ? createReplay() : null;
@@ -1579,11 +1792,22 @@
   const terminalMap = features.has("terminal-map") ? createTerminalMap() : null;
   const panels = features.has("panels") ? createPanels() : null;
   const menus = features.has("menus") ? createMenus() : null;
+  const sidebarMenus = features.has("sidebar-menus") ? createSidebarMenus() : null;
   if (document.documentElement.classList.contains("mock-replay-boot")) {
     replay?.prepare();
     document.documentElement.classList.remove("mock-replay-boot");
   }
-  if (!replay && !queue && !groups && !sessions && !panes && !terminalMap && !panels && !menus) {
+  if (
+    !replay &&
+    !queue &&
+    !groups &&
+    !sessions &&
+    !panes &&
+    !terminalMap &&
+    !panels &&
+    !menus &&
+    !sidebarMenus
+  ) {
     return;
   }
 

@@ -23,19 +23,26 @@ import {
   ChevronDownIcon,
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
+  Columns2Icon,
   EllipsisIcon,
   EllipsisVerticalIcon,
   ExpandIcon,
+  FolderGit2Icon,
   FolderIcon,
+  GitBranchIcon,
   GlobeIcon,
   LayoutDashboardIcon,
   MessageSquareTextIcon,
   Minimize2Icon,
+  PanelBottomCloseIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
   PanelRightOpenIcon,
   PaperclipIcon,
+  PencilIcon,
+  PlusIcon,
+  RotateCcwIcon,
   SettingsIcon,
   SquareCenterlineDashedVerticalIcon,
   SquareTerminalIcon,
@@ -51,6 +58,7 @@ import {
   MOCK_HOME_DRAFTS,
   MOCK_HOME_RAILS,
   MOCK_SESSIONS,
+  MOCK_TAB_DETAILS,
   SAVED_PROMPTS,
   SESSION_LABEL,
   SESSION_LABELS,
@@ -714,6 +722,205 @@ function TerminalMap() {
   );
 }
 
+// The sidebar's right-click menus, exactly as the app pairs them: a tab's
+// context menu carries its details above the action list, and a group's menu
+// opens from the … button or a right-click on the group's background. They
+// ship hidden at the window's root so the script can position them against
+// the replica rather than the page; every item dismisses except the collapse
+// toggle, which flips in place the way the app's does.
+const TAB_STATUS_LABELS: Record<MockPane["status"], [string, string]> = {
+  active: ["Running", "active"],
+  idle: ["Idle", "idle"],
+  done: ["Done", "done"],
+  attention: ["Awaiting input", "attention"],
+};
+
+function PaneTabMenu({ pane }: { pane: MockPane }) {
+  const session = MOCK_SESSIONS[pane.sessionId];
+  const details = MOCK_TAB_DETAILS[pane.sessionId];
+  const [statusLabel, statusTone] = TAB_STATUS_LABELS[pane.status];
+  return (
+    <div
+      className="popover-surface popover-surface--context pane-context-menu"
+      role="dialog"
+      aria-label={`${pane.title} details`}
+      data-mock-tab-menu={pane.sessionId}
+      hidden
+    >
+      <dl className="pane-context-details">
+        <div className={`pane-context-status-row status-${statusTone}`}>
+          <dt>Agent</dt>
+          <dd>{statusLabel}</dd>
+        </div>
+        <div>
+          <dt>Tab</dt>
+          <dd>{pane.title}</dd>
+        </div>
+        {details?.branch ? (
+          <div>
+            <dt>Branch</dt>
+            <dd>{details.branch}</dd>
+          </div>
+        ) : null}
+        <div>
+          <dt>Directory</dt>
+          <dd>~/code/{session.project}</dd>
+        </div>
+      </dl>
+      <div className="pane-context-actions" role="menu" aria-label="Tab actions">
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button"
+          data-mock-context-item
+          title="Restore this tab's default title"
+        >
+          <RotateCcwIcon size={13} />
+          <span>Reset title</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <PanelBottomCloseIcon size={13} />
+          <span>Split terminal</span>
+          <kbd className="context-menu-shortcut">⌘D</kbd>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <Columns2Icon size={13} />
+          <span>Split terminal to the right</span>
+          <kbd className="context-menu-shortcut">⌘⇧D</kbd>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <FolderGit2Icon size={13} />
+          <span>Open worktree</span>
+        </button>
+        <div className="context-menu-divider" role="separator" />
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <GitBranchIcon size={13} />
+          <span>Fork session</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <GitBranchIcon size={13} />
+          <span>Fork session in split</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <GitBranchIcon size={13} />
+          <span>Fork session in worktree</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <MessageSquareTextIcon size={13} />
+          <span>Export to Research…</span>
+        </button>
+        <div className="context-menu-divider" role="separator" />
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-danger"
+          data-mock-context-item
+          aria-label={`Close ${pane.title}`}
+        >
+          <XIcon size={13} />
+          <span>Close tab</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PaneGroupMenu({ group }: { group: MockGroup }) {
+  return (
+    <div
+      className="popover-surface popover-surface--context pane-context-menu group-context-menu"
+      role="menu"
+      aria-label="Group options"
+      data-mock-group-menu={group.name}
+      hidden
+    >
+      <div className="group-context-actions">
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <FolderIcon size={13} />
+          <span>Change directory</span>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <PencilIcon size={13} />
+          <span>Rename group</span>
+          <kbd className="context-menu-shortcut is-keycap">R</kbd>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+          data-mock-menu-collapse
+        >
+          <span className="mock-menu-icon-expand" hidden={!group.collapsed}>
+            <ChevronsUpDownIcon size={13} />
+          </span>
+          <span className="mock-menu-icon-collapse" hidden={group.collapsed}>
+            <ChevronsDownUpIcon size={13} />
+          </span>
+          <span className="mock-menu-label-expand" hidden={!group.collapsed}>
+            Expand group
+          </span>
+          <span className="mock-menu-label-collapse" hidden={group.collapsed}>
+            Collapse group
+          </span>
+          <span className="context-menu-shortcut-options" hidden={!group.collapsed} aria-label="C or E">
+            <kbd className="context-menu-shortcut is-keycap">C</kbd>
+            <span aria-hidden="true">/</span>
+            <kbd className="context-menu-shortcut is-keycap">E</kbd>
+          </span>
+          <kbd className="context-menu-shortcut is-keycap mock-menu-keycap" hidden={group.collapsed}>
+            C
+          </kbd>
+        </button>
+        <div className="context-menu-divider" role="separator" />
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <SquareTerminalIcon size={13} />
+          <span>New shell</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <MessageSquareTextIcon size={13} />
+          <span>New agent</span>
+        </button>
+        <div className="context-menu-divider" role="separator" />
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <PlusIcon size={13} />
+          <span>New group...</span>
+          <kbd className="context-menu-shortcut">⌘⇧N</kbd>
+        </button>
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-danger"
+          data-mock-context-item
+        >
+          <XIcon size={13} />
+          <span>Close group</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TranscriptSession({
   sessionId,
   session,
@@ -890,6 +1097,7 @@ export const MOCKUP_FEATURES = [
   "terminal-map",
   "panels",
   "menus",
+  "sidebar-menus",
 ] as const;
 
 export default function AppMockup({
@@ -925,6 +1133,12 @@ export default function AppMockup({
             </div>
           </div>
         </div>
+        {MOCK_GROUPS.map((group) => (
+          <PaneGroupMenu key={group.name} group={group} />
+        ))}
+        {MOCK_GROUPS.flatMap((group) =>
+          group.panes.map((pane) => <PaneTabMenu key={pane.sessionId} pane={pane} />),
+        )}
         <TerminalMap />
       </div>
       <span className="mock-demo-status" role="status" aria-live="polite" />
