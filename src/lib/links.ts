@@ -137,10 +137,35 @@ const INTERNAL_FILE_PREVIEW_EXTENSIONS = new Set([
   "yml",
 ]);
 
+// Mirrors the file server's renderable-source list (is_renderable_source):
+// these are served as line-anchored HTML pages despite an octet-stream mime.
+const INTERNAL_SOURCE_PREVIEW_EXTENSIONS = new Set([
+  "rs", "ts", "tsx", "jsx", "py", "go", "c", "h", "cc", "cpp", "cxx",
+  "hpp", "hh", "java", "kt", "kts", "swift", "m", "mm", "rb", "php",
+  "cs", "scala", "clj", "cljs", "ex", "exs", "erl", "hs", "ml", "mli",
+  "lua", "pl", "pm", "r", "jl", "zig", "nim", "dart", "sql", "proto",
+  "graphql", "gql", "vue", "svelte", "astro", "tf", "hcl", "nix",
+  "cmake", "gradle", "groovy", "ps1", "bat", "sh", "bash", "zsh",
+  "fish", "awk", "sed", "diff", "patch",
+]);
+const INTERNAL_SOURCE_PREVIEW_FILENAMES = new Set(["makefile", "dockerfile", "justfile"]);
+
 export function canPreviewLocalFilePath(path: string): boolean {
-  const filename = path.replace(/\\/g, "/").split("/").pop() ?? "";
+  // Grep-style location suffixes (`session.rs:8`, `session.rs:8:14`) resolve
+  // to the underlying file on the backend; judge previewability without them.
+  const filename = (path.replace(/\\/g, "/").split("/").pop() ?? "").replace(
+    /(?::\d+){1,2}$/,
+    "",
+  );
+  if (INTERNAL_SOURCE_PREVIEW_FILENAMES.has(filename.toLowerCase())) {
+    return true;
+  }
   const extension = filename.includes(".") ? filename.split(".").pop()?.toLowerCase() : undefined;
-  return extension !== undefined && INTERNAL_FILE_PREVIEW_EXTENSIONS.has(extension);
+  return (
+    extension !== undefined &&
+    (INTERNAL_FILE_PREVIEW_EXTENSIONS.has(extension) ||
+      INTERNAL_SOURCE_PREVIEW_EXTENSIONS.has(extension))
+  );
 }
 
 /**

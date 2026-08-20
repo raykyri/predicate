@@ -98,6 +98,17 @@ test("local preview hints allow renderable files and reject binary packages", ()
   assert.equal(canPreviewLocalFilePath("/tmp/no-extension"), false);
 });
 
+test("local preview hints cover renderable source files and location suffixes", () => {
+  assert.equal(canPreviewLocalFilePath("/repo/src/client/session.rs"), true);
+  assert.equal(canPreviewLocalFilePath("/repo/src/client/session.rs:8"), true);
+  assert.equal(canPreviewLocalFilePath("/repo/src/client/session.rs:8:14"), true);
+  assert.equal(canPreviewLocalFilePath("/repo/app/main.py"), true);
+  assert.equal(canPreviewLocalFilePath("/repo/Makefile"), true);
+  assert.equal(canPreviewLocalFilePath("/repo/Dockerfile"), true);
+  // A location suffix never rescues a non-previewable file.
+  assert.equal(canPreviewLocalFilePath("/tmp/release.dmg:8"), false);
+});
+
 test("isFileServerUrl recognizes token-bearing loopback paths", () => {
   const token = "a".repeat(64);
   assert.equal(

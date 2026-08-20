@@ -1080,11 +1080,12 @@ fn mime_type(path: &Path) -> String {
 }
 
 /// Whether the protected browser surface has an explicit rendering type for a
-/// local file. Unknown extensions stay `application/octet-stream`; navigating
-/// the overlay to them would only trigger a download, so callers should reveal
-/// those files in the OS file manager instead.
+/// local file. Renderable source files count: their mime stays
+/// `application/octet-stream`, but the server renders them into line-anchored
+/// HTML pages. Everything else that would only trigger a download should be
+/// revealed in the OS file manager instead.
 pub(crate) fn is_browser_previewable_path(path: &Path) -> bool {
-    mime_type(path) != "application/octet-stream"
+    mime_type(path) != "application/octet-stream" || is_renderable_source(path)
 }
 
 /// Percent-encodes a path, leaving `/` (the separator) and the RFC 3986 unreserved
@@ -1201,6 +1202,9 @@ mod tests {
         assert!(is_browser_previewable_path(Path::new("report.HTML")));
         assert!(is_browser_previewable_path(Path::new("notes.md")));
         assert!(is_browser_previewable_path(Path::new("diagram.svg")));
+        // Renderable source files are previewable via the line-anchored page.
+        assert!(is_browser_previewable_path(Path::new("session.rs")));
+        assert!(is_browser_previewable_path(Path::new("Makefile")));
         assert!(!is_browser_previewable_path(Path::new("release.dmg")));
         assert!(!is_browser_previewable_path(Path::new("installer.pkg")));
         assert!(!is_browser_previewable_path(Path::new("archive.zip")));
