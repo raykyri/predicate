@@ -11,6 +11,8 @@ const SELECT_PANE_PREFIX: &str = "qmux-menu-bar-select-pane:";
 const SELECT_PANE_EVENT: &str = "menu-bar-select-pane";
 const TOGGLE_GROUP_PREFIX: &str = "qmux-menu-bar-toggle-group:";
 const MAX_TAB_TITLE_CHARS: usize = 40;
+#[cfg(target_os = "macos")]
+const GROUP_HEADER_STATUS_INDICATOR_INSET: f64 = 38.0;
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -489,9 +491,7 @@ fn apply_collapsed_state(menu: &objc2_app_kit::NSMenu, snapshot: &MenuBarSnapsho
         let is_collapsed = collapsed.contains(&group.id);
         let title = group_header_label(&group.label, is_collapsed, group.tabs.len());
         header.setTitle(&NSString::from_str(&title));
-        if let Some(view) = header.view()
-            && let Ok(button) = view.downcast::<objc2_app_kit::NSButton>()
-        {
+        if let Some(button) = group_header_button(&header) {
             set_header_button_title(&button, &title);
         }
 
@@ -556,12 +556,15 @@ fn attach_group_header_button(
     mtm: objc2_foundation::MainThreadMarker,
 ) {
     use objc2::sel;
-    use objc2_app_kit::{NSButton, NSFocusRingType, NSFont, NSTextAlignment};
+    use objc2_app_kit::{NSButton, NSFocusRingType, NSFont, NSTextAlignment, NSView};
     use objc2_foundation::{NSPoint, NSRect, NSSize};
 
     let button = NSButton::initWithFrame(
         mtm.alloc(),
-        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(220.0, 22.0)),
+        NSRect::new(
+            NSPoint::new(GROUP_HEADER_STATUS_INDICATOR_INSET, 0.0),
+            NSSize::new(220.0, 22.0),
+        ),
     );
     button.setBordered(false);
     button.setFocusRingType(NSFocusRingType::None);
@@ -574,7 +577,35 @@ fn attach_group_header_button(
         button.setTarget(Some(&target));
         button.setAction(Some(sel!(toggleGroup:)));
     }
-    item.setView(Some(&button));
+
+    // NSMenu positions a custom item view at the menu's outer content edge.
+    // Keep the clickable button inside a container so its title instead starts
+    // at the same x coordinate as the status icons on the native tab rows.
+    let button_frame = button.frame();
+    let container = NSView::initWithFrame(
+        mtm.alloc(),
+        NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(
+                button_frame.origin.x + button_frame.size.width,
+                button_frame.size.height,
+            ),
+        ),
+    );
+    container.addSubview(&button);
+    item.setView(Some(&container));
+}
+
+#[cfg(target_os = "macos")]
+fn group_header_button(
+    item: &objc2_app_kit::NSMenuItem,
+) -> Option<objc2::rc::Retained<objc2_app_kit::NSButton>> {
+    let container = item.view()?;
+    container
+        .subviews()
+        .firstObject()?
+        .downcast::<objc2_app_kit::NSButton>()
+        .ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -590,6 +621,16 @@ fn set_header_button_title(button: &objc2_app_kit::NSButton, title: &str) {
     frame.size.width = (frame.size.width + 16.0).max(160.0);
     frame.size.height = 22.0;
     button.setFrame(frame);
+    // A collapsed header adds its tab count after the view is attached. Grow
+    // the custom item view if that makes the button wider.
+    if let Some(container) = unsafe { button.superview() } {
+        let mut container_frame = container.frame();
+        container_frame.size.width = container_frame
+            .size
+            .width
+            .max(frame.origin.x + frame.size.width);
+        container.setFrame(container_frame);
+    }
 }
 
 #[cfg(target_os = "macos")]
