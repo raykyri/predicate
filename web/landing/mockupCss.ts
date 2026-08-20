@@ -2382,6 +2382,14 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   box-shadow: inset 0 -1px 0 var(--surface-border-faint);
 }
 
+/* The collapse item ships both shortcut variants and toggles them via the
+   hidden attribute; these display rules would otherwise out-rank the UA's
+   own [hidden] rule and leave both variants showing. */
+.app-mockup .context-menu-shortcut.is-keycap[hidden],
+.app-mockup .context-menu-shortcut-options[hidden] {
+  display: none;
+}
+
 .app-mockup .context-menu-shortcut-options {
   display: inline-flex;
   align-items: center;
