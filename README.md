@@ -142,6 +142,9 @@ Development:
 # Build the frontend only
 npm run build:site:frontend
 
+# Run the complete JavaScript, plugin, integration, and Rust test suite
+npm test
+
 # Check Rust formatting
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
