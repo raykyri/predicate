@@ -186,6 +186,7 @@ fn scan_stores() -> Result<Vec<HistoryEntry>, String> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".codex"));
     scan_codex(&codex_home.join("sessions"), &mut by_id);
+    scan_codex(&codex_home.join("archived_sessions"), &mut by_id);
     Ok(by_id.into_values().collect())
 }
 
@@ -528,6 +529,28 @@ mod tests {
         let entry = codex_entry(&path).unwrap();
         assert_eq!(entry.id, "codex:sess-1");
         assert_eq!(entry.title, "fix the bug");
+    }
+
+    #[test]
+    fn scans_codex_sessions_at_the_archive_root() {
+        let root = temp_file("placeholder", "").parent().unwrap().to_path_buf();
+        let path = root.join("rollout-archived.jsonl");
+        fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"archived-1\",\"cwd\":\"/tmp/repo\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"old task\"}}\n"
+            ),
+        )
+        .unwrap();
+        let mut entries = HashMap::new();
+        scan_codex(&root, &mut entries);
+        assert_eq!(
+            entries
+                .get("codex:archived-1")
+                .map(|entry| entry.title.as_str()),
+            Some("old task")
+        );
     }
 
     #[test]
