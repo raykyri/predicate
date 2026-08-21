@@ -1,6 +1,7 @@
 import { isValidElement, useEffect, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, ReactNode, RefObject } from "react";
 import DOMPurify from "dompurify";
+import { openDiagramLightbox } from "../lib/diagramLightbox";
 import { safeHref } from "../lib/links";
 
 // Renders fenced ```mermaid and ```dot/```graphviz blocks from transcript markdown as SVG,
@@ -295,7 +296,13 @@ export default function DiagramBlock({
           data-lang={lang}
           onClick={(event) => {
             const href = diagramLinkFromEvent(event);
-            if (!href) return;
+            if (!href) {
+              // A plain click on the diagram (not one of its links) expands
+              // it into the full-page lightbox. The SVG is already rendered
+              // and sanitized, so the lightbox reuses these exact bytes.
+              openDiagramLightbox({ lang, label, svg: state.svg });
+              return;
+            }
             event.preventDefault();
             openLink(href);
           }}

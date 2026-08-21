@@ -862,6 +862,61 @@ header + .turn-blocks {
   font-size: var(--fs-base);
 }
 
+/* Full-page diagram overlay opened by clicking a rendered transcript diagram.
+   Portaled to <body> like the image lightbox, so it floats above every pane
+   and the right sidebar. The panel fills the viewport minus a margin; the
+   canvas scrolls diagrams larger than the screen at natural size. */
+.diagram-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-overlay, 1000);
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 28px;
+  background: rgba(0, 0, 0, 0.72);
+  cursor: zoom-out;
+}
+
+.diagram-lightbox-panel {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  max-width: 1400px;
+  margin: 0 auto;
+  overflow: hidden;
+  border: 1px solid var(--surface-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--transcript-code-bg);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  cursor: default;
+}
+
+.diagram-lightbox-lang {
+  padding: 6px 12px;
+  border-bottom: 1px solid #262d30;
+  background: var(--transcript-code-header-bg);
+  font-family: var(--font-mono);
+  font-size: calc(10.5px + var(--transcript-font-delta, 0px));
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #7f8b88;
+}
+
+.diagram-lightbox-canvas {
+  flex: 1;
+  min-height: 0;
+}
+
+/* The shared .turn-diagram-svg rule advertises click-to-expand with a zoom-in
+   cursor; inside the lightbox the diagram is already expanded and clicks are
+   swallowed, so inherit the panel's default cursor instead. */
+.diagram-lightbox-canvas.turn-diagram-svg {
+  cursor: default;
+}
+
 .tagged-user-instruction {
   display: grid;
   gap: 7px;
@@ -1338,6 +1393,9 @@ html.wrap-code-blocks .turn-markdown-code-block pre code {
   overflow: auto;
   padding: 10px;
   text-align: center;
+  /* The rendered diagram is clickable: it expands into the full-page
+     diagram lightbox (DiagramBlock). */
+  cursor: zoom-in;
 }
 
 .turn-diagram-svg svg {

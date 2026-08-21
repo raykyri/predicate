@@ -78,6 +78,12 @@ import {
   getImageLightbox,
   subscribeImageLightbox,
 } from "./lib/imageLightbox";
+import DiagramLightbox from "./components/DiagramLightbox";
+import {
+  closeDiagramLightbox,
+  getDiagramLightbox,
+  subscribeDiagramLightbox,
+} from "./lib/diagramLightbox";
 import ConfirmDialogActionButton from "./components/ConfirmDialogActionButton";
 import { queuedTurnDeliveryLabel } from "./components/QueuedTurnCard";
 import {
@@ -5308,6 +5314,14 @@ function MainApp() {
     getImageLightbox,
     getImageLightbox,
   );
+  // Same story as the image lightbox: the diagram lightbox lives in a module
+  // store, and subscribing here is what makes an open lightbox participate in
+  // the native input policy below.
+  const diagramLightbox = useSyncExternalStore(
+    subscribeDiagramLightbox,
+    getDiagramLightbox,
+    getDiagramLightbox,
+  );
   // This is the shared hard-input policy for every visible native surface and
   // for the logical owner calculation below. Keeping it single-sourced avoids
   // a modal disabling pointer claims while the owner coordinator still grants
@@ -5325,6 +5339,7 @@ function MainApp() {
   const nativeModalOccluded = Boolean(
     settingsOpen ||
       imageLightbox !== null ||
+      diagramLightbox !== null ||
       newResearchOpen ||
       newAgentOpen ||
       terminalMapOpen ||
@@ -11779,15 +11794,23 @@ function MainApp() {
       }
       const overlays = escapeOverlayStateRef.current;
 
-      // The image lightbox is the frontmost modal (it floats above every pane
-      // and the browser overlay), so it takes Escape first and exclusively.
-      // Its state lives in a module store rather than App state, so read it
-      // directly here instead of mirroring it into the overlay ref above.
+      // The image and diagram lightboxes are the frontmost modals (they float
+      // above every pane and the browser overlay), so they take Escape first
+      // and exclusively. Their state lives in module stores rather than App
+      // state, so read them directly here instead of mirroring them into the
+      // overlay ref above.
       if (getImageLightbox() !== null) {
         event.preventDefault();
         event.stopPropagation();
         event.stopImmediatePropagation();
         closeImageLightbox();
+        return;
+      }
+      if (getDiagramLightbox() !== null) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        closeDiagramLightbox();
         return;
       }
 
@@ -16894,6 +16917,7 @@ function MainApp() {
         </div>
       ) : null}
       <ImageLightbox />
+      <DiagramLightbox />
     </main>
   );
 }
