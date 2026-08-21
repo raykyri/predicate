@@ -12,7 +12,9 @@ use crate::research::{
 use crate::scrollback::{bounded_undo_scrollback, read_pane_scrollback, remove_pane_scrollback};
 use crate::thread_graph;
 use crate::transcript::Turn;
-use crate::workspace::{ActiveWorkspace, AgentInfo, AgentStatus, GroupInfo, WorkspaceScope};
+use crate::workspace::{
+    ActiveWorkspace, AgentInfo, AgentStatus, GroupInfo, WorkspaceScope, group_recoverable_dir,
+};
 use portable_pty::{Child, MasterPty};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1850,9 +1852,20 @@ impl AppState {
     /// panes (rooted in a worktree) and stale or missing directories yield `None`, so
     /// the caller falls back to `default_open_dir`.
     pub fn inheritable_shell_cwd(&self, pane_id: &str) -> Option<std::path::PathBuf> {
+        self.inheritable_cwd(pane_id, true)
+    }
+
+    /// Live cwd of `pane_id` when that directory still exists, including agent
+    /// panes. Used when a new tab should follow the current tab into a
+    /// subdirectory of the target group.
+    pub fn inheritable_pane_cwd(&self, pane_id: &str) -> Option<std::path::PathBuf> {
+        self.inheritable_cwd(pane_id, false)
+    }
+
+    fn inheritable_cwd(&self, pane_id: &str, shells_only: bool) -> Option<std::path::PathBuf> {
         let model = self.inner.model.lock().ok()?;
         let pane = model.panes.get(pane_id)?;
-        if !matches!(pane.info.kind, PaneKind::Shell) {
+        if shells_only && !matches!(pane.info.kind, PaneKind::Shell) {
             return None;
         }
         // A remote pane's cwd is a path on its group's host; the local is_dir
@@ -1863,6 +1876,48 @@ impl AppState {
             .is_some_and(GroupInfo::is_remote);
         let cwd = std::path::PathBuf::from(&pane.info.cwd);
         (remote || cwd.is_dir()).then_some(cwd)
+    }
+
+    /// Directory a newly opened shell in `group` should start in.
+    ///
+    /// Preference order:
+    /// 1. `cwd_override` when it still exists
+    /// 2. The current tab's live cwd when that directory is inside `group.dir`
+    ///    (a tab that has `cd`'d into a subdirectory of the group)
+    /// 3. The current tab's cwd when it is a shell in this group ("new tab here",
+    ///    including when the shell has `cd`'d outside the group)
+    /// 4. The group's most-recently-active shell
+    /// 5. `group.dir`
+    /// 6. The default open dir
+    pub fn resolve_shell_spawn_cwd(
+        &self,
+        group: &GroupInfo,
+        source_pane_id: Option<&str>,
+        cwd_override: Option<&str>,
+    ) -> Result<std::path::PathBuf, String> {
+        if let Some(cwd) = cwd_override.map(str::trim).filter(|cwd| !cwd.is_empty()) {
+            return group_recoverable_dir(group.remote.as_ref(), cwd)
+                .ok_or_else(|| format!("shell working directory {cwd} does not exist"));
+        }
+
+        if let Some(cwd) = source_pane_id.and_then(|id| self.inheritable_pane_cwd(id))
+            && path_is_ancestor_or_equal(std::path::Path::new(&group.dir), &cwd)
+        {
+            return Ok(cwd);
+        }
+
+        let same_group_shell = source_pane_id
+            .filter(|&id| {
+                self.pane_group_id(id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|gid| gid == group.id)
+            })
+            .and_then(|id| self.inheritable_shell_cwd(id));
+        Ok(same_group_shell
+            .or_else(|| self.group_spawn_cwd(&group.id))
+            .or_else(|| group_recoverable_dir(group.remote.as_ref(), &group.dir))
+            .unwrap_or_else(|| self.default_open_dir()))
     }
 
     /// The advisory cwd for spawning into `group_id`: the live cwd of the group's
@@ -16695,6 +16750,111 @@ mod tests {
 
         // A group with no shell panes (or no panes at all) yields None.
         assert_eq!(state.group_spawn_cwd("group-empty"), None);
+    }
+
+    #[test]
+    fn resolve_shell_spawn_cwd_uses_current_tab_when_inside_group_dir() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+
+        let base = std::env::temp_dir().join(format!(
+            "qmux-spawn-cwd-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default()
+        ));
+        let group_dir = base.join("project");
+        let nested = group_dir.join("src");
+        let outside = base.join("other");
+        for dir in [&group_dir, &nested, &outside] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        let mut group = sample_terminal_group();
+        group.dir = group_dir.display().to_string();
+        state.insert_group_after(group.clone(), None).unwrap();
+
+        // Root shell at the group dir: most recently active, so it is the group's
+        // advisory spawn cwd if the current tab is not used.
+        let mut root = sample_pane_runtime("pane-root");
+        root.info.group_id = group.id.clone();
+        root.info.cwd = group_dir.display().to_string();
+        root.info.last_active_at = 200;
+        state.insert_pane(root).unwrap();
+
+        let mut current = sample_pane_runtime("pane-current");
+        current.info.group_id = group.id.clone();
+        current.info.cwd = nested.display().to_string();
+        current.info.last_active_at = 50;
+        state.insert_pane(current).unwrap();
+
+        assert_eq!(
+            state
+                .resolve_shell_spawn_cwd(&group, Some("pane-current"), None)
+                .unwrap(),
+            nested
+        );
+
+        // A same-group shell that has cd'd outside the group still inherits
+        // ("new tab here").
+        let mut wanderer = sample_pane_runtime("pane-out");
+        wanderer.info.group_id = group.id.clone();
+        wanderer.info.cwd = outside.display().to_string();
+        state.insert_pane(wanderer).unwrap();
+        assert_eq!(
+            state
+                .resolve_shell_spawn_cwd(&group, Some("pane-out"), None)
+                .unwrap(),
+            outside
+        );
+
+        // An agent whose cwd is inside the group dir is followed too — new
+        // tabs from that tab should land next to its work, not at the group root.
+        let mut agent = sample_pane_runtime("pane-agent");
+        agent.info.group_id = group.id.clone();
+        agent.info.kind = PaneKind::Agent;
+        agent.info.agent_id = Some("agent-1".to_string());
+        agent.info.cwd = nested.display().to_string();
+        agent.info.last_active_at = 300;
+        state.insert_pane(agent).unwrap();
+        assert_eq!(
+            state
+                .resolve_shell_spawn_cwd(&group, Some("pane-agent"), None)
+                .unwrap(),
+            nested
+        );
+
+        // An agent outside the group dir does not steal the spawn: fall back to
+        // the group's most-recently-active shell.
+        let mut agent_out = sample_pane_runtime("pane-agent-out");
+        agent_out.info.group_id = group.id.clone();
+        agent_out.info.kind = PaneKind::Agent;
+        agent_out.info.agent_id = Some("agent-2".to_string());
+        agent_out.info.cwd = outside.display().to_string();
+        state.insert_pane(agent_out).unwrap();
+        assert_eq!(
+            state
+                .resolve_shell_spawn_cwd(&group, Some("pane-agent-out"), None)
+                .unwrap(),
+            group_dir
+        );
+
+        // A tab in another group still donates its cwd when that cwd sits
+        // inside the target group's directory.
+        let mut foreign = sample_pane_runtime("pane-foreign");
+        foreign.info.group_id = "group-other".to_string();
+        foreign.info.cwd = nested.display().to_string();
+        state.insert_pane(foreign).unwrap();
+        assert_eq!(
+            state
+                .resolve_shell_spawn_cwd(&group, Some("pane-foreign"), None)
+                .unwrap(),
+            nested
+        );
+
+        std::fs::remove_dir_all(base).ok();
     }
 
     #[test]

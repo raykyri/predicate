@@ -5942,8 +5942,11 @@ function MainApp() {
   async function addShellPaneInGroup(groupId: string | null) {
     setError(null);
     try {
-      const sourcePaneId =
-        activePane?.kind === "shell" && activePane.groupId === groupId ? activePane.id : null;
+      // Pass the focused tab so the backend can inherit its cwd when that
+      // directory sits inside the target group's directory. Omit it when not
+      // opening into a group: a source pane would otherwise pin a new shell
+      // to that pane's group instead of creating one.
+      const sourcePaneId = groupId ? (activePaneRef.current?.id ?? null) : null;
       const pane = await spawnShell(estimateInitialPaneSize(false), sourcePaneId, groupId);
       const orderedPanes = panesWithNewTabInLaunchPosition(pane, groupId);
       setPanesPreservingRecoveredDismissals(orderedPanes);

@@ -402,10 +402,10 @@ pub fn spawn_shell_pane_at(
     group_id: Option<&str>,
     cwd_override: Option<&str>,
 ) -> Result<PaneInfo, String> {
-    // A user-opened shell inherits the focused shell's current directory when one is
-    // given and still valid (matching how terminal emulators open a "new tab here");
-    // otherwise it opens in the target group directory / home, never the bare `/` a
-    // Finder/Dock launch inherits as its cwd.
+    // A user-opened shell inherits the focused tab's current directory when that
+    // directory sits inside the target group, or when the focused pane is a
+    // same-group shell ("new tab here"). Otherwise it opens in the target group
+    // directory / home, never the bare `/` a Finder/Dock launch inherits as its cwd.
     let source_group_id = source_pane_id.and_then(|id| state.pane_group_id(id).ok().flatten());
     let group = match group_id.or(source_group_id.as_deref()) {
         Some(group_id) => state
@@ -427,29 +427,12 @@ pub fn spawn_shell_pane_at(
     if group.scope != WorkspaceScope::Terminal {
         return Err("ordinary shells cannot be opened in a research workspace".to_string());
     }
-    // Inherit the focused shell's cwd only when it belongs to the group we are
-    // spawning into ("new tab here"). When opening into a group from *outside* it,
-    // derive the cwd from that group's own most-recently-active shell pane instead
-    // of the foreign pane the user happened to be in. A brand-new group has no shell
-    // panes yet, so fall back to its creation-time seed dir (`group.dir`) — the
-    // directory the group was opened for — before the default home dir; otherwise the
-    // first terminal would land in ~ and every sibling would copy that.
-    let cwd = match cwd_override.map(str::trim).filter(|cwd| !cwd.is_empty()) {
-        Some(cwd) => group_recoverable_dir(group.remote.as_ref(), cwd)
-            .ok_or_else(|| format!("shell working directory {cwd} does not exist"))?,
-        None => source_pane_id
-            .filter(|&id| {
-                state
-                    .pane_group_id(id)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|gid| gid == group.id)
-            })
-            .and_then(|id| state.inheritable_shell_cwd(id))
-            .or_else(|| state.group_spawn_cwd(&group.id))
-            .or_else(|| group_recoverable_dir(group.remote.as_ref(), &group.dir))
-            .unwrap_or_else(|| state.default_open_dir()),
-    };
+    // Prefer the current tab's cwd when it is inside this group's directory
+    // (a tab that has `cd`'d into a subdirectory). Same-group shells still
+    // inherit even after `cd`'ing elsewhere ("new tab here"). Opening into a
+    // group from outside otherwise uses that group's most-recently-active
+    // shell, then its creation-time seed dir (`group.dir`), then home.
+    let cwd = state.resolve_shell_spawn_cwd(&group, source_pane_id, cwd_override)?;
     let pane_id = state.next_id("pane");
     spawn_pty(
         state,
