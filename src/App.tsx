@@ -191,6 +191,7 @@ import type { OrphanedQueueGroup } from "./components/RecoveredQueuePanel";
 import {
   agentStatusLabel,
   agentStatusKeepsMachineAwake,
+  desiredPreventSleepState,
   agentCanFork,
   agentDisplayBranch,
   agentDisplayCheckoutRoot,
@@ -1788,6 +1789,10 @@ function MainApp() {
   const regeneratingTitlePaneIdsRef = useRef(regeneratingTitlePaneIds);
   regeneratingTitlePaneIdsRef.current = regeneratingTitlePaneIds;
   const [agents, setAgents] = useState<AgentInfo[]>([]);
+  // False while a fresh/reloaded WebContent document still holds the empty
+  // placeholder above. Until listAgents() succeeds, it is not safe to infer
+  // that the backend has no active agents and release its existing wake lock.
+  const [agentsHydrated, setAgentsHydrated] = useState(false);
   const [shellJobByAgent, setShellJobByAgent] = useState<
     Record<string, ShellAgentJobInfo>
   >({});
@@ -7110,6 +7115,7 @@ function MainApp() {
             : null,
         );
         setAgents(existingAgents);
+        setAgentsHydrated(true);
         setArtifacts(existingArtifacts);
         const partitionedResearchTrees = partitionResearchTrees(existingResearchTrees);
         setResearchTrees(partitionedResearchTrees.active);
@@ -12102,7 +12108,8 @@ function MainApp() {
     [],
   );
   // Keep the machine awake while the toggle is on and at least one agent may
-  // still be working, including while an in-flight tool waits for permission.
+  // still be working, including while an in-flight tool waits for permission or
+  // user feedback.
   // Releasing the lock once every agent is at rest lets normal power management
   // resume.
   const anyAgentBusy = useMemo(
@@ -12110,7 +12117,14 @@ function MainApp() {
     [agents],
   );
   useEffect(() => {
-    const active = settings.preventSleep && anyAgentBusy;
+    const active = desiredPreventSleepState(
+      agentsHydrated,
+      settings.preventSleep,
+      anyAgentBusy,
+    );
+    if (active === null) {
+      return;
+    }
     void setPreventSleep(active).catch(() => undefined);
     if (!active) {
       return;
@@ -12122,7 +12136,7 @@ function MainApp() {
       void setPreventSleep(true).catch(() => undefined);
     }, 30_000);
     return () => window.clearInterval(interval);
-  }, [settings.preventSleep, anyAgentBusy]);
+  }, [agentsHydrated, settings.preventSleep, anyAgentBusy]);
 
   // Mirror the login-shell preference to the backend, which keeps its own
   // persisted copy (read on the spawn path, including startup recovery that runs

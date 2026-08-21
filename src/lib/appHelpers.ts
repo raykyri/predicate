@@ -672,7 +672,6 @@ export function agentStatusLabel(status: AgentInfo["status"]) {
 }
 
 const AGENT_STATUSES_AT_REST = new Set<AgentInfo["status"]>([
-  "awaitingInput",
   "done",
   "idle",
   "failed",
@@ -729,11 +728,28 @@ export function agentDisplayCheckoutRoot(agent: AgentInfo | undefined): string |
 }
 
 /** Whether an agent may still be doing work and should keep the machine awake.
- * Permission waits remain inside an active tool call, so they are busy. Keeping
- * this as a resting-state denylist also makes an unexpected future status fail
- * safe by retaining the wake lock. */
+ * Permission and user-feedback waits remain inside an unfinished turn, so they
+ * keep the wake lock. Using a resting-state denylist also makes an unexpected
+ * future status fail safe by retaining the lock. */
 export function agentStatusKeepsMachineAwake(status: AgentInfo["status"]): boolean {
   return !AGENT_STATUSES_AT_REST.has(status);
+}
+
+/** The frontend must not release a backend-owned wake lock until its agent
+ * snapshot is authoritative. During a WebContent reload, React initially has
+ * an empty agent list while `listAgents()` is still in flight; treating that
+ * placeholder as "no busy agents" creates a brief assertion gap in which macOS
+ * can commit to idle sleep. `null` means leave the backend's current state
+ * untouched until hydration succeeds. */
+export function desiredPreventSleepState(
+  agentsHydrated: boolean,
+  settingEnabled: boolean,
+  anyAgentBusy: boolean,
+): boolean | null {
+  if (!agentsHydrated) {
+    return null;
+  }
+  return settingEnabled && anyAgentBusy;
 }
 
 export type AgentStatusTone = "active" | "pending" | "attention" | "done" | "error" | "idle";
