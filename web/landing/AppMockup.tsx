@@ -42,7 +42,6 @@ import {
   PaperclipIcon,
   PencilIcon,
   PlusIcon,
-  RotateCcwIcon,
   SettingsIcon,
   SquareCenterlineDashedVerticalIcon,
   SquareTerminalIcon,
@@ -755,8 +754,8 @@ function PaneTabMenu({ pane }: { pane: MockPane }) {
           <dd>{statusLabel}</dd>
         </div>
         <div>
-          <dt>Tab</dt>
-          <dd>{pane.title}</dd>
+          <dt>Directory</dt>
+          <dd>~/code/{session.project}</dd>
         </div>
         {details?.branch ? (
           <div>
@@ -764,22 +763,8 @@ function PaneTabMenu({ pane }: { pane: MockPane }) {
             <dd>{details.branch}</dd>
           </div>
         ) : null}
-        <div>
-          <dt>Directory</dt>
-          <dd>~/code/{session.project}</dd>
-        </div>
       </dl>
       <div className="pane-context-actions" role="menu" aria-label="Tab actions">
-        <button
-          type="button"
-          role="menuitem"
-          className="control-button"
-          data-mock-context-item
-          title="Restore this tab's default title"
-        >
-          <RotateCcwIcon size={13} />
-          <span>Reset title</span>
-        </button>
         <button
           type="button"
           role="menuitem"
@@ -800,21 +785,22 @@ function PaneTabMenu({ pane }: { pane: MockPane }) {
           <span>Split terminal to the right</span>
           <kbd className="context-menu-shortcut">⌘⇧D</kbd>
         </button>
-        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
-          <FolderGit2Icon size={13} />
-          <span>Open worktree</span>
-        </button>
         <div className="context-menu-divider" role="separator" />
         <button type="button" role="menuitem" className="control-button" data-mock-context-item>
           <GitBranchIcon size={13} />
           <span>Fork session</span>
         </button>
         <button type="button" role="menuitem" className="control-button" data-mock-context-item>
-          <GitBranchIcon size={13} />
+          <PanelBottomCloseIcon size={13} />
           <span>Fork session in split</span>
         </button>
+        <div className="context-menu-divider" role="separator" />
         <button type="button" role="menuitem" className="control-button" data-mock-context-item>
-          <GitBranchIcon size={13} />
+          <FolderGit2Icon size={13} />
+          <span>Open worktree</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <FolderGit2Icon size={13} />
           <span>Fork session in worktree</span>
         </button>
         <button type="button" role="menuitem" className="control-button" data-mock-context-item>

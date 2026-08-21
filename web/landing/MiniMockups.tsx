@@ -15,7 +15,6 @@ import {
   MessageSquareTextIcon,
   PanelBottomCloseIcon,
   PaperclipIcon,
-  RotateCcwIcon,
   XIcon,
 } from "./icons";
 import { ARTIFACTS } from "./mockupData";
@@ -49,10 +48,6 @@ function WorktreesMini() {
   return (
     <div className="pane-context-menu">
       <div className="pane-context-actions">
-        <span className="context-menu-item">
-          <RotateCcwIcon size={13} />
-          <span>Reset title</span>
-        </span>
         <span className="context-menu-item context-menu-has-shortcut">
           <PanelBottomCloseIcon size={13} />
           <span>Split terminal</span>
@@ -63,21 +58,22 @@ function WorktreesMini() {
           <span>Split terminal to the right</span>
           <kbd className="context-menu-shortcut">⌘⇧D</kbd>
         </span>
-        <span className="context-menu-item is-selected">
-          <FolderGit2Icon size={13} />
-          <span>Open worktree</span>
-        </span>
         <div className="context-menu-divider" role="separator" />
         <span className="context-menu-item">
           <GitBranchIcon size={13} />
           <span>Fork session</span>
         </span>
         <span className="context-menu-item">
-          <GitBranchIcon size={13} />
+          <PanelBottomCloseIcon size={13} />
           <span>Fork session in split</span>
         </span>
+        <div className="context-menu-divider" role="separator" />
+        <span className="context-menu-item is-selected">
+          <FolderGit2Icon size={13} />
+          <span>Open worktree</span>
+        </span>
         <span className="context-menu-item">
-          <GitBranchIcon size={13} />
+          <FolderGit2Icon size={13} />
           <span>Fork session in worktree</span>
         </span>
         <span className="context-menu-item">

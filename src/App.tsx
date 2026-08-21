@@ -45,7 +45,6 @@ import {
   Pencil,
   PictureInPicture2,
   Plus,
-  RotateCcw,
   Rows2,
   Settings,
   SquareTerminal,
@@ -194,10 +193,8 @@ import {
   desiredPreventSleepState,
   agentCanFork,
   agentDisplayBranch,
-  agentDisplayCheckoutRoot,
   agentDisplayDirectory,
   agentDisplayWorktreeRoot,
-  agentShowsLaunchDirectory,
   agentSupportsForkAtMessage,
   agentStatusTone,
   clamp,
@@ -933,7 +930,7 @@ const MIN_INITIAL_ROWS = 5;
 const MAX_INITIAL_COLS = 500;
 const MAX_INITIAL_ROWS = 200;
 const PANE_CONTEXT_MENU_WIDTH = 320;
-const PANE_CONTEXT_MENU_ESTIMATED_HEIGHT = 340;
+const PANE_CONTEXT_MENU_ESTIMATED_HEIGHT = 190;
 const GROUP_CONTEXT_MENU_WIDTH = 220;
 const GROUP_CONTEXT_MENU_ESTIMATED_HEIGHT = 270;
 const SETTINGS_CONTEXT_MENU_WIDTH = 180;
@@ -10554,52 +10551,6 @@ function MainApp() {
     setRenamePaneId(pane.id);
   }
 
-  async function resetPaneTitle(pane: PaneInfo) {
-    const paneAgent = agents.find((agent) => agent.paneId === pane.id);
-    const nextTitle = defaultPaneTitle(pane, paneAgent, config);
-    if (!nextTitle) {
-      return;
-    }
-
-    const previousWasManuallyTitled = manuallyTitledPaneIds.has(pane.id);
-    setManuallyTitledPaneIds((current) => {
-      const next = new Set(current);
-      next.delete(pane.id);
-      return next;
-    });
-    if (pane.title === nextTitle) {
-      return;
-    }
-
-    setPanesPreservingRecoveredDismissals((current) =>
-      current.map((candidate) =>
-        candidate.id === pane.id ? { ...candidate, title: nextTitle } : candidate,
-      ),
-    );
-    try {
-      const updated = await renamePane(pane.id, nextTitle);
-      setPanesPreservingRecoveredDismissals((current) =>
-        current.map((candidate) =>
-          candidate.id === pane.id ? { ...candidate, title: updated.title } : candidate,
-        ),
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      setManuallyTitledPaneIds((current) => {
-        const next = new Set(current);
-        if (previousWasManuallyTitled) {
-          next.add(pane.id);
-        }
-        return next;
-      });
-      setPanesPreservingRecoveredDismissals((current) =>
-        current.map((candidate) =>
-          candidate.id === pane.id ? { ...candidate, title: pane.title } : candidate,
-        ),
-      );
-    }
-  }
-
   function openGroupRenameDialog(group: GroupInfo) {
     setRenameValue(displayGroupName(group));
     setRenamePaneId(null);
@@ -14660,78 +14611,23 @@ function MainApp() {
               </div>
             ) : null}
             <div>
-              <dt>Tab</dt>
-              <dd>{contextMenuDisplayTitle}</dd>
+              <dt>Directory</dt>
+              <dd>{contextMenuAgent?.activeWorkspace?.cwd ?? contextMenuPane.cwd}</dd>
             </div>
-            {contextMenuTerminalTitle && contextMenuTerminalTitle !== contextMenuDisplayTitle ? (
-              <div>
-                <dt>Terminal title</dt>
-                <dd>{contextMenuTerminalTitle}</dd>
-              </div>
-            ) : null}
             {agentDisplayBranch(contextMenuAgent) ? (
               <div>
                 <dt>Branch</dt>
                 <dd>{agentDisplayBranch(contextMenuAgent)}</dd>
               </div>
             ) : null}
-            {agentDisplayCheckoutRoot(contextMenuAgent) ? (
+            {contextMenuTerminalTitle && contextMenuTerminalTitle !== contextMenuDisplayTitle ? (
               <div>
-                <dt>{contextMenuAgent?.activeWorkspace ? "Current checkout" : "Worktree"}</dt>
-                <dd>{agentDisplayCheckoutRoot(contextMenuAgent)}</dd>
+                <dt>Terminal title</dt>
+                <dd>{contextMenuTerminalTitle}</dd>
               </div>
             ) : null}
-            {contextMenuAgent?.activeWorkspace?.gitRoot ? (
-              <div>
-                <dt>Checkout type</dt>
-                <dd>{contextMenuAgent.activeWorkspace.kind === "linkedWorktree"
-                  ? "Linked worktree"
-                  : contextMenuAgent.activeWorkspace.kind === "mainCheckout"
-                    ? "Main checkout"
-                    : "Git checkout"}</dd>
-              </div>
-            ) : null}
-            {contextMenuAgent?.activeWorkspace ? (
-              <>
-                <div>
-                  <dt>Detected from</dt>
-                  <dd>{contextMenuAgent.activeWorkspace.source === "qmux"
-                    ? "Qmux"
-                    : contextMenuAgent.activeWorkspace.source === "claude"
-                      ? "Claude"
-                      : "Codex"}</dd>
-                </div>
-                <div>
-                  <dt>Managed by Qmux</dt>
-                  <dd>{contextMenuAgent.activeWorkspace.managedByQmux ? "Yes" : "No"}</dd>
-                </div>
-              </>
-            ) : null}
-            {contextMenuAgent && agentShowsLaunchDirectory(contextMenuAgent) ? (
-              <div>
-                <dt>Launch directory</dt>
-                <dd>{contextMenuAgent.worktreeDir}</dd>
-              </div>
-            ) : null}
-            <div>
-              <dt>Directory</dt>
-              <dd>{contextMenuAgent?.activeWorkspace?.cwd ?? contextMenuPane.cwd}</dd>
-            </div>
           </dl>
           <div className="pane-context-actions" role="menu" aria-label="Tab actions">
-            <button
-              type="button"
-              role="menuitem"
-              className="control-button"
-              title="Restore this tab's default title"
-              onClick={() => {
-                setPaneContextMenu(null);
-                void resetPaneTitle(contextMenuPane);
-              }}
-            >
-              <RotateCcw size={13} aria-hidden="true" />
-              <span>Reset title</span>
-            </button>
             <button
               type="button"
               role="menuitem"
@@ -14836,26 +14732,6 @@ function MainApp() {
                 <span>Detach from split</span>
               </button>
             ) : null}
-            <button
-              className="control-button"
-              type="button"
-              role="menuitem"
-              disabled={!contextMenuWorktreeAction.enabled}
-              title={
-                contextMenuWorktreeAction.enabled
-                  ? "Create a git worktree from this tab's checkout and open a shell there"
-                  : contextMenuWorktreeAction.reason
-              }
-              onClick={() => {
-                if (!contextMenuWorktreeAction.enabled) {
-                  return;
-                }
-                void openWorktreeFromPane(contextMenuPane);
-              }}
-            >
-              <FolderGit2 size={13} aria-hidden="true" />
-              <span>Open worktree</span>
-            </button>
             {canForkContextMenuPane ? (
               <>
                 <div className="context-menu-divider" role="separator" />
@@ -14886,21 +14762,48 @@ function MainApp() {
                     });
                   }}
                 >
-                  <GitBranch size={13} aria-hidden="true" />
+                  {contextMenuSplitIsColumns ? (
+                    <Columns2 size={13} aria-hidden="true" />
+                  ) : (
+                    <PanelBottomClose size={13} aria-hidden="true" />
+                  )}
                   <span>Fork session in split</span>
                 </button>
-                <button className="control-button"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setPaneContextMenu(null);
-                    void forkPane(contextMenuPane, { useWorktree: true });
-                  }}
-                >
-                  <GitBranch size={13} aria-hidden="true" />
-                  <span>Fork session in worktree</span>
-                </button>
               </>
+            ) : null}
+            <div className="context-menu-divider" role="separator" />
+            <button
+              className="control-button"
+              type="button"
+              role="menuitem"
+              disabled={!contextMenuWorktreeAction.enabled}
+              title={
+                contextMenuWorktreeAction.enabled
+                  ? "Create a git worktree from this tab's checkout and open a shell there"
+                  : contextMenuWorktreeAction.reason
+              }
+              onClick={() => {
+                if (!contextMenuWorktreeAction.enabled) {
+                  return;
+                }
+                void openWorktreeFromPane(contextMenuPane);
+              }}
+            >
+              <FolderGit2 size={13} aria-hidden="true" />
+              <span>Open worktree</span>
+            </button>
+            {canForkContextMenuPane ? (
+              <button className="control-button"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setPaneContextMenu(null);
+                  void forkPane(contextMenuPane, { useWorktree: true });
+                }}
+              >
+                <FolderGit2 size={13} aria-hidden="true" />
+                <span>Fork session in worktree</span>
+              </button>
             ) : null}
             {contextMenuAgent && paneScope(contextMenuPane, groupById) === "terminal" ? (
               <>
