@@ -1,6 +1,7 @@
 mod adapters;
 mod browser_backend;
 mod browser_engine;
+mod claude_sdk;
 mod completion_sound;
 mod config;
 mod connection_limit;
@@ -23,6 +24,7 @@ mod pty;
 mod publishing;
 mod recovery;
 mod research;
+mod research_runtime;
 mod scrollback;
 mod shell_jobs;
 mod show_hide_shortcut;
@@ -1219,6 +1221,45 @@ fn research_launch_options(adapter: &str, effort: Option<&str>) -> serde_json::V
     }
 }
 
+fn launch_research_execution(
+    state: &AppState,
+    node: &research::ResearchNode,
+    workspace: &workspace::GroupInfo,
+    prompt: String,
+    fork_from: Option<&workspace::AgentInfo>,
+) -> Result<research::ResearchNode, String> {
+    let prompt = match persistence::load_preferences(&state.config().workspace_root) {
+        Ok(preferences) => research::prompt_with_research_launch_instruction(
+            prompt,
+            preferences.research_launch_instruction.as_deref(),
+        ),
+        Err(err) => {
+            let _ = state.fail_research_node(&node.id, err.clone());
+            return Err(err);
+        }
+    };
+    if research_runtime::should_use_research_sdk(state, &node.adapter) {
+        let resume = fork_from.and_then(|agent| agent.session_id.clone());
+        return research_runtime::launch(
+            state,
+            node,
+            workspace,
+            prompt,
+            resume,
+            fork_from.is_some(),
+        );
+    }
+    launch_fresh_research_pane(
+        state,
+        &node.id,
+        workspace,
+        &node.adapter,
+        node.model.clone(),
+        node.effort.clone(),
+        prompt,
+    )
+}
+
 /// Launches a fresh (non-forked) agent run for an admitted research node and
 /// binds the resulting pane. Shared by root-run creation and document
 /// follow-ups. On failure the node is failed and any spawned pane reclaimed;
@@ -1232,24 +1273,21 @@ fn launch_fresh_research_run(
     effort: Option<String>,
     prompt: String,
 ) -> Result<research::ResearchNode, String> {
+    let _ = (adapter, model, effort);
+    let node = state.research_node(node_id)?;
+    launch_research_execution(state, &node, workspace, prompt, None)
+}
+
+fn launch_fresh_research_pane(
+    state: &AppState,
+    node_id: &str,
+    workspace: &workspace::GroupInfo,
+    adapter: &str,
+    model: Option<String>,
+    effort: Option<String>,
+    prompt: String,
+) -> Result<research::ResearchNode, String> {
     let options = research_launch_options(adapter, effort.as_deref());
-    // The custom launch instruction is read per launch (not cached at startup)
-    // so a settings change applies from the very next run. It is applied to
-    // the fully assembled prompt — after any document/conversation context
-    // wrapper — so a leading slash command stays at the start of the message.
-    // A damaged preferences file fails the launch, mirroring
-    // update_preferences' refusal discipline, rather than silently launching
-    // without the user's instruction.
-    let prompt = match persistence::load_preferences(&state.config().workspace_root) {
-        Ok(preferences) => research::prompt_with_research_launch_instruction(
-            prompt,
-            preferences.research_launch_instruction.as_deref(),
-        ),
-        Err(err) => {
-            let _ = state.fail_research_node(node_id, err.clone());
-            return Err(err);
-        }
-    };
     let spawn = SpawnAgentRequest {
         adapter_id: adapter.to_string(),
         prompt,
@@ -1619,21 +1657,6 @@ fn launch_research_child_run(
         }
         research::ResearchNodeKind::Run => {}
     }
-    // Run follow-ups fork the parent session, bypassing
-    // launch_fresh_research_run, so the custom launch instruction is
-    // applied to the sent question here. The child's displayed prompt
-    // stays the bare question — still a normalized substring of the sent
-    // prompt, so response-boundary matching keeps working.
-    let question = match persistence::load_preferences(&state.config().workspace_root) {
-        Ok(preferences) => research::prompt_with_research_launch_instruction(
-            question,
-            preferences.research_launch_instruction.as_deref(),
-        ),
-        Err(err) => {
-            let _ = state.fail_research_node(&child.id, err.clone());
-            return Err(err);
-        }
-    };
     let live_source = parent
         .agent_id
         .as_deref()
@@ -1686,6 +1709,19 @@ fn launch_research_child_run(
     // The follow-up runs at the child's (inherited) effort, applied by the
     // adapter's fork path the same way `model` is re-applied.
     source.effort = child.effort.clone();
+    if research_runtime::should_use_research_sdk(state, &child.adapter) {
+        return launch_research_execution(state, child, workspace, question, Some(&source));
+    }
+    let question = match persistence::load_preferences(&state.config().workspace_root) {
+        Ok(preferences) => research::prompt_with_research_launch_instruction(
+            question,
+            preferences.research_launch_instruction.as_deref(),
+        ),
+        Err(err) => {
+            let _ = state.fail_research_node(&child.id, err.clone());
+            return Err(err);
+        }
+    };
     match fork_agent_source(state, &source, false, Some(&question)) {
         Ok(pane) => {
             let association = pane
@@ -2223,6 +2259,23 @@ fn research_launch_instruction_set(
     let instruction = research::sanitized_research_launch_instruction(&instruction)?;
     persistence::update_preferences(&state.config().workspace_root, move |preferences| {
         preferences.research_launch_instruction = instruction;
+    })
+}
+
+#[tauri::command(async)]
+fn research_sdk_harness_get(state: tauri::State<'_, AppState>) -> Result<bool, String> {
+    Ok(persistence::research_sdk_harness_enabled(
+        &state.config().workspace_root,
+    ))
+}
+
+#[tauri::command(async)]
+fn research_sdk_harness_set(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+) -> Result<(), String> {
+    persistence::update_preferences(&state.config().workspace_root, move |preferences| {
+        preferences.research_sdk_harness = enabled;
     })
 }
 
@@ -3302,6 +3355,8 @@ fn main() {
             use_login_shell_set,
             research_launch_instruction_get,
             research_launch_instruction_set,
+            research_sdk_harness_get,
+            research_sdk_harness_set,
             worktree_location_get,
             worktree_location_set,
             agent_spawn,
@@ -3395,6 +3450,7 @@ fn main() {
                 // remove_pane path, and any of those persists that win the race with
                 // process death would save the session with its tabs deleted.
                 exit_state.finalize_persistence_for_exit();
+                research_runtime::kill_all_sessions();
                 pty::kill_all_panes(&exit_state);
                 native_terminal::shutdown();
                 // Stop the supervisor before touching the pathname. If we unlink

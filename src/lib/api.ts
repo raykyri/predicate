@@ -744,6 +744,14 @@ export function setResearchLaunchInstruction(instruction: string) {
   return invoke<void>("research_launch_instruction_set", { instruction });
 }
 
+export function getResearchSdkHarness() {
+  return invoke<boolean>("research_sdk_harness_get");
+}
+
+export function setResearchSdkHarness(enabled: boolean) {
+  return invoke<void>("research_sdk_harness_set", { enabled });
+}
+
 export function spawnAgent(request: SpawnAgentRequest) {
   return invoke<PaneInfo>("agent_spawn", { request });
 }

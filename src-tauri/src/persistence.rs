@@ -165,7 +165,7 @@ pub enum WorktreeLocation {
     LocalClaude,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPreferences {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -200,6 +200,43 @@ pub struct AppPreferences {
     /// user's prompt unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub research_launch_instruction: Option<String>,
+    /// When true (the default), Claude research runs use the headless SDK
+    /// harness instead of a hidden TUI pane. False is always written so a
+    /// user who turns the harness off does not get the default-true on reload.
+    #[serde(
+        default = "default_research_sdk_harness",
+        skip_serializing_if = "is_true"
+    )]
+    pub research_sdk_harness: bool,
+}
+
+fn default_research_sdk_harness() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+impl Default for AppPreferences {
+    fn default() -> Self {
+        Self {
+            launcher_adapter_id: None,
+            use_login_shell: None,
+            worktree_location: None,
+            show_hide_shortcut: None,
+            global_launcher_hotkey: None,
+            open_router_key: None,
+            research_launch_instruction: None,
+            research_sdk_harness: true,
+        }
+    }
+}
+
+pub fn research_sdk_harness_enabled(workspace_root: &Path) -> bool {
+    load_preferences(workspace_root)
+        .map(|preferences| preferences.research_sdk_harness)
+        .unwrap_or(true)
 }
 
 pub fn preferences_path(workspace_root: &Path) -> PathBuf {
@@ -1184,6 +1221,49 @@ mod tests {
             mode & 0o077,
             0,
             "preferences file must not be group/other readable"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn research_sdk_harness_defaults_true_and_persists_false() {
+        let root = temp_root();
+        assert!(load_preferences(&root).unwrap().research_sdk_harness);
+
+        let absent: AppPreferences = serde_json::from_str("{}").unwrap();
+        assert!(absent.research_sdk_harness);
+
+        save_preferences(
+            &root,
+            &AppPreferences {
+                research_sdk_harness: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(preferences_path(&root)).unwrap();
+        assert!(
+            on_disk.contains("\"researchSdkHarness\": false"),
+            "{on_disk}"
+        );
+        assert!(
+            !read_preferences_from_disk(&preferences_path(&root))
+                .unwrap()
+                .research_sdk_harness
+        );
+
+        save_preferences(
+            &root,
+            &AppPreferences {
+                research_sdk_harness: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let on_disk = fs::read_to_string(preferences_path(&root)).unwrap();
+        assert!(
+            !on_disk.contains("researchSdkHarness"),
+            "true must be omitted so absent keys keep defaulting on: {on_disk}"
         );
         fs::remove_dir_all(root).unwrap();
     }

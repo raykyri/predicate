@@ -6,8 +6,8 @@ use crate::research::{
     self, CreateResearchDocumentRequest, CreateResearchTreeRequest, ResearchBranchRemoval,
     ResearchHighlight, ResearchHighlightAnchor, ResearchNode, ResearchNodeCard,
     ResearchNodeContent, ResearchNodeKind, ResearchNodeOrigin, ResearchNodeStatus,
-    ResearchPublicationProposal, ResearchTree, ResearchTreeDetail, ResearchTreeSummary,
-    UpdateResearchDocumentRequest, UpdateResearchDocumentResult,
+    ResearchPublicationProposal, ResearchRuntime, ResearchTree, ResearchTreeDetail,
+    ResearchTreeSummary, UpdateResearchDocumentRequest, UpdateResearchDocumentResult,
 };
 use crate::scrollback::{bounded_undo_scrollback, read_pane_scrollback, remove_pane_scrollback};
 use crate::thread_graph;
@@ -2307,6 +2307,22 @@ impl AppState {
             if node.pane_id.take().is_some() {
                 research_reconciled = true;
             }
+            if node.status.is_active()
+                && node.runtime == ResearchRuntime::Sdk
+                && let Ok(Some(snapshot)) = research::read_response_snapshot_with_revision(
+                    &self.inner.config.workspace_root,
+                    &node.id,
+                )
+                && let Some(outcome) = snapshot.outcome
+                && outcome.status.is_terminal()
+            {
+                node.status = outcome.status;
+                node.error = outcome.error;
+                node.completed_at = Some(outcome.completed_at);
+                node.response_snapshot_at
+                    .get_or_insert(outcome.completed_at);
+                research_reconciled = true;
+            }
             if node.status.is_active() {
                 node.status = ResearchNodeStatus::Failed;
                 node.error =
@@ -2314,6 +2330,40 @@ impl AppState {
                 node.completed_at = Some(now_millis());
                 research_reconciled = true;
             }
+        }
+        let sdk_agent_ids = persisted
+            .research_nodes
+            .values()
+            .filter_map(|node| node.agent_id.clone())
+            .collect::<HashSet<_>>();
+        let dropped_sdk_agent_ids = persisted
+            .agents
+            .iter()
+            .filter(|agent| {
+                agent.pane_id.is_none()
+                    && sdk_agent_ids.contains(&agent.id)
+                    && persisted
+                        .queues
+                        .get(&agent.id)
+                        .is_none_or(|turns| turns.is_empty())
+                    && !persisted.inflight.contains_key(&agent.id)
+            })
+            .map(|agent| agent.id.clone())
+            .collect::<HashSet<_>>();
+        if !dropped_sdk_agent_ids.is_empty() {
+            persisted
+                .agents
+                .retain(|agent| !dropped_sdk_agent_ids.contains(&agent.id));
+            for group in &mut persisted.groups {
+                group
+                    .agents
+                    .retain(|agent_id| !dropped_sdk_agent_ids.contains(agent_id));
+            }
+            for agent_id in &dropped_sdk_agent_ids {
+                persisted.queues.remove(agent_id);
+                persisted.drafts.remove(agent_id);
+            }
+            research_reconciled = true;
         }
         // Snapshots for nodes the passes above dropped (or that a crash left
         // behind mid tree-removal) have no other reaper. Prune against the
@@ -2724,6 +2774,39 @@ impl AppState {
             .persist_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.inner.exit_confirmed.load(Ordering::Relaxed) {
+            // A confirmed quit is a user cancellation, not a crash. Settle
+            // active research before freezing state.json so restore agrees
+            // with both the confirmation copy and the processes we terminate
+            // immediately after this snapshot.
+            let now = now_millis();
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut settled = Vec::new();
+            let mut agent_ids = Vec::new();
+            for node in model.research_nodes.values_mut() {
+                if node.kind == ResearchNodeKind::Run && node.status.is_active() {
+                    node.status = ResearchNodeStatus::Cancelled;
+                    node.error = None;
+                    node.completed_at = Some(now);
+                    settled.push(node.tree_id.clone());
+                    if let Some(agent_id) = node.agent_id.clone() {
+                        agent_ids.push(agent_id);
+                    }
+                }
+            }
+            for agent_id in agent_ids {
+                if let Some(agent) = model.agents.get_mut(&agent_id) {
+                    agent.status = AgentStatus::Idle;
+                }
+            }
+            for tree_id in settled {
+                touch_research_tree_locked(&mut model, &tree_id, now);
+            }
+        }
         if let Err(err) = self.persist_snapshot_locked() {
             eprintln!("qmux: failed to persist final session state: {err}");
         }
@@ -2861,20 +2944,38 @@ impl AppState {
         if self.inner.exit_confirmed.load(Ordering::Relaxed) {
             return false;
         }
-        self.open_pane_count() > 0
+        self.open_pane_count() > 0 || self.active_research_run_count() > 0
     }
 
     pub fn request_exit_confirmation(&self) {
         let pane_count = self.open_pane_count();
-        if pane_count == 0 {
+        let research_run_count = self.active_research_run_count();
+        if pane_count == 0 && research_run_count == 0 {
             return;
         }
         self.emit(QmuxEvent::new(
             "app.exit_confirmation_requested",
             None,
             None,
-            json!({ "paneCount": pane_count }),
+            json!({
+                "paneCount": pane_count,
+                "researchRunCount": research_run_count,
+            }),
         ));
+    }
+
+    fn active_research_run_count(&self) -> usize {
+        self.inner
+            .model
+            .lock()
+            .map(|model| {
+                model
+                    .research_nodes
+                    .values()
+                    .filter(|node| node.kind == ResearchNodeKind::Run && node.status.is_active())
+                    .count()
+            })
+            .unwrap_or_default()
     }
 
     fn open_pane_count(&self) -> usize {
@@ -3805,6 +3906,7 @@ impl AppState {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -3889,6 +3991,7 @@ impl AppState {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Document,
             origin: None,
@@ -4133,6 +4236,7 @@ impl AppState {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Conversation,
             origin: Some(ResearchNodeOrigin::TerminalExport),
@@ -4561,6 +4665,7 @@ impl AppState {
                 prompt_native_id: None,
                 agent_id: None,
                 pane_id: None,
+                runtime: crate::research::ResearchRuntime::Pane,
                 thread_id: None,
                 kind: ResearchNodeKind::Run,
                 origin: None,
@@ -4696,6 +4801,321 @@ impl AppState {
         ));
         self.maybe_schedule_research_retirement(&node);
         Ok(node)
+    }
+
+    pub fn bind_research_node_harness(
+        &self,
+        node_id: &str,
+        agent: &AgentInfo,
+    ) -> Result<ResearchNode, String> {
+        let node = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let node_snapshot = model
+                .research_nodes
+                .get(node_id)
+                .cloned()
+                .ok_or_else(|| format!("research node {node_id} was not found"))?;
+            if node_snapshot.kind != ResearchNodeKind::Run {
+                return Err(format!(
+                    "research node {node_id} is not a run and cannot bind a live agent"
+                ));
+            }
+            let tree = model
+                .research_trees
+                .get(&node_snapshot.tree_id)
+                .ok_or_else(|| format!("research tree {} was not found", node_snapshot.tree_id))?;
+            let workspace = model
+                .groups
+                .get(&tree.workspace_id)
+                .ok_or_else(|| format!("research workspace {} was not found", tree.workspace_id))?;
+            if workspace.scope != WorkspaceScope::Research || agent.group_id != workspace.id {
+                return Err("research launch did not use the tree's current workspace".to_string());
+            }
+            let now = now_millis();
+            let node = model
+                .research_nodes
+                .get_mut(node_id)
+                .expect("research node was checked above");
+            node.agent_id = Some(agent.id.clone());
+            node.thread_id = agent.thread_id.clone();
+            node.native_session_id = agent.session_id.clone();
+            node.transcript_path = agent.transcript_path.clone();
+            node.pane_id = None;
+            node.runtime = ResearchRuntime::Sdk;
+            node.started_at.get_or_insert(now);
+            if !node.status.is_terminal() {
+                node.status = ResearchNodeStatus::Starting;
+                node.error = None;
+            }
+            let node = node.clone();
+            touch_research_tree_locked(&mut model, &node.tree_id, now);
+            node
+        };
+        if let Ok(mut completion_sound) = self.inner.completion_sound.lock() {
+            completion_sound.mark_research_agent(&agent.id);
+        }
+        self.persist();
+        self.emit(QmuxEvent::new(
+            "research.node.updated",
+            None,
+            Some(agent.id.clone()),
+            json!({ "node": node }),
+        ));
+        self.emit(QmuxEvent::new(
+            "agent.updated",
+            None,
+            Some(agent.id.clone()),
+            json!({ "agent": agent }),
+        ));
+        Ok(node)
+    }
+
+    pub fn append_harness_turn(&self, turn: Turn) -> Result<(), String> {
+        self.append_turn_internal(turn, None).map(|_| ())
+    }
+
+    pub fn record_research_sdk_session(
+        &self,
+        node_id: &str,
+        agent_id: &str,
+        session_id: Option<String>,
+        transcript_path: Option<String>,
+    ) -> Result<(), String> {
+        let agent = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if let Some(agent) = model.agents.get_mut(agent_id) {
+                if let Some(session_id) = session_id.clone() {
+                    agent.session_id = Some(session_id);
+                }
+                if let Some(transcript_path) = transcript_path.clone() {
+                    agent.transcript_path = Some(transcript_path);
+                }
+                if agent.status == AgentStatus::Starting {
+                    agent.status = AgentStatus::Running;
+                }
+            }
+            let now = now_millis();
+            let tree_id = if let Some(node) = model.research_nodes.get_mut(node_id) {
+                if let Some(session_id) = session_id {
+                    node.native_session_id = Some(session_id);
+                }
+                if let Some(transcript_path) = transcript_path {
+                    node.transcript_path = Some(transcript_path);
+                }
+                if !node.status.is_terminal() {
+                    node.status = ResearchNodeStatus::Running;
+                    node.error = None;
+                }
+                Some(node.tree_id.clone())
+            } else {
+                None
+            };
+            if let Some(tree_id) = tree_id {
+                touch_research_tree_locked(&mut model, &tree_id, now);
+            }
+            model.agents.get(agent_id).cloned()
+        };
+        self.persist();
+        if let Some(agent) = agent {
+            self.emit(QmuxEvent::new(
+                "agent.updated",
+                None,
+                Some(agent.id.clone()),
+                json!({ "agent": agent }),
+            ));
+        }
+        if let Ok(node) = self.research_node(node_id) {
+            self.emit(QmuxEvent::new(
+                "research.node.updated",
+                None,
+                Some(agent_id.to_string()),
+                json!({ "node": node }),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn finish_research_sdk_run(
+        &self,
+        node_id: &str,
+        agent_id: &str,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<(), String> {
+        let now = now_millis();
+        let requested_status = if success {
+            ResearchNodeStatus::Complete
+        } else if error.is_some() {
+            ResearchNodeStatus::Failed
+        } else {
+            ResearchNodeStatus::Cancelled
+        };
+        let durable_outcome = self
+            .research_node(node_id)
+            .ok()
+            .filter(|node| node.status.is_terminal())
+            .map(|node| research::ResearchRunOutcome {
+                status: node.status,
+                error: node.error,
+                completed_at: node.completed_at.unwrap_or(now),
+            })
+            .unwrap_or(research::ResearchRunOutcome {
+                status: requested_status,
+                error,
+                completed_at: now,
+            });
+        let snapshot_error = self
+            .snapshot_research_sdk_response(node_id, &durable_outcome)
+            .err();
+        let effective_success =
+            durable_outcome.status == ResearchNodeStatus::Complete && snapshot_error.is_none();
+        let effective_error = snapshot_error
+            .as_ref()
+            .map(|err| format!("research finished, but its response could not be preserved: {err}"))
+            .or_else(|| durable_outcome.error.clone());
+        let (node, agent) = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if let Some(agent) = model.agents.get_mut(agent_id) {
+                agent.status = if effective_success {
+                    AgentStatus::Done
+                } else if effective_error.is_some() {
+                    AgentStatus::Failed
+                } else {
+                    AgentStatus::Idle
+                };
+            }
+            let agent = model.agents.get(agent_id).cloned();
+            let tree_id = if let Some(node) = model.research_nodes.get_mut(node_id)
+                && !node.status.is_terminal()
+            {
+                if snapshot_error.is_some() {
+                    node.status = ResearchNodeStatus::Failed;
+                    node.error = effective_error;
+                } else {
+                    node.status = durable_outcome.status;
+                    node.error = durable_outcome.error.clone();
+                }
+                node.completed_at
+                    .get_or_insert(durable_outcome.completed_at);
+                Some(node.tree_id.clone())
+            } else {
+                None
+            };
+            if let Some(tree_id) = tree_id {
+                touch_research_tree_locked(&mut model, &tree_id, now);
+            }
+            let node = model.research_nodes.get(node_id).cloned();
+            (node, agent)
+        };
+        self.persist();
+        if let Some(agent) = agent {
+            self.emit(QmuxEvent::new(
+                if effective_success {
+                    "agent.done"
+                } else {
+                    "agent.updated"
+                },
+                None,
+                Some(agent.id.clone()),
+                json!({ "agent": agent }),
+            ));
+        }
+        if let Some(node) = node {
+            self.emit(QmuxEvent::new(
+                "research.node.updated",
+                None,
+                Some(agent_id.to_string()),
+                json!({ "node": node }),
+            ));
+        }
+        if snapshot_error.is_none() {
+            self.prune_agent(agent_id);
+            Ok(())
+        } else {
+            // Retain the pane-less agent and its live turns for this process
+            // lifetime. Retry can reclaim it once the runtime session is gone.
+            Err(snapshot_error.expect("snapshot error was checked above"))
+        }
+    }
+
+    fn snapshot_research_sdk_response(
+        &self,
+        node_id: &str,
+        outcome: &research::ResearchRunOutcome,
+    ) -> Result<(), String> {
+        let content = self.research_node_content(node_id)?;
+        let ancestor_prompts = self
+            .research_node_ancestor_prompts(node_id)
+            .unwrap_or_default();
+        let mut selected_turns = None;
+        if content.node.transcript_path.is_some()
+            && let Ok(turns) = research::load_transcript_response(
+                &self.inner.config,
+                &content.node,
+                &ancestor_prompts,
+            )
+            && research::has_active_assistant_turn(&turns)
+            && turns.len() >= content.turns.len()
+        {
+            selected_turns = Some(turns);
+        }
+        if selected_turns.is_none() && research::has_active_assistant_turn(&content.turns) {
+            selected_turns = Some(content.turns.clone());
+        }
+        if selected_turns.is_none() && outcome.status == ResearchNodeStatus::Complete {
+            for delay_ms in [250_u64, 500, 1000] {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                let node = self.research_node(node_id)?;
+                if let Ok(turns) =
+                    research::load_transcript_response(&self.inner.config, &node, &ancestor_prompts)
+                    && research::has_active_assistant_turn(&turns)
+                {
+                    selected_turns = Some(turns);
+                    break;
+                }
+            }
+        }
+        let turns = selected_turns.unwrap_or(content.turns);
+        research::write_research_run_outcome_snapshot_verified(
+            &self.inner.config.workspace_root,
+            node_id,
+            &turns,
+            outcome,
+        )?;
+        self.mark_research_response_snapshotted(node_id)?;
+        Ok(())
+    }
+
+    pub fn prune_agent(&self, agent_id: &str) {
+        {
+            let mut model = match self.inner.model.lock() {
+                Ok(model) => model,
+                Err(_) => return,
+            };
+            prune_agent_locked(&mut model, agent_id);
+        }
+        self.persist();
+        // Payload-less agent.updated makes the frontend refetch listAgents()
+        // so pane-less SDK agents leave the React array (and the wake lock)
+        // after prune. Pane agents already leave via pane.removed.
+        self.emit(QmuxEvent::new(
+            "agent.updated",
+            None,
+            Some(agent_id.to_string()),
+            json!({}),
+        ));
     }
 
     /// Arms the pre-session watchdog for a just-launched research run. Agent
@@ -4871,7 +5291,7 @@ impl AppState {
     /// an already-settled node (a kill that failed on a previous cancel), so
     /// a stuck binding cannot pin the tree forever.
     pub fn cancel_research_node(&self, node_id: &str) -> Result<ResearchNode, String> {
-        let (node, pane_id) = {
+        let (node, pane_id, runtime) = {
             let mut model = self
                 .inner
                 .model
@@ -4882,8 +5302,13 @@ impl AppState {
                 .get_mut(node_id)
                 .ok_or_else(|| format!("research node {node_id} was not found"))?;
             let active = node.status.is_active();
+            let runtime = node.runtime;
             if !active && node.pane_id.is_none() {
-                return Err("research run is not active".to_string());
+                let sdk_still_stopping = runtime == ResearchRuntime::Sdk
+                    && crate::research_runtime::session_registered(node_id);
+                if !sdk_still_stopping {
+                    return Err("research run is not active".to_string());
+                }
             }
             if active {
                 node.status = ResearchNodeStatus::Cancelled;
@@ -4893,7 +5318,7 @@ impl AppState {
             let pane_id = node.pane_id.clone();
             let node = node.clone();
             touch_research_tree_locked(&mut model, &node.tree_id, now_millis());
-            (node, pane_id)
+            (node, pane_id, runtime)
         };
         self.persist();
         self.emit(QmuxEvent::new(
@@ -4902,6 +5327,9 @@ impl AppState {
             node.agent_id.clone(),
             json!({ "node": node }),
         ));
+        if runtime == ResearchRuntime::Sdk {
+            crate::research_runtime::interrupt_session(&node.id);
+        }
         if let Some(pane_id) = pane_id {
             // The pane detach path clears the binding; a Cancelled node is
             // already settled, so detach leaves its status alone.
@@ -4940,6 +5368,15 @@ impl AppState {
     /// reset would therefore bind a pane the node's terminal status
     /// immediately orphans.
     pub fn reset_research_node_for_retry(&self, node_id: &str) -> Result<ResearchNode, String> {
+        if self
+            .research_node(node_id)
+            .is_ok_and(|node| node.runtime == ResearchRuntime::Sdk && node.status.is_terminal())
+        {
+            crate::research_runtime::wait_for_session_stop(
+                node_id,
+                crate::claude_sdk::INTERRUPT_GRACE + std::time::Duration::from_secs(1),
+            );
+        }
         let node = {
             let mut model = self
                 .inner
@@ -4949,6 +5386,7 @@ impl AppState {
             let node = model
                 .research_nodes
                 .get(node_id)
+                .cloned()
                 .ok_or_else(|| format!("research node {node_id} was not found"))?;
             let tree = model
                 .research_trees
@@ -4975,6 +5413,21 @@ impl AppState {
                     );
                 }
             }
+            if crate::research_runtime::session_registered(node_id) {
+                return Err("the previous run is still stopping; wait and retry".to_string());
+            }
+            // A retry must never be allowed to inherit a response or stderr log
+            // from the previous attempt. Keep the node terminal if cleanup fails.
+            research::remove_response_snapshot(&self.inner.config.workspace_root, node_id)?;
+            if let Some(agent_id) = node.agent_id.as_deref()
+                && model.agents.contains_key(agent_id)
+            {
+                if node.runtime == ResearchRuntime::Sdk {
+                    prune_agent_locked(&mut model, agent_id);
+                } else {
+                    return Err("the previous run is still stopping; wait and retry".to_string());
+                }
+            }
             let now = now_millis();
             let node = model
                 .research_nodes
@@ -4992,19 +5445,11 @@ impl AppState {
             node.prompt_native_id = None;
             node.response_preview = None;
             node.response_snapshot_at = None;
+            node.runtime = ResearchRuntime::Pane;
             let node = node.clone();
             touch_research_tree_locked(&mut model, &node.tree_id, now);
             node
         };
-        // Best-effort: a leftover snapshot from the failed attempt would be
-        // served as the retried run's response until the fresh one lands.
-        if let Err(err) =
-            research::remove_response_snapshot(&self.inner.config.workspace_root, node_id)
-        {
-            eprintln!(
-                "qmux: failed to remove stale research response snapshot for {node_id}: {err}"
-            );
-        }
         self.persist();
         self.emit(QmuxEvent::new(
             "research.node.updated",
@@ -5442,9 +5887,11 @@ impl AppState {
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
-            if model.research_nodes.values().any(|node| {
-                node.tree_id == tree_id && (node.pane_id.is_some() || node.status.is_active())
-            }) {
+            if model
+                .research_nodes
+                .values()
+                .any(|node| node.tree_id == tree_id && research_node_has_live_execution(node))
+            {
                 return Err("cannot archive research while it has active runs".to_string());
             }
             let tree = model
@@ -5510,10 +5957,25 @@ impl AppState {
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
-            if model.research_nodes.values().any(|node| {
-                node.tree_id == tree_id && (node.pane_id.is_some() || node.status.is_active())
-            }) {
+            if model
+                .research_nodes
+                .values()
+                .any(|node| node.tree_id == tree_id && research_node_has_live_execution(node))
+            {
                 return Err("cannot remove a research tree while it has active runs".to_string());
+            }
+            let stopped_sdk_agents = model
+                .research_nodes
+                .values()
+                .filter(|node| {
+                    node.tree_id == tree_id
+                        && node.runtime == ResearchRuntime::Sdk
+                        && node.pane_id.is_none()
+                })
+                .filter_map(|node| node.agent_id.clone())
+                .collect::<Vec<_>>();
+            for agent_id in stopped_sdk_agents {
+                prune_agent_locked(&mut model, &agent_id);
             }
             let node_ids = model
                 .research_nodes
@@ -5644,10 +6106,23 @@ impl AppState {
             }
 
             if model.research_nodes.values().any(|node| {
-                subtree_ids.contains(&node.id)
-                    && (node.pane_id.is_some() || node.status.is_active())
+                subtree_ids.contains(&node.id) && research_node_has_live_execution(node)
             }) {
                 return Err("cannot delete a research branch while it has active runs".to_string());
+            }
+
+            let stopped_sdk_agents = model
+                .research_nodes
+                .values()
+                .filter(|node| {
+                    subtree_ids.contains(&node.id)
+                        && node.runtime == ResearchRuntime::Sdk
+                        && node.pane_id.is_none()
+                })
+                .filter_map(|node| node.agent_id.clone())
+                .collect::<Vec<_>>();
+            for agent_id in stopped_sdk_agents {
+                prune_agent_locked(&mut model, &agent_id);
             }
 
             let thread_ids = model
@@ -5749,8 +6224,7 @@ impl AppState {
         Ok(ResearchWorkspaceDependencies {
             tree_count: tree_ids.len(),
             has_active_runs: model.research_nodes.values().any(|node| {
-                tree_ids.contains(node.tree_id.as_str())
-                    && (node.status.is_active() || node.pane_id.is_some())
+                tree_ids.contains(node.tree_id.as_str()) && research_node_has_live_execution(node)
             }),
             has_live_panes: model
                 .panes
@@ -5888,8 +6362,7 @@ impl AppState {
                 .map(|tree| tree.id.clone())
                 .collect::<HashSet<_>>();
             let active = model.research_nodes.values().any(|node| {
-                tree_ids.contains(&node.tree_id)
-                    && (node.status.is_active() || node.pane_id.is_some())
+                tree_ids.contains(&node.tree_id) && research_node_has_live_execution(node)
             });
             if active {
                 return Err("research folder still has active runs".to_string());
@@ -10849,6 +11322,13 @@ fn drop_research_recent_sessions(persisted: &mut PersistedState) -> bool {
 /// forever (no completion, no snapshot, no retirement, no follow-ups); one
 /// whose process exits on completion relies on `detach_research_pane`'s
 /// agent-finished check to settle Complete instead of Failed.
+fn research_node_has_live_execution(node: &ResearchNode) -> bool {
+    node.pane_id.is_some()
+        || node.status.is_active()
+        || (node.runtime == ResearchRuntime::Sdk
+            && crate::research_runtime::session_registered(&node.id))
+}
+
 fn research_status_for_agent(
     status: AgentStatus,
     has_active_subagents: bool,
@@ -13454,6 +13934,227 @@ mod tests {
     }
 
     #[test]
+    fn bind_research_node_harness_sets_sdk_runtime_without_a_pane() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        let bound = state
+            .bind_research_node_harness(&detail.tree.root_node_id, &agent)
+            .unwrap();
+        assert_eq!(bound.runtime, ResearchRuntime::Sdk);
+        assert!(bound.pane_id.is_none());
+        assert_eq!(bound.agent_id.as_deref(), Some("sdk-agent"));
+        assert_eq!(bound.status, ResearchNodeStatus::Starting);
+        assert!(!state.pane_exists("pane-7").unwrap());
+    }
+
+    #[test]
+    fn retry_reset_reclaims_a_stopped_sdk_agent() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root_id = detail.tree.root_node_id.clone();
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state.bind_research_node_harness(&root_id, &agent).unwrap();
+        state
+            .fail_research_node(&root_id, "boom".to_string())
+            .unwrap();
+        let reset = state.reset_research_node_for_retry(&root_id).unwrap();
+        assert_eq!(reset.status, ResearchNodeStatus::Queued);
+        assert_eq!(reset.runtime, ResearchRuntime::Pane);
+        assert!(state.agent("sdk-agent").unwrap().is_none());
+    }
+
+    #[test]
+    fn retry_reset_stays_terminal_when_stale_snapshot_cleanup_fails() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let node_id = detail.tree.root_node_id;
+        state
+            .fail_research_node(&node_id, "failed attempt".to_string())
+            .unwrap();
+        let snapshot_path = workspace
+            .join(crate::persistence::STATE_DIR)
+            .join("research-responses")
+            .join(format!("{node_id}.json"));
+        std::fs::create_dir_all(&snapshot_path).unwrap();
+
+        let err = state.reset_research_node_for_retry(&node_id).unwrap_err();
+        assert!(err.contains("failed to remove"), "{err}");
+        assert_eq!(
+            state.research_node(&node_id).unwrap().status,
+            ResearchNodeStatus::Failed
+        );
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn sdk_snapshot_failure_fails_the_node_and_keeps_live_turns() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let tree_id = detail.tree.id.clone();
+        let node_id = detail.tree.root_node_id;
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state.bind_research_node_harness(&node_id, &agent).unwrap();
+        let mut turn = sample_user_turn(&agent.id, "answer");
+        turn.role = "assistant".to_string();
+        state.append_harness_turn(turn).unwrap();
+        std::fs::write(workspace.join(".qmux"), b"not a directory").unwrap();
+
+        let err = state
+            .finish_research_sdk_run(&node_id, &agent.id, true, None)
+            .unwrap_err();
+        assert!(err.contains("failed"), "{err}");
+        let node = state.research_node(&node_id).unwrap();
+        assert_eq!(node.status, ResearchNodeStatus::Failed);
+        assert!(
+            node.error
+                .as_deref()
+                .is_some_and(|error| error.contains("could not be preserved"))
+        );
+        assert!(state.agent(&agent.id).unwrap().is_some());
+        assert_eq!(
+            state.research_node_content(&node_id).unwrap().turns.len(),
+            1
+        );
+        std::fs::remove_file(workspace.join(".qmux")).unwrap();
+        state.remove_research_tree(&tree_id).unwrap();
+        assert!(state.agent(&agent.id).unwrap().is_none());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn sdk_completion_overwrites_an_existing_snapshot() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Question".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let node_id = detail.tree.root_node_id;
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state.bind_research_node_harness(&node_id, &agent).unwrap();
+        let mut stale = sample_user_turn(&agent.id, "stale");
+        stale.role = "assistant".to_string();
+        research::write_response_snapshot(&workspace, &node_id, &[stale]).unwrap();
+        let mut current = sample_user_turn(&agent.id, "current");
+        current.role = "assistant".to_string();
+        state.append_harness_turn(current).unwrap();
+
+        state
+            .finish_research_sdk_run(&node_id, &agent.id, true, None)
+            .unwrap();
+        let snapshot = research::read_response_snapshot(&workspace, &node_id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            snapshot[0].blocks.as_slice(),
+            [crate::transcript::TurnBlock::Text { text }] if text == "current"
+        ));
+        assert_eq!(
+            state.research_node(&node_id).unwrap().status,
+            ResearchNodeStatus::Complete
+        );
+        assert!(state.agent(&agent.id).unwrap().is_none());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn restore_prunes_pane_less_sdk_research_agents() {
+        let workspace = temp_workspace();
+        let (tree_id, node_id) = {
+            let state = AppState::new(test_config(workspace.clone()));
+            assert!(state.restore_session().is_empty());
+            state.insert_group_after(sample_group(), None).unwrap();
+            let detail = state
+                .create_research_tree(CreateResearchTreeRequest {
+                    prompt: "Headless".to_string(),
+                    title: None,
+                    adapter: "claude".to_string(),
+                    model: None,
+                    effort: None,
+                    group_id: "group-1".to_string(),
+                })
+                .unwrap();
+            let mut agent = sample_agent("sdk-agent");
+            agent.pane_id = None;
+            state.insert_agent(agent.clone()).unwrap();
+            state
+                .bind_research_node_harness(&detail.tree.root_node_id, &agent)
+                .unwrap();
+            state.finalize_persistence_for_exit();
+            (detail.tree.id.clone(), detail.tree.root_node_id.clone())
+        };
+
+        let restored = AppState::new(test_config(workspace));
+        restored.restore_session();
+        let node = restored.research_node(&node_id).unwrap();
+        assert_eq!(node.status, ResearchNodeStatus::Failed);
+        assert_eq!(
+            node.error.as_deref(),
+            Some("research run was interrupted before it could resume")
+        );
+        assert!(restored.agent("sdk-agent").unwrap().is_none());
+        restored.remove_research_tree(&tree_id).unwrap();
+    }
+
+    #[test]
     fn retry_reset_round_trips_failed_to_queued_and_back() {
         let state = AppState::new(test_config(temp_workspace()));
         state.insert_group_after(sample_group(), None).unwrap();
@@ -13660,6 +14361,7 @@ mod tests {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -13737,6 +14439,86 @@ mod tests {
     }
 
     #[test]
+    fn restore_recovers_sdk_outcome_committed_with_the_response() {
+        let workspace = temp_workspace();
+        let tree = ResearchTree {
+            id: "tree-1".to_string(),
+            title: "Recovered SDK research".to_string(),
+            root_node_id: "node-1".to_string(),
+            workspace_id: "group-1".to_string(),
+            created_at: 1,
+            updated_at: 1,
+            archived_at: None,
+            last_viewed_at: None,
+        };
+        let node = ResearchNode {
+            id: "node-1".to_string(),
+            tree_id: tree.id.clone(),
+            parent_node_id: None,
+            publication_proposal: None,
+            query_anchor: None,
+            inline: false,
+            prompt: "Question".to_string(),
+            title: None,
+            response_preview: None,
+            adapter: "claude".to_string(),
+            model: None,
+            effort: None,
+            group_id: "group-1".to_string(),
+            worktree_dir: workspace.display().to_string(),
+            native_session_id: Some("session-1".to_string()),
+            transcript_path: None,
+            prompt_native_id: None,
+            agent_id: Some("sdk-agent".to_string()),
+            pane_id: None,
+            runtime: ResearchRuntime::Sdk,
+            thread_id: None,
+            kind: ResearchNodeKind::Run,
+            origin: None,
+            status: ResearchNodeStatus::Running,
+            error: None,
+            response_snapshot_at: None,
+            created_at: 1,
+            started_at: Some(2),
+            completed_at: None,
+            highlights: Vec::new(),
+        };
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        let persisted = PersistedState {
+            groups: vec![sample_group()],
+            group_order: vec!["group-1".to_string()],
+            agents: vec![agent],
+            research_trees: HashMap::from([(tree.id.clone(), tree)]),
+            research_nodes: HashMap::from([(node.id.clone(), node)]),
+            ..PersistedState::default()
+        };
+        persistence::save(&workspace, &persisted).unwrap();
+        let mut answer = sample_user_turn("sdk-agent", "durable answer");
+        answer.role = "assistant".to_string();
+        research::write_research_run_outcome_snapshot_verified(
+            &workspace,
+            "node-1",
+            &[answer],
+            &research::ResearchRunOutcome {
+                status: ResearchNodeStatus::Complete,
+                error: None,
+                completed_at: 99,
+            },
+        )
+        .unwrap();
+
+        let restored = AppState::new(test_config(workspace.clone()));
+        restored.restore_session();
+        let recovered = restored.research_node("node-1").unwrap();
+        assert_eq!(recovered.status, ResearchNodeStatus::Complete);
+        assert_eq!(recovered.completed_at, Some(99));
+        assert_eq!(recovered.response_snapshot_at, Some(99));
+        assert!(restored.agent("sdk-agent").unwrap().is_none());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
     fn restore_splits_legacy_research_runtime_out_of_a_terminal_group() {
         let workspace = temp_workspace();
         let managed = workspace.join("legacy-managed");
@@ -13783,6 +14565,7 @@ mod tests {
             prompt_native_id: None,
             agent_id: Some(agent.id.clone()),
             pane_id: Some(research_pane.id.clone()),
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -13886,6 +14669,7 @@ mod tests {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -13964,6 +14748,7 @@ mod tests {
             prompt_native_id: None,
             agent_id: None,
             pane_id: None,
+            runtime: crate::research::ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -14051,6 +14836,7 @@ mod tests {
                     prompt_native_id: None,
                     agent_id: None,
                     pane_id: None,
+                    runtime: crate::research::ResearchRuntime::Pane,
                     thread_id: None,
                     kind: ResearchNodeKind::Run,
                     origin: None,
@@ -16858,7 +17644,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_confirmation_counts_only_live_panes() {
+    fn exit_confirmation_counts_live_panes_or_active_research() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
 
@@ -16889,6 +17675,73 @@ mod tests {
             .mark_pane_status("pane-failed", PaneStatus::Failed)
             .unwrap();
         assert!(!state.should_confirm_exit());
+
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Headless".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_harness(&detail.tree.root_node_id, &agent)
+            .unwrap();
+        assert!(state.should_confirm_exit());
+        state
+            .finish_research_sdk_run(&detail.tree.root_node_id, &agent.id, false, None)
+            .unwrap();
+        assert!(!state.should_confirm_exit());
+    }
+
+    #[test]
+    fn confirmed_exit_persists_active_research_as_cancelled() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace.clone()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Headless".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let mut agent = sample_agent("sdk-agent");
+        agent.pane_id = None;
+        state.insert_agent(agent.clone()).unwrap();
+        state
+            .bind_research_node_harness(&detail.tree.root_node_id, &agent)
+            .unwrap();
+
+        state.mark_exit_confirmed();
+        state.finalize_persistence_for_exit();
+
+        let persisted = persistence::load_with_diagnostics(&workspace).state;
+        let node = persisted
+            .research_nodes
+            .get(&detail.tree.root_node_id)
+            .unwrap();
+        assert_eq!(node.status, ResearchNodeStatus::Cancelled);
+        assert!(node.completed_at.is_some());
+        assert_eq!(
+            persisted
+                .agents
+                .iter()
+                .find(|persisted| persisted.id == agent.id)
+                .unwrap()
+                .status,
+            AgentStatus::Idle
+        );
+        std::fs::remove_dir_all(workspace).ok();
     }
 
     #[test]

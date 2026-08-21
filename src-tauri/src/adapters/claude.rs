@@ -110,6 +110,10 @@ impl ClaudeAdapter {
         })?;
         Ok(binary.display().to_string())
     }
+
+    pub fn ensure_binary_for_sdk(&self) -> Result<String, String> {
+        self.ensure_binary()
+    }
 }
 
 impl AgentAdapter for ClaudeAdapter {

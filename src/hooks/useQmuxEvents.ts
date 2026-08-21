@@ -371,8 +371,13 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "app.exit_confirmation_requested") {
         const paneCount =
           typeof event.payload.paneCount === "number" ? event.payload.paneCount : 1;
+        const researchRunCount =
+          typeof event.payload.researchRunCount === "number"
+            ? event.payload.researchRunCount
+            : 0;
         setExitPreflightRequest((current) => ({
           paneCount,
+          researchRunCount,
           nonce: (current?.nonce ?? 0) + 1,
         }));
       }

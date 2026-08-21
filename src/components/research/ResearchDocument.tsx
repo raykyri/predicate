@@ -4666,7 +4666,11 @@ function ResearchDocument({
   }
 
   const activeRun = isActiveResearchStatus(displayNode.status);
-  const cancellationNeedsRetry = displayNode.status === "cancelled" && Boolean(displayNode.paneId);
+  // Pane runs keep `paneId` bound until the process is reaped; SDK runs do
+  // not, so a cancelled SDK node is immediately retryable. Treating
+  // `runtime === "sdk"` as "still stopping" would hide Retry forever.
+  const cancellationNeedsRetry =
+    displayNode.status === "cancelled" && Boolean(displayNode.paneId);
   const threadLength = chainNodes.length;
   // The chip counts what this page shows: the thread's turns and the branch
   // cards hanging off them — not every descendant in the whole tree. The

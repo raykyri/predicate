@@ -308,6 +308,8 @@ export interface ResearchNode {
   promptNativeId?: string | null;
   agentId?: string | null;
   paneId?: string | null;
+  /** How the run executes. Absent means the historical hidden TUI pane. */
+  runtime?: "pane" | "sdk" | null;
   /** The run agent's thread-graph record id, kept for backend reaping. */
   threadId?: string | null;
   kind?: ResearchNodeKind;

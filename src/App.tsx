@@ -465,6 +465,7 @@ import {
   getRuntimeConfig,
   getUseLoginShell,
   getResearchLaunchInstruction,
+  getResearchSdkHarness,
   getWorktreeLocation,
   generateFoundationTabTitle,
   killPane,
@@ -531,6 +532,7 @@ import {
   setPreventSleep,
   setUseLoginShell,
   setResearchLaunchInstruction,
+  setResearchSdkHarness,
   setWorktreeLocation,
   spawnAgent,
   spawnShell,
@@ -1718,6 +1720,10 @@ function MainApp() {
   const useLoginShellHydratedRef = useRef(false);
   const worktreeLocationHydratedRef = useRef(false);
   const researchLaunchInstructionHydratedRef = useRef(false);
+  const researchSdkHarnessHydratedRef = useRef(false);
+  const researchSdkHarnessPersistedRef = useRef<boolean | null>(null);
+  const researchSdkHarnessSaveSeqRef = useRef(0);
+  const researchSdkHarnessSaveChainRef = useRef<Promise<void>>(Promise.resolve());
   const paneSplitsRef = useRef<PaneSplitInfo[]>([]);
   const titleGenerationTestSeqRef = useRef(0);
   const activeTabPersistenceReadyRef = useRef(false);
@@ -6979,6 +6985,7 @@ function MainApp() {
           storedUseLoginShell,
           storedWorktreeLocation,
           storedResearchLaunchInstruction,
+          storedResearchSdkHarness,
           queueEntries,
           draftEntries,
           storedGlobalDrafts,
@@ -6988,6 +6995,7 @@ function MainApp() {
             getUseLoginShell().catch((): boolean | null => null),
             getWorktreeLocation().catch((): AppSettings["worktreeLocation"] | null => null),
             getResearchLaunchInstruction().catch((): string | null => null),
+            getResearchSdkHarness().catch((): boolean | null => null),
             // Per-agent fetches are individually guarded so one failed
             // draft/queue read just falls back to empty for that agent.
             Promise.all(
@@ -7027,6 +7035,8 @@ function MainApp() {
           const effectiveResearchLaunchInstruction = clampResearchLaunchInstruction(
             storedResearchLaunchInstruction ?? current.researchLaunchInstruction,
           );
+          const effectiveResearchSdkHarness =
+            storedResearchSdkHarness ?? current.researchSdkHarness;
           if (!backendKey && migratedKey) {
             void setOpenRouterKey(migratedKey).catch(() => undefined);
           }
@@ -7034,10 +7044,13 @@ function MainApp() {
           useLoginShellHydratedRef.current = true;
           worktreeLocationHydratedRef.current = true;
           researchLaunchInstructionHydratedRef.current = true;
+          researchSdkHarnessHydratedRef.current = true;
+          researchSdkHarnessPersistedRef.current = effectiveResearchSdkHarness;
           return current.openRouterKey === effectiveKey &&
             current.useLoginShell === effectiveUseLoginShell &&
             current.worktreeLocation === effectiveWorktreeLocation &&
-            current.researchLaunchInstruction === effectiveResearchLaunchInstruction
+            current.researchLaunchInstruction === effectiveResearchLaunchInstruction &&
+            current.researchSdkHarness === effectiveResearchSdkHarness
             ? current
             : {
                 ...current,
@@ -7045,6 +7058,7 @@ function MainApp() {
                 useLoginShell: effectiveUseLoginShell,
                 worktreeLocation: effectiveWorktreeLocation,
                 researchLaunchInstruction: effectiveResearchLaunchInstruction,
+                researchSdkHarness: effectiveResearchSdkHarness,
               };
         });
 
@@ -10996,9 +11010,13 @@ function MainApp() {
     // ordinary pane, then discard the resulting dialog descriptions. With many tabs
     // that delayed this generic confirmation by hundreds of milliseconds.
     const paneCount = Math.max(exitPreflightRequest.paneCount, panesRef.current.length);
+    const researchRunCount = Math.max(
+      exitPreflightRequest.researchRunCount,
+      runningResearchCount,
+    );
     setExitPreflightRequest(null);
-    setExitDialog(paneCount > 0 ? { paneCount } : null);
-  }, [exitPreflightRequest]);
+    setExitDialog(paneCount > 0 || researchRunCount > 0 ? { paneCount, researchRunCount } : null);
+  }, [exitPreflightRequest, runningResearchCount]);
 
   useEffect(() => {
     if (!closeDialog) {
@@ -12128,6 +12146,35 @@ function MainApp() {
       setError(`Could not save the research-instructions setting: ${unknownErrorMessage(err)}`);
     });
   }, [settings.researchLaunchInstruction]);
+
+  useEffect(() => {
+    if (!researchSdkHarnessHydratedRef.current) {
+      return;
+    }
+    const requested = settings.researchSdkHarness;
+    const saveSeq = ++researchSdkHarnessSaveSeqRef.current;
+    const save = researchSdkHarnessSaveChainRef.current
+      .catch(() => undefined)
+      .then(() => setResearchSdkHarness(requested))
+      .then(() => {
+        researchSdkHarnessPersistedRef.current = requested;
+      });
+    researchSdkHarnessSaveChainRef.current = save.catch(() => undefined);
+    void save
+      .catch((err) => {
+        if (researchSdkHarnessSaveSeqRef.current === saveSeq) {
+          const persisted = researchSdkHarnessPersistedRef.current;
+          if (persisted !== null) {
+            setSettings((current) =>
+              current.researchSdkHarness === persisted
+                ? current
+                : { ...current, researchSdkHarness: persisted },
+            );
+          }
+        }
+        setError(`Could not save the research SDK setting: ${unknownErrorMessage(err)}`);
+      });
+  }, [settings.researchSdkHarness]);
 
   // Escape handling for the worktree close/exit dialogs and the settings panel
   // lives in the app-level Escape dispatcher; this effect only resets transient
@@ -15477,6 +15524,26 @@ function MainApp() {
               />
             </div>
 
+            <div className="settings-row">
+              <div className="settings-label-stack">
+                <label htmlFor="settings-research-sdk-harness" className="settings-label">
+                  Headless Claude research
+                </label>
+                <p className="settings-hint settings-hint-weak">
+                  Run Claude research without a hidden terminal. Off falls back to the pane TUI.
+                </p>
+              </div>
+              <input
+                id="settings-research-sdk-harness"
+                type="checkbox"
+                checked={settings.researchSdkHarness}
+                onChange={(event) => {
+                  const researchSdkHarness = event.currentTarget.checked;
+                  setSettings((current) => ({ ...current, researchSdkHarness }));
+                }}
+              />
+            </div>
+
             <div className="settings-row settings-shortcut-row">
               <label htmlFor="settings-global-task-launcher-hotkey" className="settings-label">
                 Global quick launch hotkey
@@ -16115,16 +16182,22 @@ function MainApp() {
             aria-busy={quitting}
           >
             <h2 id="exit-dialog-title">Quit qmux?</h2>
-            <p>
-              Quitting will close{" "}
-              {exitDialog.paneCount === 1 ? "the open tab" : `all ${exitDialog.paneCount} tabs`}{" "}
-              and stop any running agents or processes.
-            </p>
-            {runningResearchCount > 0 ? (
+            {exitDialog.paneCount > 0 ? (
               <p>
-                {runningResearchCount} active research run
-                {runningResearchCount === 1 ? "" : "s"} will be cancelled and kept in Research
-                history.
+                Quitting will close{" "}
+                {exitDialog.paneCount === 1
+                  ? "the open tab"
+                  : `all ${exitDialog.paneCount} tabs`}{" "}
+                and stop any running agents or processes.
+              </p>
+            ) : (
+              <p>Quitting will stop running agents or processes.</p>
+            )}
+            {exitDialog.researchRunCount > 0 ? (
+              <p>
+                {exitDialog.researchRunCount} active research run
+                {exitDialog.researchRunCount === 1 ? "" : "s"} will be cancelled and kept in
+                Research history.
               </p>
             ) : null}
             <div className="confirm-dialog-actions">

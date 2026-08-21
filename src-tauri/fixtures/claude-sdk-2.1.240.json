@@ -1,0 +1,171 @@
+{
+  "capture": {
+    "claudeCodeVersion": "2.1.240",
+    "capturedAt": "2026-08-23",
+    "sanitized": true,
+    "notes": "Captured from the installed CLI with qmux's read-only argv. Identity, account, paths, UUIDs, timestamps, usage, cost, and dynamic command inventories were removed or replaced."
+  },
+  "success": {
+    "stdin": [
+      {
+        "type": "control_request",
+        "request_id": "req_1_fixture",
+        "request": { "subtype": "initialize", "hooks": null }
+      },
+      {
+        "type": "user",
+        "session_id": "",
+        "parent_tool_use_id": null,
+        "message": {
+          "role": "user",
+          "content": "Reply with exactly fixture-ok and do not use any tools."
+        }
+      }
+    ],
+    "stdout": [
+      {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "req_1_fixture",
+          "response": {
+            "commands": [{ "name": "fixture-command", "description": "<redacted>" }],
+            "agents": [],
+            "output_style": "default"
+          }
+        }
+      },
+      {
+        "type": "system",
+        "subtype": "init",
+        "cwd": "<fixture-cwd>",
+        "session_id": "fixture-session",
+        "tools": ["Glob", "Grep", "Read", "WebFetch", "WebSearch"],
+        "mcp_servers": [],
+        "model": "claude-sonnet-4-6",
+        "permissionMode": "dontAsk",
+        "claude_code_version": "2.1.240",
+        "capabilities": ["interrupt_receipt_v1", "interrupt_cancel_queued_v1", "msg_lifecycle_v1"]
+      },
+      {
+        "type": "stream_event",
+        "event": {
+          "type": "message_start",
+          "message": {
+            "model": "claude-sonnet-4-6",
+            "id": "fixture-message",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "stop_reason": null
+          }
+        },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_start",
+          "index": 0,
+          "content_block": { "type": "text", "text": "" }
+        },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": { "type": "text_delta", "text": "fixture" }
+        },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "stream_event",
+        "event": {
+          "type": "content_block_delta",
+          "index": 0,
+          "delta": { "type": "text_delta", "text": "-ok" }
+        },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "assistant",
+        "message": {
+          "model": "claude-sonnet-4-6",
+          "id": "fixture-message",
+          "type": "message",
+          "role": "assistant",
+          "content": [{ "type": "text", "text": "fixture-ok" }],
+          "stop_reason": null
+        },
+        "parent_tool_use_id": null,
+        "session_id": "fixture-session",
+        "uuid": "fixture-assistant"
+      },
+      {
+        "type": "stream_event",
+        "event": {
+          "type": "message_delta",
+          "delta": { "stop_reason": "end_turn", "stop_sequence": null }
+        },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "stream_event",
+        "event": { "type": "message_stop" },
+        "session_id": "fixture-session",
+        "parent_tool_use_id": null
+      },
+      {
+        "type": "result",
+        "is_error": false,
+        "num_turns": 1,
+        "stop_reason": "end_turn",
+        "session_id": "fixture-session",
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "subtype": "success",
+        "result": "fixture-ok",
+        "uuid": "fixture-result"
+      }
+    ]
+  },
+  "interrupt": {
+    "stdin": [
+      {
+        "type": "control_request",
+        "request_id": "req_1_fixture",
+        "request": { "subtype": "initialize", "hooks": null }
+      },
+      {
+        "type": "control_request",
+        "request_id": "req_2_fixture",
+        "request": { "subtype": "interrupt" }
+      }
+    ],
+    "stdout": [
+      {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "req_1_fixture",
+          "response": { "commands": [], "agents": [], "output_style": "default" }
+        }
+      },
+      {
+        "type": "control_response",
+        "response": {
+          "subtype": "success",
+          "request_id": "req_2_fixture",
+          "response": { "still_queued": [] }
+        }
+      }
+    ]
+  }
+}

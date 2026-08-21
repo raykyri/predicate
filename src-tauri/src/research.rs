@@ -269,6 +269,21 @@ impl ResearchNodeKind {
     }
 }
 
+/// How a research run is hosted. Pane is the historical hidden-TUI path.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ResearchRuntime {
+    #[default]
+    Pane,
+    Sdk,
+}
+
+impl ResearchRuntime {
+    pub fn is_pane(&self) -> bool {
+        matches!(self, Self::Pane)
+    }
+}
+
 /// serde skip guard for defaulted booleans (see `ResearchNode::inline`).
 fn is_false(value: &bool) -> bool {
     !*value
@@ -333,6 +348,10 @@ pub struct ResearchNode {
     pub agent_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_id: Option<String>,
+    /// How this run executes. Default `Pane` (hidden TUI) is omitted from
+    /// serialization so pre-SDK state.json and archives stay byte-identical.
+    #[serde(default, skip_serializing_if = "ResearchRuntime::is_pane")]
+    pub runtime: ResearchRuntime,
     /// The run agent's thread-graph record id. The agent record itself is
     /// pruned when the run's pane retires, so this is the only surviving link
     /// from a node to its thread record — tree removal uses it to reap the
@@ -1107,9 +1126,35 @@ fn legacy_response_snapshot_path(workspace_root: &Path, node_id: &str) -> Result
         .join(validated_snapshot_file_name(node_id)?))
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResearchRunOutcome {
+    pub status: ResearchNodeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub completed_at: u128,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseSnapshotEnvelope {
+    version: u32,
+    turns: Vec<crate::transcript::Turn>,
+    outcome: ResearchRunOutcome,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseSnapshotEnvelopeRef<'a> {
+    version: u32,
+    turns: &'a [crate::transcript::Turn],
+    outcome: &'a ResearchRunOutcome,
+}
+
 pub struct ResponseSnapshot {
     pub turns: Vec<crate::transcript::Turn>,
     pub revision: String,
+    pub outcome: Option<ResearchRunOutcome>,
 }
 
 fn read_snapshot_file(path: &Path) -> Result<Option<ResponseSnapshot>, String> {
@@ -1144,12 +1189,31 @@ fn read_snapshot_file(path: &Path) -> Result<Option<ResponseSnapshot>, String> {
             path.display()
         ));
     }
-    let turns = serde_json::from_slice(&raw)
-        .map_err(|err| format!("failed to decode {}: {err}", path.display()))?;
-    let digest = Sha256::digest(&raw);
+    // Legacy snapshots are bare turn arrays; outcome-bearing SDK snapshots
+    // are versioned objects. Inspecting the first non-whitespace byte avoids
+    // materializing an additional generic JSON tree for snapshots that may be
+    // tens of megabytes.
+    let (turns, outcome) = if raw.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'[') {
+        let turns = serde_json::from_slice(&raw)
+            .map_err(|err| format!("failed to decode {}: {err}", path.display()))?;
+        (turns, None)
+    } else {
+        let envelope: ResponseSnapshotEnvelope = serde_json::from_slice(&raw)
+            .map_err(|err| format!("failed to decode {}: {err}", path.display()))?;
+        if envelope.version != 1 {
+            return Err(format!(
+                "research response snapshot {} has unsupported version {}",
+                path.display(),
+                envelope.version
+            ));
+        }
+        (envelope.turns, Some(envelope.outcome))
+    };
+    let revision = response_revision(&turns)?;
     Ok(Some(ResponseSnapshot {
         turns,
-        revision: digest.iter().map(|byte| format!("{byte:02x}")).collect(),
+        revision,
+        outcome,
     }))
 }
 
@@ -1178,7 +1242,7 @@ pub fn write_response_snapshot(
     node_id: &str,
     turns: &[crate::transcript::Turn],
 ) -> Result<(), String> {
-    write_response_snapshot_inner(workspace_root, node_id, turns).map(|_| ())
+    write_response_snapshot_inner(workspace_root, node_id, turns, None).map(|_| ())
 }
 
 /// [`write_response_snapshot`] plus a byte-level read-back of the committed
@@ -1190,9 +1254,34 @@ pub fn write_response_snapshot_verified(
     node_id: &str,
     turns: &[crate::transcript::Turn],
 ) -> Result<(), String> {
-    let (path, raw) = write_response_snapshot_inner(workspace_root, node_id, turns)?;
-    let written = std::fs::read(&path)
-        .map_err(|err| format!("failed to read back {}: {err}", path.display()))?;
+    let (path, raw) = write_response_snapshot_inner(workspace_root, node_id, turns, None)?;
+    verify_response_snapshot_bytes(&path, &raw)
+}
+
+pub fn write_research_run_outcome_snapshot_verified(
+    workspace_root: &Path,
+    node_id: &str,
+    turns: &[crate::transcript::Turn],
+    outcome: &ResearchRunOutcome,
+) -> Result<(), String> {
+    if !outcome.status.is_terminal() {
+        return Err("research response outcome must be terminal".to_string());
+    }
+    let (path, raw) = write_response_snapshot_inner(workspace_root, node_id, turns, Some(outcome))?;
+    verify_response_snapshot_bytes(&path, &raw)
+}
+
+fn verify_response_snapshot_bytes(path: &Path, raw: &[u8]) -> Result<(), String> {
+    let written = match std::fs::read(path) {
+        Ok(written) => written,
+        Err(err) => {
+            // A caller must never persist state pointing at an unverified
+            // snapshot. Remove the committed file just as we do for a byte
+            // mismatch so startup recovery cannot later trust it.
+            let _ = std::fs::remove_file(path);
+            return Err(format!("failed to read back {}: {err}", path.display()));
+        }
+    };
     if written != raw {
         let _ = std::fs::remove_file(&path);
         return Err(format!(
@@ -1207,6 +1296,7 @@ fn write_response_snapshot_inner(
     workspace_root: &Path,
     node_id: &str,
     turns: &[crate::transcript::Turn],
+    outcome: Option<&ResearchRunOutcome>,
 ) -> Result<(PathBuf, Vec<u8>), String> {
     let path = response_snapshot_path(workspace_root, node_id)?;
     let parent = path.parent().expect("snapshot path has a parent");
@@ -1219,8 +1309,16 @@ fn write_response_snapshot_inner(
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
     }
-    let raw = serde_json::to_vec(turns)
-        .map_err(|err| format!("failed to encode research response: {err}"))?;
+    let raw = if let Some(outcome) = outcome {
+        serde_json::to_vec(&ResponseSnapshotEnvelopeRef {
+            version: 1,
+            turns,
+            outcome,
+        })
+    } else {
+        serde_json::to_vec(turns)
+    }
+    .map_err(|err| format!("failed to encode research response: {err}"))?;
     if raw.len() > MAX_RESPONSE_SNAPSHOT_BYTES {
         return Err("research response is too large to render safely".to_string());
     }
@@ -1371,7 +1469,40 @@ pub fn prune_response_snapshots(
             }
         }
     }
+    prune_research_logs(workspace_root, valid_node_ids);
     Ok(())
+}
+
+fn prune_research_logs(workspace_root: &Path, valid_node_ids: &HashSet<String>) {
+    let dir = workspace_root.join(".qmux").join("research-logs");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            eprintln!("qmux: failed to list {}: {err}", dir.display());
+            return;
+        }
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(node_id) = name.strip_suffix(".log") else {
+            continue;
+        };
+        if valid_node_ids.contains(node_id) {
+            continue;
+        }
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            eprintln!(
+                "qmux: failed to prune research log {}: {err}",
+                path.display()
+            );
+        }
+    }
 }
 
 pub fn remove_response_snapshot(workspace_root: &Path, node_id: &str) -> Result<(), String> {
@@ -1384,6 +1515,16 @@ pub fn remove_response_snapshot(workspace_root: &Path, node_id: &str) -> Result<
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(format!("failed to remove {}: {err}", path.display())),
         }
+    }
+    validated_snapshot_file_name(node_id)?;
+    let log_path = workspace_root
+        .join(".qmux")
+        .join("research-logs")
+        .join(format!("{node_id}.log"));
+    match std::fs::remove_file(&log_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(format!("failed to remove {}: {err}", log_path.display())),
     }
     Ok(())
 }
@@ -2658,6 +2799,7 @@ mod tests {
             prompt_native_id: None,
             agent_id: Some("agent-1".to_string()),
             pane_id: None,
+            runtime: ResearchRuntime::Pane,
             thread_id: None,
             kind: ResearchNodeKind::Run,
             origin: None,
@@ -2829,6 +2971,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(snapshot.revision, response_revision(&expected).unwrap());
+        let log = workspace
+            .join(".qmux")
+            .join("research-logs")
+            .join("node-1.log");
+        std::fs::create_dir_all(log.parent().unwrap()).unwrap();
+        std::fs::write(&log, b"diagnostic").unwrap();
 
         remove_response_snapshot(&workspace, "node-1").unwrap();
         assert!(
@@ -2836,6 +2984,31 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        assert!(!log.exists());
+        std::fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn sdk_outcome_and_response_commit_in_one_snapshot() {
+        let workspace = temp_workspace();
+        let expected = vec![sample_turn("turn-1")];
+        let outcome = ResearchRunOutcome {
+            status: ResearchNodeStatus::Complete,
+            error: None,
+            completed_at: 42,
+        };
+        write_research_run_outcome_snapshot_verified(&workspace, "node-1", &expected, &outcome)
+            .unwrap();
+
+        let snapshot = read_response_snapshot_with_revision(&workspace, "node-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.turns, expected);
+        assert_eq!(
+            snapshot.revision,
+            response_revision(&snapshot.turns).unwrap()
+        );
+        assert_eq!(snapshot.outcome, Some(outcome));
         std::fs::remove_dir_all(workspace).unwrap();
     }
 

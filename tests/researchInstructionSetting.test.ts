@@ -58,6 +58,17 @@ test("settings round-trip the research launch instruction", () => {
   assert.equal(loadSettings().researchLaunchInstruction, "Keep answers short.");
 });
 
+test("research SDK harness defaults on and round-trips off", () => {
+  store.clear();
+  assert.equal(loadSettings().researchSdkHarness, true);
+
+  saveSettings({ ...DEFAULT_SETTINGS, researchSdkHarness: false });
+  assert.equal(loadSettings().researchSdkHarness, false);
+
+  saveSettings({ ...DEFAULT_SETTINGS, researchSdkHarness: true });
+  assert.equal(loadSettings().researchSdkHarness, true);
+});
+
 test("corrupt or oversized stored instructions degrade safely", () => {
   store.clear();
   saveSettings({
