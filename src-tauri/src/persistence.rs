@@ -1297,6 +1297,7 @@ mod tests {
             agent_id: None,
             group_id: "group-1".to_string(),
             cwd: "/tmp/work".to_string(),
+            active_workspace: None,
             cols: 120,
             rows: 40,
             status: PaneStatus::Running,

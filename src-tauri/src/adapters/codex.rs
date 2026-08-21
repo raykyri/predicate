@@ -4511,6 +4511,7 @@ trusted_hash = "sha256:trusted"
                     agent_id: Some("agent-1".to_string()),
                     group_id: "group-1".to_string(),
                     cwd: "/tmp/qmux-codex-test".to_string(),
+                    active_workspace: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,
@@ -4527,6 +4528,7 @@ trusted_hash = "sha256:trusted"
                     backlog: Default::default(),
                     native_surface: false,
                 },
+                cwd_observation_seq: 0,
             })
             .unwrap();
         bytes

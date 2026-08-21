@@ -808,6 +808,18 @@
   font-size: calc(12px + var(--turn-font-delta, 0px));
 }
 
+.pane-tab-gitmeta .pane-tab-gitmeta-icon {
+  display: inline-block;
+  vertical-align: -1.5px;
+  margin-right: 2px;
+}
+
+/* Tabs inside a linked worktree get a subtle blue accent so they stand apart
+   from plain checkouts at a glance. */
+.pane-tab-gitmeta.is-worktree {
+  color: color-mix(in srgb, var(--status-info-fg) 55%, #6b736f);
+}
+
 .pane-tab-path {
   line-height: 1;
   padding-block: 0.1em;

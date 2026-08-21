@@ -2034,6 +2034,7 @@ mod tests {
                 agent_id: agent_id.map(ToString::to_string),
                 group_id: "group-1".to_string(),
                 cwd: "/tmp/work".to_string(),
+                active_workspace: None,
                 cols: 80,
                 rows: 24,
                 status: PaneStatus::Running,
@@ -2048,6 +2049,7 @@ mod tests {
                 backlog: Arc::new(Mutex::new(PaneBacklog::default())),
                 native_surface: false,
             },
+            cwd_observation_seq: 0,
         }
     }
 

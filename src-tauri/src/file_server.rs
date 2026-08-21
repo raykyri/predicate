@@ -1297,6 +1297,7 @@ mod tests {
                     agent_id: None,
                     group_id: "group-1".to_string(),
                     cwd: root.display().to_string(),
+                    active_workspace: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,
@@ -1311,6 +1312,7 @@ mod tests {
                     backlog: Default::default(),
                     native_surface: false,
                 },
+                cwd_observation_seq: 0,
             })
             .unwrap();
         state

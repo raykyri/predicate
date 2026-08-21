@@ -2238,6 +2238,83 @@ fn classify_git_checkout(git_dir: Option<&Path>, common_dir: Option<&Path>) -> A
     }
 }
 
+/// Resolves display-only workspace metadata for a shell pane with a single git
+/// invocation. The agent-facing [`resolve_active_workspace`] probes fields one
+/// process at a time, which is fine at transcript-tail cadence but would
+/// multiply process spawns onto every reported cd; rev-parse prints each
+/// requested value on its own line, so one process answers all of them.
+///
+/// The combined form trades away one behavior: an unborn branch (fresh
+/// `git init`, no commits) fails the whole invocation, so such a pane reports
+/// no workspace at all instead of just no branch. The result only feeds the
+/// tab worktree badge, so staying silent there is acceptable.
+pub fn resolve_pane_workspace(cwd: &str) -> Option<ActiveWorkspace> {
+    if !Path::new(cwd).is_absolute() {
+        return None;
+    }
+    let canonical = fs::canonicalize(cwd).ok()?;
+    if !canonical.is_dir() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&canonical)
+        .args([
+            "rev-parse",
+            "--show-toplevel",
+            "--absolute-git-dir",
+            "--git-common-dir",
+            "--abbrev-ref",
+            "HEAD",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let mut lines = stdout.lines();
+    // Output order mirrors the argument order. `--git-common-dir` may print a
+    // path relative to the `-C` directory, so resolve both git paths against
+    // it before comparing (older Git releases print relative paths).
+    let toplevel = lines.next()?.trim();
+    let git_dir = lines.next()?.trim();
+    let common_dir = lines.next()?.trim();
+    let branch = lines.next().map(str::trim);
+    if toplevel.is_empty() || git_dir.is_empty() || common_dir.is_empty() {
+        return None;
+    }
+    let resolve_against_cwd = |raw: &str| -> Option<PathBuf> {
+        let path = PathBuf::from(raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            canonical.join(path)
+        };
+        fs::canonicalize(path).ok()
+    };
+    let git_root = fs::canonicalize(toplevel).unwrap_or_else(|_| PathBuf::from(toplevel));
+    let kind = classify_git_checkout(
+        resolve_against_cwd(git_dir).as_deref(),
+        resolve_against_cwd(common_dir).as_deref(),
+    );
+    // Detached HEAD abbreviates to the literal "HEAD"; report no branch rather
+    // than a bogus name.
+    let branch = branch
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "HEAD")
+        .map(str::to_string);
+
+    Some(ActiveWorkspace {
+        cwd: cwd.to_string(),
+        git_root: Some(git_root.display().to_string()),
+        branch,
+        kind,
+        source: ActiveWorkspaceSource::Qmux,
+        managed_by_qmux: false,
+    })
+}
+
 fn local_git_field(cwd: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
         .arg("-C")
@@ -2814,6 +2891,89 @@ mod tests {
     }
 
     #[test]
+    fn pane_workspace_resolves_with_a_single_invocation() {
+        let workspace = temp_workspace("pane-workspace");
+        let repo = workspace.join("repo");
+        let linked = workspace.join("linked");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |cwd: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&repo, &["init", "-b", "main"]);
+        git(&repo, &["config", "user.email", "test@example.com"]);
+        git(&repo, &["config", "user.name", "qmux test"]);
+        git(&repo, &["commit", "--allow-empty", "-m", "init"]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/pane",
+                linked.to_str().unwrap(),
+            ],
+        );
+
+        let canonical_repo = fs::canonicalize(&repo).unwrap();
+        let canonical_linked = fs::canonicalize(&linked).unwrap();
+
+        let main = resolve_pane_workspace(repo.to_str().unwrap()).unwrap();
+        assert_eq!(main.kind, ActiveWorkspaceKind::MainCheckout);
+        assert_eq!(main.git_root.as_deref(), canonical_repo.to_str());
+        assert_eq!(main.branch.as_deref(), Some("main"));
+        assert_eq!(main.source, ActiveWorkspaceSource::Qmux);
+        assert!(!main.managed_by_qmux);
+
+        let worktree = resolve_pane_workspace(linked.to_str().unwrap()).unwrap();
+        assert_eq!(worktree.kind, ActiveWorkspaceKind::LinkedWorktree);
+        assert_eq!(worktree.git_root.as_deref(), canonical_linked.to_str());
+        assert_eq!(worktree.branch.as_deref(), Some("feature/pane"));
+
+        // Detached HEAD still classifies as a worktree but reports no branch.
+        git(&linked, &["checkout", "--detach", "HEAD"]);
+        let detached = resolve_pane_workspace(linked.to_str().unwrap()).unwrap();
+        assert_eq!(detached.kind, ActiveWorkspaceKind::LinkedWorktree);
+        assert_eq!(detached.branch, None);
+
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn pane_workspace_stays_silent_outside_git_and_on_unborn_branches() {
+        let workspace = temp_workspace("pane-workspace-none");
+        let plain = workspace.join("plain");
+        let unborn = workspace.join("unborn");
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&unborn).unwrap();
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&unborn)
+            .args(["init", "-b", "main"])
+            .output()
+            .expect("git runs");
+        assert!(output.status.success());
+
+        assert_eq!(resolve_pane_workspace(plain.to_str().unwrap()), None);
+        // Unborn branch: the combined rev-parse fails, so no workspace at all
+        // (accepted regression versus the per-field agent resolver).
+        assert_eq!(resolve_pane_workspace(unborn.to_str().unwrap()), None);
+        assert_eq!(resolve_pane_workspace("relative/path"), None);
+        assert_eq!(resolve_pane_workspace("/no/such/qmux/dir"), None);
+
+        fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
     fn git_main_checkout_rejects_a_directory_outside_git() {
         let directory = temp_workspace("not-git");
         let err = git_main_checkout(&Host::Local, directory.to_str().unwrap()).unwrap_err();
@@ -3309,6 +3469,7 @@ mod tests {
             agent_id: None,
             group_id: group_id.to_string(),
             cwd: cwd.display().to_string(),
+            active_workspace: None,
             cols: 80,
             rows: 24,
             status: crate::state::PaneStatus::Running,

@@ -967,12 +967,8 @@ fi
 {qmux_function}
 {agent_functions}
 if [ -n "${{QMUX_PANE_ID:-}}" ]; then
-  typeset -g __qmux_last_pwd=""
   __qmux_report_cwd() {{
-    if [ "$PWD" != "$__qmux_last_pwd" ]; then
-      __qmux_last_pwd="$PWD"
-      {cli} cwd >/dev/null 2>&1
-    fi
+    {cli} cwd >/dev/null 2>&1
   }}
   autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __qmux_report_cwd
 fi
@@ -1015,12 +1011,8 @@ fi"#
 {qmux_function}
 {agent_functions}
 if [ -n "${{QMUX_PANE_ID:-}}" ]; then
-  __qmux_last_pwd=""
   __qmux_report_cwd() {{
-    if [ "$PWD" != "$__qmux_last_pwd" ]; then
-      __qmux_last_pwd="$PWD"
-      {cli} cwd >/dev/null 2>&1
-    fi
+    {cli} cwd >/dev/null 2>&1
   }}
   case "$PROMPT_COMMAND" in
     *__qmux_report_cwd*) ;;
@@ -1337,6 +1329,14 @@ fn spawn_portable_pty(
         agent_id: spec.agent_id,
         group_id: spec.group_id,
         cwd: spec.cwd.display().to_string(),
+        // Shell tabs get their worktree badge from a single git probe at
+        // spawn; agent tabs leave this unset and rely on transcript tailing.
+        active_workspace: match spec.kind {
+            PaneKind::Shell => {
+                crate::workspace::resolve_pane_workspace(spec.cwd.to_str().unwrap_or_default())
+            }
+            PaneKind::Agent => None,
+        },
         cols: initial_size.cols,
         rows: initial_size.rows,
         status: PaneStatus::Running,
@@ -1358,6 +1358,7 @@ fn spawn_portable_pty(
             backlog: backlog.clone(),
             native_surface,
         },
+        cwd_observation_seq: 0,
     };
 
     state.insert_pane(runtime)?;
@@ -3604,6 +3605,9 @@ mod tests {
             // Shell integration reports cwd changes so restarts reopen the last dir.
             assert!(script.contains("'/Applications/qmux app/qmux' cwd"));
             assert!(script.contains("__qmux_report_cwd"));
+            // Every prompt reports, even when PWD is unchanged, so an in-place
+            // `git switch` refreshes the branch shown on the tab.
+            assert!(!script.contains("__qmux_last_pwd"));
             // No resume requested: the script must not auto-run an agent on startup.
             assert!(!script.contains("--resume"));
         }
@@ -4154,6 +4158,7 @@ mod tests {
             agent_id: None,
             group_id: "group-1".to_string(),
             cwd: std::env::temp_dir().display().to_string(),
+            active_workspace: None,
             cols: 100,
             rows: 24,
             status: PaneStatus::Running,

@@ -159,6 +159,11 @@ struct AppStateInner {
     // would expose unrelated panes and sessions to a leaked preview token.
     file_preview_grants: Mutex<HashMap<String, HashSet<std::path::PathBuf>>>,
     model: Mutex<Model>,
+    // Coordinates the two short model mutations around an out-of-lock shell
+    // workspace probe. Reports take this lock to reserve a revision and again
+    // to commit/emit it, so a superseded probe can never publish stale cwd
+    // metadata after a newer report.
+    pane_cwd_commit_lock: Mutex<()>,
     transcript_tails: Mutex<HashMap<String, TranscriptTailRegistration>>,
     next_transcript_tail: AtomicU64,
     next_id: AtomicU64,
@@ -1250,6 +1255,9 @@ pub enum SubmitWatchStatus {
 pub struct PaneRuntime {
     pub info: PaneInfo,
     pub backend: PaneBackend,
+    /// Process-local revision for cwd/workspace observations. This is not part
+    /// of PaneInfo because it only orders concurrent probes within one run.
+    pub cwd_observation_seq: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1266,6 +1274,12 @@ pub struct PaneInfo {
     pub agent_id: Option<String>,
     pub group_id: String,
     pub cwd: String,
+    /// Display-only workspace observation for shell tabs (checkout kind, git
+    /// root, branch), resolved with a single git invocation at spawn and on
+    /// each shell prompt. Agent panes leave this unset: they carry their own
+    /// live `AgentInfo.active_workspace` from transcript tailing instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_workspace: Option<ActiveWorkspace>,
     pub cols: u16,
     pub rows: u16,
     pub status: PaneStatus,
@@ -1613,6 +1627,7 @@ impl AppState {
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
                 model: Mutex::new(Model::default()),
+                pane_cwd_commit_lock: Mutex::new(()),
                 transcript_tails: Mutex::new(HashMap::new()),
                 next_transcript_tail: AtomicU64::new(1),
                 next_id: AtomicU64::new(1),
@@ -9696,35 +9711,85 @@ impl AppState {
         if !candidate.is_dir() {
             return Err("pane cwd is not an existing directory; refusing to persist".to_string());
         }
-        let changed = {
+        let (observation_seq, cwd_changed, is_shell) = {
+            let _commit_guard = self
+                .inner
+                .pane_cwd_commit_lock
+                .lock()
+                .map_err(|_| "pane cwd commit lock poisoned".to_string())?;
             let mut model = self
                 .inner
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
-            match model.panes.get_mut(pane_id) {
-                Some(pane) if pane.info.cwd != cwd => {
-                    pane.info.cwd = cwd.clone();
-                    true
-                }
-                _ => false,
+            let Some(pane) = model.panes.get_mut(pane_id) else {
+                return Ok(());
+            };
+            let cwd_changed = pane.info.cwd != cwd;
+            let is_shell = matches!(pane.info.kind, PaneKind::Shell);
+            if !cwd_changed && !is_shell {
+                return Ok(());
             }
+            pane.cwd_observation_seq = pane.cwd_observation_seq.wrapping_add(1);
+            let observation_seq = pane.cwd_observation_seq;
+            if cwd_changed {
+                pane.info.cwd = cwd.clone();
+                pane.info.active_workspace = None;
+            }
+            (observation_seq, cwd_changed, is_shell)
         };
-        if changed {
-            self.persist();
-            // Persisting alone makes the cwd survive a restart, but the live UI only
-            // learns a pane's cwd at spawn and on a full pane-list refetch. Without
-            // this event a tab's shown directory (and the context-menu working dir)
-            // would stay pinned to the spawn-time cwd for the rest of the session,
-            // only catching up on the next full load (e.g. a restart). Emit a
-            // surgical update so each tab tracks the directory it is actually in.
-            self.emit(QmuxEvent::new(
-                "pane.cwd_changed",
-                Some(pane_id.to_string()),
-                None,
-                json!({ "paneId": pane_id, "cwd": cwd }),
-            ));
+
+        // Agent panes have no PaneInfo workspace observation, so an unchanged
+        // cwd remains a no-op for them. Shell panes probe at every prompt: a
+        // branch can change without the directory changing.
+        // Resolve outside both short commit sections: git can invoke hooks or
+        // otherwise take time, and must not pin the model or block other panes.
+        let active_workspace = is_shell
+            .then(|| crate::workspace::resolve_pane_workspace(&cwd))
+            .flatten();
+
+        let _commit_guard = self
+            .inner
+            .pane_cwd_commit_lock
+            .lock()
+            .map_err(|_| "pane cwd commit lock poisoned".to_string())?;
+        let should_emit = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let Some(pane) = model.panes.get_mut(pane_id) else {
+                return Ok(());
+            };
+            // A newer cwd/prompt report supersedes this probe even when it is
+            // for the same directory. Never persist or emit its stale result.
+            if pane.cwd_observation_seq != observation_seq || pane.info.cwd != cwd {
+                return Ok(());
+            }
+            let workspace_changed = is_shell && pane.info.active_workspace != active_workspace;
+            if workspace_changed {
+                pane.info.active_workspace = active_workspace.clone();
+            }
+            cwd_changed || workspace_changed
+        };
+        if !should_emit {
+            return Ok(());
         }
+
+        self.persist();
+        // Carry cwd and workspace together so the tab path, context-menu cwd,
+        // branch, and worktree badge advance as one ordered observation.
+        self.emit(QmuxEvent::new(
+            "pane.cwd_changed",
+            Some(pane_id.to_string()),
+            None,
+            json!({
+                "paneId": pane_id,
+                "cwd": cwd,
+                "activeWorkspace": active_workspace,
+            }),
+        ));
         Ok(())
     }
 
@@ -11449,6 +11514,7 @@ mod tests {
             agent_id: agent_id.map(ToString::to_string),
             group_id: "group-1".to_string(),
             cwd: "/tmp/work/agent-1".to_string(),
+            active_workspace: None,
             cols: 132,
             rows: 43,
             status: PaneStatus::Running,
@@ -15001,6 +15067,7 @@ mod tests {
                 backlog: Default::default(),
                 native_surface: false,
             },
+            cwd_observation_seq: 0,
         }
     }
 
@@ -16531,6 +16598,57 @@ mod tests {
                 .is_err()
         );
         assert_eq!(state.list_panes().unwrap()[0].cwd, real_dir);
+    }
+
+    #[test]
+    fn update_pane_cwd_refreshes_branch_when_directory_is_unchanged() {
+        let workspace = temp_workspace();
+        let repo = workspace.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "qmux test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+
+        let state = AppState::new(test_config(workspace.clone()));
+        let mut pane = sample_pane_runtime("pane-1");
+        pane.info.cwd = repo.display().to_string();
+        pane.info.active_workspace = crate::workspace::resolve_pane_workspace(&pane.info.cwd);
+        state.insert_pane(pane).unwrap();
+        assert_eq!(
+            state.list_panes().unwrap()[0]
+                .active_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("main")
+        );
+
+        git(&["switch", "-c", "feature/prompt-refresh"]);
+        state
+            .update_pane_cwd("pane-1", repo.display().to_string())
+            .unwrap();
+        assert_eq!(
+            state.list_panes().unwrap()[0]
+                .active_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("feature/prompt-refresh")
+        );
+
+        std::fs::remove_dir_all(workspace).ok();
     }
 
     #[test]

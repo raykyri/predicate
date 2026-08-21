@@ -3078,6 +3078,7 @@ mod tests {
                     agent_id: Some("agent-1".to_string()),
                     group_id: "group-1".to_string(),
                     cwd: "/tmp/qmux-hooks-test".to_string(),
+                    active_workspace: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,
@@ -3094,6 +3095,7 @@ mod tests {
                     backlog: Default::default(),
                     native_surface: false,
                 },
+                cwd_observation_seq: 0,
             })
             .unwrap();
         bytes
@@ -3522,6 +3524,7 @@ mod tests {
             agent_id: Some(agent.id.clone()),
             group_id: agent.group_id.clone(),
             cwd: dir.display().to_string(),
+            active_workspace: None,
             cols: 80,
             rows: 24,
             status: PaneStatus::Running,

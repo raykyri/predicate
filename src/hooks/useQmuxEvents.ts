@@ -20,6 +20,7 @@ import {
 import { parseAppShortcutCommand, type AppShortcutCommand } from "../lib/appShortcuts";
 import type { ExitPreflightRequest, PaneContextMenuState } from "../appTypes";
 import type {
+  ActiveWorkspace,
   AgentInfo,
   GlobalDraft,
   GroupInfo,
@@ -270,13 +271,22 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         // A shell tab reported a directory change (the user cd'd). The backend has
         // already persisted it for restart recovery; patch the live pane so the tab
         // path and context-menu working dir track the current directory instead of
-        // lagging at the spawn-time cwd until the next full pane-list load.
+        // lagging at the spawn-time cwd until the next full pane-list load. The
+        // payload also carries the freshly resolved workspace observation so the
+        // worktree badge updates in the same step.
         const cwdPaneId = event.paneId;
         const nextCwd = event.payload.cwd;
         if (typeof nextCwd === "string") {
+          const rawWorkspace = event.payload.activeWorkspace;
+          const nextWorkspace =
+            rawWorkspace && typeof rawWorkspace === "object"
+              ? (rawWorkspace as ActiveWorkspace)
+              : null;
           setPanes((current) =>
             current.map((pane) =>
-              pane.id === cwdPaneId ? { ...pane, cwd: nextCwd } : pane,
+              pane.id === cwdPaneId
+                ? { ...pane, cwd: nextCwd, activeWorkspace: nextWorkspace }
+                : pane,
             ),
           );
         }

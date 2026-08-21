@@ -47,6 +47,10 @@ export interface PaneInfo {
   agentId?: string | null;
   groupId: string;
   cwd: string;
+  /** Display-only workspace observation for shell tabs (checkout kind, git
+   * root, branch), resolved by the backend at spawn and on each shell prompt.
+   * Agent tabs leave this unset and use AgentInfo.activeWorkspace instead. */
+  activeWorkspace?: ActiveWorkspace | null;
   cols: number;
   rows: number;
   status: "starting" | "running" | "exited" | "killed" | "failed";

@@ -13084,12 +13084,22 @@ function MainApp() {
     );
     const hidePaneDir =
       splitMembersShareDir && paneSplit?.paneIds[paneSplit.paneIds.length - 1] !== pane.id;
-    const paneBranch = agentDisplayBranch(paneAgent);
-    const paneWorktreeRoot = agentDisplayWorktreeRoot(paneAgent);
-    const paneWorktreeName =
-      paneBranch && paneWorktreeRoot
-        ? (paneWorktreeRoot.split("/").filter(Boolean).pop() ?? null)
-        : null;
+    // Shell tabs carry their own backend-resolved workspace observation; agent
+    // tabs keep using their transcript-tailed live workspace (with the launch
+    // worktree as fallback before the first observation lands).
+    const paneShellWorkspace = paneAgent ? null : (pane.activeWorkspace ?? null);
+    const paneBranch =
+      agentDisplayBranch(paneAgent) ?? (paneShellWorkspace?.branch ?? null);
+    const paneWorktreeRoot =
+      agentDisplayWorktreeRoot(paneAgent) ??
+      (paneShellWorkspace?.kind === "linkedWorktree"
+        ? (paneShellWorkspace.gitRoot ?? null)
+        : null);
+    // Name comes from the root alone so a detached-HEAD worktree still badges
+    // (with just the directory name) instead of silently hiding the indicator.
+    const paneWorktreeName = paneWorktreeRoot
+      ? (paneWorktreeRoot.split("/").filter(Boolean).pop() ?? null)
+      : null;
     const paneGitMeta = [paneBranch, paneWorktreeName].filter(Boolean).join(" · ");
     const paneGitMetaTitle = [paneBranch, paneWorktreeRoot]
       .filter(Boolean)
@@ -13165,7 +13175,13 @@ function MainApp() {
               </span>
             ) : null}
             {settings.codeMode && paneGitMeta ? (
-              <span className="pane-tab-gitmeta" title={paneGitMetaTitle}>
+              <span
+                className={`pane-tab-gitmeta${paneWorktreeRoot ? " is-worktree" : ""}`}
+                title={paneGitMetaTitle}
+              >
+                {paneWorktreeRoot ? (
+                  <FolderGit2 size={11} aria-hidden="true" className="pane-tab-gitmeta-icon" />
+                ) : null}
                 {paneGitMeta}
               </span>
             ) : null}
