@@ -11244,12 +11244,18 @@ function MainApp() {
         mode,
         prompt: prompt || null,
       });
-      setPanesPreservingRecoveredDismissals((current) =>
-        current.some((candidate) => candidate.id === pane.id) ? current : [...current, pane],
-      );
+      const orderedPanes = panesWithNewTabInLaunchPosition(pane, pane.groupId);
+      setPanesPreservingRecoveredDismissals(orderedPanes);
       setActivePaneId(pane.id);
       setLastActiveGroupId(pane.groupId);
       expandNewAgentTranscriptByDefault(pane);
+      if (mode !== "resume" && pane.agentId && prompt.trim()) {
+        pendingFirstTitleByAgentRef.current.set(
+          pane.agentId,
+          createPendingFirstMessageTitle(pane.id),
+        );
+        applyPendingFirstMessageTitle(pane.agentId, prompt);
+      }
       const [latestAgents] = await Promise.all([listAgents(), refreshGroups()]);
       setAgents(latestAgents);
       setConversationHistoryOpen(false);

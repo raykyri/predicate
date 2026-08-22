@@ -13,14 +13,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_HISTORY_ENTRIES: usize = 500;
 const MAX_SCAN_FILES: usize = 4_000;
-const MAX_METADATA_LINE_BYTES: u64 = 1024 * 1024;
 const MAX_HEAD_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_CLAUDE_LINE_BYTES: usize = MAX_HEAD_BYTES as usize;
+const MAX_CODEX_LINE_BYTES: usize = 512 * 1024;
 const MAX_TAIL_BYTES: u64 = 64 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -100,7 +101,7 @@ pub fn launch(state: &AppState, request: HistoryLaunchRequest) -> Result<PaneInf
     let group_id = matching_local_group(state, &entry.cwd)?;
     let fork = request.mode != HistoryLaunchMode::Resume;
     let use_worktree = request.mode == HistoryLaunchMode::ForkWorktree;
-    adapter_registry(state.config())
+    let pane = adapter_registry(state.config())
         .get(&entry.adapter)?
         .launch(
             state,
@@ -119,7 +120,11 @@ pub fn launch(state: &AppState, request: HistoryLaunchRequest) -> Result<PaneInf
                 resume_session_id: Some(entry.session_id),
                 fork_session: fork,
             },
-        )
+        )?;
+    // A provider resume starts with the adapter's generic tab label. Preserve
+    // the durable conversation title immediately, before transcript hooks have
+    // a chance to rediscover it (Codex has no generated-title record at all).
+    Ok(state.rename_pane(&pane.id, entry.title).unwrap_or(pane))
 }
 
 fn matching_local_group(state: &AppState, cwd: &str) -> Result<Option<String>, String> {
@@ -241,7 +246,7 @@ fn claude_entry(path: &Path) -> Option<HistoryEntry> {
         preview,
         transcript_path: path.display().to_string(),
         last_active_at: millis(metadata.modified().ok()),
-        created_at: Some(millis(metadata.created().ok())),
+        created_at: metadata.created().ok().map(|value| millis(Some(value))),
         active: false,
         pane_id: None,
         agent_id: None,
@@ -258,19 +263,20 @@ fn read_claude_head(path: &Path) -> Option<(String, Option<String>)> {
     let mut cwd = None;
     let mut preview = None;
     while consumed < MAX_HEAD_BYTES {
-        let mut line = String::new();
-        let read = reader
-            .by_ref()
-            .take(MAX_METADATA_LINE_BYTES + 1)
-            .read_line(&mut line)
-            .ok()?;
-        if read == 0 {
-            break;
-        }
-        consumed = consumed.saturating_add(read as u64);
-        if read as u64 > MAX_METADATA_LINE_BYTES {
-            continue;
-        }
+        let line = match read_bounded_line(&mut reader, MAX_CLAUDE_LINE_BYTES).ok()? {
+            BoundedLine::Eof => break,
+            BoundedLine::TooLong { consumed: read } => {
+                consumed = consumed.saturating_add(read);
+                continue;
+            }
+            BoundedLine::Line {
+                value,
+                consumed: read,
+            } => {
+                consumed = consumed.saturating_add(read);
+                value
+            }
+        };
         let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
             continue;
         };
@@ -344,15 +350,10 @@ fn scan_codex(root: &Path, entries: &mut HashMap<String, HistoryEntry>) {
 fn codex_entry(path: &Path) -> Option<HistoryEntry> {
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
-    let mut first = String::new();
-    reader
-        .by_ref()
-        .take(MAX_METADATA_LINE_BYTES + 1)
-        .read_line(&mut first)
-        .ok()?;
-    if first.len() as u64 > MAX_METADATA_LINE_BYTES {
-        return None;
-    }
+    let first = match read_bounded_line(&mut reader, MAX_CODEX_LINE_BYTES).ok()? {
+        BoundedLine::Line { value, .. } => value,
+        BoundedLine::Eof | BoundedLine::TooLong { .. } => return None,
+    };
     let meta = serde_json::from_str::<Value>(first.trim_end()).ok()?;
     if meta.get("type").and_then(Value::as_str) != Some("session_meta") {
         return None;
@@ -374,7 +375,7 @@ fn codex_entry(path: &Path) -> Option<HistoryEntry> {
         preview,
         transcript_path: path.display().to_string(),
         last_active_at: millis(metadata.modified().ok()),
-        created_at: Some(millis(metadata.created().ok())),
+        created_at: metadata.created().ok().map(|value| millis(Some(value))),
         active: false,
         pane_id: None,
         agent_id: None,
@@ -387,19 +388,20 @@ fn codex_entry(path: &Path) -> Option<HistoryEntry> {
 fn first_codex_prompt(reader: &mut BufReader<File>) -> Option<String> {
     let mut consumed = 0_u64;
     while consumed < MAX_HEAD_BYTES {
-        let mut line = String::new();
-        let read = reader
-            .by_ref()
-            .take(MAX_METADATA_LINE_BYTES + 1)
-            .read_line(&mut line)
-            .ok()?;
-        if read == 0 {
-            return None;
-        }
-        consumed = consumed.saturating_add(read as u64);
-        if read as u64 > MAX_METADATA_LINE_BYTES {
-            continue;
-        }
+        let line = match read_bounded_line(reader, MAX_CODEX_LINE_BYTES).ok()? {
+            BoundedLine::Eof => return None,
+            BoundedLine::TooLong { consumed: read } => {
+                consumed = consumed.saturating_add(read);
+                continue;
+            }
+            BoundedLine::Line {
+                value,
+                consumed: read,
+            } => {
+                consumed = consumed.saturating_add(read);
+                value
+            }
+        };
         let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
             continue;
         };
@@ -462,6 +464,60 @@ fn compact_preview(value: &str, max_chars: usize) -> String {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum BoundedLine {
+    Eof,
+    Line { value: String, consumed: u64 },
+    TooLong { consumed: u64 },
+}
+
+/// Reads and consumes one complete line without ever allocating more than
+/// `max_bytes`. Oversized lines are drained through the next newline so the
+/// following call starts at a real JSONL record instead of parsing a fragment.
+fn read_bounded_line(reader: &mut impl BufRead, max_bytes: usize) -> io::Result<BoundedLine> {
+    let mut bytes = Vec::with_capacity(max_bytes.min(64 * 1024));
+    let mut consumed = 0_u64;
+    let mut too_long = false;
+    loop {
+        let buffer = reader.fill_buf()?;
+        if buffer.is_empty() {
+            return if consumed == 0 {
+                Ok(BoundedLine::Eof)
+            } else if too_long {
+                Ok(BoundedLine::TooLong { consumed })
+            } else {
+                Ok(BoundedLine::Line {
+                    value: String::from_utf8_lossy(&bytes).into_owned(),
+                    consumed,
+                })
+            };
+        }
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let take = newline.map_or(buffer.len(), |index| index + 1);
+        consumed = consumed.saturating_add(take as u64);
+        if !too_long {
+            let remaining = max_bytes.saturating_sub(bytes.len());
+            if take > remaining {
+                too_long = true;
+                bytes.clear();
+            } else {
+                bytes.extend_from_slice(&buffer[..take]);
+            }
+        }
+        reader.consume(take);
+        if newline.is_some() {
+            return if too_long {
+                Ok(BoundedLine::TooLong { consumed })
+            } else {
+                Ok(BoundedLine::Line {
+                    value: String::from_utf8_lossy(&bytes).into_owned(),
+                    consumed,
+                })
+            };
+        }
     }
 }
 
@@ -557,5 +613,22 @@ mod tests {
     fn preview_normalization_is_bounded() {
         assert_eq!(compact_preview("  a\n b\t c ", 20), "a b c");
         assert_eq!(compact_preview("abcdef", 3), "abc…");
+    }
+
+    #[test]
+    fn oversized_jsonl_line_is_drained_before_the_next_record() {
+        let input = format!("{}\nnext\n", "x".repeat(12));
+        let mut reader = BufReader::new(input.as_bytes());
+        assert_eq!(
+            read_bounded_line(&mut reader, 8).unwrap(),
+            BoundedLine::TooLong { consumed: 13 }
+        );
+        assert_eq!(
+            read_bounded_line(&mut reader, 8).unwrap(),
+            BoundedLine::Line {
+                value: "next\n".to_string(),
+                consumed: 5,
+            }
+        );
     }
 }

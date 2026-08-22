@@ -4,8 +4,9 @@ use super::{
     PrepareShellAgentLaunchRequest, PreparedShellAgentLaunch, ShellCommandIntegration,
     SpawnAgentRequest, TranscriptLifecycleEvent, WorkspaceObservation, apply_shell_cli_model,
     ensure_on_path, model_from_claude_native_transcript_line, new_uuid_v4,
-    parse_transcript_records, prepared_shell_agent, record_shell_session_lineage,
-    reusable_session_agent, shell_cli_model, shell_quote_arg, shell_quote_path,
+    parse_transcript_records, prepared_shell_agent, record_shell_fork_lineage,
+    record_shell_session_lineage, reusable_session_agent, shell_cli_model, shell_quote_arg,
+    shell_quote_path,
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
@@ -335,6 +336,11 @@ impl ClaudeAdapter {
         if request.fork_session && resume_session_id.is_none() {
             return Err("a Claude history fork requires a session id".to_string());
         }
+        let lineage_cwd = request
+            .cwd
+            .as_deref()
+            .or(request.base_repo.as_deref())
+            .map(str::to_string);
 
         let mut agent = prepare_agent_workspace_with_parent(
             state,
@@ -351,8 +357,17 @@ impl ClaudeAdapter {
         )?;
         if let Some(session_id) = resume_session_id.as_ref() {
             if request.fork_session {
-                agent.fork_point = Some(session_id.clone());
-                agent.root_session_id = Some(session_id.clone());
+                let lineage_cwd = lineage_cwd
+                    .as_deref()
+                    .unwrap_or(&agent.worktree_dir)
+                    .to_string();
+                agent = record_shell_fork_lineage(
+                    state,
+                    agent,
+                    self.id(),
+                    Some(session_id),
+                    &lineage_cwd,
+                )?;
             } else {
                 agent.session_id = Some(session_id.clone());
             }
@@ -364,6 +379,7 @@ impl ClaudeAdapter {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&agent.worktree_dir));
         if !cwd.is_dir() {
+            let _ = mark_agent_failed(state, &agent.id);
             return Err(format!(
                 "Claude working directory {} does not exist",
                 cwd.display()

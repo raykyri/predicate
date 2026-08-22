@@ -45,6 +45,8 @@ export default function ConversationHistoryDialog({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const rowRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const refresh = async () => {
     setLoading(true);
@@ -76,6 +78,23 @@ export default function ConversationHistoryDialog({
         event.preventDefault();
         event.stopPropagation();
         onClose();
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = Array.from(
+          dialogRef.current?.querySelectorAll<HTMLElement>(
+            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), [tabindex="0"]',
+          ) ?? [],
+        ).filter((element) => element.getClientRects().length > 0);
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (first && last && event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (first && last && !event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown, true);
@@ -101,15 +120,46 @@ export default function ConversationHistoryDialog({
   if (!open) return null;
   const selected = entries.find((entry) => entry.id === selectedId) ?? null;
 
-  const launch = async (mode: ConversationHistoryLaunchMode) => {
-    if (!selected || launching || !selected.cwdExists) return;
+  const launchEntry = async (
+    entry: ConversationHistoryEntry,
+    mode: ConversationHistoryLaunchMode,
+    initialPrompt: string,
+  ) => {
+    if (launching || !entry.cwdExists) return;
     setError(null);
     try {
-      await onLaunch(selected, mode, prompt.trim());
+      await onLaunch(entry, mode, initialPrompt.trim());
       setPrompt("");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  const launch = (mode: ConversationHistoryLaunchMode) => {
+    if (!selected) return Promise.resolve();
+    return launchEntry(selected, mode, prompt);
+  };
+
+  const activateEntry = (entry: ConversationHistoryEntry) => {
+    if (entry.active && entry.paneId) {
+      onFocusPane(entry.paneId);
+      return Promise.resolve();
+    }
+    return launchEntry(entry, "resume", "");
+  };
+
+  const moveSelection = (edgeOrDelta: "first" | "last" | number) => {
+    if (filtered.length === 0) return;
+    const currentIndex = Math.max(0, filtered.findIndex((entry) => entry.id === selectedId));
+    const nextIndex =
+      edgeOrDelta === "first"
+        ? 0
+        : edgeOrDelta === "last"
+          ? filtered.length - 1
+          : Math.min(filtered.length - 1, Math.max(0, currentIndex + edgeOrDelta));
+    const next = filtered[nextIndex];
+    setSelectedId(next.id);
+    requestAnimationFrame(() => rowRefs.current.get(next.id)?.focus());
   };
 
   return (
@@ -121,6 +171,7 @@ export default function ConversationHistoryDialog({
       }}
     >
       <section
+        ref={dialogRef}
         className="history-dialog"
         role="dialog"
         aria-modal="true"
@@ -181,7 +232,23 @@ export default function ConversationHistoryDialog({
         </div>
 
         <div className="history-body">
-          <div className="history-list" role="listbox" aria-label="Past conversations">
+          <div
+            className="history-list"
+            role="listbox"
+            aria-label="Past conversations"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                event.preventDefault();
+                moveSelection(event.key === "ArrowDown" ? 1 : -1);
+              } else if (event.key === "Home" || event.key === "End") {
+                event.preventDefault();
+                moveSelection(event.key === "Home" ? "first" : "last");
+              } else if (event.key === "Enter" && selected) {
+                event.preventDefault();
+                void activateEntry(selected);
+              }
+            }}
+          >
             {loading && entries.length === 0 ? (
               <div className="history-empty"><LoaderCircle className="is-spinning" /> Scanning…</div>
             ) : filtered.length === 0 ? (
@@ -196,13 +263,15 @@ export default function ConversationHistoryDialog({
                   key={entry.id}
                   type="button"
                   role="option"
+                  ref={(node) => {
+                    if (node) rowRefs.current.set(entry.id, node);
+                    else rowRefs.current.delete(entry.id);
+                  }}
+                  tabIndex={entry.id === selectedId ? 0 : -1}
                   aria-selected={entry.id === selectedId}
                   className={`history-row${entry.id === selectedId ? " is-selected" : ""}`}
                   onClick={() => setSelectedId(entry.id)}
-                  onDoubleClick={() => {
-                    if (entry.active && entry.paneId) onFocusPane(entry.paneId);
-                    else void onLaunch(entry, "resume", "");
-                  }}
+                  onDoubleClick={() => void activateEntry(entry)}
                 >
                   <span className={`history-agent history-agent--${entry.adapter}`}>
                     <Bot size={14} aria-hidden="true" />
@@ -236,8 +305,8 @@ export default function ConversationHistoryDialog({
                   <p className="history-preview">{selected.preview}</p>
                 ) : null}
                 <dl className="history-facts">
-                  <div><dt>Project</dt><dd>{selected.cwd}</dd></div>
-                  <div><dt>Session</dt><dd>{selected.sessionId}</dd></div>
+                  <div><dt>Project</dt><dd title={selected.cwd}>{selected.cwd}</dd></div>
+                  <div><dt>Session</dt><dd title={selected.sessionId}>{selected.sessionId}</dd></div>
                   {selected.model ? <div><dt>Model</dt><dd>{selected.model}</dd></div> : null}
                   <div><dt>Activity</dt><dd>{formatRelativeTime(selected.lastActiveAt)}</dd></div>
                 </dl>
