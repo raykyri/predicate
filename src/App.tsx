@@ -13138,10 +13138,10 @@ function MainApp() {
     const paneWorktreeName = paneWorktreeRoot
       ? (paneWorktreeRoot.split("/").filter(Boolean).pop() ?? null)
       : null;
-    const paneGitMeta = [paneBranch, paneWorktreeName].filter(Boolean).join(" · ");
+    const hasGitMeta = Boolean(paneBranch || paneWorktreeName);
     const paneGitMetaTitle = [paneBranch, paneWorktreeRoot]
       .filter(Boolean)
-      .join(" · ");
+      .join(" ");
     const dropGap =
       allowDrag && paneDropTarget?.kind === "gap" && paneDropTarget.groupId === groupId
         ? paneDropTarget.index
@@ -13212,15 +13212,18 @@ function MainApp() {
                 {formatPaneDir(paneDir)}
               </span>
             ) : null}
-            {settings.codeMode && paneGitMeta ? (
-              <span
-                className={`pane-tab-gitmeta${paneWorktreeRoot ? " is-worktree" : ""}`}
-                title={paneGitMetaTitle}
-              >
-                {paneWorktreeRoot ? (
-                  <FolderGit2 size={11} aria-hidden="true" className="pane-tab-gitmeta-icon" />
+            {settings.codeMode && hasGitMeta ? (
+              <span className="pane-tab-gitmeta" title={paneGitMetaTitle}>
+                {paneBranch ? (
+                  <span className="pane-tab-gitmeta-branch">{paneBranch}</span>
                 ) : null}
-                {paneGitMeta}
+                {paneBranch && paneWorktreeName ? "\u00A0" : null}
+                {paneWorktreeName ? (
+                  <span className="pane-tab-gitmeta-worktree">
+                    <FolderGit2 size={11} aria-hidden="true" className="pane-tab-gitmeta-icon" />
+                    {paneWorktreeName}
+                  </span>
+                ) : null}
               </span>
             ) : null}
           </span>
