@@ -583,6 +583,10 @@ import type { MenuBarSnapshot, MenuBarStatusTone } from "./lib/api";
 
 const LEFT_SIDEBAR_DEFAULT_WIDTH = 268;
 
+type WorktreeCreateAction =
+  | { kind: "open" }
+  | { kind: "fork"; prompt?: string; anchor?: MessageAnchor };
+
 // How long the artifact tray's undo footer holds the last removal.
 const ARTIFACT_UNDO_MS = 10_000;
 const LEFT_SIDEBAR_MIN_WIDTH = 208;
@@ -2766,10 +2770,12 @@ function MainApp() {
   const [folderPickerStatus, setFolderPickerStatus] = useState<string | null>(null);
   const [worktreeCreateDialog, setWorktreeCreateDialog] = useState<{
     pane: PaneInfo;
+    action: WorktreeCreateAction;
     name: string;
     creating: boolean;
     error: string | null;
   } | null>(null);
+  const worktreeDialogResolveRef = useRef<((created: boolean) => void) | null>(null);
   const worktreeNameInputRef = useRef<HTMLInputElement | null>(null);
   const [closeDialog, setCloseDialog] = useState<CloseDialogState | null>(null);
   const [researchFolderRemovalError, setResearchFolderRemovalError] = useState<string | null>(null);
@@ -9418,15 +9424,41 @@ function MainApp() {
     await addShellPaneInGroup(launchGroupId());
   }
 
-  async function openWorktreeFromPane(pane: PaneInfo) {
+  function dismissWorktreeCreateDialog(created: boolean) {
+    setWorktreeCreateDialog(null);
+    const resolve = worktreeDialogResolveRef.current;
+    worktreeDialogResolveRef.current = null;
+    resolve?.(created);
+  }
+
+  async function openWorktreeDialog(
+    pane: PaneInfo,
+    action: WorktreeCreateAction,
+  ): Promise<boolean> {
     setError(null);
     setPaneContextMenu(null);
     try {
       const name = await suggestPaneWorktreeName(pane.id);
-      setWorktreeCreateDialog({ pane, name, creating: false, error: null });
+      worktreeDialogResolveRef.current?.(false);
+      return await new Promise<boolean>((resolve) => {
+        worktreeDialogResolveRef.current = resolve;
+        setWorktreeCreateDialog({ pane, action, name, creating: false, error: null });
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      return false;
     }
+  }
+
+  async function openWorktreeFromPane(pane: PaneInfo) {
+    await openWorktreeDialog(pane, { kind: "open" });
+  }
+
+  function forkPaneInWorktree(
+    pane: PaneInfo,
+    options?: { prompt?: string; anchor?: MessageAnchor },
+  ): Promise<boolean> {
+    return openWorktreeDialog(pane, { kind: "fork", ...options });
   }
 
   async function createWorktreeFromDialog() {
@@ -9435,6 +9467,26 @@ function MainApp() {
       return;
     }
     setWorktreeCreateDialog({ ...dialog, creating: true, error: null });
+    if (dialog.action.kind === "fork") {
+      const forked = await forkPane(dialog.pane, {
+        useWorktree: true,
+        worktreeName: dialog.name.trim(),
+        prompt: dialog.action.prompt,
+        anchor: dialog.action.anchor,
+        onError: (message) => {
+          setWorktreeCreateDialog((current) =>
+            current && current.pane.id === dialog.pane.id
+              ? { ...current, creating: false, error: message }
+              : current,
+          );
+        },
+      });
+      if (forked) {
+        dismissWorktreeCreateDialog(true);
+      }
+      return;
+    }
+
     let created: PaneInfo;
     try {
       created = await openPaneWorktree(
@@ -9456,7 +9508,7 @@ function MainApp() {
     setPanesPreservingRecoveredDismissals(orderedPanes);
     setActivePaneId(created.id);
     setLastActiveGroupId(created.groupId);
-    setWorktreeCreateDialog(null);
+    dismissWorktreeCreateDialog(true);
     try {
       await refreshGroups();
     } catch (err) {
@@ -9749,7 +9801,7 @@ function MainApp() {
         id: "action:fork-worktree",
         section: "Actions",
         title: "Fork session in worktree",
-        action: () => void forkActivePane({ useWorktree: true }),
+        action: () => void forkPaneInWorktree(visiblePane),
       });
     }
     if (activeBrowserOwnerId) {
@@ -11282,9 +11334,11 @@ function MainApp() {
     pane: PaneInfo,
     options: {
       useWorktree: boolean;
+      worktreeName?: string;
       prompt?: string;
       anchor?: MessageAnchor;
       splitBelow?: boolean;
+      onError?: (message: string) => void;
     },
   ): Promise<boolean> {
     setError(null);
@@ -11319,7 +11373,12 @@ function MainApp() {
       }
       return true;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      if (options.onError) {
+        options.onError(message);
+      } else {
+        setError(message);
+      }
       return false;
     }
   }
@@ -11328,7 +11387,11 @@ function MainApp() {
     if (!activePane || !activeAgent) {
       return;
     }
-    await forkPane(activePane, options);
+    if (options.useWorktree) {
+      await forkPaneInWorktree(activePane);
+    } else {
+      await forkPane(activePane, options);
+    }
   }
 
   // Stable identity for the terminal input handler. The impl above is a plain
@@ -11846,6 +11909,9 @@ function MainApp() {
         }
         if (!overlays.worktreeCreateDialog?.creating) {
           setWorktreeCreateDialog(null);
+          const resolve = worktreeDialogResolveRef.current;
+          worktreeDialogResolveRef.current = null;
+          resolve?.(false);
         }
         if (!overlays.quitting) {
           setExitDialog(null);
@@ -13800,10 +13866,9 @@ function MainApp() {
                 registerDraftFlusher={registerComposerDraftFlusher}
                 onWaitTargetHover={setWaitTargetHoverAgentId}
                 onForkWithPrompt={({ useWorktree, prompt }) =>
-                  forkPane(surface.pane, {
-                    useWorktree,
-                    prompt,
-                  })
+                  useWorktree
+                    ? forkPaneInWorktree(surface.pane, { prompt })
+                    : forkPane(surface.pane, { useWorktree: false, prompt })
                 }
                 onTurnSubmitted={(agentId, text, mode) => {
                   // Show "Working…" the instant a send starts a run, before the
@@ -14856,7 +14921,7 @@ function MainApp() {
                 role="menuitem"
                 onClick={() => {
                   setPaneContextMenu(null);
-                  void forkPane(contextMenuPane, { useWorktree: true });
+                  void forkPaneInWorktree(contextMenuPane);
                 }}
               >
                 <FolderGit2 size={13} aria-hidden="true" />
@@ -15899,7 +15964,7 @@ function MainApp() {
           role="presentation"
           onMouseDown={(event) => {
             if (event.target === event.currentTarget && !worktreeCreateDialog.creating) {
-              setWorktreeCreateDialog(null);
+              dismissWorktreeCreateDialog(false);
             }
           }}
         >
@@ -15913,7 +15978,11 @@ function MainApp() {
               void createWorktreeFromDialog();
             }}
           >
-            <h2 id="create-worktree-dialog-title">Create worktree</h2>
+            <h2 id="create-worktree-dialog-title">
+              {worktreeCreateDialog.action.kind === "fork"
+                ? "Fork session in worktree"
+                : "Create worktree"}
+            </h2>
             <label className="confirm-dialog-field-label" htmlFor="create-worktree-name">
               Worktree name
             </label>
@@ -15934,8 +16003,8 @@ function MainApp() {
               aria-describedby="create-worktree-name-hint"
             />
             <p id="create-worktree-name-hint" className="rename-dialog-hint">
-              Use letters, numbers, hyphens, or underscores. The worktree starts at this tab’s
-              current commit.
+              Use letters, numbers, hyphens, or underscores. The worktree and branch use this exact
+              name and start at this tab’s current commit.
             </p>
             {worktreeCreateDialog.error ? (
               <p className="confirm-dialog-error" role="alert">
@@ -15947,7 +16016,7 @@ function MainApp() {
                 className="control-button"
                 type="button"
                 disabled={worktreeCreateDialog.creating}
-                onClick={() => setWorktreeCreateDialog(null)}
+                onClick={() => dismissWorktreeCreateDialog(false)}
               >
                 Cancel
               </button>
@@ -15957,7 +16026,9 @@ function MainApp() {
                 pending={worktreeCreateDialog.creating}
                 pendingLabel="Creating…"
               >
-                Create worktree
+                {worktreeCreateDialog.action.kind === "fork"
+                  ? "Fork session"
+                  : "Create worktree"}
               </ConfirmDialogActionButton>
             </div>
           </form>

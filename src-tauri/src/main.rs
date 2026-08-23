@@ -2315,6 +2315,7 @@ async fn agent_fork(
     state: tauri::State<'_, AppState>,
     pane_id: String,
     use_worktree: bool,
+    worktree_name: Option<String>,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
 ) -> Result<PaneInfo, String> {
@@ -2323,7 +2324,14 @@ async fn agent_fork(
         if let Some(group_id) = state.pane_group_id(&pane_id)? {
             validate_launch_workspace(&state, Some(&group_id), LaunchOrigin::Terminal)?;
         }
-        fork_agent_pane(&state, &pane_id, use_worktree, prompt, anchor)
+        fork_agent_pane(
+            &state,
+            &pane_id,
+            use_worktree,
+            prompt,
+            anchor,
+            worktree_name,
+        )
     })
     .await
     .map_err(|err| format!("agent_fork task failed: {err}"))?

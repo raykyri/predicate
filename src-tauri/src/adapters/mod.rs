@@ -20,6 +20,7 @@ pub(crate) use crate::transcript::string_field;
 use crate::workspace::{
     ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
+    prepare_named_agent_workspace_with_parent,
 };
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
@@ -1052,6 +1053,7 @@ pub fn agent_fork(
     use_worktree: bool,
     prompt: Option<String>,
     anchor: Option<MessageAnchor>,
+    worktree_name: Option<String>,
 ) -> Result<PaneInfo, String> {
     let source = state
         .agent_by_pane(authed_pane)?
@@ -1062,6 +1064,7 @@ pub fn agent_fork(
         use_worktree,
         prompt.as_deref(),
         anchor.as_ref(),
+        worktree_name.as_deref(),
     )
 }
 
@@ -1075,7 +1078,11 @@ fn fork_agent_in_shell(
     use_worktree: bool,
     prompt: Option<&str>,
     anchor: Option<&MessageAnchor>,
+    worktree_name: Option<&str>,
 ) -> Result<PaneInfo, String> {
+    if !use_worktree && worktree_name.is_some() {
+        return Err("a worktree name requires a worktree fork".to_string());
+    }
     let registry = adapter_registry(state.config());
     let adapter = registry
         .get(&source.adapter)
@@ -1109,23 +1116,28 @@ fn fork_agent_in_shell(
             None
         }
     };
-    let mut agent = prepare_agent_workspace_with_parent(
-        state,
-        PrepareAgentWorkspaceRequest {
-            group_id: Some(source.group_id.clone()),
-            base_repo: if use_worktree {
-                None
-            } else {
-                Some(source.worktree_dir.clone())
-            },
-            base_ref: Some("HEAD".to_string()),
-            adapter: source.adapter.clone(),
-            model: source.model.clone(),
-            effort: source.effort.clone(),
-            use_worktree,
+    let workspace_request = PrepareAgentWorkspaceRequest {
+        group_id: Some(source.group_id.clone()),
+        base_repo: if use_worktree && worktree_name.is_none() {
+            None
+        } else {
+            Some(source.worktree_dir.clone())
         },
-        Some(&source.id),
-    )?;
+        base_ref: Some("HEAD".to_string()),
+        adapter: source.adapter.clone(),
+        model: source.model.clone(),
+        effort: source.effort.clone(),
+        use_worktree,
+    };
+    let mut agent = match worktree_name {
+        Some(name) => prepare_named_agent_workspace_with_parent(
+            state,
+            workspace_request,
+            Some(&source.id),
+            name,
+        )?,
+        None => prepare_agent_workspace_with_parent(state, workspace_request, Some(&source.id))?,
+    };
     agent.fork_point = Some(session_id.clone());
     agent.root_session_id = source
         .root_session_id
@@ -1650,7 +1662,7 @@ mod tests {
         let state = AppState::new(test_config());
 
         // No agent bound to the pane: nothing to fork.
-        let err = agent_fork(&state, "pane-1", false, None, None).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None, None).unwrap_err();
         assert!(err.contains("no agent"), "unexpected error: {err}");
 
         // An adapter without a native fork command is rejected before any spawn is attempted.
@@ -1680,7 +1692,7 @@ mod tests {
                 created_at: 1,
             })
             .unwrap();
-        let err = agent_fork(&state, "pane-1", false, None, None).unwrap_err();
+        let err = agent_fork(&state, "pane-1", false, None, None, None).unwrap_err();
         assert_eq!(err, FORK_UNSUPPORTED_ERROR);
     }
 

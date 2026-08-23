@@ -1006,7 +1006,7 @@ pub fn prepare_agent_workspace(
     let _guard = AGENT_WORKSPACE_CREATION_LOCK
         .lock()
         .map_err(|_| "agent workspace creation lock poisoned".to_string())?;
-    prepare_agent_workspace_locked(state, request, None)
+    prepare_agent_workspace_locked(state, request, None, None)
 }
 
 /// Prepares a new agent and records its lineage before returning to the adapter
@@ -1015,8 +1015,29 @@ pub fn prepare_agent_workspace(
 /// the parent capability boundary its launcher requested.
 pub fn prepare_agent_workspace_with_parent(
     state: &AppState,
+    request: PrepareAgentWorkspaceRequest,
+    parent_id: Option<&str>,
+) -> Result<AgentInfo, String> {
+    prepare_agent_workspace_with_parent_inner(state, request, parent_id, None)
+}
+
+/// Prepares a worktree-backed child using the exact user-provided directory and
+/// branch name. Terminal-tab worktree forks use this path after collecting the
+/// name in the same dialog as an ordinary shell worktree.
+pub fn prepare_named_agent_workspace_with_parent(
+    state: &AppState,
+    request: PrepareAgentWorkspaceRequest,
+    parent_id: Option<&str>,
+    worktree_name: &str,
+) -> Result<AgentInfo, String> {
+    prepare_agent_workspace_with_parent_inner(state, request, parent_id, Some(worktree_name))
+}
+
+fn prepare_agent_workspace_with_parent_inner(
+    state: &AppState,
     mut request: PrepareAgentWorkspaceRequest,
     parent_id: Option<&str>,
+    worktree_name: Option<&str>,
 ) -> Result<AgentInfo, String> {
     let _guard = AGENT_WORKSPACE_CREATION_LOCK
         .lock()
@@ -1044,7 +1065,7 @@ pub fn prepare_agent_workspace_with_parent(
         }
         None => None,
     };
-    let agent = prepare_agent_workspace_locked(state, request, None)?;
+    let agent = prepare_agent_workspace_locked(state, request, None, worktree_name)?;
     let Some(parent) = parent else {
         return Ok(agent);
     };
@@ -1061,6 +1082,7 @@ fn prepare_agent_workspace_locked(
     state: &AppState,
     request: PrepareAgentWorkspaceRequest,
     agent_id_override: Option<String>,
+    worktree_name: Option<&str>,
 ) -> Result<AgentInfo, String> {
     let mut group = match request.group_id.as_deref() {
         Some(group_id) => state
@@ -1114,15 +1136,32 @@ fn prepare_agent_workspace_locked(
     let host = host::for_group(group.remote.as_ref());
 
     let use_worktree = request.use_worktree;
+    if worktree_name.is_some() && !use_worktree {
+        return Err("a worktree name requires a worktree-backed agent".to_string());
+    }
     let worktree_dir = if use_worktree {
         // Isolated git worktree in the configured global or project-local root
         // (or a plain directory when the base is not a git repo).
-        let dir =
-            allocate_agent_worktree_dir(state, &host, base_repo.as_deref(), &group, &agent_name)?;
+        let dir = match worktree_name {
+            Some(name) => {
+                let base_repo = base_repo.as_deref().ok_or_else(|| {
+                    "cannot create a named worktree without a project directory".to_string()
+                })?;
+                allocate_named_worktree_dir(state, &host, base_repo, &group, name)?
+            }
+            None => allocate_agent_worktree_dir(
+                state,
+                &host,
+                base_repo.as_deref(),
+                &group,
+                &agent_name,
+            )?,
+        };
         match base_repo.as_deref().filter(|repo| is_git_repo(&host, repo)) {
             Some(base_repo) => {
-                let branch_name =
-                    format!("qmux/{}/{}", sanitize_ref_segment(&group.id), agent_name);
+                let branch_name = worktree_name.map(ToString::to_string).unwrap_or_else(|| {
+                    format!("qmux/{}/{}", sanitize_ref_segment(&group.id), agent_name)
+                });
                 create_worktree(&host, base_repo, &dir, &branch_name, &base_ref)?;
                 branch = Some(branch_name);
             }
@@ -1258,6 +1297,7 @@ pub fn recover_shell_agent_from_session_start(
                 use_worktree: false,
             },
             recovered_agent_id,
+            None,
         )?
     };
     let attached = attach_agent_pane(state, &agent.id, pane.id.clone())?;
@@ -2174,11 +2214,7 @@ pub fn create_shell_worktree(
     let name = validate_worktree_name(requested_name)?;
     let dir = allocate_named_worktree_dir(state, host, main, group, name)?;
     let head = git_rev_parse_field(host, current, "HEAD")?;
-    let branch = format!(
-        "qmux/{}/{}",
-        sanitize_ref_segment(&group.id),
-        sanitize_ref_segment(&name)
-    );
+    let branch = name.to_string();
     create_worktree(host, current, &dir, &branch, &head)?;
     Ok(dir)
 }
@@ -3088,6 +3124,19 @@ mod tests {
         .trim()
         .to_string();
         assert_eq!(created_head, feature_head);
+        let created_branch = String::from_utf8(
+            Command::new("git")
+                .arg("-C")
+                .arg(&created)
+                .args(["branch", "--show-current"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_eq!(created_branch, "qmux-feature-shell");
 
         let collision = create_shell_worktree(
             &state,
@@ -3147,6 +3196,70 @@ mod tests {
         let name = suggested_shell_worktree_name(&group);
         assert!(name.starts_with("brave-otter-"), "{name}");
         assert!(validate_worktree_name(&name).is_ok());
+    }
+
+    #[test]
+    fn named_agent_worktree_uses_the_exact_directory_and_branch_name() {
+        let workspace = temp_workspace("named-agent-worktree");
+        let repo = workspace.join("repo");
+        let managed = workspace.join("managed/group");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&managed).unwrap();
+        let git = |args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "qmux test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+
+        let state = test_state_with_workspace(workspace.join("state"));
+        persistence::save_preferences(
+            &state.config().workspace_root,
+            &persistence::AppPreferences {
+                worktree_location: Some(WorktreeLocation::LocalQmux),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        state
+            .insert_group_after(allocation_group(&repo, &managed), None)
+            .unwrap();
+
+        let agent = prepare_named_agent_workspace_with_parent(
+            &state,
+            PrepareAgentWorkspaceRequest {
+                group_id: Some("group-1".to_string()),
+                base_repo: Some(repo.display().to_string()),
+                base_ref: Some("HEAD".to_string()),
+                adapter: "codex".to_string(),
+                model: None,
+                effort: None,
+                use_worktree: true,
+            },
+            None,
+            "feature_name",
+        )
+        .unwrap();
+
+        assert_eq!(agent.branch.as_deref(), Some("feature_name"));
+        assert_eq!(
+            Path::new(&agent.worktree_dir)
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some("feature_name")
+        );
+        fs::remove_dir_all(workspace).ok();
     }
 
     #[test]

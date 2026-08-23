@@ -767,6 +767,7 @@ export function forkAgent(
   paneId: string,
   options?: {
     useWorktree?: boolean;
+    worktreeName?: string;
     prompt?: string;
     anchor?: MessageAnchor;
   },
@@ -774,6 +775,7 @@ export function forkAgent(
   return invoke<PaneInfo>("agent_fork", {
     paneId,
     useWorktree: options?.useWorktree ?? false,
+    worktreeName: options?.worktreeName,
     prompt: options?.prompt,
     anchor: options?.anchor,
   });
