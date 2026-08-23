@@ -14018,6 +14018,15 @@ function MainApp() {
         >
           <div className="titlebar-drag" data-tauri-drag-region aria-hidden="true" />
           <div className="sidebar-header-controls is-grouped">
+            <button
+              type="button"
+              className="icon-button sidebar-header-button"
+              aria-label="Conversation history"
+              title="Conversation history"
+              onClick={() => setConversationHistoryOpen(true)}
+            >
+              <History size={14} aria-hidden="true" />
+            </button>
             <TerminalMapButton
               className="icon-button sidebar-header-button"
               pressed={terminalMapOpen}
@@ -14323,17 +14332,6 @@ function MainApp() {
                     {settings.codeMode ? "⌘N" : "⌘N · ⌘T"}
                   </span>
                 ) : null}
-              </div>
-              <div className="sidebar-action-with-hint">
-                <button
-                  className="control-button sidebar-settings-button"
-                  type="button"
-                  aria-label="Conversation history"
-                  title="Conversation history"
-                  onClick={() => setConversationHistoryOpen(true)}
-                >
-                  <History size={14} aria-hidden="true" />
-                </button>
               </div>
             </>
           ) : (
