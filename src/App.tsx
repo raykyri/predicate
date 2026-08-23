@@ -13103,16 +13103,16 @@ function MainApp() {
           : " pane-tab-status-queued"
         : "";
     const paneSplit = paneSplitForPane(paneSplits, pane.id);
-    // The panes of the active split render as one connected card in the sidebar.
-    // Flag the run (and its top/bottom edges) so only the split you're viewing is
-    // grouped — an inactive split keeps plain tabs. Members are contiguous within
-    // their group, so the neighbours bracket the run.
+    // Every split keeps a bracket in the sidebar so its membership remains legible
+    // after focus moves elsewhere. The active split additionally renders as one
+    // connected card. Members are contiguous within their group, so neighbouring
+    // split ids identify the bracket's top and bottom caps.
     const paneInActiveSplit =
       Boolean(activePaneSplitMembership) && activeSplitMemberIdSet.has(pane.id);
-    const isActiveSplitFirst =
-      paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index - 1]?.id ?? "");
-    const isActiveSplitLast =
-      paneInActiveSplit && !activeSplitMemberIdSet.has(groupPanes[index + 1]?.id ?? "");
+    const previousPaneSplit = paneSplitForPane(paneSplits, groupPanes[index - 1]?.id);
+    const nextPaneSplit = paneSplitForPane(paneSplits, groupPanes[index + 1]?.id);
+    const isSplitFirst = Boolean(paneSplit) && previousPaneSplit?.id !== paneSplit?.id;
+    const isSplitLast = Boolean(paneSplit) && nextPaneSplit?.id !== paneSplit?.id;
     const paneDir = agentDisplayDirectory(paneAgent, pane.cwd);
     const splitMembersShareDir = Boolean(
       paneSplit &&
@@ -13159,8 +13159,8 @@ function MainApp() {
       pane.id === activePane?.id ? "is-selected" : "",
       paneSplit ? "is-split-member" : "",
       paneInActiveSplit ? "is-split-active" : "",
-      isActiveSplitFirst ? "is-split-active-first" : "",
-      isActiveSplitLast ? "is-split-active-last" : "",
+      isSplitFirst ? "is-split-first" : "",
+      isSplitLast ? "is-split-last" : "",
       paneAgent?.id === waitTargetHoverAgentId ? "is-wait-target-preview" : "",
       canClearWorkingStatus ? "has-clearable-status" : "",
       isDraggingRow ? "is-dragging" : "",
@@ -13189,6 +13189,7 @@ function MainApp() {
         onClick={() => handlePaneTabClick(pane.id)}
         onDoubleClick={allowDrag ? () => handlePaneTabDoubleClick(pane) : undefined}
       >
+        {paneSplit ? <span className="pane-tab-split-bracket" aria-hidden="true" /> : null}
         <button
           type="button"
           className="control-button pane-tab"

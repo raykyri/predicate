@@ -334,30 +334,61 @@
   box-shadow: none;
 }
 
+/* A persistent bracket occupies the same left-edge pixel column as a normal
+   selected tab's rail, so split membership remains identifiable even when the
+   split is inactive. Each row contributes a continuous segment; the first and
+   last members add the curved caps. */
+.pane-tab-split-bracket {
+  --pane-split-bracket-color: var(--split-border-active-muted);
+  position: absolute;
+  top: -1px;
+  bottom: -1px;
+  left: 0;
+  z-index: 2;
+  width: 8px;
+  border-left: 1.5px solid var(--pane-split-bracket-color);
+  pointer-events: none;
+}
+
+.pane-tab-row.is-split-active > .pane-tab-split-bracket {
+  --pane-split-bracket-color: var(--split-border-active);
+}
+
+.pane-tab-row.is-split-first > .pane-tab-split-bracket {
+  top: 4px;
+  border-top: 1.5px solid var(--pane-split-bracket-color);
+  border-top-left-radius: var(--radius-sm);
+}
+
+.pane-tab-row.is-split-last > .pane-tab-split-bracket {
+  bottom: 4px;
+  border-bottom: 1.5px solid var(--pane-split-bracket-color);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
 /* The panes of the active split read as a single connected card: every member
-   shares the selected fill and the run is bracket-rounded so only the group's
-   outer corners are round (inner edges stay square). The focused pane keeps the
-   same accent border as a normal selected tab, separate from the amber running
-   status dot. */
+   shares the selected fill and the run is rounded only at its outer corners.
+   The bracket is the split's sole left-edge signal, including on the focused
+   member; individual selected members do not add a second active rail. */
 .pane-tab-row.is-split-active .pane-tab {
   background: var(--control-bg-hover);
   border-color: transparent;
-  border-left-color: var(--split-border-active-muted);
+  border-left-color: transparent;
   border-radius: 0;
   color: #f1f3ef;
 }
 
 .pane-tab-row.is-split-active.is-selected .pane-tab {
-  border-left-color: var(--split-border-active);
+  border-left-color: transparent;
   color: #ffffff;
 }
 
-.pane-tab-row.is-split-active-first .pane-tab {
+.pane-tab-row.is-split-active.is-split-first .pane-tab {
   border-top-left-radius: var(--radius-sm);
   border-top-right-radius: var(--radius-sm);
 }
 
-.pane-tab-row.is-split-active-last .pane-tab {
+.pane-tab-row.is-split-active.is-split-last .pane-tab {
   border-bottom-left-radius: var(--radius-sm);
   border-bottom-right-radius: var(--radius-sm);
 }
