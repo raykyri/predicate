@@ -194,12 +194,13 @@ that early) is not swept by a concurrent one.
 
 ## Codex
 
-- `SessionStart`: records the session id from `session_id`,
-  `sessionId`, `resource_id`, or `resourceId` when Codex provides one,
-  then starts transcript binding. If Codex provides `transcript_path` or
-  `transcriptPath`, qmux polls that explicit `.jsonl` path until it is
-  ready. Otherwise qmux searches `$CODEX_HOME/sessions` for a matching
-  transcript. This does not mark the agent as running.
+- `SessionStart`: treats the session id from `session_id`, `sessionId`,
+  `resource_id`, or `resourceId` as provisional and starts transcript
+  validation. If Codex provides `transcript_path` or `transcriptPath`,
+  qmux polls that explicit `.jsonl` path until its `session_meta` is
+  ready. Otherwise qmux searches `$CODEX_HOME/sessions` for a rollout
+  whose `session_meta.id` matches the candidate id. This does not mark
+  the agent as running.
 - `UserPromptSubmit`: marks the agent `Running` and emits
   `agent.prompt_submitted`. qmux reads `prompt` or `input` from the
   payload and matches it against outstanding send tracking.
@@ -213,6 +214,37 @@ that early) is not swept by a concurrent one.
   if allowed, and emits either `agent.running` or `agent.done`.
 - Unknown Codex hook events: forwarded as `agent.hook.<event>` with the
   raw hook payload.
+
+### Codex session identity binding
+
+For a bound Codex agent, qmux maintains this invariant:
+
+```text
+agent.session_id == session_meta.id(agent.transcript_path)
+```
+
+Hook delivery alone cannot establish that identity. Codex can create a
+transient side conversation inside an existing TUI and route its
+`SessionStart` through the same pane-scoped hook token even when that
+conversation has no durable rollout. Consequently, a hook-reported id
+and path form a process-local binding candidate; they do not mutate the
+persisted agent yet.
+
+Each candidate gets a generation. Validation may poll an acceptable
+explicit path, or discover a rollout below `$CODEX_HOME/sessions` by
+reading `session_meta.id`. Once a rollout proves the candidate id, qmux
+commits `session_id` and `transcript_path` together and starts the new
+tail. A newer candidate invalidates older generations, preventing a slow
+validator from committing after it has been superseded.
+
+If validation fails or no rollout appears, qmux discards the candidate.
+An existing canonical binding remains unchanged and the failed
+candidate is silent; an initially unbound agent receives the normal
+`Transcript unavailable` notice. This allows real qmux-created forks and
+resumes to take ownership once their rollouts exist while ignoring
+rollout-less TUI side conversations. On recovery and hook ingestion,
+qmux also repairs legacy hybrid state by deriving the session id from an
+already-bound rollout before selecting a session to resume.
 
 
 ## Grok

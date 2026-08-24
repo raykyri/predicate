@@ -421,6 +421,10 @@ impl CodexAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
+        // Older qmux versions could persist a hook-reported side-conversation id
+        // beside the original rollout path. The rollout is the durable authority,
+        // so repair that hybrid before choosing which Codex session to resume.
+        let agent = reconcile_codex_agent_identity(state, agent)?;
         let binary = self.ensure_binary()?;
         let codex_home = ensure_codex_integration()?;
         let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
@@ -738,6 +742,9 @@ impl CodexAdapter {
                     .as_deref()
                     .and_then(|pane_id| state.agent_by_pane(pane_id).ok().flatten())
             });
+        if let Some(current) = agent.take() {
+            agent = Some(reconcile_codex_agent_identity(state, &current)?);
+        }
         let hook_event = notification.event.clone();
         if hook_event != "SessionStart"
             && let Some(current) = agent.as_ref()
@@ -765,8 +772,6 @@ impl CodexAdapter {
                                 candidate,
                             )
                         });
-                    let session_id_for_tail = session_id.clone();
-                    let transcript_path_for_tail = transcript_path.clone();
                     let stale_fork_payload =
                         current.fork_point.as_deref().is_some_and(|fork_point| {
                             session_id.as_deref() == Some(fork_point)
@@ -775,27 +780,16 @@ impl CodexAdapter {
                                         == Some(fork_point)
                                 })
                         });
-                    // Field-scoped mutation, not a full-struct `update_agent`: this
-                    // freshly spawned process's pane is being bound by attach_agent_pane
-                    // on another thread, and a stale-snapshot write here would race it —
-                    // wiping either the pane_id it set or the session_id we set.
                     if !stale_fork_payload {
-                        state.mutate_agent(&current.id, |agent| {
-                            // Only overwrite when this event carries a session id; a
-                            // late/duplicate SessionStart that omits it must not blank a
-                            // recorded one, which fork + recovery key off.
-                            if let Some(session_id) = session_id {
-                                agent.session_id = Some(session_id);
-                            }
-                            // A startup hook only means Codex is ready, not that a turn is
-                            // running. Keep status unchanged here; the first real prompt/tool
-                            // hook promotes the agent to Running.
-                        })?;
+                        // A SessionStart can describe an ephemeral TUI fork routed
+                        // through the same pane token. Keep its identity provisional;
+                        // the binding worker promotes both fields together only after
+                        // a rollout's session_meta proves the reported id.
                         start_codex_transcript_binding(
                             state.clone(),
                             current.id.clone(),
-                            session_id_for_tail,
-                            transcript_path_for_tail,
+                            session_id,
+                            transcript_path,
                         );
                     }
                 }
@@ -1612,9 +1606,41 @@ fn codex_config_overrides_hooks(value: &str) -> bool {
     key == "hooks" || key.starts_with("hooks.") || key == "features.hooks"
 }
 
+/// Makes the durable rollout authoritative over a previously persisted hook id.
+/// This repairs hybrid identities written by qmux versions that committed
+/// SessionStart before validating its transcript.
+fn reconcile_codex_agent_identity(
+    state: &AppState,
+    current: &AgentInfo,
+) -> Result<AgentInfo, String> {
+    let Some(transcript_path) = current.transcript_path.as_deref() else {
+        return Ok(current.clone());
+    };
+    let Some(transcript_session_id) = codex_transcript_session_id(Path::new(transcript_path))
+    else {
+        return Ok(current.clone());
+    };
+    if current.session_id.as_deref() == Some(transcript_session_id.as_str()) {
+        return Ok(current.clone());
+    }
+
+    state
+        .mutate_agent(&current.id, |agent| {
+            if agent.transcript_path.as_deref() == Some(transcript_path) {
+                agent.session_id = Some(transcript_session_id.clone());
+            }
+        })?
+        .ok_or_else(|| {
+            format!(
+                "agent {} disappeared while reconciling Codex transcript identity",
+                current.id
+            )
+        })
+}
+
 /// Recovers a fork's child identity when its startup hook briefly reported the
 /// source session. Later lifecycle hooks carry the child session metadata, so the
-/// first trustworthy child id can repair the one rejected at SessionStart.
+/// first child candidate can be validated against its rollout.
 fn adopt_forked_codex_session_identity(
     state: &AppState,
     current: &AgentInfo,
@@ -1650,23 +1676,12 @@ fn adopt_forked_codex_session_identity(
         return Ok(());
     };
 
-    let updated = state.mutate_agent(&current.id, |agent| {
-        if agent.session_id.is_none() || agent.session_id.as_deref() == Some(fork_point) {
-            agent.session_id = Some(child_session_id.clone());
-        }
-    })?;
-    if updated
-        .as_ref()
-        .and_then(|agent| agent.session_id.as_deref())
-        == Some(child_session_id.as_str())
-    {
-        start_codex_transcript_binding(
-            state.clone(),
-            current.id.clone(),
-            Some(child_session_id),
-            transcript_path,
-        );
-    }
+    start_codex_transcript_binding(
+        state.clone(),
+        current.id.clone(),
+        Some(child_session_id),
+        transcript_path,
+    );
     Ok(())
 }
 
@@ -1679,47 +1694,90 @@ fn start_codex_transcript_binding(
     session_id: Option<String>,
     transcript_path: Option<String>,
 ) {
-    if let Some(transcript_path) = transcript_path {
-        if codex_binding_should_continue(&state, &agent_id, false) {
-            start_explicit_codex_transcript_binding(state, agent_id, session_id, transcript_path);
-        }
+    if state.agent(&agent_id).ok().flatten().is_some_and(|agent| {
+        agent.session_id == session_id
+            && agent.transcript_path.is_some()
+            && transcript_path
+                .as_deref()
+                .is_none_or(|path| agent.transcript_path.as_deref() == Some(path))
+    }) {
         return;
     }
 
-    let Some(session_id) = session_id.filter(|id| looks_like_codex_session_id(id)) else {
+    if transcript_path.is_none()
+        && !session_id
+            .as_deref()
+            .is_some_and(looks_like_codex_session_id)
+    {
         // No usable session id and no explicit transcript path, so directory
-        // discovery can't run. Surface a notice instead of leaving the timeline
-        // silently empty.
-        emit_codex_transcript_notice(
+        // discovery can't run. An already-bound pane may receive such a hook from
+        // a transient side conversation; keep its canonical binding quietly.
+        emit_codex_transcript_failure_if_unbound(
             &state,
             &agent_id,
-            Some("Transcript unavailable: Codex did not report a usable session id"),
+            "Transcript unavailable: Codex did not report a usable session id",
             None,
         );
         return;
+    }
+
+    let generation = match state.begin_transcript_binding_candidate(
+        &agent_id,
+        session_id.as_deref(),
+        transcript_path.as_deref(),
+    ) {
+        Ok(Some(generation)) => generation,
+        Ok(None) => return,
+        Err(err) => {
+            emit_codex_transcript_failure_if_unbound(&state, &agent_id, &err, None);
+            return;
+        }
     };
-    if !codex_binding_should_continue(&state, &agent_id, true) {
+
+    if let Some(transcript_path) = transcript_path {
+        start_explicit_codex_transcript_binding(
+            state,
+            agent_id,
+            generation,
+            session_id,
+            transcript_path,
+        );
         return;
     }
+
+    let session_id = session_id.expect("usable session id checked above");
     let Ok(codex_home) = codex_home() else {
+        finish_codex_transcript_binding_failure(
+            &state,
+            &agent_id,
+            generation,
+            "Transcript unavailable: could not resolve CODEX_HOME",
+            None,
+        );
         return;
     };
 
     thread::spawn(move || {
         for attempt in 0..CODEX_TRANSCRIPT_DISCOVERY_ATTEMPTS {
-            if !codex_binding_should_continue(&state, &agent_id, true) {
+            if !codex_binding_should_continue(&state, &agent_id, generation) {
+                state.clear_transcript_binding_candidate(&agent_id, generation);
                 return;
             }
             match find_codex_transcript_path(&codex_home, &session_id) {
                 Ok(Some(path)) => {
                     let path_string = path.display().to_string();
-                    if let Err(err) =
-                        bind_codex_transcript_path(&state, &agent_id, Some(&session_id), &path)
-                    {
-                        emit_codex_transcript_notice(
+                    if let Err(err) = bind_codex_transcript_path(
+                        &state,
+                        &agent_id,
+                        generation,
+                        Some(&session_id),
+                        &path,
+                    ) {
+                        finish_codex_transcript_binding_failure(
                             &state,
                             &agent_id,
-                            Some(&err),
+                            generation,
+                            &err,
                             Some(&path_string),
                         );
                     }
@@ -1727,7 +1785,9 @@ fn start_codex_transcript_binding(
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    emit_codex_transcript_notice(&state, &agent_id, Some(&err), None);
+                    finish_codex_transcript_binding_failure(
+                        &state, &agent_id, generation, &err, None,
+                    );
                     return;
                 }
             }
@@ -1737,20 +1797,28 @@ fn start_codex_transcript_binding(
             }
         }
 
-        emit_codex_transcript_notice(&state, &agent_id, Some("Transcript unavailable"), None);
+        finish_codex_transcript_binding_failure(
+            &state,
+            &agent_id,
+            generation,
+            "Transcript unavailable",
+            None,
+        );
     });
 }
 
 fn start_explicit_codex_transcript_binding(
     state: AppState,
     agent_id: String,
+    generation: u64,
     expected_session_id: Option<String>,
     transcript_path: String,
 ) {
     thread::spawn(move || {
         let path = PathBuf::from(&transcript_path);
         for attempt in 0..CODEX_TRANSCRIPT_DISCOVERY_ATTEMPTS {
-            if !codex_binding_should_continue(&state, &agent_id, false) {
+            if !codex_binding_should_continue(&state, &agent_id, generation) {
+                state.clear_transcript_binding_candidate(&agent_id, generation);
                 return;
             }
             match codex_transcript_path_ready(&path, expected_session_id.as_deref()) {
@@ -1758,13 +1826,15 @@ fn start_explicit_codex_transcript_binding(
                     if let Err(err) = bind_codex_transcript_path(
                         &state,
                         &agent_id,
+                        generation,
                         expected_session_id.as_deref(),
                         &path,
                     ) {
-                        emit_codex_transcript_notice(
+                        finish_codex_transcript_binding_failure(
                             &state,
                             &agent_id,
-                            Some(&err),
+                            generation,
+                            &err,
                             Some(&transcript_path),
                         );
                     }
@@ -1772,10 +1842,11 @@ fn start_explicit_codex_transcript_binding(
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    emit_codex_transcript_notice(
+                    finish_codex_transcript_binding_failure(
                         &state,
                         &agent_id,
-                        Some(&err),
+                        generation,
+                        &err,
                         Some(&transcript_path),
                     );
                     return;
@@ -1787,26 +1858,21 @@ fn start_explicit_codex_transcript_binding(
             }
         }
 
-        emit_codex_transcript_notice(
+        finish_codex_transcript_binding_failure(
             &state,
             &agent_id,
-            Some("Transcript unavailable"),
+            generation,
+            "Transcript unavailable",
             Some(&transcript_path),
         );
     });
 }
 
-/// Whether a Codex transcript binding loop should keep running. Returns false
-/// once the agent is gone, or — when `require_unbound` is set — once the agent
-/// already has a transcript path (a duplicate SessionStart or prior iteration
-/// bound it). A poisoned model lock is treated as transient so a momentary
-/// failure does not tear down discovery.
-fn codex_binding_should_continue(state: &AppState, agent_id: &str, require_unbound: bool) -> bool {
-    match state.agent(agent_id) {
-        Ok(Some(agent)) => !require_unbound || agent.transcript_path.is_none(),
-        Ok(None) => false,
-        Err(_) => true,
-    }
+/// A validator remains live only while its agent exists and no newer hook has
+/// superseded its candidate generation.
+fn codex_binding_should_continue(state: &AppState, agent_id: &str, generation: u64) -> bool {
+    state.agent(agent_id).ok().flatten().is_some()
+        && state.transcript_binding_candidate_is_current(agent_id, generation)
 }
 
 fn codex_transcript_path_ready(
@@ -1831,10 +1897,10 @@ fn codex_transcript_path_ready(
         return Err(format!("Codex transcript {} is not a file", path.display()));
     }
 
+    let Some(actual_session_id) = read_codex_transcript_session_id(path)? else {
+        return Ok(false);
+    };
     if let Some(expected_session_id) = expected_session_id {
-        let Some(actual_session_id) = read_codex_transcript_session_id(path)? else {
-            return Ok(false);
-        };
         if actual_session_id != expected_session_id {
             // The file at this path currently belongs to a different session — it
             // may be a stale/rotated rollout, or still mid-write so its first line
@@ -1852,39 +1918,37 @@ fn codex_transcript_path_ready(
 fn bind_codex_transcript_path(
     state: &AppState,
     agent_id: &str,
+    generation: u64,
     expected_session_id: Option<&str>,
     path: &Path,
 ) -> Result<(), String> {
-    let path_string = path.display().to_string();
-    let mut should_start = false;
-    let updated = state.mutate_agent(agent_id, |agent| {
-        if let Some(expected_session_id) = expected_session_id {
-            if agent
-                .session_id
-                .as_deref()
-                .is_some_and(|current| current != expected_session_id)
-            {
-                return;
-            }
-            if agent.session_id.is_none() {
-                agent.session_id = Some(expected_session_id.to_string());
-            }
-        }
-        if agent.transcript_path.as_deref() != Some(path_string.as_str()) {
-            agent.transcript_path = Some(path_string.clone());
-        }
-        should_start = true;
-    })?;
-
-    if should_start {
-        if let Some(agent) = updated {
-            state.emit(QmuxEvent::new(
-                "agent.transcript_bound",
-                agent.pane_id.clone(),
-                Some(agent.id.clone()),
-                json!({ "agent": agent, "transcriptPath": path_string }),
+    let actual_session_id = read_codex_transcript_session_id(path)?
+        .ok_or_else(|| format!("Codex transcript {} has no session_meta id", path.display()))?;
+    if let Some(expected_session_id) = expected_session_id {
+        if expected_session_id != actual_session_id {
+            return Err(format!(
+                "Codex transcript {} belongs to session {}, not {}",
+                path.display(),
+                actual_session_id,
+                expected_session_id
             ));
         }
+    }
+    let path_string = path.display().to_string();
+    let updated = state.commit_transcript_binding_candidate(
+        agent_id,
+        generation,
+        &actual_session_id,
+        &path_string,
+    )?;
+
+    if let Some(agent) = updated {
+        state.emit(QmuxEvent::new(
+            "agent.transcript_bound",
+            agent.pane_id.clone(),
+            Some(agent.id.clone()),
+            json!({ "agent": agent, "transcriptPath": path_string }),
+        ));
         emit_codex_transcript_notice(state, agent_id, None, Some(&path_string));
         start_transcript_tail(
             state.clone(),
@@ -1895,6 +1959,37 @@ fn bind_codex_transcript_path(
     }
 
     Ok(())
+}
+
+fn finish_codex_transcript_binding_failure(
+    state: &AppState,
+    agent_id: &str,
+    generation: u64,
+    message: &str,
+    path: Option<&str>,
+) {
+    if !state.transcript_binding_candidate_is_current(agent_id, generation) {
+        return;
+    }
+    state.clear_transcript_binding_candidate(agent_id, generation);
+    emit_codex_transcript_failure_if_unbound(state, agent_id, message, path);
+}
+
+fn emit_codex_transcript_failure_if_unbound(
+    state: &AppState,
+    agent_id: &str,
+    message: &str,
+    path: Option<&str>,
+) {
+    if state
+        .agent(agent_id)
+        .ok()
+        .flatten()
+        .is_some_and(|agent| agent.transcript_path.is_some())
+    {
+        return;
+    }
+    emit_codex_transcript_notice(state, agent_id, Some(message), path);
 }
 
 fn emit_codex_transcript_notice(
@@ -3322,7 +3417,7 @@ trusted_hash = "sha256:trusted"
     }
 
     #[test]
-    fn pre_spawn_fork_attach_allows_session_start_to_record_fork_session() {
+    fn pre_spawn_fork_attach_promotes_a_validated_fork_session() {
         let state = test_state();
         let mut agent = sample_agent();
         agent.status = AgentStatus::Idle;
@@ -3336,18 +3431,27 @@ trusted_hash = "sha256:trusted"
             attach_codex_agent_pane(&state, "agent-1", "pane-1".to_string(), false).unwrap();
         assert_eq!(attached.pane_id.as_deref(), Some("pane-1"));
         assert!(matches!(attached.status, AgentStatus::Idle));
+        let transcript_path = temp_dir().join("fork-session.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"session_meta","payload":{"id":"fork-session"}}"#,
+        )
+        .unwrap();
 
         let event = ingest(
             &state,
             hook_for_agent(
                 "SessionStart",
                 "agent-1",
-                json!({ "session_id": "fork-session" }),
+                json!({
+                    "session_id": "fork-session",
+                    "transcript_path": transcript_path.display().to_string()
+                }),
             ),
         );
 
         assert_eq!(event.event_type, "agent.session_start");
-        let stored = state.agent("agent-1").unwrap().expect("agent exists");
+        let stored = wait_for_agent_transcript_path(&state, "agent-1", &transcript_path);
         assert_eq!(stored.pane_id.as_deref(), Some("pane-1"));
         assert_eq!(stored.session_id.as_deref(), Some("fork-session"));
         assert_eq!(stored.parent_id.as_deref(), Some("agent-source"));
@@ -3373,6 +3477,12 @@ trusted_hash = "sha256:trusted"
             ),
         );
         assert_eq!(state.agent("agent-1").unwrap().unwrap().session_id, None);
+        let transcript_path = temp_dir().join("child-session.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"session_meta","payload":{"id":"child-session"}}"#,
+        )
+        .unwrap();
 
         ingest(
             &state,
@@ -3381,17 +3491,18 @@ trusted_hash = "sha256:trusted"
                 "agent-1",
                 json!({
                     "session_id": "child-session",
+                    "transcript_path": transcript_path.display().to_string(),
                     "prompt": "continue from the fork"
                 }),
             ),
         );
-        let stored = state.agent("agent-1").unwrap().unwrap();
+        let stored = wait_for_agent_transcript_path(&state, "agent-1", &transcript_path);
         assert_eq!(stored.session_id.as_deref(), Some("child-session"));
         assert_eq!(stored.fork_point.as_deref(), Some("source-session"));
     }
 
     #[test]
-    fn session_start_captures_codex_resource_id() {
+    fn session_start_keeps_codex_resource_id_provisional_without_a_rollout() {
         let state = test_state();
         let mut agent = sample_agent();
         agent.status = AgentStatus::Starting;
@@ -3408,10 +3519,9 @@ trusted_hash = "sha256:trusted"
 
         assert_eq!(event.event_type, "agent.session_start");
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
-        assert_eq!(agent.session_id.as_deref(), Some("codex-session-1"));
-        // SessionStart records the resource id but no longer promotes status: a
-        // session merely starting doesn't mean a turn is running, so the agent keeps
-        // whatever status it had (here Starting) until a real prompt/tool hook lands.
+        assert_eq!(agent.session_id, None);
+        // SessionStart neither commits an unverified identity nor promotes status:
+        // the agent remains Starting until a real prompt/tool hook lands.
         assert!(matches!(agent.status, AgentStatus::Starting));
     }
 
@@ -3433,7 +3543,7 @@ trusted_hash = "sha256:trusted"
 
         assert_eq!(event.event_type, "agent.session_start");
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
-        assert_eq!(agent.session_id.as_deref(), Some("codex-session-1"));
+        assert_eq!(agent.session_id, None);
         assert!(matches!(agent.status, AgentStatus::AwaitingInput));
     }
 
@@ -3442,26 +3552,15 @@ trusted_hash = "sha256:trusted"
         let state = test_state();
         let mut agent = sample_agent();
         agent.status = AgentStatus::Starting;
+        let transcript_path = temp_dir().join("codex-session.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"session_meta","payload":{"id":"codex-session-1"}}"#,
+        )
+        .unwrap();
+        agent.session_id = Some("codex-session-1".to_string());
+        agent.transcript_path = Some(transcript_path.display().to_string());
         state.insert_agent(agent).unwrap();
-
-        // The first SessionStart records the resource/session id.
-        ingest(
-            &state,
-            hook_for_agent(
-                "SessionStart",
-                "agent-1",
-                json!({ "resource_id": "codex-session-1" }),
-            ),
-        );
-        assert_eq!(
-            state
-                .agent("agent-1")
-                .unwrap()
-                .unwrap()
-                .session_id
-                .as_deref(),
-            Some("codex-session-1")
-        );
 
         // A late/duplicate SessionStart that omits the id must not blank it.
         ingest(&state, hook_for_agent("SessionStart", "agent-1", json!({})));
@@ -3535,67 +3634,221 @@ trusted_hash = "sha256:trusted"
     }
 
     #[test]
-    fn codex_binding_continues_for_alive_unbound_agent() {
+    fn codex_binding_continues_only_for_the_current_candidate() {
         let state = test_state();
-        let mut agent = sample_agent();
-        agent.transcript_path = None;
-        state.insert_agent(agent).unwrap();
+        state.insert_agent(sample_agent()).unwrap();
+        let first = state
+            .begin_transcript_binding_candidate("agent-1", Some("first"), None)
+            .unwrap()
+            .unwrap();
 
-        assert!(codex_binding_should_continue(&state, "agent-1", true));
-        assert!(codex_binding_should_continue(&state, "agent-1", false));
+        assert!(codex_binding_should_continue(&state, "agent-1", first));
+
+        let second = state
+            .begin_transcript_binding_candidate("agent-1", Some("second"), None)
+            .unwrap()
+            .unwrap();
+        assert!(!codex_binding_should_continue(&state, "agent-1", first));
+        assert!(codex_binding_should_continue(&state, "agent-1", second));
+    }
+
+    #[test]
+    fn repeated_codex_candidate_does_not_discard_its_explicit_path() {
+        let state = test_state();
+        state.insert_agent(sample_agent()).unwrap();
+        let generation = state
+            .begin_transcript_binding_candidate(
+                "agent-1",
+                Some("child-session"),
+                Some("/tmp/child-session.jsonl"),
+            )
+            .unwrap()
+            .unwrap();
+
+        let repeated = state
+            .begin_transcript_binding_candidate("agent-1", Some("child-session"), None)
+            .unwrap();
+
+        assert_eq!(repeated, None);
+        assert!(codex_binding_should_continue(&state, "agent-1", generation));
     }
 
     #[test]
     fn codex_binding_stops_when_agent_is_gone() {
         let state = test_state();
+        let generation = state
+            .begin_transcript_binding_candidate("missing", Some("session"), None)
+            .unwrap()
+            .unwrap();
 
-        assert!(!codex_binding_should_continue(&state, "missing", true));
-        assert!(!codex_binding_should_continue(&state, "missing", false));
+        assert!(!codex_binding_should_continue(
+            &state, "missing", generation
+        ));
     }
 
     #[test]
-    fn codex_binding_stops_when_transcript_bound_only_with_require_unbound() {
+    fn codex_candidate_can_be_validated_while_an_old_transcript_stays_bound() {
         let state = test_state();
         let mut agent = sample_agent();
         agent.transcript_path = Some("/tmp/session.jsonl".to_string());
         state.insert_agent(agent).unwrap();
+        let generation = state
+            .begin_transcript_binding_candidate("agent-1", Some("new-session"), None)
+            .unwrap()
+            .unwrap();
 
         assert!(
-            !codex_binding_should_continue(&state, "agent-1", true),
-            "discovery should stop when transcript is already bound"
-        );
-        assert!(
-            codex_binding_should_continue(&state, "agent-1", false),
-            "explicit path binding should continue even when transcript is bound"
+            codex_binding_should_continue(&state, "agent-1", generation),
+            "the old canonical binding must remain while the candidate is validated"
         );
     }
 
     #[test]
-    fn bind_codex_transcript_path_skips_when_session_id_mismatches() {
+    fn side_conversation_candidate_cannot_split_canonical_identity() {
         let state = test_state();
         let mut agent = sample_agent();
-        agent.session_id = Some("different-session".to_string());
-        state.insert_agent(agent).unwrap();
-        let transcript_path = temp_dir().join("codex-mismatch.jsonl");
+        let transcript_path = temp_dir().join("canonical.jsonl");
         fs::write(
             &transcript_path,
-            r#"{"type":"session_meta","payload":{"id":"target-session"}}"#,
+            r#"{"type":"session_meta","payload":{"id":"canonical-session"}}"#,
         )
         .unwrap();
-
-        bind_codex_transcript_path(&state, "agent-1", Some("target-session"), &transcript_path)
+        agent.session_id = Some("canonical-session".to_string());
+        agent.transcript_path = Some(transcript_path.display().to_string());
+        state.insert_agent(agent).unwrap();
+        let generation = state
+            .begin_transcript_binding_candidate(
+                "agent-1",
+                Some("side-conversation"),
+                Some(transcript_path.to_str().unwrap()),
+            )
+            .unwrap()
             .unwrap();
 
+        let error = bind_codex_transcript_path(
+            &state,
+            "agent-1",
+            generation,
+            Some("side-conversation"),
+            &transcript_path,
+        )
+        .unwrap_err();
+
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(error.contains("canonical-session"));
         assert_eq!(
-            agent.transcript_path, None,
-            "transcript should not be bound when session_id mismatches"
+            agent.transcript_path.as_deref(),
+            Some(transcript_path.to_str().unwrap())
         );
         assert_eq!(
             agent.session_id.as_deref(),
-            Some("different-session"),
-            "session_id should not be overwritten"
+            Some("canonical-session"),
+            "a candidate without a matching rollout must not overwrite the root identity"
         );
+    }
+
+    #[test]
+    fn validated_codex_candidate_replaces_both_canonical_fields() {
+        let state = test_state();
+        let mut agent = sample_agent();
+        agent.session_id = Some("old-session".to_string());
+        agent.transcript_path = Some("/tmp/old-session.jsonl".to_string());
+        state.insert_agent(agent).unwrap();
+        let transcript_path = temp_dir().join("new-session.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"session_meta","payload":{"id":"new-session"}}"#,
+        )
+        .unwrap();
+        let generation = state
+            .begin_transcript_binding_candidate(
+                "agent-1",
+                Some("new-session"),
+                Some(transcript_path.to_str().unwrap()),
+            )
+            .unwrap()
+            .unwrap();
+
+        bind_codex_transcript_path(
+            &state,
+            "agent-1",
+            generation,
+            Some("new-session"),
+            &transcript_path,
+        )
+        .unwrap();
+
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert_eq!(agent.session_id.as_deref(), Some("new-session"));
+        assert_eq!(
+            agent.transcript_path.as_deref(),
+            Some(transcript_path.to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn reconcile_codex_identity_repairs_a_legacy_hybrid() {
+        let state = test_state();
+        let transcript_path = temp_dir().join("canonical.jsonl");
+        fs::write(
+            &transcript_path,
+            r#"{"type":"session_meta","payload":{"id":"canonical-session"}}"#,
+        )
+        .unwrap();
+        let mut agent = sample_agent();
+        agent.session_id = Some("side-conversation".to_string());
+        agent.transcript_path = Some(transcript_path.display().to_string());
+        state.insert_agent(agent.clone()).unwrap();
+
+        let repaired = reconcile_codex_agent_identity(&state, &agent).unwrap();
+
+        assert_eq!(repaired.session_id.as_deref(), Some("canonical-session"));
+        assert_eq!(
+            state
+                .agent("agent-1")
+                .unwrap()
+                .unwrap()
+                .session_id
+                .as_deref(),
+            Some("canonical-session")
+        );
+    }
+
+    #[test]
+    fn superseded_codex_candidate_cannot_commit_late() {
+        let state = test_state();
+        state.insert_agent(sample_agent()).unwrap();
+        let old_path = temp_dir().join("old-candidate.jsonl");
+        fs::write(
+            &old_path,
+            r#"{"type":"session_meta","payload":{"id":"old-candidate"}}"#,
+        )
+        .unwrap();
+        let old_generation = state
+            .begin_transcript_binding_candidate(
+                "agent-1",
+                Some("old-candidate"),
+                Some(old_path.to_str().unwrap()),
+            )
+            .unwrap()
+            .unwrap();
+        state
+            .begin_transcript_binding_candidate("agent-1", Some("new-candidate"), None)
+            .unwrap()
+            .unwrap();
+
+        bind_codex_transcript_path(
+            &state,
+            "agent-1",
+            old_generation,
+            Some("old-candidate"),
+            &old_path,
+        )
+        .unwrap();
+
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert_eq!(agent.session_id, None);
+        assert_eq!(agent.transcript_path, None);
     }
 
     #[test]

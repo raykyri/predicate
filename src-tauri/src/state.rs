@@ -168,6 +168,11 @@ struct AppStateInner {
     pane_cwd_commit_lock: Mutex<()>,
     transcript_tails: Mutex<HashMap<String, TranscriptTailRegistration>>,
     next_transcript_tail: AtomicU64,
+    // A hook-reported transcript identity is only a candidate until the adapter
+    // validates the backing transcript. Generations prevent an older validator
+    // from committing after a newer SessionStart has superseded it.
+    transcript_binding_candidates: Mutex<HashMap<String, TranscriptBindingCandidate>>,
+    next_transcript_binding_candidate: AtomicU64,
     next_id: AtomicU64,
     app_handle: Mutex<Option<AppHandle>>,
     /// Reload-safe agent-completion lifecycle and the current sound preference.
@@ -247,6 +252,13 @@ struct TranscriptTailRegistration {
     /// gate. The new generation invalidates the old one immediately, then
     /// waits for it to finish before any turn or lifecycle mutation can race.
     gate: Arc<Mutex<()>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TranscriptBindingCandidate {
+    generation: u64,
+    session_id: Option<String>,
+    transcript_path: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -1632,6 +1644,8 @@ impl AppState {
                 pane_cwd_commit_lock: Mutex::new(()),
                 transcript_tails: Mutex::new(HashMap::new()),
                 next_transcript_tail: AtomicU64::new(1),
+                transcript_binding_candidates: Mutex::new(HashMap::new()),
+                next_transcript_binding_candidate: AtomicU64::new(1),
                 next_id: AtomicU64::new(1),
                 app_handle: Mutex::new(None),
                 completion_sound: Mutex::new(
@@ -7752,7 +7766,7 @@ impl AppState {
     /// leaving every field `f` doesn't touch exactly as it stands. Unlike `update_agent`
     /// (which inserts a whole struct snapshot the caller read earlier, outside the lock),
     /// this can't clobber a field a concurrent writer set in the meantime — e.g. the
-    /// `session_id` / `transcript_path` a freshly spawned agent's SessionStart hook
+    /// `session_id` / `transcript_path` a freshly spawned agent's transcript validator
     /// records on another thread while `attach_agent_pane` is binding its pane. Returns
     /// the updated agent, or `None` if it no longer exists.
     pub fn mutate_agent<F>(&self, agent_id: &str, f: F) -> Result<Option<AgentInfo>, String>
@@ -7781,6 +7795,111 @@ impl AppState {
             self.persist();
         }
         Ok(updated)
+    }
+
+    /// Registers a provisional transcript identity for an agent. Repeated hooks
+    /// carrying the same candidate share the in-flight validator; a different
+    /// candidate supersedes it and receives a new generation.
+    pub(crate) fn begin_transcript_binding_candidate(
+        &self,
+        agent_id: &str,
+        session_id: Option<&str>,
+        transcript_path: Option<&str>,
+    ) -> Result<Option<u64>, String> {
+        let mut candidates = self
+            .inner
+            .transcript_binding_candidates
+            .lock()
+            .map_err(|_| "transcript binding candidate lock poisoned".to_string())?;
+        if candidates.get(agent_id).is_some_and(|candidate| {
+            candidate.session_id.as_deref() == session_id
+                && (candidate.transcript_path.as_deref() == transcript_path
+                    // A later lifecycle hook commonly repeats the same session id
+                    // without the explicit path from SessionStart. Keep the richer
+                    // validator instead of replacing it with directory discovery.
+                    || candidate.transcript_path.is_some() && transcript_path.is_none())
+        }) {
+            return Ok(None);
+        }
+        let generation = self
+            .inner
+            .next_transcript_binding_candidate
+            .fetch_add(1, Ordering::Relaxed);
+        candidates.insert(
+            agent_id.to_string(),
+            TranscriptBindingCandidate {
+                generation,
+                session_id: session_id.map(ToOwned::to_owned),
+                transcript_path: transcript_path.map(ToOwned::to_owned),
+            },
+        );
+        Ok(Some(generation))
+    }
+
+    pub(crate) fn transcript_binding_candidate_is_current(
+        &self,
+        agent_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.inner
+            .transcript_binding_candidates
+            .lock()
+            .ok()
+            .and_then(|candidates| {
+                candidates
+                    .get(agent_id)
+                    .map(|candidate| candidate.generation)
+            })
+            == Some(generation)
+    }
+
+    /// Atomically promotes a validated transcript candidate to the agent's
+    /// canonical identity. Holding the candidate lock across the field-scoped
+    /// model mutation prevents a superseding SessionStart from racing between
+    /// the generation check and the commit.
+    pub(crate) fn commit_transcript_binding_candidate(
+        &self,
+        agent_id: &str,
+        generation: u64,
+        session_id: &str,
+        transcript_path: &str,
+    ) -> Result<Option<AgentInfo>, String> {
+        let mut candidates = self
+            .inner
+            .transcript_binding_candidates
+            .lock()
+            .map_err(|_| "transcript binding candidate lock poisoned".to_string())?;
+        if candidates
+            .get(agent_id)
+            .map(|candidate| candidate.generation)
+            != Some(generation)
+        {
+            return Ok(None);
+        }
+        let updated = self.mutate_agent(agent_id, |agent| {
+            agent.session_id = Some(session_id.to_string());
+            agent.transcript_path = Some(transcript_path.to_string());
+        })?;
+        if candidates
+            .get(agent_id)
+            .map(|candidate| candidate.generation)
+            == Some(generation)
+        {
+            candidates.remove(agent_id);
+        }
+        Ok(updated)
+    }
+
+    pub(crate) fn clear_transcript_binding_candidate(&self, agent_id: &str, generation: u64) {
+        if let Ok(mut candidates) = self.inner.transcript_binding_candidates.lock() {
+            if candidates
+                .get(agent_id)
+                .map(|candidate| candidate.generation)
+                == Some(generation)
+            {
+                candidates.remove(agent_id);
+            }
+        }
     }
 
     /// Records display-only workspace metadata only while the reporting tail
@@ -18739,7 +18858,7 @@ mod tests {
         };
         state.insert_agent(agent.clone()).unwrap();
 
-        // Simulate the spawned fork's SessionStart landing: it records the new
+        // Simulate the spawned fork's transcript validation committing the new
         // session id and transcript on the agent.
         agent.session_id = Some("sess-fork".to_string());
         agent.transcript_path = Some("/tmp/fork.jsonl".to_string());
@@ -18953,9 +19072,10 @@ mod tests {
         state.insert_agent(agent).unwrap();
 
         // Two interleaved field-scoped writers on a freshly spawned agent: the
-        // SessionStart hook records the session id/transcript, then attach_agent_pane
-        // binds the pane. Because each only writes its own fields, neither clobbers the
-        // other — the bug a full-struct update_agent (read snapshot, write it back) had.
+        // The transcript validator records the session id/transcript, then
+        // attach_agent_pane binds the pane. Because each only writes its own fields,
+        // neither clobbers the other — the bug a full-struct update_agent (read
+        // snapshot, write it back) had.
         state
             .mutate_agent("agent-1", |agent| {
                 agent.session_id = Some("sess-1".to_string());
