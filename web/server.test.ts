@@ -887,16 +887,29 @@ test("the landing page renders the app replica and its own image policy", async 
   const response = await fetch(`http://127.0.0.1:${address.port}/`);
   const body = await response.text();
   assert.equal(response.status, 200);
-  assert.match(body, /All-in-one terminal for agents/);
+  assert.match(body, /class="hero-title-prefix">All-in-one terminal for /);
+  for (const phrase of [
+    "long-running agents",
+    "live artifacts",
+    "vertical tabs",
+    "worktrees",
+    "reading the transcript",
+    "architecture diagrams",
+    "multiplexing work",
+  ]) {
+    assert.match(body, new RegExp(`class="hero-title-phrase">${phrase}<`));
+  }
+  assert.match(body, /class="visually-hidden">All-in-one terminal for long-running agents</);
   assert.match(
     body,
     /qmux is a terminal for CLI agents with visual transcripts, artifacts, cross-agent queues/,
   );
-  assert.match(body, /Built on libghostty/);
   assert.match(
     body,
-    /class="hero-lead">\s*<h1[^>]*>\s*All-in-one terminal for agents\s*<\/h1>\s*<div class="intro-copy">/,
+    /class="hero-lead">\s*<h1[^>]*>[\s\S]*class="hero-title-rotator"[\s\S]*<\/h1>\s*<div class="intro-copy">/,
   );
+  assert.match(body, /@keyframes hero-title-phrase-cycle/);
+  assert.match(body, /prefers-reduced-motion: reduce[\s\S]*hero-title-phrase:first-child/);
   assert.match(body, /aria-label="Supported agents"/);
   assert.match(body, /class="hero-agents"/);
   for (const label of [
@@ -912,6 +925,14 @@ test("the landing page renders the app replica and its own image policy", async 
     assert.match(body, new RegExp(`class="visually-hidden">${label}<`));
     assert.match(body, new RegExp(`data-label="${label}"`));
   }
+  const heroAgentMarkup = (label: string) => {
+    const markup = body.match(new RegExp(`<li data-label="${label}">[\\s\\S]*?</li>`))?.[0];
+    assert.ok(markup, `missing hero mark for ${label}`);
+    return markup;
+  };
+  assert.match(heroAgentMarkup("Codex"), /<path d="M9\.205 8\.658/);
+  assert.match(heroAgentMarkup("Devin"), /<path d="M2\.033 9\.867/);
+  assert.match(heroAgentMarkup("Pi"), /width="16" height="16"/);
   assert.doesNotMatch(body, /class="visually-hidden">ACP</);
   assert.match(body, /<a href="#features">Features<\/a>/);
   assert.match(body, /<section class="grid-section" id="features" aria-label="Features">/);
@@ -921,18 +942,60 @@ test("the landing page renders the app replica and its own image policy", async 
   // The hero ships the HTML replica of the app window, not a screenshot.
   assert.match(body, /class="app-mockup"/);
   assert.match(body, /class="app-shell has-turn-sidebar"/);
+  const appMockup = body.indexOf('class="app-mockup"');
+  const productThesis = body.indexOf('class="product-thesis"');
+  const miniMockups = body.indexOf('class="mini-mockups"');
+  const secondaryProductIntro = body.indexOf('class="secondary-product-intro"');
+  const secondaryProductShot = body.indexOf('class="secondary-product-shot"');
+  const secondAppMockup = body.indexOf('class="app-mockup"', appMockup + 1);
+  const featureModules = body.indexOf('class="feature-list"');
+  assert.ok(
+    appMockup >= 0 &&
+      productThesis > appMockup &&
+      miniMockups > productThesis &&
+      secondaryProductIntro > miniMockups &&
+      secondaryProductShot > secondaryProductIntro &&
+      secondAppMockup > secondaryProductShot &&
+      featureModules > secondAppMockup,
+  );
+  assert.match(
+    body,
+    /class="app-shell has-turn-sidebar is-sidebar-collapsed is-transcript-expanded"/,
+  );
+  assert.match(body, /Choose your own adventure\./);
+  assert.match(
+    body,
+    /Rapid iteration, long running workflows, or juggling lots of agents\? We(?:&#x27;|')ve got you covered\./,
+  );
+  assert.match(body, /Your terminal, powered up\./);
+  assert.match(
+    body,
+    /Use your terminal agents like a desktop app, or switch modes when you need it\./,
+  );
   assert.match(body, /What should we investigate next\?/);
   const queueHead = body.indexOf("commit the landing copy pass");
   const queueTail = body.indexOf("narrow the replay window once the image step lands");
   assert.ok(queueHead >= 0 && queueTail >= 0 && queueHead < queueTail);
+  const slashQueueHead = body.indexOf(
+    "/fork Review with a fanout of Claude and Codex subagents",
+  );
+  const slashQueueTail = body.indexOf(
+    "Now write a plan for phase 3, key decisions at the end",
+  );
+  assert.ok(slashQueueHead >= 0 && slashQueueTail > slashQueueHead);
   assert.doesNotMatch(body, /qmux running a Codex agent over the Porffor JavaScript engine/);
   assert.doesNotMatch(body, /Play the session/);
   assert.doesNotMatch(body, /Type in the composer to queue a turn/);
   // The curated feature list reaches the markup without retired entries.
   assert.match(body, /Based on libghostty/);
+  assert.doesNotMatch(body, /Built on libghostty\./);
   assert.match(body, /<strong>Open source<\/strong>/);
-  assert.match(body, /Fully open-source, local-first, free forever\./);
+  assert.match(body, /Fully open-source, local-first, non-commercial\./);
   assert.match(body, /<strong>Artifacts and previews<\/strong>/);
+  assert.ok(
+    body.indexOf("<strong>Open source</strong>") >
+      body.indexOf("<strong>Keyboard-first</strong>"),
+  );
   assert.doesNotMatch(body, /Lorem ipsum/);
   assert.doesNotMatch(body, /<strong>First-class agents<\/strong>/);
   assert.doesNotMatch(body, /<strong>Vertical splittable tabs<\/strong>/);
@@ -952,16 +1015,21 @@ test("the landing page renders the app replica and its own image policy", async 
   // step timeline the enhancement replays from.
   assert.match(
     body,
-    /data-mock-features="replay queue groups sessions panes terminal-map panels menus sidebar-menus"/,
+    /data-mock-features="replay queue groups sessions panes terminal-map panels menus sidebar-menus images"/,
   );
-  // Every visible sidebar tab ships a complete terminal/transcript pair. The
-  // default is visible without JavaScript and the enhancement swaps the rest.
-  assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 14);
-  assert.equal((body.match(/data-mock-session-view=/g) ?? []).length, 28);
-  assert.ok((body.match(/class="mock-terminal-block"/g) ?? []).length >= 115);
-  assert.ok((body.match(/class="mock-terminal-line"/g) ?? []).length >= 430);
-  assert.equal((body.match(/data-mock-session-status="active"/g) ?? []).length, 4);
-  assert.equal((body.match(/class="turn-thinking"/g) ?? []).length, 4);
+  assert.match(
+    body,
+    /data-mock-features="queue groups sessions panes terminal-map panels menus sidebar-menus images"/,
+  );
+  // Every visible sidebar tab ships a complete terminal/transcript pair in
+  // each replica. The defaults are visible without JavaScript and the
+  // enhancement swaps the rest independently.
+  assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 28);
+  assert.equal((body.match(/data-mock-session-view=/g) ?? []).length, 56);
+  assert.ok((body.match(/class="mock-terminal-block"/g) ?? []).length >= 230);
+  assert.ok((body.match(/class="mock-terminal-line"/g) ?? []).length >= 860);
+  assert.equal((body.match(/data-mock-session-status="active"/g) ?? []).length, 8);
+  assert.equal((body.match(/class="turn-thinking"/g) ?? []).length, 8);
   assert.match(body, /data-mock-session-view="qmux-landing-transcript"/);
   assert.match(body, /data-mock-session-view="porffor-replace-all" hidden/);
   assert.match(body, /data-mock-session-view="nanochat-tokenizer" hidden/);
@@ -977,6 +1045,9 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="turn-image"/);
   assert.match(body, /src="\/qmux\.png"/);
   assert.match(body, /alt="The qmux desktop interface"/);
+  assert.equal((body.match(/data-mock-image-src="\/qmux\.png"/g) ?? []).length, 2);
+  assert.equal((body.match(/data-mock-image-lightbox="true"/g) ?? []).length, 2);
+  assert.match(body, /class="mock-image-lightbox-img"[^>]*width="2704" height="1704"/);
   assert.doesNotMatch(body, /qmux desktop layout reference/);
   assert.match(body, /class="turn-card role-assistant turn-image-card" data-step="12"/);
   assert.match(body, /\.\/porf \/tmp\/replaceall-smoke\.js/);
@@ -1005,27 +1076,39 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /data-mock-action="open-terminal-map"/);
   assert.match(body, /data-mock-terminal-map="true" hidden/);
   assert.match(body, /class="terminal-map-popover"/);
-  assert.equal((body.match(/class="home-rail"/g) ?? []).length, 15);
-  assert.equal((body.match(/data-mock-open-session=/g) ?? []).length, 14);
-  assert.equal((body.match(/class="mock-rail-composer"/g) ?? []).length, 15);
+  assert.equal((body.match(/class="home-rail"/g) ?? []).length, 30);
+  assert.equal((body.match(/data-mock-open-session=/g) ?? []).length, 28);
+  assert.equal((body.match(/class="mock-rail-composer"/g) ?? []).length, 30);
   assert.match(body, /data-mock-home-chip="__drafts__"/);
   assert.match(body, /data-mock-home-menu="qmux" hidden/);
   assert.match(body, /home-rail-paused">paused</);
   // The sidebar's right-click menus ship closed: one details menu per tab and
   // one group menu per group, mirroring the app's pairing.
-  assert.equal((body.match(/data-mock-tab-menu=/g) ?? []).length, 14);
-  assert.equal((body.match(/data-mock-group-menu=/g) ?? []).length, 7);
+  assert.equal((body.match(/data-mock-tab-menu=/g) ?? []).length, 28);
+  assert.equal((body.match(/data-mock-group-menu=/g) ?? []).length, 14);
   assert.match(body, /class="pane-context-details"/);
   assert.match(body, /Export to Research…/);
   assert.match(body, /data-mock-menu-collapse/);
   assert.match(body, /Close group/);
-  // Four miniature feature replicas sit above the window replica in the hero,
+  assert.match(body, /<span>Add split below<\/span>/);
+  assert.match(body, /<span>Add split to the right<\/span>/);
+  assert.match(body, /<span>Split left and right<\/span>/);
+  assert.match(body, /<span>Join with terminal below<\/span>/);
+  assert.match(body, /<span>Detach from split<\/span>/);
+  assert.doesNotMatch(body, /<span>Split terminal<\/span>/);
+  // Four miniature feature replicas sit below the window replica in the hero,
   // each an inert illustration captioned like a feature card.
   assert.equal((body.match(/class="mini-mockup"/g) ?? []).length, 4);
-  assert.match(body, /Never forget the command for creating a worktree again/);
-  assert.match(body, /View mockups and documents at a glance/);
+  assert.match(body, /Worktree management/);
+  assert.match(body, /View and manage worktrees without CLI commands/);
+  assert.match(body, /Artifact viewer/);
+  assert.match(body, /Switch between mockups, documents, and agents in a snap/);
+  assert.match(body, /Interactive composer/);
+  assert.match(body, /Stack, fork, and interleave sessions to get more done faster/);
   assert.match(body, /Scroll back thousands of messages, even across auto-compactions/);
   assert.match(body, /class="composer-slash-token">\/fork</);
+  assert.doesNotMatch(body, /Fork this session/);
+  assert.doesNotMatch(body, /Fork into a new worktree/);
   assert.match(body, /data-step="5"/);
   // Replay staging is inert unless the pre-paint bootstrap activates it, so the
   // serialized default session remains complete when JavaScript is unavailable.
@@ -1063,7 +1146,9 @@ test("the landing page's enhancement script is served as JavaScript", async (t) 
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /text\/javascript/);
   assert.equal(response.headers.get("x-content-type-options"), "nosniff");
-  assert.match(body, /app-mockup/);
+  assert.match(body, /querySelectorAll\("\.app-mockup"\)/);
+  assert.match(body, /for \(const mockup of mockups\)/);
+  assert.match(body, /createImageLightbox/);
 
   const bootResponse = await fetch(`http://127.0.0.1:${address.port}/mockup-boot.js`);
   const bootBody = await bootResponse.text();

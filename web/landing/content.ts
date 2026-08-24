@@ -45,15 +45,11 @@ export const FEATURES: Feature[] = [
   },
   {
     name: "Session forking",
-    copy: "Fork sessions while they're working. Easily create worktrees with one click.",
+    copy: "Fork sessions while they're working. Create worktrees with one click.",
   },
   {
     name: "Based on libghostty",
-    copy: "Every pane is a real libghostty terminal, rendered natively with Metal.",
-  },
-  {
-    name: "Open source",
-    copy: "Fully open-source, local-first, free forever.",
+    copy: "Fast and responsive, with a real libghostty terminal, rendered natively using Metal.",
   },
   {
     name: "Artifacts and previews",
@@ -64,7 +60,7 @@ export const FEATURES: Feature[] = [
     copy: "Organize terminal and agent panes with vertical tabs and flexible split layouts.",
   },
   {
-    name: "Saved prompt library",
+    name: "Prompt library",
     copy: "Reuse Markdown prompts globally or per project.",
   },
   {
@@ -76,7 +72,11 @@ export const FEATURES: Feature[] = [
     copy: "Keep local previews and web pages beside the agent working with them.",
   },
   {
-    name: "Keyboard-first workflow",
-    copy: "Launch agents, navigate tabs, and manage panes without reaching for the mouse.",
+    name: "Keyboard-first",
+    copy: "Launch agents, navigate tabs, and manage panes without a mouse.",
+  },
+  {
+    name: "Open source",
+    copy: "Fully open-source, local-first, non-commercial.",
   },
 ];

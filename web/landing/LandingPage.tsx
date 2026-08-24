@@ -3,12 +3,24 @@
 // component tree and one build.
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import AppMockup from "./AppMockup";
+import AppMockup, { MOCKUP_FEATURES } from "./AppMockup";
 import FeatureMiniMockups from "./MiniMockups";
 import { HeroAgents } from "./agentIcons";
 import { FEATURES, GITHUB_URL, RELEASES_URL, SITE_DESCRIPTION, SITE_TITLE } from "./content";
 import { LANDING_CSS } from "./landingCss";
 import { MOCKUP_CSS } from "./mockupCss";
+
+const HERO_TITLE_PHRASES = [
+  "long-running agents",
+  "live artifacts",
+  "vertical tabs",
+  "worktrees",
+  "reading the transcript",
+  "architecture diagrams",
+  "multiplexing work",
+];
+
+const SECONDARY_MOCKUP_FEATURES = MOCKUP_FEATURES.filter((feature) => feature !== "replay");
 
 function SiteHeader() {
   return (
@@ -35,19 +47,53 @@ function Hero() {
     <section className="grid-section" aria-labelledby="hero-title">
       <div className="hero-lead">
         <h1 className="hero-title" id="hero-title">
-          All-in-one terminal for agents
+          <span className="hero-title-visual" aria-hidden="true">
+            <span className="hero-title-prefix">All-in-one terminal for </span>
+            <span className="hero-title-rotator">
+              {HERO_TITLE_PHRASES.map((phrase) => (
+                <span className="hero-title-phrase" key={phrase}>
+                  {phrase}
+                </span>
+              ))}
+            </span>
+          </span>
+          <span className="visually-hidden">All-in-one terminal for long-running agents</span>
         </h1>
         <div className="intro-copy">
           <p>
             qmux is a terminal for CLI agents with visual transcripts, artifacts,
-            cross-agent queues, and more. Built on libghostty.
+            cross-agent queues, and more.
           </p>
         </div>
         <HeroAgents />
       </div>
       <figure className="product-shot">
-        <FeatureMiniMockups />
         <AppMockup />
+        <p className="product-thesis">Your terminal, powered up.</p>
+        <p className="product-thesis-description">
+          Rapid iteration, long running workflows, or juggling lots of agents? We&apos;ve got you
+          covered.
+        </p>
+        <FeatureMiniMockups />
+        <div className="secondary-product-intro">
+          <p className="secondary-product-heading">Choose your own adventure.</p>
+          <p className="product-thesis-description">
+            Use your terminal agents like a desktop app, or switch modes when you need it.
+          </p>
+        </div>
+        <div className="secondary-product-shot">
+          <AppMockup
+            features={SECONDARY_MOCKUP_FEATURES}
+            initialSidebarCollapsed
+            initialTranscriptExpanded
+          />
+        </div>
+        <div className="feature-product-intro">
+          <p className="feature-product-heading">Dozens of hand-picked features.</p>
+          <p className="product-thesis-description">
+            Some useful every day, others matter only when you really need them.
+          </p>
+        </div>
       </figure>
     </section>
   );

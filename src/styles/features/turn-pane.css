@@ -304,6 +304,7 @@
   flex: 0 0 auto;
   display: flex;
   gap: 6px;
+  margin-left: auto;
 }
 
 .turn-pane-sidebar-controls {

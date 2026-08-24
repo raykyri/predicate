@@ -22,6 +22,8 @@
 //             library, the split queue, the browser overlay, and the artifact
 //             tray. They interlock: a saved prompt lands in the composer, and
 //             opening an artifact hands it to the browser.
+//   images  — opens transcript thumbnails at their original resolution in the
+//             same modal lightbox as the desktop app.
 //   menus   — opens the transcript-message and composer overflow menus. Their
 //             items are intentionally inert: this is a product tour, not a
 //             clipboard, publishing, or session-management surface.
@@ -40,35 +42,16 @@
 //     have to be hidden from assistive tech instead — a focusable control inside
 //     a presentational subtree is worse than no control at all.
 
-(() => {
-  const found = document.querySelector(".app-mockup");
-  if (!(found instanceof HTMLElement)) {
-    return;
-  }
-  // Re-bound with an explicit type: narrowing from the guard above does not
-  // reach the closures below.
-  const mockup = /** @type {HTMLElement} */ (found);
+/**
+ * Give one replica its own state, timers, and element-scoped handlers.
+ * Document-level dismissal listeners remain harmlessly independent because
+ * their open-menu state lives inside this closure.
+ * @param {HTMLElement} mockup
+ * @param {boolean} replayBoot
+ */
+function enhanceQmuxMockup(mockup, replayBoot) {
   const frame = mockup.closest(".app-mockup-frame");
   const features = new Set((mockup.dataset.mockFeatures || "").split(/\s+/).filter(Boolean));
-
-  // A drag that finishes in the gap above the mockup can include the grid's
-  // block-boundary whitespace. Keep copying the hero description literal.
-  const introCopy = document.querySelector(".intro-copy > p:first-child");
-  if (introCopy instanceof HTMLElement) {
-    document.addEventListener("copy", (event) => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || !event.clipboardData) {
-        return;
-      }
-      const selectedText = selection.toString();
-      const trimmedText = selectedText.trimEnd();
-      if (trimmedText !== introCopy.innerText.trim() || trimmedText === selectedText) {
-        return;
-      }
-      event.clipboardData.setData("text/plain", trimmedText);
-      event.preventDefault();
-    });
-  }
 
   if (features.size === 0) {
     return;
@@ -570,6 +553,13 @@
     const shell = /** @type {Element} */ (foundShell);
     const sidebar = /** @type {Element} */ (foundSidebar);
     const turnPane = /** @type {Element} */ (foundTurnPane);
+    const initiallyExpanded = shell.classList.contains("is-transcript-expanded");
+
+    // Initial layout classes can ship from the server for replicas that open
+    // on a different product state. Match their accessibility state before
+    // promoting any controls inside those panes.
+    sidebar.toggleAttribute("inert", shell.classList.contains("is-sidebar-collapsed"));
+    turnPane.toggleAttribute("inert", shell.classList.contains("is-right-collapsed"));
 
     /**
      * Moves focus off a pane that is about to be hidden. Without this the
@@ -649,12 +639,16 @@
       if (!button) {
         continue;
       }
-      const label = PANE_LABELS[/** @type {keyof typeof PANE_LABELS} */ (action)];
+      const label =
+        action === "expand-transcript" && initiallyExpanded
+          ? "Restore the transcript"
+          : PANE_LABELS[/** @type {keyof typeof PANE_LABELS} */ (action)];
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
       if (action === "expand-transcript") {
         // A toggle reports its state from the start, not only once pressed.
-        button.setAttribute("aria-pressed", "false");
+        button.classList.toggle("is-active", initiallyExpanded);
+        button.setAttribute("aria-pressed", String(initiallyExpanded));
       }
       button.addEventListener("click", handler);
     }
@@ -1285,6 +1279,100 @@
     return { syncQueueEmptyState };
   }
 
+  // --------------------------------------------------------------- images
+
+  function createImageLightbox() {
+    const foundLightbox = mockup.querySelector("[data-mock-image-lightbox]");
+    const foundImage = foundLightbox?.querySelector("[data-mock-image-full]");
+    const closeNode = foundLightbox?.querySelector("[data-mock-image-close]");
+    const thumbnailNodes = [...mockup.querySelectorAll("[data-mock-image-src]")];
+    if (
+      !(foundLightbox instanceof HTMLElement) ||
+      !(foundImage instanceof HTMLImageElement) ||
+      !closeNode ||
+      thumbnailNodes.length === 0
+    ) {
+      return null;
+    }
+
+    const lightbox = foundLightbox;
+    const fullImage = foundImage;
+    const promotedCloseButton = promote(closeNode, "button");
+    if (!promotedCloseButton) {
+      return null;
+    }
+    const closeButton = /** @type {HTMLElement} */ (promotedCloseButton);
+    closeButton.setAttribute("aria-label", "Close image");
+    closeButton.setAttribute("title", "Close image");
+
+    /** @type {HTMLElement | null} */
+    let opener = null;
+    /** @type {Element[]} */
+    let inertedByLightbox = [];
+
+    function close() {
+      if (lightbox.hidden) {
+        return;
+      }
+      lightbox.hidden = true;
+      for (const child of inertedByLightbox) {
+        child.removeAttribute("inert");
+      }
+      inertedByLightbox = [];
+      opener?.focus();
+      opener = null;
+      announce("Image closed.");
+    }
+
+    /** @param {HTMLElement} trigger */
+    function open(trigger) {
+      const src = trigger.dataset.mockImageSrc ?? "";
+      const alt = trigger.dataset.mockImageAlt ?? "Transcript image";
+      if (!src) {
+        return;
+      }
+      opener = trigger;
+      fullImage.src = src;
+      fullImage.alt = alt;
+      lightbox.setAttribute("aria-label", alt);
+      lightbox.hidden = false;
+      for (const child of mockup.children) {
+        if (child !== lightbox && !child.hasAttribute("inert")) {
+          child.setAttribute("inert", "");
+          inertedByLightbox.push(child);
+        }
+      }
+      closeButton.focus();
+      announce("Image opened at full resolution.");
+    }
+
+    for (const node of thumbnailNodes) {
+      const button = promote(node, "button");
+      if (!button) {
+        continue;
+      }
+      const alt = button.dataset.mockImageAlt ?? "Transcript image";
+      button.setAttribute("aria-label", `Open image: ${alt}`);
+      button.setAttribute("title", "Open full-size image");
+      button.setAttribute("aria-haspopup", "dialog");
+      button.addEventListener("click", () => open(button));
+    }
+
+    closeButton.addEventListener("click", close);
+    lightbox.addEventListener("click", (event) => {
+      if (event.target === lightbox) {
+        close();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !lightbox.hidden) {
+        close();
+      }
+    });
+
+    return {};
+  }
+
   // ---------------------------------------------------------------- groups
 
   function createGroups() {
@@ -1791,11 +1879,11 @@
   const panes = features.has("panes") ? createPanes() : null;
   const terminalMap = features.has("terminal-map") ? createTerminalMap() : null;
   const panels = features.has("panels") ? createPanels() : null;
+  const images = features.has("images") ? createImageLightbox() : null;
   const menus = features.has("menus") ? createMenus() : null;
   const sidebarMenus = features.has("sidebar-menus") ? createSidebarMenus() : null;
-  if (document.documentElement.classList.contains("mock-replay-boot")) {
+  if (replayBoot) {
     replay?.prepare();
-    document.documentElement.classList.remove("mock-replay-boot");
   }
   if (
     !replay &&
@@ -1805,6 +1893,7 @@
     !panes &&
     !terminalMap &&
     !panels &&
+    !images &&
     !menus &&
     !sidebarMenus
   ) {
@@ -1846,5 +1935,46 @@
       );
       observer.observe(mockup);
     }
+  }
+}
+
+(() => {
+  const mockups = /** @type {HTMLElement[]} */ (
+    [...document.querySelectorAll(".app-mockup")].filter(
+      (node) => node instanceof HTMLElement,
+    )
+  );
+  if (mockups.length === 0) {
+    return;
+  }
+
+  // A drag that finishes in the gap above the mockup can include the grid's
+  // block-boundary whitespace. Keep copying the hero description literal.
+  const introCopy = document.querySelector(".intro-copy > p:first-child");
+  if (introCopy instanceof HTMLElement) {
+    document.addEventListener("copy", (event) => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || !event.clipboardData) {
+        return;
+      }
+      const selectedText = selection.toString();
+      const trimmedText = selectedText.trimEnd();
+      if (trimmedText !== introCopy.innerText.trim() || trimmedText === selectedText) {
+        return;
+      }
+      event.clipboardData.setData("text/plain", trimmedText);
+      event.preventDefault();
+    });
+  }
+
+  // Replay staging is selected globally before paint, but every replica must
+  // transfer those hints into its own runtime state before the document-level
+  // class is removed.
+  const replayBoot = document.documentElement.classList.contains("mock-replay-boot");
+  for (const mockup of mockups) {
+    enhanceQmuxMockup(mockup, replayBoot);
+  }
+  if (replayBoot) {
+    document.documentElement.classList.remove("mock-replay-boot");
   }
 })();

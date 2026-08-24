@@ -14,6 +14,7 @@ import {
   GitForkIcon,
   MessageSquareTextIcon,
   PanelBottomCloseIcon,
+  PanelBottomOpenIcon,
   PaperclipIcon,
   XIcon,
 } from "./icons";
@@ -50,13 +51,25 @@ function WorktreesMini() {
       <div className="pane-context-actions">
         <span className="context-menu-item context-menu-has-shortcut">
           <PanelBottomCloseIcon size={13} />
-          <span>Split terminal</span>
+          <span>Add split below</span>
           <kbd className="context-menu-shortcut">⌘D</kbd>
         </span>
         <span className="context-menu-item context-menu-has-shortcut">
           <Columns2Icon size={13} />
-          <span>Split terminal to the right</span>
+          <span>Add split to the right</span>
           <kbd className="context-menu-shortcut">⌘⇧D</kbd>
+        </span>
+        <span className="context-menu-item">
+          <Columns2Icon size={13} />
+          <span>Split left and right</span>
+        </span>
+        <span className="context-menu-item">
+          <PanelBottomCloseIcon size={13} />
+          <span>Join with terminal below</span>
+        </span>
+        <span className="context-menu-item">
+          <PanelBottomOpenIcon size={13} />
+          <span>Detach from split</span>
         </span>
         <div className="context-menu-divider" role="separator" />
         <span className="context-menu-item">
@@ -118,6 +131,14 @@ function ArtifactsMini() {
 function SlashCommandsMini() {
   return (
     <div className="mini-composer">
+      <div className="mini-queued-turn-stack">
+        <div className="mini-queued-turn">
+          /fork Review with a fanout of Claude and Codex subagents
+        </div>
+        <div className="mini-queued-turn">
+          Now write a plan for phase 3, key decisions at the end
+        </div>
+      </div>
       <div className="composer-slash-popover">
         <div className="composer-slash-list">
           <span className="composer-slash-option is-selected">
@@ -125,14 +146,12 @@ function SlashCommandsMini() {
               <GitForkIcon size={12} strokeWidth={1.75} />
             </span>
             <span className="composer-slash-token">/fork</span>
-            <span className="composer-slash-summary">Fork this session</span>
           </span>
           <span className="composer-slash-option">
             <span className="composer-slash-icon">
               <FolderGit2Icon size={12} strokeWidth={1.75} />
             </span>
             <span className="composer-slash-token">/worktree</span>
-            <span className="composer-slash-summary">Fork into a new worktree</span>
           </span>
         </div>
       </div>
@@ -217,16 +236,23 @@ export default function FeatureMiniMockups() {
   return (
     <div className="mini-mockups">
       <MiniModule
-        label="Worktrees"
-        sub="Never forget the command for creating a worktree again"
+        label="Worktree management"
+        sub="View and manage worktrees without CLI commands"
         fade
       >
         <WorktreesMini />
       </MiniModule>
-      <MiniModule label="Artifacts" sub="View mockups and documents at a glance" fade>
+      <MiniModule
+        label="Artifact viewer"
+        sub="Switch between mockups, documents, and agents in a snap"
+        fade
+      >
         <ArtifactsMini />
       </MiniModule>
-      <MiniModule label="Slash commands" sub="Fork sessions right from the message input">
+      <MiniModule
+        label="Interactive composer"
+        sub="Stack, fork, and interleave sessions to get more done faster"
+      >
         <SlashCommandsMini />
       </MiniModule>
       <MiniModule

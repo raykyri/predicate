@@ -192,6 +192,69 @@ code {
   text-wrap: balance;
 }
 
+.hero-title-visual {
+  display: block;
+}
+
+.hero-title-rotator {
+  display: inline-grid;
+  width: max-content;
+  max-width: 100%;
+  color: var(--muted);
+  opacity: 0.6;
+  vertical-align: top;
+}
+
+.hero-title-phrase {
+  grid-area: 1 / 1;
+  opacity: 0;
+  animation: hero-title-phrase-cycle 21s infinite;
+  animation-timing-function: ease-in-out;
+}
+
+.hero-title-phrase:nth-child(2) {
+  animation-delay: 3s;
+}
+
+.hero-title-phrase:nth-child(3) {
+  animation-delay: 6s;
+}
+
+.hero-title-phrase:nth-child(4) {
+  animation-delay: 9s;
+}
+
+.hero-title-phrase:nth-child(5) {
+  animation-delay: 12s;
+}
+
+.hero-title-phrase:nth-child(6) {
+  animation-delay: 15s;
+}
+
+.hero-title-phrase:nth-child(7) {
+  animation-delay: 18s;
+}
+
+@keyframes hero-title-phrase-cycle {
+  0% {
+    opacity: 0;
+    transform: translateY(0.12em);
+  }
+
+  1.429%,
+  10.952% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  15.714%,
+  100% {
+    opacity: 0;
+    transform: translateY(-0.22em);
+  }
+}
+
 .hero-agents {
   display: flex;
   flex-wrap: wrap;
@@ -293,6 +356,44 @@ code {
 .product-shot {
   grid-column: 1 / 9;
   margin: 0;
+}
+
+.product-thesis,
+.secondary-product-heading,
+.feature-product-heading {
+  max-width: 820px;
+  font-size: clamp(1.5rem, 2.35vw, 2rem);
+  line-height: 1.15;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.product-thesis {
+  margin: 52px auto 0;
+}
+
+.product-thesis-description {
+  max-width: 620px;
+  margin: 10px auto 0;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 25px;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.secondary-product-shot {
+  margin-top: 48px;
+}
+
+.secondary-product-intro,
+.feature-product-intro {
+  margin-top: 52px;
+}
+
+.secondary-product-heading,
+.feature-product-heading {
+  margin: 0 auto;
 }
 
 /* Editorial sections */
@@ -441,6 +542,15 @@ code {
 
   .text-link::after {
     transition: none;
+  }
+
+  .hero-title-phrase {
+    animation: none;
+  }
+
+  .hero-title-phrase:first-child {
+    opacity: 1;
+    transform: none;
   }
 }
 `;

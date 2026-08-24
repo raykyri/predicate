@@ -35,6 +35,7 @@ import {
   MessageSquareTextIcon,
   Minimize2Icon,
   PanelBottomCloseIcon,
+  PanelBottomOpenIcon,
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PanelRightCloseIcon,
@@ -292,6 +293,39 @@ function FloatingRestoreControls() {
         <PanelRightOpenIcon size={14} />
       </span>
     </>
+  );
+}
+
+// The transcript thumbnail opens the same high-resolution source in a modal
+// overlay. It ships hidden and inert; site/mockup.js promotes its controls when
+// the image enhancement is enabled.
+function MockImageLightbox() {
+  return (
+    <div
+      className="mock-image-lightbox"
+      data-mock-image-lightbox
+      role="dialog"
+      aria-modal="true"
+      aria-label="Expanded transcript image"
+      hidden
+    >
+      <span
+        className="control-button mock-image-lightbox-close"
+        data-mock-image-close
+        aria-label="Close image"
+      >
+        <XIcon size={14} />
+      </span>
+      <img
+        className="mock-image-lightbox-img"
+        data-mock-image-full
+        src="/qmux.png"
+        alt=""
+        width={2704}
+        height={1704}
+        decoding="async"
+      />
+    </div>
   );
 }
 
@@ -772,7 +806,7 @@ function PaneTabMenu({ pane }: { pane: MockPane }) {
           data-mock-context-item
         >
           <PanelBottomCloseIcon size={13} />
-          <span>Split terminal</span>
+          <span>Add split below</span>
           <kbd className="context-menu-shortcut">⌘D</kbd>
         </button>
         <button
@@ -782,8 +816,20 @@ function PaneTabMenu({ pane }: { pane: MockPane }) {
           data-mock-context-item
         >
           <Columns2Icon size={13} />
-          <span>Split terminal to the right</span>
+          <span>Add split to the right</span>
           <kbd className="context-menu-shortcut">⌘⇧D</kbd>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <Columns2Icon size={13} />
+          <span>Split left and right</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <PanelBottomCloseIcon size={13} />
+          <span>Join with terminal below</span>
+        </button>
+        <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+          <PanelBottomOpenIcon size={13} />
+          <span>Detach from split</span>
         </button>
         <div className="context-menu-divider" role="separator" />
         <button type="button" role="menuitem" className="control-button" data-mock-context-item>
@@ -978,14 +1024,20 @@ function TranscriptSession({
             <div className="turn-blocks">
               <div className="turn-message-block">
                 <figure className="turn-image-embed">
-                  <img
-                    className="turn-image"
-                    src={item.src}
-                    alt={item.alt}
-                    width={2704}
-                    height={1704}
-                    decoding="async"
-                  />
+                  <span
+                    className="turn-image-thumb"
+                    data-mock-image-src={item.src}
+                    data-mock-image-alt={item.alt}
+                  >
+                    <img
+                      className="turn-image"
+                      src={item.src}
+                      alt={item.alt}
+                      width={2704}
+                      height={1704}
+                      decoding="async"
+                    />
+                  </span>
                 </figure>
               </div>
             </div>
@@ -1086,16 +1138,29 @@ export const MOCKUP_FEATURES = [
   "panels",
   "menus",
   "sidebar-menus",
+  "images",
 ] as const;
 
 export default function AppMockup({
   labelledBy,
   features = MOCKUP_FEATURES,
+  initialSidebarCollapsed = false,
+  initialTranscriptExpanded = false,
 }: {
   labelledBy?: string;
   features?: readonly string[];
+  initialSidebarCollapsed?: boolean;
+  initialTranscriptExpanded?: boolean;
 }) {
   const stageReplay = features.includes("replay");
+  const shellClassName = [
+    "app-shell",
+    "has-turn-sidebar",
+    initialSidebarCollapsed ? "is-sidebar-collapsed" : "",
+    initialTranscriptExpanded ? "is-transcript-expanded" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <div className="app-mockup-frame">
       <div
@@ -1107,7 +1172,7 @@ export default function AppMockup({
       >
         <TrafficLights />
         <FloatingRestoreControls />
-        <div className="app-shell has-turn-sidebar">
+        <div className={shellClassName}>
           <Sidebar />
           <TerminalPane stageReplay={stageReplay} />
           <BrowserOverlay />
@@ -1121,6 +1186,7 @@ export default function AppMockup({
             </div>
           </div>
         </div>
+        <MockImageLightbox />
         {MOCK_GROUPS.map((group) => (
           <PaneGroupMenu key={group.name} group={group} />
         ))}

@@ -795,6 +795,7 @@ export const MOCKUP_CSS = `
   flex: 0 0 auto;
   display: flex;
   gap: 6px;
+  margin-left: auto;
 }
 
 .app-mockup .turn-pane-header-button {
@@ -1010,6 +1011,23 @@ export const MOCKUP_CSS = `
   margin: 0;
 }
 
+.app-mockup .turn-image-thumb {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  border-radius: var(--radius-md);
+  line-height: 0;
+}
+
+.app-mockup.is-interactive .turn-image-thumb {
+  cursor: zoom-in;
+}
+
+.app-mockup .turn-image-thumb:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
 .app-mockup .turn-image {
   display: block;
   width: 112px;
@@ -1021,6 +1039,58 @@ export const MOCKUP_CSS = `
   background: var(--terminal-pane-bg);
   object-fit: cover;
   object-position: top;
+}
+
+/* The app's image lightbox, constrained to the replica's window rather than
+   covering the marketing page. The thumbnail and expanded view share the
+   original 2704×1704 source, so CSS downsizing never limits the opened image. */
+.app-mockup [data-mock-image-lightbox][hidden] {
+  display: none;
+}
+
+.app-mockup .mock-image-lightbox {
+  position: absolute;
+  inset: 0;
+  z-index: 21;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: rgba(0, 0, 0, 0.72);
+  cursor: zoom-out;
+}
+
+.app-mockup .mock-image-lightbox-img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 100%;
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  cursor: default;
+  object-fit: contain;
+}
+
+.app-mockup .mock-image-lightbox-close {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 1;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  background: var(--chrome-control-bg);
+  color: var(--text-secondary);
+  backdrop-filter: blur(6px);
+}
+
+.app-mockup.is-interactive .mock-image-lightbox-close:hover {
+  background: var(--chrome-control-bg-hover);
+  color: var(--text-strong);
 }
 
 .app-mockup .activity-group-block {
@@ -2712,7 +2782,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 /* ------------------------------------------------------------------ */
-/* Feature mini-mockups (MiniMockups.tsx). Four frozen app surfaces above
+/* Feature mini-mockups (MiniMockups.tsx). Four frozen app surfaces below
    the full window replica, each captioned like a feature card. The stages
    share .app-mockup's tokens but carry no behavior: every control inside is
    a span, and the whole stage is aria-hidden behind its caption. */
@@ -2720,7 +2790,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px;
-  margin-bottom: 20px;
+  margin-top: 48px;
 }
 
 .mini-mockup {
@@ -2954,10 +3024,34 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   left: 12px;
 }
 
-.mini-mockup .composer-slash-popover {
-  box-sizing: border-box;
-  width: 100%;
+.mini-mockup .mini-queued-turn-stack {
+  display: grid;
+  gap: 4px;
   margin-bottom: 6px;
+}
+
+.mini-mockup .mini-queued-turn {
+  display: -webkit-box;
+  overflow: hidden;
+  padding: 5px 7px;
+  border: 1px solid var(--queued-turn-border);
+  border-radius: var(--radius-md);
+  background: var(--content-inset-bg);
+  color: var(--text-body-soft);
+  font-size: 11px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.mini-mockup .composer-slash-popover {
+  position: absolute;
+  right: 0;
+  bottom: 44px;
+  z-index: 2;
+  box-sizing: border-box;
+  width: 50%;
   padding: 4px;
   overflow: hidden;
   border: 0.5px solid var(--control-border);
@@ -2974,7 +3068,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 
 .mini-mockup .composer-slash-option {
   display: grid;
-  grid-template-columns: auto 76px minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 8px;
   align-items: center;
   min-height: 30px;
@@ -3000,15 +3094,6 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   font-size: calc(var(--fs-base) - 1px);
   font-weight: 500;
   white-space: nowrap;
-}
-
-.mini-mockup .composer-slash-summary {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--control-fg-muted);
-  font-size: calc(var(--fs-base) - 1px);
-  white-space: nowrap;
-  text-overflow: ellipsis;
 }
 
 .mini-mockup .mini-composer-field {

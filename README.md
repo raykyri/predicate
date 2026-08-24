@@ -38,7 +38,7 @@ matching UI adapter on the frontend.
   best-effort restart recovery.
 - Session forking from inside a running agent session (`qmux fork`),
   supported by Claude Code, Codex, OpenCode, Grok, and Pi.
-- Saved prompt library: prompts as Markdown files with global and
+- Prompt library: prompts as Markdown files with global and
   per-project scopes, `{placeholder}` fill-in, and a `Cmd-K` command
   palette covering prompts, tab navigation, and pane actions.
 - App settings: color themes, body font, terminal font and size,
