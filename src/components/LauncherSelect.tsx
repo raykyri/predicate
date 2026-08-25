@@ -63,7 +63,7 @@ export function LauncherSelect({ value, options, onChange, ariaLabel }: Launcher
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" || event.key === "Tab") {
         setOpen(false);
       }
     };

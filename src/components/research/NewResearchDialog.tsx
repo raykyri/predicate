@@ -15,43 +15,19 @@ import {
   saveSessionDraftJson,
   SESSION_DRAFT_KEYS,
 } from "../../lib/sessionDrafts";
-
-// Model presets per adapter; "custom" reveals a free-form input. Adapters
-// without a curated list only offer "custom".
-const MODEL_PRESETS_BY_ADAPTER: Record<string, string[]> = {
-  [CLAUDE_ADAPTER_ID]: ["opus", "fable", "sonnet", "custom"],
-  [CODEX_ADAPTER_ID]: [
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.5",
-    "gpt-5.4",
-    "custom",
-  ],
-};
-
-const CUSTOM_MODEL = "custom";
+import {
+  CUSTOM_MODEL,
+  formatLauncherModelLabel,
+  modelPresetsFor,
+  nextModelPreset,
+  selectedModelPreset,
+} from "../../lib/launcherModels";
+import { launcherTabAction } from "../../lib/launcherKeyboard";
 
 // GPT-5.4 stops at extra high; every other Codex preset (and a custom model,
 // whose ceiling is unknown here) offers the full range and lets the CLI
 // reject a level the model does not support.
 const GPT_5_4_REASONING_LEVELS = ["", "low", "medium", "high", "xhigh"];
-
-function modelPresetsFor(adapter: string): string[] {
-  return MODEL_PRESETS_BY_ADAPTER[adapter] ?? [CUSTOM_MODEL];
-}
-
-/** Display label for a model preset: title-case each alphanumeric token so
- * multi-part ids (`gpt-5.4`) read evenly rather than only uppercasing the first
- * character (`Gpt-5.4`). */
-function formatResearchModelLabel(preset: string): string {
-  return preset.replace(/[A-Za-z]+/g, (token) => {
-    if (token.length === 0) {
-      return token;
-    }
-    return `${token.charAt(0).toUpperCase()}${token.slice(1).toLowerCase()}`;
-  });
-}
 
 // The reasoning/effort levels the selected model supports, or null for
 // adapters without a reasoning-effort launch option. Every Claude model
@@ -230,8 +206,7 @@ export default function NewResearchDialog({
   // A stale choice (left over from another adapter) silently falls back to the
   // adapter's first preset, so the trigger always shows what will launch.
   const modelPresets = modelPresetsFor(adapter);
-  const selectedModel =
-    modelChoice && modelPresets.includes(modelChoice) ? modelChoice : modelPresets[0];
+  const selectedModel = selectedModelPreset(adapter, modelChoice);
   const resolvedModel =
     selectedModel === CUSTOM_MODEL ? customModel.trim() || null : selectedModel;
   // Same stale-choice contract as the model picker: a level left over from
@@ -292,6 +267,26 @@ export default function NewResearchDialog({
     iconClassName: adapterIconClassName(candidate.id),
   }));
 
+  function cycleAdapter() {
+    if (adapterOptions.length === 0) {
+      return;
+    }
+    const currentIndex = adapterOptions.findIndex((option) => option.value === adapter);
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % adapterOptions.length;
+    const nextAdapter = adapterOptions[nextIndex]?.value;
+    if (nextAdapter && nextAdapter !== adapter) {
+      sessionDraftTouchedRef.current = true;
+      setAdapter(nextAdapter);
+    }
+    window.requestAnimationFrame(() => promptRef.current?.focus());
+  }
+
+  function cycleModel() {
+    sessionDraftTouchedRef.current = true;
+    setModelChoice(nextModelPreset(adapter, selectedModel));
+    window.requestAnimationFrame(() => promptRef.current?.focus());
+  }
+
   const launcher = (
     <form
       className="command-launcher new-research-launcher"
@@ -299,6 +294,17 @@ export default function NewResearchDialog({
       aria-modal={inline ? undefined : true}
       aria-label="New research"
       onKeyDown={(event) => {
+        const tabAction = launcherTabAction(event, true);
+        if (tabAction) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (tabAction === "cycle-provider") {
+            cycleAdapter();
+          } else if (tabAction === "cycle-model") {
+            cycleModel();
+          }
+          return;
+        }
         if (!inline && event.key === "Escape" && !submitting) {
           close();
         }
@@ -335,7 +341,7 @@ export default function NewResearchDialog({
                 value={selectedModel}
                 options={modelPresets.map((preset) => ({
                   value: preset,
-                  label: formatResearchModelLabel(preset),
+                  label: formatLauncherModelLabel(adapter, preset),
                 }))}
                 ariaLabel="Model"
                 onChange={(choice) => {

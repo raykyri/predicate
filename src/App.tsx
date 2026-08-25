@@ -66,6 +66,7 @@ import {
 } from "./components/ComposerSubmitShortcut";
 import { LauncherSelect } from "./components/LauncherSelect";
 import type { LauncherSelectOption } from "./components/LauncherSelect";
+import { launcherTabAction } from "./lib/launcherKeyboard";
 import BrowserOverlay from "./components/BrowserOverlay";
 import ArtifactTray, { type ArtifactTrayPosition } from "./components/ArtifactTray";
 import AgentDebugPanel, {
@@ -12984,6 +12985,16 @@ function MainApp() {
       aria-modal="true"
       aria-label="New agent"
       onKeyDown={(event) => {
+        const tabAction = launcherTabAction(event, false);
+        if (tabAction) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (tabAction === "cycle-provider") {
+            cycleLauncherAdapter();
+          }
+          focusLauncherInput();
+          return;
+        }
         if (event.key === "Escape") {
           // The adapter/model picker portals above this form. Let it dismiss
           // itself instead of tearing down the whole launcher.
