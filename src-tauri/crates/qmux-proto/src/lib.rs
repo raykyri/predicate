@@ -9,9 +9,11 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// A single control request. `token` scopes the request to exactly one pane:
-/// the server resolves the pane from the token and treats any pane id inside
-/// `payload` as advisory only.
+/// A single control request. `token` normally scopes the request to exactly one
+/// pane: the server resolves the pane from the token and treats any pane id
+/// inside `payload` as advisory only. The notification-only public entry point
+/// also accepts an empty token from a same-user Unix-socket peer; no other
+/// command may use that exception.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ControlRequest {

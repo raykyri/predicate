@@ -36,6 +36,7 @@ mod title_generation;
 mod transcript;
 mod turn_queue;
 mod updater;
+mod user_notifications;
 mod workspace;
 
 use adapters::{
@@ -3402,6 +3403,8 @@ fn main() {
             native_terminal_read_viewport_text,
             completion_sound_play,
             completion_sound_set,
+            user_notifications::notification_permission_status,
+            user_notifications::notification_request_permission,
             agent_submit_turn,
             agent_queue_wait_turn,
             agent_queue_delivery_turn,

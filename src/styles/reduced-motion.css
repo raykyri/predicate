@@ -24,6 +24,12 @@
   transform: translateX(-50%);
 }
 
+.app-shell.reduce-motion .user-notification,
+.app-shell.reduce-motion .user-notification.is-entering,
+.app-shell.reduce-motion .user-notification.is-exiting {
+  transform: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root,
   *,
@@ -46,5 +52,11 @@
   .turn-jump-to-latest,
   .turn-jump-to-latest.is-visible {
     transform: translateX(-50%);
+  }
+
+  .user-notification,
+  .user-notification.is-entering,
+  .user-notification.is-exiting {
+    transform: none;
   }
 }

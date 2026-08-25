@@ -284,6 +284,15 @@ hosted view can show proposal status without a separate collaboration database.
   the notification to the owning agent's adapter. The same socket, scoped to the
   caller's pane, serves other in-pane commands such as `qmux fork` and
   `qmux open <file|localhost-url>`.
+- `qmux send [options] <message>` sends a manual user notification. The default
+  `auto` mode shows a stacked card at the top right while qmux is focused and a
+  native macOS notification while it is in the background; unavailable native
+  delivery falls back to a card. Calls made inside a qmux pane are associated
+  with that pane, so clicking the card or native notification returns to it.
+  Calls from other local shells are accepted through a same-user,
+  notification-only socket path and carry no pane action. Use `qmux send --help`
+  for title, tone, sound, timeout, stdin, and delivery overrides. This is separate
+  from the internal `qmux notify <event>` hook protocol above.
 - A loopback-only (`127.0.0.1`) HTTP server with per-pane random tokens backs
   browser-overlay file targets. It serves only the requesting pane's group,
   current directory, and agent worktree roots.

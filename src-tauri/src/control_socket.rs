@@ -788,6 +788,7 @@ fn handle_client(state: AppState, stream: UnixStream) {
 }
 
 fn handle_client_with_timeout(state: AppState, mut stream: UnixStream, read_timeout: Duration) {
+    let same_user_peer = peer_is_current_user(&stream);
     let reader_stream = match stream.try_clone() {
         Ok(stream) => stream,
         Err(err) => {
@@ -806,7 +807,7 @@ fn handle_client_with_timeout(state: AppState, mut stream: UnixStream, read_time
 
     for line in reader.lines() {
         let result = match line {
-            Ok(line) => handle_line(&state, &line),
+            Ok(line) => handle_line_with_peer(&state, &line, same_user_peer),
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return;
             }
@@ -819,9 +820,34 @@ fn handle_client_with_timeout(state: AppState, mut stream: UnixStream, read_time
     }
 }
 
+#[cfg(test)]
 fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
+    handle_line_with_peer(state, line, false)
+}
+
+fn handle_line_with_peer(
+    state: &AppState,
+    line: &str,
+    same_user_peer: bool,
+) -> Result<Value, String> {
     let request: ControlRequest =
         serde_json::from_str(line).map_err(|err| format!("invalid control request: {err}"))?;
+    // `qmux send` is intentionally usable outside qmux panes. An empty token is
+    // accepted for this one non-mutating command only when the kernel says the
+    // Unix-socket peer has our uid. The socket and its parent are also 0600/0700,
+    // but checking the peer prevents a permissive-filesystem regression from
+    // silently widening this exception. A non-empty invalid token never falls
+    // through to peer auth: callers cannot probe with a guessed pane credential.
+    if request.command == "notification.send" && request.token.is_empty() {
+        if !same_user_peer {
+            return Err("external notifications require a same-user local peer".to_string());
+        }
+        let payload = serde_json::from_value::<crate::user_notifications::SendNotificationRequest>(
+            request.payload,
+        )
+        .map_err(|err| format!("invalid notification.send payload: {err}"))?;
+        return crate::user_notifications::dispatch(state, None, payload);
+    }
     // A control token authorizes exactly one pane. Resolving it here means every
     // command below acts only on the caller's own pane: a process in one pane cannot
     // write to, or impersonate hooks for, any other pane.
@@ -839,6 +865,13 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
 
     match request.command.as_str() {
         "ping" => Ok(json!({ "status": "ok" })),
+        "notification.send" => {
+            let payload = serde_json::from_value::<
+                crate::user_notifications::SendNotificationRequest,
+            >(request.payload)
+            .map_err(|err| format!("invalid notification.send payload: {err}"))?;
+            crate::user_notifications::dispatch(state, Some(&authed_pane), payload)
+        }
         "cli.call" => {
             let payload = serde_json::from_value::<PublicControlRequest>(request.payload)
                 .map_err(|err| format!("invalid cli.call payload: {err}"))?;
@@ -1143,6 +1176,59 @@ fn handle_line(state: &AppState, line: &str) -> Result<Value, String> {
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
         other => Err(format!("unknown control command '{other}'")),
     }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly"
+))]
+fn peer_is_current_user(stream: &UnixStream) -> bool {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: both pointers are valid for writes and the fd belongs to a live
+    // connected UnixStream for the duration of this call.
+    let result = unsafe { libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) };
+    result == 0 && uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn peer_is_current_user(stream: &UnixStream) -> bool {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: credentials and length point at initialized writable storage of
+    // the exact size requested by SO_PEERCRED.
+    let result = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut length,
+        )
+    };
+    result == 0
+        && length as usize == std::mem::size_of::<libc::ucred>()
+        && credentials.uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(any(
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "dragonfly",
+    target_os = "linux",
+    target_os = "android"
+)))]
+fn peer_is_current_user(_stream: &UnixStream) -> bool {
+    false
 }
 
 fn validate_control_launch_workspace(state: &AppState, pane_id: &str) -> Result<(), String> {
@@ -1481,6 +1567,69 @@ mod tests {
         let token = state.pane_token("pane-1").unwrap();
         let data = handle_line(&state, &request_line(&token, "ping", Value::Null)).unwrap();
         assert_eq!(data, json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn external_notification_is_the_only_same_user_tokenless_command() {
+        let state = test_state();
+        let notification = request_line(
+            "",
+            "notification.send",
+            json!({
+                "body": "Build finished",
+                "mode": "overlay",
+                "tone": "success",
+                "timeoutMs": 5000,
+            }),
+        );
+        let data = handle_line_with_peer(&state, &notification, true).unwrap();
+        assert_eq!(data["accepted"], true);
+        assert_eq!(data["delivery"], "overlay");
+
+        let err = handle_line_with_peer(&state, &request_line("", "ping", Value::Null), true)
+            .unwrap_err();
+        assert!(err.contains("invalid QMUX_TOKEN"));
+
+        let err = handle_line_with_peer(&state, &notification, false).unwrap_err();
+        assert!(err.contains("same-user local peer"));
+    }
+
+    #[test]
+    fn invalid_nonempty_notification_token_does_not_fall_back_to_peer_auth() {
+        let state = test_state();
+        let err = handle_line_with_peer(
+            &state,
+            &request_line(
+                "guessed-token",
+                "notification.send",
+                json!({ "body": "hello", "mode": "overlay" }),
+            ),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid QMUX_TOKEN"));
+    }
+
+    #[test]
+    fn external_notification_rejects_unrecognized_payload_fields() {
+        let state = test_state();
+        let err = handle_line_with_peer(
+            &state,
+            &request_line(
+                "",
+                "notification.send",
+                json!({ "body": "hello", "paneId": "pane-forged" }),
+            ),
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown field"));
+    }
+
+    #[test]
+    fn connected_unix_socket_reports_the_current_user() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        assert!(peer_is_current_user(&client));
     }
 
     #[test]

@@ -79,6 +79,19 @@ export function setCompletionSound(soundId: CompletionSoundId) {
   return invoke<void>("completion_sound_set", { soundId });
 }
 
+export interface NotificationPermissionInfo {
+  supported: boolean;
+  status: "NotDetermined" | "Denied" | "Authorized" | "Provisional" | "Ephemeral" | "Unknown" | "Unavailable";
+}
+
+export function getNotificationPermission() {
+  return invoke<NotificationPermissionInfo>("notification_permission_status");
+}
+
+export function requestNotificationPermission() {
+  return invoke<NotificationPermissionInfo>("notification_request_permission");
+}
+
 export function listShellAgentJobs() {
   return invoke<ShellAgentJobInfo[]>("list_shell_agent_jobs");
 }

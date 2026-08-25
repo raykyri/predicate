@@ -17,6 +17,7 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -68,6 +69,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         return Ok(true);
     }
     let remaining = args.collect::<Vec<_>>();
+    if command == "send" {
+        run_notification_send(remaining)?;
+        return Ok(true);
+    }
     if public_cli::run(&command, remaining.clone())? {
         return Ok(true);
     }
@@ -256,6 +261,243 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         _ => Ok(false),
     }
+}
+
+const SEND_USAGE: &str = "usage: qmux send [--title <text>] [--mode <auto|native|overlay>] [--tone <info|success|warning|error>] [--sound|--no-sound] [--timeout <seconds>] [--stdin] [--] <message>";
+
+#[derive(Debug, PartialEq)]
+struct NotificationSendArgs {
+    title: Option<String>,
+    body: String,
+    mode: String,
+    tone: String,
+    sound: Option<bool>,
+    timeout_ms: u64,
+}
+
+fn run_notification_send(args: Vec<String>) -> Result<(), String> {
+    if args.as_slice() == ["--help"] || args.as_slice() == ["-h"] {
+        println!("{SEND_USAGE}");
+        return Ok(());
+    }
+    let parsed = parse_notification_send(args, || {
+        let mut input = String::new();
+        std::io::stdin()
+            .read_to_string(&mut input)
+            .map_err(|error| format!("failed to read notification body from stdin: {error}"))?;
+        Ok(input.trim_end_matches(['\r', '\n']).to_string())
+    })
+    .map_err(syntax_error)?;
+    let socket_path = notification_socket_path()?;
+    // A pane token gives the notification a trusted source pane. Outside qmux
+    // the empty token selects the peer-credential-gated notification-only path.
+    let token = env::var("QMUX_TOKEN").unwrap_or_default();
+    let raw = send_request_with_timeout(
+        socket_path.to_string_lossy().as_ref(),
+        &token,
+        "notification.send",
+        json!({
+            "title": parsed.title,
+            "body": parsed.body,
+            "mode": parsed.mode,
+            "tone": parsed.tone,
+            "sound": parsed.sound,
+            "timeoutMs": parsed.timeout_ms,
+        }),
+        // macOS permission/settings IPC and Notification Center scheduling can
+        // occasionally exceed the two-second hook fast path. Avoid reporting a
+        // false failure for a notification the app is still delivering.
+        Duration::from_secs(10),
+    )?;
+    let response = serde_json::from_str::<ControlResponse>(&raw)
+        .map_err(|error| format!("invalid qmux response: {error}"))?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "qmux rejected the notification".to_string()))
+    }
+}
+
+fn parse_notification_send(
+    mut args: Vec<String>,
+    read_stdin: impl FnOnce() -> Result<String, String>,
+) -> Result<NotificationSendArgs, String> {
+    let mut title = None;
+    let mut mode = "auto".to_string();
+    let mut tone = "info".to_string();
+    let mut sound = None;
+    let mut timeout_ms = 5_000_u64;
+    let mut stdin = false;
+    let mut message = Vec::new();
+    let mut options = true;
+
+    while !args.is_empty() {
+        let argument = args.remove(0);
+        if options && argument == "--" {
+            options = false;
+            continue;
+        }
+        if !options || !argument.starts_with('-') || argument == "-" {
+            message.push(argument);
+            continue;
+        }
+        match argument.as_str() {
+            "--title" => title = Some(take_send_value(&mut args, &argument)?),
+            "--mode" => {
+                let value = take_send_value(&mut args, &argument)?;
+                if !matches!(value.as_str(), "auto" | "native" | "overlay") {
+                    return Err(format!(
+                        "invalid notification mode {value:?}; expected auto, native, or overlay"
+                    ));
+                }
+                mode = value;
+            }
+            "--auto" => mode = "auto".to_string(),
+            "--native" => mode = "native".to_string(),
+            "--overlay" => mode = "overlay".to_string(),
+            "--tone" => {
+                let value = take_send_value(&mut args, &argument)?;
+                if !matches!(value.as_str(), "info" | "success" | "warning" | "error") {
+                    return Err(format!(
+                        "invalid notification tone {value:?}; expected info, success, warning, or error"
+                    ));
+                }
+                tone = value;
+            }
+            "--sound" => sound = Some(true),
+            "--no-sound" => sound = Some(false),
+            "--timeout" => {
+                let value = take_send_value(&mut args, &argument)?;
+                let seconds = value.parse::<u64>().map_err(|_| {
+                    format!("invalid notification timeout {value:?}; expected whole seconds")
+                })?;
+                if !(1..=30).contains(&seconds) {
+                    return Err("notification timeout must be between 1 and 30 seconds".to_string());
+                }
+                timeout_ms = seconds * 1_000;
+            }
+            "--stdin" => stdin = true,
+            "--help" | "-h" => return Err(SEND_USAGE.to_string()),
+            _ => return Err(format!("unknown qmux send option {argument:?}")),
+        }
+    }
+
+    if stdin && !message.is_empty() {
+        return Err("qmux send accepts either --stdin or a message, not both".to_string());
+    }
+    let body = if stdin {
+        read_stdin()?
+    } else {
+        message.join(" ")
+    };
+    if body.trim().is_empty() {
+        return Err(SEND_USAGE.to_string());
+    }
+    Ok(NotificationSendArgs {
+        title,
+        body,
+        mode,
+        tone,
+        sound,
+        timeout_ms,
+    })
+}
+
+fn take_send_value(args: &mut Vec<String>, flag: &str) -> Result<String, String> {
+    if args.is_empty() {
+        return Err(format!("{flag} requires a value"));
+    }
+    Ok(args.remove(0))
+}
+
+fn notification_socket_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("QMUX_SOCK").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(path) = configured_notification_socket_path()? {
+        return Ok(path);
+    }
+    dirs::runtime_dir()
+        .map(|root| root.join("qmux").join("qmux.sock"))
+        .or_else(|| dirs::data_dir().map(|root| root.join("qmux").join("run").join("qmux.sock")))
+        .ok_or_else(|| {
+            "could not locate qmux's control socket; set QMUX_SOCK explicitly".to_string()
+        })
+}
+
+fn configured_notification_socket_path() -> Result<Option<PathBuf>, String> {
+    let cwd = env::current_dir().map_err(|error| format!("failed to read cwd: {error}"))?;
+    let explicit = env::var_os("QMUX_CONFIG").filter(|value| !value.is_empty());
+    let config_path = if let Some(path) = explicit.as_ref() {
+        let path = PathBuf::from(path);
+        Some(if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        })
+    } else if cfg!(debug_assertions) {
+        let path = cwd.join("qmux.config.json");
+        path.exists().then_some(path)
+    } else {
+        None
+    };
+    let Some(config_path) = config_path else {
+        return Ok(None);
+    };
+    let raw = std::fs::read_to_string(&config_path).map_err(|error| {
+        format!(
+            "failed to read qmux config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    let config = serde_json::from_str::<Value>(&raw).map_err(|error| {
+        format!(
+            "failed to parse qmux config {}: {error}",
+            config_path.display()
+        )
+    })?;
+    let configured = config
+        .get("socketPath")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            format!(
+                "qmux config {} has no string socketPath",
+                config_path.display()
+            )
+        })?;
+    let config_dir = config_path.parent().unwrap_or(&cwd);
+    Ok(Some(resolve_notification_socket_path(
+        config_dir,
+        Path::new(configured),
+        env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .as_deref(),
+    )))
+}
+
+fn resolve_notification_socket_path(
+    config_dir: &Path,
+    configured: &Path,
+    home: Option<&Path>,
+) -> PathBuf {
+    if let Some(home) = home
+        && let Ok(suffix) = configured.strip_prefix("~")
+    {
+        return home.join(suffix);
+    }
+    if configured.is_absolute() {
+        return configured.to_path_buf();
+    }
+    if home.is_some_and(|home| config_dir.starts_with(home)) {
+        return config_dir.join(configured);
+    }
+    dirs::runtime_dir()
+        .map(|root| root.join("qmux").join("qmux.sock"))
+        .or_else(|| dirs::data_dir().map(|root| root.join("qmux").join("run").join("qmux.sock")))
+        .unwrap_or_else(|| config_dir.join(configured))
 }
 
 fn run_agent_exec(adapter_id: String, args: Vec<String>) -> Result<(), String> {
@@ -613,5 +855,92 @@ mod tests {
         }))
         .unwrap_err();
         assert!(error.contains("unsupported qmux public API version"));
+    }
+
+    #[test]
+    fn notification_send_parser_preserves_explicit_message_options() {
+        let parsed = parse_notification_send(
+            vec![
+                "--title".into(),
+                "Tests".into(),
+                "--native".into(),
+                "--tone".into(),
+                "success".into(),
+                "--no-sound".into(),
+                "--timeout".into(),
+                "12".into(),
+                "--".into(),
+                "-all".into(),
+                "passed".into(),
+            ],
+            || panic!("stdin must not be read without --stdin"),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            NotificationSendArgs {
+                title: Some("Tests".into()),
+                body: "-all passed".into(),
+                mode: "native".into(),
+                tone: "success".into(),
+                sound: Some(false),
+                timeout_ms: 12_000,
+            }
+        );
+    }
+
+    #[test]
+    fn notification_send_reads_stdin_only_when_requested() {
+        let parsed =
+            parse_notification_send(vec!["--stdin".into()], || Ok("hello\n".into())).unwrap();
+        assert_eq!(parsed.body, "hello\n");
+
+        let error =
+            parse_notification_send(vec!["--stdin".into(), "also-an-argument".into()], || {
+                Ok("stdin".into())
+            })
+            .unwrap_err();
+        assert!(error.contains("either --stdin or a message"));
+    }
+
+    #[test]
+    fn notification_send_rejects_invalid_enums_and_timeouts() {
+        assert!(
+            parse_notification_send(
+                vec!["--mode".into(), "carrier-pigeon".into(), "hello".into()],
+                || unreachable!(),
+            )
+            .unwrap_err()
+            .contains("invalid notification mode")
+        );
+        assert!(
+            parse_notification_send(
+                vec!["--timeout".into(), "31".into(), "hello".into()],
+                || unreachable!(),
+            )
+            .unwrap_err()
+            .contains("between 1 and 30")
+        );
+    }
+
+    #[test]
+    fn notification_socket_config_expands_home_and_relative_paths() {
+        let home = Path::new("/tmp/qmux-cli-home");
+        assert_eq!(
+            resolve_notification_socket_path(
+                Path::new("/tmp/qmux-cli-home/config"),
+                Path::new("~/run/qmux.sock"),
+                Some(home),
+            ),
+            PathBuf::from("/tmp/qmux-cli-home/run/qmux.sock")
+        );
+        assert_eq!(
+            resolve_notification_socket_path(
+                Path::new("/tmp/qmux-cli-home/config"),
+                Path::new("run/qmux.sock"),
+                Some(home),
+            ),
+            PathBuf::from("/tmp/qmux-cli-home/config/run/qmux.sock")
+        );
     }
 }

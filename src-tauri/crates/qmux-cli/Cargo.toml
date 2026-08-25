@@ -10,6 +10,7 @@ name = "qmux-cli"
 path = "src/bin/qmux-cli.rs"
 
 [dependencies]
+dirs = "6"
 libc = "0.2"
 qmux-proto = { path = "../qmux-proto" }
 serde = { version = "1", features = ["derive"] }

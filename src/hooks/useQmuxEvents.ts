@@ -134,6 +134,8 @@ export interface UseQmuxEventsHandlers {
   onTerminalOpenUrl?: (paneId: string, url: string) => void;
   onTerminalTitleChanged?: (paneId: string, title: string) => void;
   onResearchChanged?: (event: QmuxEvent) => void;
+  onUserNotificationRequested?: (event: QmuxEvent) => void;
+  onNotificationOpenPane?: (paneId: string) => void;
 }
 
 function stringField(value: unknown, field: string): string | null {
@@ -188,6 +190,8 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onTerminalOpenUrl,
     onTerminalTitleChanged,
     onResearchChanged,
+    onUserNotificationRequested,
+    onNotificationOpenPane,
   } = handlers;
 
   useEffect(() => {
@@ -232,6 +236,12 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       }
       if (event.type.startsWith("research.")) {
         onResearchChanged?.(event);
+      }
+      if (event.type === "app.notification_requested") {
+        onUserNotificationRequested?.(event);
+      }
+      if (event.type === "app.notification_open_pane" && event.paneId) {
+        onNotificationOpenPane?.(event.paneId);
       }
       const hookEvent = transcriptHookEvent(event);
       if (hookEvent) {

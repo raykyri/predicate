@@ -113,6 +113,11 @@ import SidebarModeToggle from "./components/SidebarModeToggle";
 import TerminalPane from "./components/TerminalPane";
 import type { TerminalPaneHandle } from "./components/TerminalPane";
 import TerminalPip from "./components/TerminalPip";
+import {
+  UserNotificationStack,
+  type UserNotificationItem,
+  type UserNotificationTone,
+} from "./components/UserNotificationStack";
 import { shouldShowTerminalPip, shouldShowTerminalPipToggle } from "./lib/terminalPip";
 import TurnOverlay, {
   formatTurnsTranscript,
@@ -505,6 +510,9 @@ import {
   browserOpenLocalPath,
   paneActivity,
   playCompletionSound,
+  getNotificationPermission,
+  requestNotificationPermission,
+  type NotificationPermissionInfo,
   pickGroupDirectory,
   placePaneAfter,
   removeQueuedAgentTurn,
@@ -2774,6 +2782,26 @@ function MainApp() {
     message: string;
     tone: "normal" | "warning";
   } | null>(null);
+  const [userNotifications, setUserNotifications] = useState<UserNotificationItem[]>([]);
+  const [notificationPermission, setNotificationPermission] =
+    useState<NotificationPermissionInfo | null>(null);
+  const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
+  useEffect(() => {
+    if (!settingsOpen) return;
+    let disposed = false;
+    void getNotificationPermission()
+      .then((permission) => {
+        if (!disposed) setNotificationPermission(permission);
+      })
+      .catch(() => {
+        if (!disposed) {
+          setNotificationPermission({ supported: false, status: "Unavailable" });
+        }
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [settingsOpen]);
   const [folderPickerStatus, setFolderPickerStatus] = useState<string | null>(null);
   const [worktreeCreateDialog, setWorktreeCreateDialog] = useState<{
     pane: PaneInfo;
@@ -5383,7 +5411,7 @@ function MainApp() {
       settingsMenu,
   );
   const nativeBrowserOccluded = Boolean(
-    nativeModalOccluded || appToast || folderPickerStatus,
+    nativeModalOccluded || appToast || userNotifications.length > 0 || folderPickerStatus,
   );
   const nativeBrowserGeometryRevision = activeTranscriptVisibleExpanded
     ? -1
@@ -9378,6 +9406,67 @@ function MainApp() {
     }
   }, []);
 
+  const enableNativeNotifications = useCallback(async () => {
+    setNotificationPermissionBusy(true);
+    try {
+      setNotificationPermission(await requestNotificationPermission());
+    } catch (err) {
+      showAppToast(
+        `Couldn't enable native notifications: ${unknownErrorMessage(err)}`,
+        "warning",
+      );
+    } finally {
+      setNotificationPermissionBusy(false);
+    }
+  }, []);
+
+  const handleUserNotificationRequested = useCallback((event: QmuxEvent) => {
+    const { id, title, body, tone, timeoutMs, sound } = event.payload;
+    if (
+      typeof id !== "string" ||
+      typeof title !== "string" ||
+      typeof body !== "string" ||
+      typeof timeoutMs !== "number" ||
+      !Number.isFinite(timeoutMs)
+    ) {
+      return;
+    }
+    const normalizedTone: UserNotificationTone =
+      tone === "success" || tone === "warning" || tone === "error" ? tone : "info";
+    setUserNotifications((current) =>
+      [
+        ...current.filter((notification) => notification.id !== id),
+        {
+          id,
+          title,
+          body,
+          tone: normalizedTone,
+          timeoutMs: Math.min(30_000, Math.max(1_000, timeoutMs)),
+          paneId: event.paneId ?? null,
+        },
+      ].slice(-20),
+    );
+    if (sound === true) {
+      void playCompletionSound(settingsRef.current.completionSound).catch(() => undefined);
+    }
+  }, []);
+
+  const notificationOpenPaneRef = useRef<(paneId: string) => void>(() => undefined);
+  notificationOpenPaneRef.current = (paneId) => {
+    if (panesRef.current.some((pane) => pane.id === paneId)) {
+      focusPaneTab(paneId);
+    }
+  };
+  const handleNotificationOpenPane = useCallback(
+    (paneId: string) => notificationOpenPaneRef.current(paneId),
+    [],
+  );
+  const dismissUserNotification = useCallback((id: string) => {
+    setUserNotifications((current) =>
+      current.filter((notification) => notification.id !== id),
+    );
+  }, []);
+
   useQmuxEvents({
     appendHookEvent,
     setPanes: setPanesPreservingRecoveredDismissals,
@@ -9429,6 +9518,8 @@ function MainApp() {
     onTerminalOpenUrl: openPaneLink,
     onTerminalTitleChanged: handleTerminalTitleChange,
     onResearchChanged: handleResearchEvent,
+    onUserNotificationRequested: handleUserNotificationRequested,
+    onNotificationOpenPane: handleNotificationOpenPane,
   });
 
   async function addShellPane() {
@@ -15593,6 +15684,39 @@ function MainApp() {
 
             <div className="settings-row">
               <div className="settings-label-stack">
+                <span className="settings-label">Native notifications</span>
+                <p className="settings-hint settings-hint-weak">
+                  Used by <code>qmux send</code> while qmux is in the background.
+                </p>
+              </div>
+              {notificationPermission === null ? (
+                <span className="settings-hint">Checking…</span>
+              ) : notificationPermission.supported &&
+                (notificationPermission.status === "Authorized" ||
+                  notificationPermission.status === "Provisional" ||
+                  notificationPermission.status === "Ephemeral") ? (
+                <span className="settings-hint">Enabled</span>
+              ) : notificationPermission.supported &&
+                notificationPermission.status !== "Denied" ? (
+                <button
+                  type="button"
+                  className="control-button"
+                  disabled={notificationPermissionBusy}
+                  onClick={() => void enableNativeNotifications()}
+                >
+                  {notificationPermissionBusy ? "Enabling…" : "Enable"}
+                </button>
+              ) : (
+                <span className="settings-hint">
+                  {notificationPermission.status === "Denied"
+                    ? "Denied in System Settings"
+                    : "Unavailable"}
+                </span>
+              )}
+            </div>
+
+            <div className="settings-row">
+              <div className="settings-label-stack">
                 <label htmlFor="settings-worktree-location" className="settings-label">
                   Worktree location
                 </label>
@@ -17021,6 +17145,12 @@ function MainApp() {
             );
           }
         }}
+      />
+
+      <UserNotificationStack
+        notifications={userNotifications}
+        onDismiss={dismissUserNotification}
+        onOpenPane={handleNotificationOpenPane}
       />
 
       {appToast ? (
