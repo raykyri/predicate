@@ -19,7 +19,7 @@ import {
 // Model presets per adapter; "custom" reveals a free-form input. Adapters
 // without a curated list only offer "custom".
 const MODEL_PRESETS_BY_ADAPTER: Record<string, string[]> = {
-  [CLAUDE_ADAPTER_ID]: ["fable", "opus", "sonnet", "custom"],
+  [CLAUDE_ADAPTER_ID]: ["opus", "fable", "sonnet", "custom"],
   [CODEX_ADAPTER_ID]: [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
