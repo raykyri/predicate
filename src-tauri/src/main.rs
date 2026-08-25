@@ -10,6 +10,7 @@ mod control_socket;
 mod events;
 mod file_server;
 mod global_task_launcher;
+mod headless_process;
 mod history;
 mod host;
 mod human_browser;

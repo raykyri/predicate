@@ -213,6 +213,10 @@ impl AgentAdapter for ClaudeAdapter {
         true
     }
 
+    fn supports_research(&self) -> bool {
+        true
+    }
+
     fn supports_fork_at_message(&self) -> bool {
         true
     }

@@ -925,6 +925,12 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether this adapter has a supported research runtime. This is
+    /// deliberately narrower than general terminal-session fork support.
+    fn supports_research(&self) -> bool {
+        false
+    }
+
     fn supports_fork_at_message(&self) -> bool {
         false
     }
@@ -992,6 +998,7 @@ impl AdapterRegistry {
                 label: adapter.display_name().to_string(),
                 default: adapter.id() == "claude",
                 supports_fork: adapter.supports_fork(),
+                supports_research: adapter.supports_research(),
                 supports_fork_at_message: adapter.supports_fork_at_message(),
             })
             .collect()
@@ -1004,11 +1011,11 @@ pub struct AdapterMetadata {
     pub id: String,
     pub label: String,
     pub default: bool,
-    /// Whether the adapter has a native fork command. Surfaces the capability
-    /// to the frontend so features built on branching (research follow-ups)
-    /// can filter their adapter choices instead of discovering the gap after
-    /// a long root run.
+    /// Whether the adapter has a native fork command for terminal-session
+    /// branching.
     pub supports_fork: bool,
+    /// Whether the adapter can run and branch through the research harness.
+    pub supports_research: bool,
     /// Whether the adapter can fork from a chosen message rather than the
     /// session head. Gates the transcript's per-message fork action, which is
     /// hidden rather than disabled for adapters without it.
@@ -1219,6 +1226,12 @@ pub fn adapter_supports_fork(config: &QmuxConfig, adapter_id: &str) -> bool {
         .is_ok_and(|adapter| adapter.supports_fork())
 }
 
+pub fn adapter_supports_research(config: &QmuxConfig, adapter_id: &str) -> bool {
+    adapter_registry(config)
+        .get(adapter_id)
+        .is_ok_and(|adapter| adapter.supports_research())
+}
+
 /// Adapters that can fork from a chosen message rather than the session head.
 /// Neither CLI has a flag for this — `claude --fork-session` and `codex fork`
 /// both branch at the head — so the adapter synthesizes a truncated copy of the
@@ -1297,8 +1310,8 @@ pub fn default_fork_adapter(config: &QmuxConfig) -> Result<String, String> {
     let metadata = adapter_registry(config).metadata();
     metadata
         .iter()
-        .find(|adapter| adapter.default && adapter.supports_fork)
-        .or_else(|| metadata.iter().find(|adapter| adapter.supports_fork))
+        .find(|adapter| adapter.default && adapter.supports_research)
+        .or_else(|| metadata.iter().find(|adapter| adapter.supports_research))
         .map(|adapter| adapter.id.clone())
         .ok_or_else(|| "no installed agent supports research follow-ups".to_string())
 }
@@ -1648,6 +1661,11 @@ mod tests {
         assert!(adapter_supports_fork(&config, "grok"));
         assert!(adapter_supports_fork(&config, "opencode"));
         assert!(adapter_supports_fork(&config, "pi"));
+        assert!(adapter_supports_research(&config, "claude"));
+        assert!(adapter_supports_research(&config, "codex"));
+        assert!(adapter_supports_research(&config, "grok"));
+        assert!(!adapter_supports_research(&config, "opencode"));
+        assert!(!adapter_supports_research(&config, "pi"));
         assert!(adapter_supports_fork_at_message(&config, "pi"));
         // Muse has no fork command either — no `--fork-session` flag and no
         // `fork` subcommand — so branching a session is not offered.

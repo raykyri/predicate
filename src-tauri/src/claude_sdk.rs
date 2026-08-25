@@ -5,6 +5,7 @@
 //! correlated `control_request` / `control_response`.
 
 use crate::adapters::hook_transcript_path_acceptable;
+use crate::headless_process::reconcile_session_id;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -234,7 +235,7 @@ pub fn parse_sdk_line(line: &str) -> Result<SdkMessage, String> {
     parse_sdk_value(value)
 }
 
-fn parse_sdk_value(value: Value) -> Result<SdkMessage, String> {
+pub(crate) fn parse_sdk_value(value: Value) -> Result<SdkMessage, String> {
     let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
     match kind {
         "control_request" => {
@@ -640,7 +641,7 @@ impl ClaudeSdkSession {
 
     pub fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<SdkMessage>, String> {
         match self.events.recv_timeout(timeout) {
-            Ok(Ok(message)) => Ok(Some(self.observe(message))),
+            Ok(Ok(message)) => self.observe(message).map(Some),
             Ok(Err(err)) => Err(err),
             Err(RecvTimeoutError::Timeout) => Ok(None),
             Err(RecvTimeoutError::Disconnected) => Err("Claude Code stdout closed".to_string()),
@@ -678,7 +679,19 @@ impl ClaudeSdkSession {
         }
     }
 
-    fn observe(&mut self, message: SdkMessage) -> SdkMessage {
+    fn observe(&mut self, message: SdkMessage) -> Result<SdkMessage, String> {
+        let observed_session_id = match &message {
+            SdkMessage::System { session_id, .. }
+            | SdkMessage::Assistant { session_id, .. }
+            | SdkMessage::User { session_id, .. }
+            | SdkMessage::StreamEvent { session_id, .. }
+            | SdkMessage::Result { session_id, .. } => session_id.as_deref(),
+            _ => None,
+        };
+        // Stream envelopes are produced by the CLI rather than the model, but
+        // still treat their durable identity as untrusted process output. A
+        // mismatched or path-shaped id must never redirect transcript lookup.
+        reconcile_session_id(&mut self.session_id, observed_session_id, "Claude")?;
         match &message {
             SdkMessage::ControlResponse {
                 request_id,
@@ -694,14 +707,10 @@ impl ClaudeSdkSession {
             }
             SdkMessage::System {
                 subtype,
-                session_id,
                 transcript_path,
                 capabilities,
                 ..
             } if subtype == "init" => {
-                if let Some(session_id) = session_id {
-                    self.session_id = Some(session_id.clone());
-                }
                 if let Some(path) = transcript_path
                     && hook_transcript_path_acceptable(self.transcript_path.as_deref(), path)
                 {
@@ -711,18 +720,11 @@ impl ClaudeSdkSession {
                     capabilities.iter().any(|cap| cap == "interrupt_receipt_v1");
             }
             SdkMessage::Result {
-                session_id,
-                transcript_path,
-                ..
+                transcript_path, ..
             }
             | SdkMessage::Assistant {
-                session_id,
-                transcript_path,
-                ..
+                transcript_path, ..
             } => {
-                if self.session_id.is_none() {
-                    self.session_id = session_id.clone();
-                }
                 if let Some(path) = transcript_path
                     && hook_transcript_path_acceptable(self.transcript_path.as_deref(), path)
                 {
@@ -731,7 +733,7 @@ impl ClaudeSdkSession {
             }
             _ => {}
         }
-        message
+        Ok(message)
     }
 
     fn write_json(&mut self, value: &Value) -> Result<(), String> {

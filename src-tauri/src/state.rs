@@ -3873,12 +3873,9 @@ impl AppState {
         if request.adapter.trim().is_empty() {
             return Err("research adapter cannot be empty".to_string());
         }
-        // Branching is the defining research feature; accepting an adapter
-        // without a native fork command would only be discovered when the
-        // first follow-up fails after a completed root run.
-        if !crate::adapters::adapter_supports_fork(&self.inner.config, &request.adapter) {
+        if !crate::adapters::adapter_supports_research(&self.inner.config, &request.adapter) {
             return Err(format!(
-                "research requires an adapter with follow-up (fork) support; '{}' has none",
+                "'{}' is not a supported research agent",
                 request.adapter
             ));
         }
@@ -4633,7 +4630,10 @@ impl AppState {
                     // it through `conversation_query_followup_prompt` so it
                     // carries the same tag neutralization as the serialized
                     // turns it travels with.
-                    if crate::adapters::adapter_supports_fork(&self.inner.config, &parent.adapter) {
+                    if crate::adapters::adapter_supports_research(
+                        &self.inner.config,
+                        &parent.adapter,
+                    ) {
                         (parent.adapter, parent.model, parent.effort)
                     } else {
                         (
@@ -12733,7 +12733,7 @@ mod tests {
     }
 
     #[test]
-    fn research_tree_creation_requires_a_forkable_adapter() {
+    fn research_tree_creation_requires_a_supported_research_adapter() {
         let state = AppState::new(test_config(temp_workspace()));
         state.insert_group_after(sample_group(), None).unwrap();
         let err = state
@@ -12746,7 +12746,7 @@ mod tests {
                 group_id: "group-1".to_string(),
             })
             .unwrap_err();
-        assert!(err.contains("follow-up (fork) support"), "{err}");
+        assert!(err.contains("not a supported research agent"), "{err}");
         assert!(state.list_research_trees().unwrap().is_empty());
     }
 

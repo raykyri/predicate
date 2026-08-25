@@ -117,11 +117,10 @@ export default function NewResearchDialog({
   // like an unresponsive Start button. Fields are kept for the retry.
   const [error, setError] = useState<string | null>(null);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
-  // Research is built on branching follow-ups, which require the adapter's
-  // native fork command; offering a non-forkable adapter here would only be
-  // discovered when the first follow-up fails after a completed root run.
+  // General terminal-session fork support is intentionally wider than the
+  // runtimes supported by research.
   const adapters = useMemo(
-    () => allAdapters.filter((candidate) => candidate.supportsFork),
+    () => allAdapters.filter((candidate) => candidate.supportsResearch),
     [allAdapters],
   );
 

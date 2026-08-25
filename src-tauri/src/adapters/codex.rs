@@ -62,7 +62,7 @@ impl CodexAdapter {
         }
     }
 
-    fn ensure_binary(&self) -> Result<String, String> {
+    pub(crate) fn ensure_binary(&self) -> Result<String, String> {
         let binary = ensure_on_path(&self.binary).ok_or_else(|| {
             format!(
                 "Codex adapter binary '{}' was not found on PATH or standard macOS tool paths. Install Codex CLI or update adapters.codex.binary in qmux.config.json.",
@@ -189,6 +189,10 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn supports_research(&self) -> bool {
         true
     }
 

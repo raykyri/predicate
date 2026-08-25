@@ -69,7 +69,7 @@ impl GrokAdapter {
         }
     }
 
-    fn ensure_binary(&self) -> Result<String, String> {
+    pub(crate) fn ensure_binary(&self) -> Result<String, String> {
         let binary = ensure_on_path(&self.binary).ok_or_else(|| {
             format!(
                 "Grok adapter binary '{}' was not found on PATH or standard macOS tool paths. Install the Grok CLI or update adapters.grok.binary in qmux.config.json.",
@@ -170,6 +170,10 @@ impl AgentAdapter for GrokAdapter {
     }
 
     fn supports_fork(&self) -> bool {
+        true
+    }
+
+    fn supports_research(&self) -> bool {
         true
     }
 
@@ -1103,6 +1107,11 @@ fn grok_session_transcript_path(grok_home: &Path, cwd: &str, session_id: &str) -
     // filesystem is briefly behind, return the predictable path and let the tail's
     // normal warm-up polling wait for chat_history.jsonl to appear.
     (encoded_cwd.len() <= 255).then_some(conventional)
+}
+
+pub(crate) fn research_session_transcript_path(cwd: &Path, session_id: &str) -> Option<PathBuf> {
+    let home = grok_home().ok()?;
+    grok_session_transcript_path(&home, &cwd.display().to_string(), session_id)
 }
 
 /// Whether a Grok hook-reported path contains conversation records qMux can render.

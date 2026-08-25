@@ -24,8 +24,10 @@ export interface AgentAdapterMetadata {
   id: string;
   label: string;
   default: boolean;
-  /** Whether the adapter can fork a session — required for research follow-ups. */
+  /** Whether the adapter can fork a native terminal session. */
   supportsFork: boolean;
+  /** Whether the adapter has a supported research runtime. */
+  supportsResearch: boolean;
   /** Whether the adapter can fork from a chosen message rather than the session
    * head. Gates the transcript's per-message fork action, which is hidden
    * rather than disabled for adapters without it. */

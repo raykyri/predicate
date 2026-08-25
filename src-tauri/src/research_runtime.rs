@@ -1,9 +1,15 @@
-//! Pane-less Claude research runs driven by [`crate::claude_sdk`].
+//! Pane-less research runs for Claude, Codex, and Grok.
 
 use crate::adapters::claude::ClaudeAdapter;
+use crate::adapters::codex::CodexAdapter;
+use crate::adapters::grok::{GrokAdapter, research_session_transcript_path};
+use crate::adapters::new_uuid_v4;
 use crate::claude_sdk::{
     self, ClaudeSdkSession, ClaudeSdkSpawnSpec, SdkMessage, assistant_message_is_end_turn,
     research_can_use_tool, stream_event_is_end_turn, stream_event_text_delta,
+};
+use crate::headless_process::{
+    JsonlProcess, JsonlReceive, reconcile_session_id, validate_session_id,
 };
 use crate::persistence;
 use crate::research::ResearchNode;
@@ -29,7 +35,9 @@ fn sessions() -> &'static Mutex<HashMap<String, SessionSlot>> {
 }
 
 pub fn should_use_research_sdk(state: &AppState, adapter: &str) -> bool {
-    adapter == "claude" && persistence::research_sdk_harness_enabled(&state.config().workspace_root)
+    matches!(adapter, "codex" | "grok")
+        || (adapter == "claude"
+            && persistence::research_sdk_harness_enabled(&state.config().workspace_root))
 }
 
 pub fn session_registered(node_id: &str) -> bool {
@@ -69,6 +77,28 @@ pub fn kill_all_sessions() {
 }
 
 pub fn launch(
+    state: &AppState,
+    node: &ResearchNode,
+    workspace: &crate::workspace::GroupInfo,
+    prompt: String,
+    resume: Option<String>,
+    fork: bool,
+) -> Result<ResearchNode, String> {
+    let resume = resume
+        .map(|session_id| validate_session_id(&session_id, &node.adapter))
+        .transpose()
+        .map_err(|err| {
+            let _ = state.fail_research_node(&node.id, err.clone());
+            err
+        })?;
+    match node.adapter.as_str() {
+        "claude" => launch_claude(state, node, workspace, prompt, resume, fork),
+        "codex" | "grok" => launch_jsonl(state, node, workspace, prompt, resume, fork),
+        adapter => Err(format!("'{adapter}' is not a supported research agent")),
+    }
+}
+
+fn launch_claude(
     state: &AppState,
     node: &ResearchNode,
     workspace: &crate::workspace::GroupInfo,
@@ -201,6 +231,646 @@ pub fn launch(
         })?;
 
     state.research_node(&node.id)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JsonlFlavor {
+    Codex,
+    Grok,
+}
+
+impl JsonlFlavor {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Grok => "Grok",
+        }
+    }
+}
+
+fn launch_jsonl(
+    state: &AppState,
+    node: &ResearchNode,
+    workspace: &crate::workspace::GroupInfo,
+    prompt: String,
+    resume: Option<String>,
+    fork: bool,
+) -> Result<ResearchNode, String> {
+    let flavor = match node.adapter.as_str() {
+        "codex" => JsonlFlavor::Codex,
+        "grok" => JsonlFlavor::Grok,
+        adapter => return Err(format!("'{adapter}' has no JSONL research runtime")),
+    };
+    if fork && resume.as_deref().map(str::trim).is_none_or(str::is_empty) {
+        let err = format!(
+            "{} research parent has no session id to fork",
+            flavor.label()
+        );
+        let _ = state.fail_research_node(&node.id, err.clone());
+        return Err(err);
+    }
+    let binary = match flavor {
+        JsonlFlavor::Codex => CodexAdapter::new(state.config()).ensure_binary(),
+        JsonlFlavor::Grok => GrokAdapter::new(state.config()).ensure_binary(),
+    }
+    .map_err(|err| {
+        let _ = state.fail_research_node(&node.id, err.clone());
+        err
+    })?;
+    let cwd = PathBuf::from(&workspace.dir);
+    let grok_session_id = (flavor == JsonlFlavor::Grok)
+        .then(new_uuid_v4)
+        .transpose()
+        .map_err(|err| {
+            let _ = state.fail_research_node(&node.id, err.clone());
+            err
+        })?;
+
+    let mut agent = prepare_agent_workspace(
+        state,
+        PrepareAgentWorkspaceRequest {
+            group_id: Some(workspace.id.clone()),
+            base_repo: Some(workspace.dir.clone()),
+            base_ref: Some("HEAD".to_string()),
+            adapter: node.adapter.clone(),
+            model: node.model.clone(),
+            effort: node.effort.clone(),
+            use_worktree: false,
+        },
+    )
+    .map_err(|err| {
+        let _ = state.fail_research_node(&node.id, err.clone());
+        err
+    })?;
+    if let Some(session_id) = grok_session_id.as_deref() {
+        agent.session_id = Some(session_id.to_string());
+        agent.transcript_path = research_session_transcript_path(&cwd, session_id)
+            .map(|path| path.display().to_string());
+        state.update_agent(agent.clone()).map_err(|err| {
+            let _ = state.fail_research_node(&node.id, err.clone());
+            state.prune_agent(&agent.id);
+            err
+        })?;
+    }
+
+    let bound = state
+        .bind_research_node_harness(&node.id, &agent)
+        .map_err(|err| {
+            let _ = state.fail_research_node(&node.id, err.clone());
+            state.prune_agent(&agent.id);
+            err
+        })?;
+    if bound.status.is_terminal() {
+        let _ = state.finish_research_sdk_run(&node.id, &agent.id, false, None);
+        return Ok(bound);
+    }
+
+    let (interrupt_tx, interrupt_rx) = std::sync::mpsc::channel();
+    {
+        let mut map = match sessions().lock() {
+            Ok(map) => map,
+            Err(_) => {
+                let err = "research SDK session table poisoned".to_string();
+                let _ = state.fail_research_node(&node.id, err.clone());
+                state.prune_agent(&agent.id);
+                return Err(err);
+            }
+        };
+        map.insert(
+            node.id.clone(),
+            SessionSlot {
+                pid: None,
+                interrupt: interrupt_tx,
+            },
+        );
+    }
+    let current = state.research_node(&node.id).map_err(|err| {
+        unregister(&node.id);
+        state.prune_agent(&agent.id);
+        err
+    })?;
+    if current.status.is_terminal() {
+        let _ = state.finish_research_sdk_run(&node.id, &agent.id, false, None);
+        unregister(&node.id);
+        return Ok(current);
+    }
+
+    let stderr_log = state
+        .config()
+        .workspace_root
+        .join(".qmux")
+        .join("research-logs")
+        .join(format!("{}.log", node.id));
+    let args = match flavor {
+        JsonlFlavor::Codex => build_codex_exec_args(
+            &prompt,
+            node.model.as_deref(),
+            node.effort.as_deref(),
+            resume.as_deref(),
+            fork,
+        ),
+        JsonlFlavor::Grok => build_grok_headless_args(
+            &cwd,
+            &prompt,
+            node.model.as_deref(),
+            node.effort.as_deref(),
+            resume.as_deref(),
+            fork,
+            grok_session_id
+                .as_deref()
+                .expect("Grok session id was minted"),
+        ),
+    };
+    let runtime_state = state.clone();
+    let node_id = node.id.clone();
+    let agent_id = agent.id.clone();
+    let initial_session_id = grok_session_id;
+    thread::Builder::new()
+        .name(format!("qmux-research-jsonl-{node_id}"))
+        .spawn(move || {
+            run_jsonl_session(
+                runtime_state,
+                node_id,
+                agent_id,
+                flavor,
+                binary,
+                args,
+                cwd,
+                stderr_log,
+                initial_session_id,
+                interrupt_rx,
+            );
+        })
+        .map_err(|err| {
+            let err = format!("failed to start {} research thread: {err}", flavor.label());
+            let _ = state.finish_research_sdk_run(&node.id, &agent.id, false, Some(err.clone()));
+            unregister(&node.id);
+            err
+        })?;
+    state.research_node(&node.id)
+}
+
+fn toml_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+fn build_codex_exec_args(
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume: Option<&str>,
+    fork: bool,
+) -> Vec<String> {
+    let mut args = vec![
+        "--search".to_string(),
+        "--disable".to_string(),
+        "hooks".to_string(),
+        "--ask-for-approval".to_string(),
+        "never".to_string(),
+        "exec".to_string(),
+    ];
+    if fork {
+        args.push("fork".to_string());
+    }
+    args.extend([
+        "--json".to_string(),
+        "--strict-config".to_string(),
+        "--skip-git-repo-check".to_string(),
+        "--ignore-user-config".to_string(),
+        "--ignore-rules".to_string(),
+    ]);
+    if fork {
+        args.extend(["-c".to_string(), "sandbox_mode=\"read-only\"".to_string()]);
+    } else {
+        args.extend(["--sandbox".to_string(), "read-only".to_string()]);
+    }
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) {
+        args.extend([
+            "-c".to_string(),
+            format!("model_reasoning_effort={}", toml_string(effort)),
+        ]);
+    }
+    if fork {
+        if let Some(session_id) = resume.map(str::trim).filter(|value| !value.is_empty()) {
+            args.push(session_id.to_string());
+        }
+    }
+    args.extend(["--".to_string(), prompt.to_string()]);
+    args
+}
+
+fn build_grok_headless_args(
+    cwd: &std::path::Path,
+    prompt: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    resume: Option<&str>,
+    fork: bool,
+    session_id: &str,
+) -> Vec<String> {
+    let mut args = vec![
+        "--no-auto-update".to_string(),
+        "--cwd".to_string(),
+        cwd.display().to_string(),
+        "--output-format".to_string(),
+        "streaming-messages-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--permission-mode".to_string(),
+        "dontAsk".to_string(),
+        "--sandbox".to_string(),
+        "read-only".to_string(),
+        "--tools".to_string(),
+        "read_file,grep,list_dir,web_search,web_fetch".to_string(),
+        "--no-subagents".to_string(),
+    ];
+    // Permission rules use Claude-compatible prefixes, which are distinct
+    // from the internal ids accepted by `--tools`. List/search are covered by
+    // Read/Grep; web_search is intrinsically read-only in Grok.
+    for tool in ["Read", "Grep", "WebFetch"] {
+        args.extend(["--allow".to_string(), tool.to_string()]);
+    }
+    for tool in ["Bash", "Edit", "Write", "MCPTool"] {
+        args.extend(["--deny".to_string(), tool.to_string()]);
+    }
+    if let Some(model) = model.map(str::trim).filter(|value| !value.is_empty()) {
+        args.extend(["--model".to_string(), model.to_string()]);
+    }
+    if let Some(effort) = effort.map(str::trim).filter(|value| !value.is_empty()) {
+        args.extend(["--reasoning-effort".to_string(), effort.to_string()]);
+    }
+    if fork {
+        if let Some(parent) = resume.map(str::trim).filter(|value| !value.is_empty()) {
+            args.extend([
+                "--resume".to_string(),
+                parent.to_string(),
+                "--fork-session".to_string(),
+            ]);
+        }
+    }
+    args.extend([
+        "--session-id".to_string(),
+        session_id.to_string(),
+        "-p".to_string(),
+        prompt.to_string(),
+    ]);
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_jsonl_session(
+    state: AppState,
+    node_id: String,
+    agent_id: String,
+    flavor: JsonlFlavor,
+    binary: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+    stderr_log: PathBuf,
+    mut session_id: Option<String>,
+    interrupt_rx: std::sync::mpsc::Receiver<()>,
+) {
+    let mut process = match JsonlProcess::spawn(&binary, &args, &cwd, &stderr_log, flavor.label()) {
+        Ok(process) => process,
+        Err(err) => {
+            finish_jsonl_failed(&state, &node_id, &agent_id, flavor, err, &stderr_log);
+            unregister(&node_id);
+            return;
+        }
+    };
+    set_pid(&node_id, Some(process.pid()));
+    let transcript_path = session_id.as_deref().and_then(|id| {
+        (flavor == JsonlFlavor::Grok)
+            .then(|| research_session_transcript_path(&cwd, id))
+            .flatten()
+            .map(|path| path.display().to_string())
+    });
+    if session_id.is_some() {
+        if let Err(err) = state.record_research_sdk_session(
+            &node_id,
+            &agent_id,
+            session_id.clone(),
+            transcript_path,
+        ) {
+            process.kill();
+            finish_jsonl_failed(&state, &node_id, &agent_id, flavor, err, &stderr_log);
+            unregister(&node_id);
+            return;
+        }
+    }
+
+    let mut mapper = TurnMapper::new(agent_id.clone());
+    let mut completed = false;
+    let mut reported_error: Option<String> = None;
+    loop {
+        match interrupt_rx.try_recv() {
+            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                process.kill();
+                let _ = state.finish_research_sdk_run(&node_id, &agent_id, false, None);
+                unregister(&node_id);
+                return;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+        match process.recv_timeout(Duration::from_millis(100)) {
+            Ok(JsonlReceive::Timeout) => continue,
+            Ok(JsonlReceive::Eof) => break,
+            Err(err) => {
+                process.kill();
+                finish_jsonl_failed(&state, &node_id, &agent_id, flavor, err, &stderr_log);
+                unregister(&node_id);
+                return;
+            }
+            Ok(JsonlReceive::Value(value)) => {
+                let outcome = match flavor {
+                    JsonlFlavor::Codex => handle_codex_event(
+                        &state,
+                        &node_id,
+                        &agent_id,
+                        &mut mapper,
+                        &mut session_id,
+                        value,
+                    ),
+                    JsonlFlavor::Grok => handle_grok_event(
+                        &state,
+                        &node_id,
+                        &agent_id,
+                        &cwd,
+                        &mut mapper,
+                        &mut session_id,
+                        value,
+                    ),
+                };
+                match outcome {
+                    Ok(EventOutcome::Continue) => {}
+                    Ok(EventOutcome::Complete) => completed = true,
+                    Ok(EventOutcome::Failed(err)) => reported_error = Some(err),
+                    Err(err) => {
+                        process.kill();
+                        finish_jsonl_failed(&state, &node_id, &agent_id, flavor, err, &stderr_log);
+                        unregister(&node_id);
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    let status = match process.finish(Duration::from_secs(2)) {
+        Ok(status) => status,
+        Err(err) => {
+            finish_jsonl_failed(&state, &node_id, &agent_id, flavor, err, &stderr_log);
+            unregister(&node_id);
+            return;
+        }
+    };
+    let success = status.success() && reported_error.is_none() && session_id.is_some() && completed;
+    let error = if success {
+        None
+    } else {
+        Some(reported_error.unwrap_or_else(|| {
+            if status.success() && session_id.is_none() {
+                format!("{} research did not report a session id", flavor.label())
+            } else if status.success() {
+                format!(
+                    "{} research exited without a completed response",
+                    flavor.label()
+                )
+            } else {
+                format!("{} research exited with status {status}", flavor.label())
+            }
+        }))
+    };
+    let error = error.map(|err| map_jsonl_error(flavor, err, &stderr_log));
+    if let Err(err) = state.finish_research_sdk_run(&node_id, &agent_id, success, error) {
+        eprintln!(
+            "qmux: failed to preserve {} research result: {err}",
+            flavor.label()
+        );
+    }
+    unregister(&node_id);
+}
+
+enum EventOutcome {
+    Continue,
+    Complete,
+    Failed(String),
+}
+
+fn handle_codex_event(
+    state: &AppState,
+    node_id: &str,
+    agent_id: &str,
+    mapper: &mut TurnMapper,
+    session_id: &mut Option<String>,
+    value: Value,
+) -> Result<EventOutcome, String> {
+    match value.get("type").and_then(Value::as_str).unwrap_or("") {
+        "thread.started" => {
+            if let Some(id) = value.get("thread_id").and_then(Value::as_str) {
+                reconcile_session_id(session_id, Some(id), "Codex")?;
+                state.record_research_sdk_session(node_id, agent_id, session_id.clone(), None)?;
+            }
+            Ok(EventOutcome::Continue)
+        }
+        "item.completed" => {
+            let item = value.get("item").unwrap_or(&Value::Null);
+            if item.get("type").and_then(Value::as_str) == Some("agent_message")
+                && let Some(text) = item.get("text").and_then(Value::as_str)
+                && !text.is_empty()
+            {
+                mapper.commit_assistant(
+                    &Value::String(text.to_string()),
+                    item.get("id").and_then(Value::as_str).map(str::to_string),
+                );
+                state.append_harness_turn(mapper.last_committed())?;
+            }
+            Ok(EventOutcome::Continue)
+        }
+        "turn.completed" => Ok(EventOutcome::Complete),
+        "turn.failed" | "error" => Ok(EventOutcome::Failed(json_event_error(&value))),
+        _ => Ok(EventOutcome::Continue),
+    }
+}
+
+fn handle_grok_event(
+    state: &AppState,
+    node_id: &str,
+    agent_id: &str,
+    cwd: &std::path::Path,
+    mapper: &mut TurnMapper,
+    session_id: &mut Option<String>,
+    value: Value,
+) -> Result<EventOutcome, String> {
+    match claude_sdk::parse_sdk_value(value)? {
+        SdkMessage::System {
+            subtype,
+            session_id: observed,
+            ..
+        } if subtype == "init" => {
+            reconcile_session_id(session_id, observed.as_deref(), "Grok")?;
+            let transcript_path = session_id
+                .as_deref()
+                .and_then(|id| research_session_transcript_path(cwd, id))
+                .map(|path| path.display().to_string());
+            state.record_research_sdk_session(
+                node_id,
+                agent_id,
+                session_id.clone(),
+                transcript_path,
+            )?;
+            Ok(EventOutcome::Continue)
+        }
+        SdkMessage::StreamEvent {
+            event,
+            session_id: observed,
+            ..
+        } => {
+            reconcile_session_id(session_id, observed.as_deref(), "Grok")?;
+            if let Some(delta) = stream_event_text_delta(&event) {
+                mapper.push_text_delta(delta);
+                state.append_harness_turn(mapper.in_flight_turn())?;
+            }
+            if stream_event_is_end_turn(&event) {
+                Ok(EventOutcome::Complete)
+            } else {
+                Ok(EventOutcome::Continue)
+            }
+        }
+        SdkMessage::Assistant {
+            content,
+            uuid: _,
+            message_id,
+            session_id: observed,
+            raw,
+            ..
+        } => {
+            reconcile_session_id(session_id, observed.as_deref(), "Grok")?;
+            // Grok documents `uuid` as a freshly generated line id, not a
+            // provider or message identity. Only the nested Messages API id is
+            // stable enough to retain as the native message id.
+            mapper.commit_assistant(&content, message_id);
+            state.append_harness_turn(mapper.last_committed())?;
+            if assistant_message_is_end_turn(&raw) {
+                Ok(EventOutcome::Complete)
+            } else {
+                Ok(EventOutcome::Continue)
+            }
+        }
+        SdkMessage::User {
+            content,
+            session_id: observed,
+            ..
+        } => {
+            reconcile_session_id(session_id, observed.as_deref(), "Grok")?;
+            if let Some(turn) = mapper.user_turn(&content) {
+                state.append_harness_turn(turn)?;
+            }
+            Ok(EventOutcome::Continue)
+        }
+        SdkMessage::Result {
+            is_error,
+            errors,
+            result_text,
+            session_id: observed,
+            ..
+        } => {
+            reconcile_session_id(session_id, observed.as_deref(), "Grok")?;
+            if !is_error
+                && !mapper.has_assistant_output()
+                && let Some(text) = result_text.as_deref().filter(|text| !text.is_empty())
+            {
+                mapper.commit_assistant(&Value::String(text.to_string()), None);
+                state.append_harness_turn(mapper.last_committed())?;
+            }
+            if is_error {
+                Ok(EventOutcome::Failed(if errors.is_empty() {
+                    result_text.unwrap_or_else(|| "Grok research failed".to_string())
+                } else {
+                    errors.join("\n")
+                }))
+            } else {
+                Ok(EventOutcome::Complete)
+            }
+        }
+        SdkMessage::ControlRequest { subtype, .. } => Err(format!(
+            "Grok requested unsupported headless control input ({subtype})"
+        )),
+        SdkMessage::Other(value) => match value.get("type").and_then(Value::as_str) {
+            Some("content_block_delta") => {
+                if let Some(delta) = stream_event_text_delta(&value) {
+                    mapper.push_text_delta(delta);
+                    state.append_harness_turn(mapper.in_flight_turn())?;
+                }
+                Ok(EventOutcome::Continue)
+            }
+            Some("message_stop") => Ok(EventOutcome::Complete),
+            Some("error") => Ok(EventOutcome::Failed(json_event_error(&value))),
+            _ => Ok(EventOutcome::Continue),
+        },
+        _ => Ok(EventOutcome::Continue),
+    }
+}
+
+fn json_event_error(value: &Value) -> String {
+    value
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("error").and_then(Value::as_str))
+        .or_else(|| {
+            value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("headless research failed")
+        .to_string()
+}
+
+fn finish_jsonl_failed(
+    state: &AppState,
+    node_id: &str,
+    agent_id: &str,
+    flavor: JsonlFlavor,
+    err: String,
+    stderr_log: &PathBuf,
+) {
+    let error = map_jsonl_error(flavor, err, stderr_log);
+    if let Err(snapshot_err) = state.finish_research_sdk_run(node_id, agent_id, false, Some(error))
+    {
+        eprintln!("qmux: failed to preserve partial JSONL research response: {snapshot_err}");
+    }
+}
+
+fn map_jsonl_error(flavor: JsonlFlavor, err: String, stderr_log: &PathBuf) -> String {
+    let stderr = std::fs::read_to_string(stderr_log).unwrap_or_default();
+    let combined = format!("{err}\n{stderr}");
+    let lower = combined.to_ascii_lowercase();
+    if lower.contains("not logged in")
+        || lower.contains("not authenticated")
+        || lower.contains("authentication required")
+    {
+        return format!(
+            "{} is not logged in. Open a terminal tab, run {}, sign in, and retry this research.",
+            flavor.label(),
+            match flavor {
+                JsonlFlavor::Codex => "codex",
+                JsonlFlavor::Grok => "grok",
+            }
+        );
+    }
+    let detail = stderr.trim();
+    if detail.is_empty() || err.contains(detail) {
+        err
+    } else {
+        let mut start = detail.len().saturating_sub(4000);
+        while !detail.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("{err}\n{}", &detail[start..])
+    }
 }
 
 fn unregister(node_id: &str) {
@@ -551,7 +1221,9 @@ fn run_session(
                     session.session_id.clone(),
                     session.transcript_path.clone(),
                 );
-                let outcome = if is_error {
+                let outcome = if cancelled {
+                    state.finish_research_sdk_run(&node_id, &agent_id, false, None)
+                } else if is_error {
                     let err = if errors.is_empty() {
                         result_text.unwrap_or_else(|| "Claude research run failed".to_string())
                     } else {
@@ -975,6 +1647,49 @@ print(json.dumps({
         path
     }
 
+    fn write_fake_claude_cancel_result(dir: &Path) -> PathBuf {
+        let path = dir.join("fake-claude-cancel-result");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+if "-v" in sys.argv or "--version" in sys.argv:
+    print("2.1.239 (Claude Code)")
+    sys.exit(0)
+init = json.loads(sys.stdin.readline())
+print(json.dumps({
+    "type": "control_response",
+    "response": {
+        "subtype": "success",
+        "request_id": init["request_id"],
+        "response": {"commands": []}
+    }
+}), flush=True)
+json.loads(sys.stdin.readline())
+open("prompt-sent", "w").write("user")
+print(json.dumps({
+    "type": "system",
+    "subtype": "init",
+    "session_id": "sess-cancel-result"
+}), flush=True)
+interrupt = json.loads(sys.stdin.readline())
+assert interrupt.get("request", {}).get("subtype") == "interrupt"
+print(json.dumps({
+    "type": "result",
+    "subtype": "error_during_execution",
+    "is_error": True,
+    "session_id": "sess-cancel-result",
+    "errors": ["interrupted"]
+}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
     fn write_fake_claude_end_turn_without_result(dir: &Path) -> PathBuf {
         let path = dir.join("fake-claude-end-turn");
         fs::write(
@@ -1018,7 +1733,12 @@ time.sleep(2)
         path
     }
 
-    fn test_config(workspace_root: PathBuf, claude: &Path) -> QmuxConfig {
+    fn test_config_with_binaries(
+        workspace_root: PathBuf,
+        claude: &Path,
+        codex: &Path,
+        grok: &Path,
+    ) -> QmuxConfig {
         QmuxConfig {
             remotes: Default::default(),
             workspace_root,
@@ -1029,13 +1749,13 @@ time.sleep(2)
                     binary: Some(claude.display().to_string()),
                 },
                 codex: CodexAdapterConfig {
-                    binary: Some("codex".to_string()),
+                    binary: Some(codex.display().to_string()),
                 },
                 opencode: OpencodeAdapterConfig {
                     binary: Some("opencode".to_string()),
                 },
                 grok: GrokAdapterConfig {
-                    binary: Some("grok".to_string()),
+                    binary: Some(grok.display().to_string()),
                 },
                 muse: MuseAdapterConfig {
                     binary: Some("muse".to_string()),
@@ -1049,6 +1769,92 @@ time.sleep(2)
             pi_extension_dir: PathBuf::new(),
             cursor_plugin_dir: PathBuf::new(),
         }
+    }
+
+    fn test_config(workspace_root: PathBuf, claude: &Path) -> QmuxConfig {
+        test_config_with_binaries(
+            workspace_root,
+            claude,
+            Path::new("codex"),
+            Path::new("grok"),
+        )
+    }
+
+    fn test_group(root: &Path, workspace_dir: &Path) -> GroupInfo {
+        GroupInfo {
+            id: "group-1".to_string(),
+            name: "group-1".to_string(),
+            name_override: None,
+            dir: workspace_dir.display().to_string(),
+            managed_dir: root.join("managed").display().to_string(),
+            base_repo: Some(workspace_dir.display().to_string()),
+            base_ref: Some("HEAD".to_string()),
+            parent_id: None,
+            created_at: 1,
+            collapsed: false,
+            scope: WorkspaceScope::Research,
+            imported_research_archive_id: None,
+            remote: None,
+            agents: Vec::new(),
+        }
+    }
+
+    fn write_fake_codex(dir: &Path) -> PathBuf {
+        let path = dir.join("fake-codex");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+assert args[:6] == ["--search", "--disable", "hooks", "--ask-for-approval", "never", "exec"]
+assert "--json" in args
+assert "--strict-config" in args
+assert "--skip-git-repo-check" in args
+assert "--ignore-user-config" in args
+assert "--ignore-rules" in args
+assert args[args.index("--sandbox") + 1] == "read-only"
+assert args[-2:] == ["--", "hello"]
+print(json.dumps({"type":"thread.started","thread_id":"codex-thread-1"}), flush=True)
+print(json.dumps({"type":"turn.started"}), flush=True)
+print(json.dumps({"type":"item.completed","item":{"id":"answer-1","type":"agent_message","text":"codex answer"}}), flush=True)
+print(json.dumps({"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    fn write_fake_grok(dir: &Path) -> PathBuf {
+        let path = dir.join("fake-grok");
+        fs::write(
+            &path,
+            r#"#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+assert "--no-auto-update" in args
+assert args[args.index("--output-format") + 1] == "streaming-messages-json"
+assert args[args.index("--permission-mode") + 1] == "dontAsk"
+assert args[args.index("--sandbox") + 1] == "read-only"
+assert args[args.index("--tools") + 1] == "read_file,grep,list_dir,web_search,web_fetch"
+assert "Bash" in args and "Edit" in args and "MCPTool" in args
+assert args[args.index("-p") + 1] == "hello"
+session_id = args[args.index("--session-id") + 1]
+print(json.dumps({"type":"system","subtype":"init","session_id":session_id}), flush=True)
+print(json.dumps({"type":"assistant","session_id":session_id,"uuid":"line-tool","message":{"id":"message-tool","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tool-1","name":"read_file","input":{"path":"README.md"}}]}}), flush=True)
+print(json.dumps({"type":"user","session_id":session_id,"uuid":"line-result","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"contents","is_error":False}]}}), flush=True)
+print(json.dumps({"type":"stream_event","session_id":session_id,"event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"grok "}}}), flush=True)
+print(json.dumps({"type":"assistant","session_id":session_id,"uuid":"answer-1","message":{"id":"message-1","stop_reason":"end_turn","content":[{"type":"text","text":"grok answer"}]}}), flush=True)
+print(json.dumps({"type":"result","subtype":"success","session_id":session_id,"result":"grok answer"}), flush=True)
+"#,
+        )
+        .unwrap();
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+        path
     }
 
     #[test]
@@ -1163,6 +1969,42 @@ time.sleep(2)
     }
 
     #[test]
+    fn cancellation_wins_over_a_racing_claude_error_result() {
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let root = temp_dir();
+        let binary = write_fake_claude_cancel_result(&root);
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        let state = AppState::new(test_config(root.clone(), &binary));
+        let group = test_group(&root, &workspace_dir);
+        state.insert_group_after(group.clone(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "hello".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: None,
+                effort: None,
+                group_id: group.id.clone(),
+            })
+            .unwrap();
+        let node = detail.nodes[0].clone();
+        launch(&state, &node, &group, "hello".to_string(), None, false).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !workspace_dir.join("prompt-sent").is_file() {
+            assert!(Instant::now() < deadline, "Claude prompt was never sent");
+            thread::sleep(Duration::from_millis(20));
+        }
+        state.cancel_research_node(&node.id).unwrap();
+        assert!(wait_for_session_stop(&node.id, Duration::from_secs(5)));
+        let finished = state.research_node(&node.id).unwrap();
+        assert_eq!(finished.status, ResearchNodeStatus::Cancelled);
+        assert!(finished.error.is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn result_only_success_is_snapshotted_as_an_assistant_turn() {
         let _guard = RUNTIME_TEST_LOCK.lock().unwrap();
         let root = temp_dir();
@@ -1263,6 +2105,194 @@ time.sleep(2)
             snapshot[0].blocks.as_slice(),
             [TurnBlock::Text { text }] if text == "answer before missing result"
         ));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn codex_exec_args_are_headless_searchable_and_fail_closed() {
+        let args =
+            build_codex_exec_args("question", Some("gpt-5.6-sol"), Some("high"), None, false);
+        assert_eq!(
+            &args[..6],
+            [
+                "--search",
+                "--disable",
+                "hooks",
+                "--ask-for-approval",
+                "never",
+                "exec"
+            ]
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(args.iter().any(|arg| arg == "--skip-git-repo-check"));
+        assert!(args.iter().any(|arg| arg == "--strict-config"));
+        assert_eq!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--ignore-user-config")
+                .count(),
+            1
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg == "model_reasoning_effort=\"high\"")
+        );
+        assert_eq!(&args[args.len() - 2..], ["--", "question"]);
+
+        let fork = build_codex_exec_args("branch", None, None, Some("parent-1"), true);
+        assert_eq!(
+            &fork[..7],
+            [
+                "--search",
+                "--disable",
+                "hooks",
+                "--ask-for-approval",
+                "never",
+                "exec",
+                "fork"
+            ]
+        );
+        assert!(fork.iter().any(|arg| arg == "sandbox_mode=\"read-only\""));
+        assert_eq!(&fork[fork.len() - 3..], ["parent-1", "--", "branch"]);
+    }
+
+    #[test]
+    fn grok_headless_args_are_streaming_and_fail_closed() {
+        let args = build_grok_headless_args(
+            Path::new("/tmp/research"),
+            "question",
+            Some("grok-build"),
+            Some("high"),
+            Some("parent-1"),
+            true,
+            "child-1",
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--output-format", "streaming-messages-json"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--permission-mode", "dontAsk"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--resume", "parent-1"]));
+        assert!(args.iter().any(|arg| arg == "--fork-session"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--session-id", "child-1"])
+        );
+        for denied in ["Bash", "Edit", "Write", "MCPTool"] {
+            assert!(
+                args.windows(2)
+                    .any(|pair| pair[0] == "--deny" && pair[1] == denied)
+            );
+        }
+        assert_eq!(&args[args.len() - 2..], ["-p", "question"]);
+    }
+
+    #[test]
+    fn headless_session_ids_must_be_safe_and_consistent() {
+        let mut session_id = Some("requested-1".to_string());
+        reconcile_session_id(&mut session_id, Some("requested-1"), "Grok").unwrap();
+        assert_eq!(session_id.as_deref(), Some("requested-1"));
+
+        let mismatch = reconcile_session_id(&mut session_id, Some("different-1"), "Grok")
+            .expect_err("a CLI must not redirect qmux to a different session");
+        assert!(mismatch.contains("different session id"));
+        let mut empty = None;
+        assert!(reconcile_session_id(&mut empty, Some("../../unsafe"), "Grok").is_err());
+    }
+
+    #[test]
+    fn launch_completes_a_fake_codex_exec_session() {
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let root = temp_dir();
+        let claude = write_fake_claude(&root);
+        let codex = write_fake_codex(&root);
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_binaries(root.clone(), &claude, &codex, Path::new("grok"));
+        let state = AppState::new(config);
+        let group = test_group(&root, &workspace_dir);
+        state.insert_group_after(group.clone(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "hello".to_string(),
+                title: None,
+                adapter: "codex".to_string(),
+                model: None,
+                effort: None,
+                group_id: group.id.clone(),
+            })
+            .unwrap();
+        let node = detail.nodes[0].clone();
+        launch(&state, &node, &group, "hello".to_string(), None, false).unwrap();
+        assert!(wait_for_session_stop(&node.id, Duration::from_secs(5)));
+        let finished = state.research_node(&node.id).unwrap();
+        assert_eq!(finished.status, ResearchNodeStatus::Complete);
+        assert_eq!(
+            finished.native_session_id.as_deref(),
+            Some("codex-thread-1")
+        );
+        assert!(finished.pane_id.is_none());
+        let snapshot = crate::research::read_response_snapshot(&root, &node.id)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            snapshot[0].blocks.as_slice(),
+            [TurnBlock::Text { text }] if text == "codex answer"
+        ));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn launch_completes_a_fake_grok_streaming_session() {
+        let _guard = RUNTIME_TEST_LOCK.lock().unwrap();
+        let root = temp_dir();
+        let claude = write_fake_claude(&root);
+        let grok = write_fake_grok(&root);
+        let workspace_dir = root.join("workspace");
+        fs::create_dir_all(&workspace_dir).unwrap();
+        let config = test_config_with_binaries(root.clone(), &claude, Path::new("codex"), &grok);
+        let state = AppState::new(config);
+        let group = test_group(&root, &workspace_dir);
+        state.insert_group_after(group.clone(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "hello".to_string(),
+                title: None,
+                adapter: "grok".to_string(),
+                model: None,
+                effort: None,
+                group_id: group.id.clone(),
+            })
+            .unwrap();
+        let node = detail.nodes[0].clone();
+        launch(&state, &node, &group, "hello".to_string(), None, false).unwrap();
+        assert!(wait_for_session_stop(&node.id, Duration::from_secs(5)));
+        let finished = state.research_node(&node.id).unwrap();
+        assert_eq!(finished.status, ResearchNodeStatus::Complete);
+        assert!(finished.native_session_id.is_some());
+        assert!(finished.pane_id.is_none());
+        let snapshot = crate::research::read_response_snapshot(&root, &node.id)
+            .unwrap()
+            .unwrap();
+        assert!(snapshot.iter().any(|turn| matches!(
+            turn.blocks.as_slice(),
+            [TurnBlock::ToolResult { tool_use_id: Some(tool_use_id), content, is_error: false }]
+                if tool_use_id == "tool-1" && content == "contents"
+        )));
+        let answer = snapshot
+            .iter()
+            .find(|turn| matches!(turn.blocks.as_slice(), [TurnBlock::Text { text }] if text == "grok answer"))
+            .expect("the final Grok answer is preserved");
+        assert_eq!(answer.native_id.as_deref(), Some("message-1"));
         fs::remove_dir_all(root).ok();
     }
 }
