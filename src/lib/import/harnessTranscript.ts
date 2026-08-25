@@ -3,8 +3,9 @@
 // tool_result blocks, sidechain and noise-row handling), rather than
 // hand-written parsers. Adapter diagnostics surface as import warnings.
 
-import { normalizeTranscript, type TrajectorySource } from "@letta-ai/trajectory";
+import type { TrajectorySource } from "@letta-ai/trajectory";
 import { parseIsoMs } from "./claudeAiExport";
+import { normalizeTranscript } from "./trajectoryBrowser";
 import type { ParsedConversation, TrajectoryRecord } from "./types";
 
 /** The transcript-file formats the import worker accepts, i.e. every source
