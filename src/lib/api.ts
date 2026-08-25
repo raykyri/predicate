@@ -499,6 +499,10 @@ export function createResearchTree(request: {
   return invoke<ResearchTreeDetail>("create_research_tree", { request });
 }
 
+export function generateResearchAgentTitle(nodeId: string) {
+  return invoke<string>("generate_research_agent_title", { nodeId });
+}
+
 export function createResearchDocument(request: {
   markdown: string;
   title?: string | null;

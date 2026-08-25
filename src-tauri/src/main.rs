@@ -3004,6 +3004,24 @@ async fn generate_foundation_tab_title(message: String) -> Result<String, String
     .map_err(|err| format!("Apple Foundation Models task failed: {err}"))?
 }
 
+#[tauri::command(async)]
+async fn generate_research_agent_title(
+    state: tauri::State<'_, AppState>,
+    node_id: String,
+) -> Result<String, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let node = state.research_node(&node_id)?;
+        if node.kind != research::ResearchNodeKind::Run {
+            return Err("only research runs can generate model titles".to_string());
+        }
+        let workspace = state.research_workspace_for_node(&node_id)?;
+        title_generation::generate_research_agent_title(state.config(), &node, &workspace)
+    })
+    .await
+    .map_err(|err| format!("research title task failed: {err}"))?
+}
+
 pub(crate) fn ensure_rustls_crypto_provider() -> Result<(), String> {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -3434,6 +3452,7 @@ fn main() {
             app_confirm_exit,
             app_set_prevent_sleep,
             generate_foundation_tab_title,
+            generate_research_agent_title,
             menu_bar_set_visible,
             menu_bar_update,
             show_hide_shortcut_get,

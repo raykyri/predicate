@@ -474,6 +474,7 @@ import {
   getResearchSdkHarness,
   getWorktreeLocation,
   generateFoundationTabTitle,
+  generateResearchAgentTitle,
   killPane,
   listenToMenuBarSelectPane,
   listGroups,
@@ -8823,31 +8824,19 @@ function MainApp() {
       scheduleResearchTreeRecovery,
     ],
   );
-  // Research titles reuse the terminal tab-title pipeline: same provider
-  // config, source-message stripping, and sanitization. Returns null when
-  // generation is disabled, unavailable, or fails — the prompt-derived
-  // default title is already a reasonable fallback, so failures stay silent.
-  const generateResearchTitle = useCallback(async (prompt: string): Promise<string | null> => {
-    const titleConfig = firstMessageTitleConfig(settingsRef.current, configRef.current);
-    if (!titleConfig) {
-      return null;
-    }
-    const sourceMessage = firstMessageTitleSource(prompt);
-    if (!sourceMessage) {
-      return null;
-    }
+  // Research titles use a fresh, tool-free request through the run's own
+  // adapter/model. Automatic failures stay silent: the prompt-derived title
+  // is already visible, and title metadata must never fail the research run.
+  const generateResearchTitle = useCallback(async (nodeId: string): Promise<string | null> => {
     try {
-      return await generateFirstMessageTitle(sourceMessage, titleConfig);
-    } catch (err) {
-      // Research titles fail silently, but a Foundation Models-unavailable error
-      // still warrants turning generation off so it doesn't recur every time.
-      noteFoundationTitleUnavailable(titleConfig, unknownErrorMessage(err));
+      return await generateResearchAgentTitle(nodeId);
+    } catch {
       return null;
     }
   }, []);
   const applyGeneratedResearchTreeTitle = useCallback(
-    async (treeId: string, prompt: string, originalTitle: string) => {
-      const title = await generateResearchTitle(prompt);
+    async (treeId: string, nodeId: string, originalTitle: string) => {
+      const title = await generateResearchTitle(nodeId);
       if (!title || title === originalTitle) {
         return;
       }
@@ -8866,12 +8855,18 @@ function MainApp() {
     [generateResearchTitle],
   );
   const applyGeneratedResearchNodeTitle = useCallback(
-    async (nodeId: string, prompt: string) => {
-      const title = await generateResearchTitle(prompt);
+    async (treeId: string, nodeId: string) => {
+      const title = await generateResearchTitle(nodeId);
       if (!title) {
         return;
       }
       try {
+        // Follow-up title generation is asynchronous too. Preserve a title the
+        // user supplied while this model request was in flight.
+        const current = await getResearchTree(treeId);
+        if (current.nodes.find((node) => node.id === nodeId)?.title) {
+          return;
+        }
         await renameResearchNode(nodeId, title);
       } catch {
         return;
@@ -8955,7 +8950,11 @@ function MainApp() {
         throw err;
       }
       adoptCreatedResearchTree(detail);
-      void applyGeneratedResearchTreeTitle(detail.tree.id, input.prompt, detail.tree.title);
+      void applyGeneratedResearchTreeTitle(
+        detail.tree.id,
+        detail.tree.rootNodeId,
+        detail.tree.title,
+      );
     },
     [
       adoptCreatedResearchTree,
@@ -9043,16 +9042,13 @@ function MainApp() {
         if (!rootNode) {
           throw new Error("The research's original query is unavailable.");
         }
-        const title = await generateResearchTitle(rootNode.prompt);
-        if (!title) {
-          throw new Error("Unable to generate a research title.");
-        }
+        const title = await generateResearchAgentTitle(rootNode.id);
         await renameResearchTree(treeId, title);
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
       }
     },
-    [generateResearchTitle],
+    [],
   );
   const archiveResearchTreeFromSidebar = useCallback(
     async (treeId: string) => {
@@ -9324,7 +9320,7 @@ function MainApp() {
         queryAnchor,
         inline ?? false,
       );
-      void applyGeneratedResearchNodeTitle(node.id, prompt);
+      void applyGeneratedResearchNodeTitle(node.treeId, node.id);
       return node;
     },
     [applyGeneratedResearchNodeTitle],

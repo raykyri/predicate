@@ -1454,9 +1454,9 @@ function ResearchSidebarSection({
                       <Pencil size={13} aria-hidden="true" />
                       <span>Rename</span>
                     </button>
-                    {menuTree.kind !== "document" ? (
-                      // Title regeneration reruns the root prompt through the
-                      // title model; a document has no prompt to rerun.
+                    {menuTree.kind === "run" ? (
+                      // Only run roots have a selected research model. Documents
+                      // and exported conversations keep their content-derived titles.
                       <button className="control-button"
                         type="button"
                         role="menuitem"
