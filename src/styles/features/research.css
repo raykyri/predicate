@@ -305,6 +305,8 @@
 }
 
 .research-sidebar-folder-collapse svg {
+  transform-origin: center;
+  transform-box: fill-box;
   transition: transform var(--transition-fast);
   transform: rotate(90deg);
 }
@@ -325,6 +327,14 @@
   margin-right: 5px;
   color: #8f9893;
   transform: translateY(1px);
+}
+
+.research-sidebar-folder-count {
+  flex: none;
+  margin-left: 0.25em;
+  color: #747d79;
+  font-weight: 500;
+  white-space: nowrap;
 }
 
 /* Members indent past the folder header's own icon (reached at ~24px: the

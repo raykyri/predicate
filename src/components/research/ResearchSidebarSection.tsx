@@ -243,34 +243,53 @@ function ResearchSidebarSection({
         setMenu(null);
         return;
       }
-      if (
-        menu.kind !== "tree" ||
-        !menuTree ||
-        event.metaKey ||
-        event.ctrlKey ||
-        event.altKey
-      ) {
+      if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
 
       const key = event.key.toLowerCase();
-      if (key !== "d" && (key !== "a" || menu.archived)) {
+      if (menu.kind === "tree" && menuTree) {
+        if (key !== "d" && (key !== "a" || menu.archived)) {
+          return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        if (menuTree.runningCount > 0) {
+          return;
+        }
+        if (key === "d") {
+          openDeleteDialog(menuTree);
+          return;
+        }
+
+        setMenu(null);
+        void onArchive(menuTree.id);
         return;
       }
 
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      if (menuTree.runningCount > 0) {
-        return;
-      }
-      if (key === "d") {
-        openDeleteDialog(menuTree);
-        return;
-      }
+      if (menu.kind === "folder" && menuFolder) {
+        if (key !== "d" && key !== "a") {
+          return;
+        }
 
-      setMenu(null);
-      void onArchive(menuTree.id);
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        if (menuFolderHasRunning) {
+          return;
+        }
+        if (key === "d") {
+          setMenu(null);
+          setFolderRemovalError(null);
+          setDeletingFolder(menuFolder);
+          return;
+        }
+
+        setMenu(null);
+        void onArchiveFolder(menuFolder.id);
+      }
     };
     const closeOnReflow = () => setMenu(null);
     document.addEventListener("mousedown", closeMenu);
@@ -283,7 +302,16 @@ function ResearchSidebarSection({
       window.removeEventListener("resize", closeOnReflow);
       window.removeEventListener("scroll", closeOnReflow, true);
     };
-  }, [menu, menuTree, onArchive]);
+  }, [
+    menu,
+    menuTree,
+    menuFolder,
+    menuFolderHasRunning,
+    onArchive,
+    onArchiveFolder,
+    setDeletingFolder,
+    setFolderRemovalError,
+  ]);
 
   useEffect(() => {
     if (renamingTree || renamingFolder) {
@@ -1084,7 +1112,7 @@ function ResearchSidebarSection({
         key={folder.id}
         className={`research-sidebar-folder${collapsed ? " is-collapsed" : ""}`}
         role="group"
-        aria-label={folder.name}
+        aria-label={`${folder.name} (${unit.trees.length})`}
       >
         <div
           className={`research-sidebar-row research-sidebar-folder-row${
@@ -1146,6 +1174,7 @@ function ResearchSidebarSection({
                   aria-hidden="true"
                 />
                 <span className="research-sidebar-title-text">{folder.name}</span>
+                <span className="research-sidebar-folder-count">({unit.trees.length})</span>
               </span>
             </span>
           </span>
@@ -1330,7 +1359,7 @@ function ResearchSidebarSection({
                 </button>
                 <div className="context-menu-divider" role="separator" />
                 <button
-                  className="control-button"
+                  className="control-button context-menu-has-shortcut"
                   type="button"
                   role="menuitem"
                   disabled={menuFolderHasRunning}
@@ -1346,11 +1375,12 @@ function ResearchSidebarSection({
                 >
                   <Archive size={13} aria-hidden="true" />
                   <span>Archive</span>
+                  <kbd className="context-menu-shortcut is-keycap">A</kbd>
                 </button>
                 <button
                   type="button"
                   role="menuitem"
-                  className="control-button context-menu-danger"
+                  className="control-button context-menu-danger context-menu-has-shortcut"
                   disabled={menuFolderHasRunning}
                   title={
                     menuFolderHasRunning
@@ -1365,6 +1395,7 @@ function ResearchSidebarSection({
                 >
                   <Trash2 size={13} aria-hidden="true" />
                   <span>Delete</span>
+                  <kbd className="context-menu-shortcut is-keycap">D</kbd>
                 </button>
               </div>
             </div>,
