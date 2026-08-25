@@ -31,6 +31,10 @@ import { claimNativeTerminalPointerForWebDrag } from "../lib/api";
 import { writeClipboardText } from "../lib/clipboard";
 import { buildHandoffDocument, type HandoffContext } from "../lib/handoff";
 import { splitImageMarkers, type ImageMarkerSegment } from "../lib/imageMarkers";
+import {
+  transcriptMessageContextMenuPoint,
+  type TranscriptMessageContextMenuPoint,
+} from "../lib/messageContextMenu";
 import { requestSaveDraftAsPrompt } from "../lib/promptLibrary";
 import { taggedUserInstructionDetails } from "../lib/taggedInstructions";
 import { formatEstimatedTokenCount } from "../lib/tokenEstimate";
@@ -1556,6 +1560,8 @@ function MessageItemView({
   onForkFromMessage?: ((anchor: MessageAnchor) => void) | undefined;
   onCopyHandoff?: (anchorKey: string) => Promise<boolean>;
 }) {
+  const [contextMenuRequest, setContextMenuRequest] =
+    useState<TranscriptMessageContextMenuPoint | null>(null);
   const taggedInstructionMessage = messageItemIsTaggedInstruction(item);
   const messageText =
     item.role === "user" || item.role === "assistant" ? messageItemText(item) : null;
@@ -1599,6 +1605,24 @@ function MessageItemView({
       }${timelineStatusClass(item.status)}${timelineContextStatusClass(
         item.contextStatus,
       )}${stickyClassName}`}
+      onContextMenu={(event) => {
+        // Links and external images already own a purpose-built context menu.
+        // Preserve that instead of opening two portaled menus for one click.
+        const point = transcriptMessageContextMenuPoint({
+          hasMessageMenu: showMessageActions,
+          defaultPrevented: event.defaultPrevented,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
+        if (!point) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        // Each call returns a new object, so repeated right-clicks at the same
+        // coordinates still retrigger menu placement.
+        setContextMenuRequest(point);
+      }}
     >
       {showHeader ? (
         <header className={showName ? undefined : "is-actions-only"}>
@@ -1621,6 +1645,7 @@ function MessageItemView({
               onRegenerateTitleFromUserMessage={onRegenerateTitleFromUserMessage}
               onForkFromMessage={forkFromMessage}
               onCopyHandoff={copyHandoff}
+              contextMenuRequest={contextMenuRequest}
             />
           ) : null}
         </header>
@@ -1657,6 +1682,7 @@ function MessageActionsMenu({
   onRegenerateTitleFromUserMessage,
   onForkFromMessage,
   onCopyHandoff,
+  contextMenuRequest,
 }: {
   savePromptAgentId?: string | null;
   messageText: string;
@@ -1667,8 +1693,13 @@ function MessageActionsMenu({
   onRegenerateTitleFromUserMessage: (message: string) => void;
   onForkFromMessage?: (() => void) | null;
   onCopyHandoff?: (() => Promise<boolean>) | null;
+  contextMenuRequest?: TranscriptMessageContextMenuPoint | null;
 }) {
   const [open, setOpen] = useState(false);
+  const [contextAnchor, setContextAnchor] = useState<{
+    clientX: number;
+    clientY: number;
+  } | null>(null);
   // A handoff's payload is never on screen, so unlike the plain copy items this
   // one reports what happened instead of closing silently.
   const [handoffState, setHandoffState] = useState<
@@ -1699,16 +1730,36 @@ function MessageActionsMenu({
       return;
     }
     const { height } = popover.getBoundingClientRect();
+    const triggerRect = contextAnchor
+      ? ({
+          left: contextAnchor.clientX,
+          right: contextAnchor.clientX,
+          top: contextAnchor.clientY,
+          bottom: contextAnchor.clientY,
+        } as DOMRect)
+      : trigger.getBoundingClientRect();
     setPos(
       placePanePopover({
-        triggerRect: trigger.getBoundingClientRect(),
+        triggerRect,
         popoverSize: { width: MESSAGE_MENU_PREFERRED_WIDTH, height },
         paneRect: turnPaneRectFrom(trigger),
-        align: "end",
+        align: contextAnchor ? "start" : "end",
         prefer: "below",
+        gap: contextAnchor ? 0 : undefined,
       }),
     );
-  }, []);
+  }, [contextAnchor]);
+
+  useEffect(() => {
+    if (!contextMenuRequest) {
+      return;
+    }
+    setContextAnchor({
+      clientX: contextMenuRequest.clientX,
+      clientY: contextMenuRequest.clientY,
+    });
+    setOpen(true);
+  }, [contextMenuRequest]);
 
   useEffect(() => {
     if (!open) {
@@ -1761,6 +1812,7 @@ function MessageActionsMenu({
         aria-expanded={open}
         onClick={(event) => {
           event.stopPropagation();
+          setContextAnchor(null);
           setOpen((current) => !current);
         }}
       >
@@ -1772,6 +1824,10 @@ function MessageActionsMenu({
               ref={popoverRef}
               className="popover-surface popover-surface--context turn-message-menu-popover"
               role="menu"
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
               style={
                 pos
                   ? {
