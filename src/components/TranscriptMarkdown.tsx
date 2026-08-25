@@ -24,6 +24,7 @@ import remarkGfm from "remark-gfm";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
 import { loopbackHtmlUrl, safeHref } from "../lib/links";
+import { normalizeLatexMathDelimiters } from "../lib/markdownMathDelimiters";
 import DiagramBlock, { diagramLangFromClassName, nodeText } from "./DiagramBlock";
 
 // The TeX pipeline (remark-math + rehype-mathjax) weighs a couple of
@@ -650,7 +651,7 @@ export default memo(function TranscriptMarkdown({
           disallowedElements={inline ? INLINE_DISALLOWED_ELEMENTS : undefined}
           unwrapDisallowed={inline}
         >
-          {text}
+          {math ? normalizeLatexMathDelimiters(text) : text}
         </ReactMarkdown>
       </div>
     </TranscriptArtifactLinksContext.Provider>

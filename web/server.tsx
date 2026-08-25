@@ -11,6 +11,7 @@ import {
   transcriptRehypePlugins,
   transcriptRemarkPlugins,
 } from "../src/lib/markdownPlugins";
+import { normalizeLatexMathDelimiters } from "../src/lib/markdownMathDelimiters";
 import {
   MAX_RESEARCH_PROPOSAL_ANSWER_CHARACTERS,
   MAX_RESEARCH_PROPOSAL_PROMPT_CHARACTERS,
@@ -2612,7 +2613,7 @@ function SafeMarkdown({ children }: { children: string }) {
         ),
       }}
     >
-      {children}
+      {normalizeLatexMathDelimiters(children)}
     </ReactMarkdown>
   );
 }

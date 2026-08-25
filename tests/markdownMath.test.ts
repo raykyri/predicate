@@ -27,6 +27,21 @@ test("fenced display TeX renders as block math", () => {
   assert.match(html, /<mjx-container class="MathJax" jax="SVG" display="true">/);
 });
 
+test("LaTeX bracket delimiters render as block math", () => {
+  const html = render(
+    "\\[\n\\text{competitive deployment}\n\\rightarrow\n\\text{deep dependence}\n\\]",
+  );
+  assert.match(html, /<mjx-container class="MathJax" jax="SVG" display="true">/);
+  assert.equal(html.includes("competitive deployment"), false);
+  assert.equal(html.includes("\\rightarrow"), false);
+});
+
+test("LaTeX parenthesis delimiters render as inline math", () => {
+  const html = render("Euler: \\(e^{i\\pi}+1=0\\).");
+  assert.match(html, /<mjx-container class="MathJax" jax="SVG">/);
+  assert.equal(html.includes("e^{i\\pi}"), false);
+});
+
 test("a standalone single-line $$…$$ paragraph is promoted to block math", () => {
   const html = render("$$\\int_0^1 x^2\\,dx = \\frac{1}{3}$$");
   assert.match(html, /<mjx-container class="MathJax" jax="SVG" display="true">/);
@@ -63,6 +78,14 @@ test("TeX inside code spans and fences is left literal", () => {
   const fence = render("```\n$$a+b$$\n```");
   assert.equal(fence.includes("mjx-container"), false);
   assert.equal(fence.includes("$$a+b$$"), true);
+
+  const alternateInlineCode = render("Use `\\(x^2\\)` in your prompt.");
+  assert.equal(alternateInlineCode.includes("mjx-container"), false);
+  assert.equal(alternateInlineCode.includes("\\(x^2\\)"), true);
+
+  const alternateFence = render("```tex\n\\[\na+b\n\\]\n```");
+  assert.equal(alternateFence.includes("mjx-container"), false);
+  assert.equal(alternateFence.includes("\\["), true);
 });
 
 test("markdown without math renders no MathJax artifacts", () => {

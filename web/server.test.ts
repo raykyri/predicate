@@ -111,7 +111,11 @@ test("the public server renders transcript TeX math as MathJax SVG", async (t) =
     createdAt: "2026-07-16T12:00:00.000Z",
     turns: [
       turn("turn-1", "user", "What is Euler's identity?"),
-      turn("turn-2", "assistant", "It is $e^{i\\pi}+1=0$, and it costs $5 and $10 more."),
+      turn(
+        "turn-2",
+        "assistant",
+        "It is $e^{i\\pi}+1=0$, and it costs $5 and $10 more.\n\n\\[\na^2+b^2=c^2\n\\]",
+      ),
     ],
   });
   const index = draft.files["publication.json"];
@@ -153,6 +157,7 @@ test("the public server renders transcript TeX math as MathJax SVG", async (t) =
   // leak check scopes to the rendered document body.
   const rendered = body.slice(body.indexOf("<body"));
   assert.match(rendered, /<mjx-container class="MathJax" jax="SVG">/);
+  assert.match(rendered, /<mjx-container class="MathJax" jax="SVG" display="true">/);
   assert.equal(rendered.includes("e^{i\\pi}"), false);
   // Dollar amounts survive as prose instead of being mathified.
   assert.equal(rendered.includes("costs $5 and $10 more."), true);
