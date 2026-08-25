@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -9,7 +9,8 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { listConversationHistory } from "../lib/api";
+import { claimNativeTerminalPointerForWebDrag, listConversationHistory } from "../lib/api";
+import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "../lib/adapterIcons";
 import { formatRelativeTime } from "../lib/transcriptSessions";
 import type {
   ConversationHistoryEntry,
@@ -29,6 +30,23 @@ interface ConversationHistoryDialogProps {
 }
 
 type AdapterFilter = "all" | "claude" | "codex";
+
+function HistoryAgentMark({ adapter, size }: { adapter: string; size: number }) {
+  const src = ADAPTER_ICON_BY_ID[adapter];
+  if (!src) {
+    return <Bot size={size} aria-hidden="true" />;
+  }
+  return (
+    <img
+      className={["history-agent-icon", adapterIconClassName(adapter)].filter(Boolean).join(" ")}
+      src={src}
+      alt=""
+      width={size}
+      height={size}
+      aria-hidden="true"
+    />
+  );
+}
 
 export default function ConversationHistoryDialog({
   open,
@@ -69,6 +87,14 @@ export default function ConversationHistoryDialog({
     setPrompt("");
     void refresh();
     requestAnimationFrame(() => searchRef.current?.focus());
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    // The backdrop covers the native terminal stage. Own pointer routing for
+    // the dialog's lifetime so AppKit cannot send presses to Ghostty while the
+    // layout FFI that blocks terminal input is still in flight.
+    return claimNativeTerminalPointerForWebDrag();
   }, [open]);
 
   useEffect(() => {
@@ -178,12 +204,9 @@ export default function ConversationHistoryDialog({
         aria-labelledby="conversation-history-title"
       >
         <header className="history-header">
-          <div>
-            <h2 id="conversation-history-title">
-              <History size={18} aria-hidden="true" /> Conversation history
-            </h2>
-            <p>Resume or branch conversations discovered in Claude and Codex.</p>
-          </div>
+          <h2 id="conversation-history-title">
+            <History size={18} aria-hidden="true" /> Conversation history
+          </h2>
           <button
             type="button"
             className="icon-button history-close"
@@ -274,7 +297,7 @@ export default function ConversationHistoryDialog({
                   onDoubleClick={() => void activateEntry(entry)}
                 >
                   <span className={`history-agent history-agent--${entry.adapter}`}>
-                    <Bot size={14} aria-hidden="true" />
+                    <HistoryAgentMark adapter={entry.adapter} size={14} />
                   </span>
                   <span className="history-row-copy">
                     <span className="history-row-title">{entry.title}</span>
@@ -294,7 +317,7 @@ export default function ConversationHistoryDialog({
               <>
                 <div className="history-detail-heading">
                   <span className={`history-agent history-agent--${selected.adapter}`}>
-                    <Bot size={16} aria-hidden="true" />
+                    <HistoryAgentMark adapter={selected.adapter} size={16} />
                   </span>
                   <div>
                     <strong>{selected.title}</strong>
@@ -327,11 +350,16 @@ export default function ConversationHistoryDialog({
                 </label>
                 <div className="history-actions">
                   {selected.active && selected.paneId ? (
-                    <button type="button" onClick={() => onFocusPane(selected.paneId!)}>
+                    <button
+                      className="control-button"
+                      type="button"
+                      onClick={() => onFocusPane(selected.paneId!)}
+                    >
                       Open tab
                     </button>
                   ) : (
                     <button
+                      className="control-button"
                       type="button"
                       disabled={!selected.cwdExists || launching}
                       onClick={() => void launch("resume")}
@@ -341,6 +369,7 @@ export default function ConversationHistoryDialog({
                     </button>
                   )}
                   <button
+                    className="control-button"
                     type="button"
                     disabled={!selected.cwdExists || launching}
                     onClick={() => void launch("fork")}
@@ -348,6 +377,7 @@ export default function ConversationHistoryDialog({
                     <GitBranch size={14} aria-hidden="true" /> Fork
                   </button>
                   <button
+                    className="control-button"
                     type="button"
                     disabled={!selected.cwdExists || launching}
                     onClick={() => void launch("forkWorktree")}

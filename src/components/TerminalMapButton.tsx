@@ -21,7 +21,7 @@ export default function TerminalMapButton({
     <button
       type="button"
       className={`${className}${pressed ? " is-active" : ""}`}
-      title="Terminal map (⇧⌘H)"
+      title="Terminal map"
       aria-label="Open terminal map"
       aria-pressed={pressed}
       onPointerDown={onPointerDown}

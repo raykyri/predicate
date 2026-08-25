@@ -916,6 +916,8 @@ const ATTACH_INITIAL_RETRY_MS = 150;
 const ATTACH_MAX_RETRY_MS = 2000;
 const BROWSER_OVERLAY_LEFT_MARGIN = 64;
 const EXPAND_TOGGLE_SHORTCUT_LABEL = "⌘⇧E / Ctrl+Shift+E";
+const LEFT_SIDEBAR_TOGGLE_SHORTCUT_LABEL = "⇧⌘G";
+const RIGHT_BAR_TOGGLE_SHORTCUT_LABEL = "⇧⌘L";
 const TERMINAL_MIN_WIDTH = 380;
 const TURN_PANE_MIN_WIDTH = 300;
 const TURN_PANE_DEFAULT_WIDTH = 420;
@@ -2246,6 +2248,8 @@ function MainApp() {
   const [turnPaneWidth, setTurnPaneWidth] = useState(TURN_PANE_DEFAULT_WIDTH);
   const [sidebarWidth, setSidebarWidth] = useState(LEFT_SIDEBAR_DEFAULT_WIDTH);
   const [leftSidebarCollapsed, setLeftSidebarCollapsed] = useState(false);
+  const leftSidebarCollapsedRef = useRef(leftSidebarCollapsed);
+  leftSidebarCollapsedRef.current = leftSidebarCollapsed;
   const effectiveSidebarWidth = leftSidebarCollapsed ? 0 : sidebarWidth;
   const showLeftSidebarInResearch = useCallback(() => {
     setLeftSidebarCollapsed(false);
@@ -2365,6 +2369,8 @@ function MainApp() {
   const markdownDropBlockedRef = useRef(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [conversationHistoryOpen, setConversationHistoryOpen] = useState(false);
+  const conversationHistoryOpenRef = useRef(conversationHistoryOpen);
+  conversationHistoryOpenRef.current = conversationHistoryOpen;
   const [conversationHistoryLaunching, setConversationHistoryLaunching] = useState(false);
   // Saved prompts shown in the palette's "Insert prompt" section, refreshed on
   // each open so edits made in the library menu or on disk show up.
@@ -2898,6 +2904,8 @@ function MainApp() {
     Record<string, boolean>
   >({});
   const [rightBarCollapsed, setRightBarCollapsed] = useState(false);
+  const rightBarCollapsedRef = useRef(rightBarCollapsed);
+  rightBarCollapsedRef.current = rightBarCollapsed;
   const [queueSplitByAgent, setQueueSplitByAgent] = useState<Record<string, boolean>>({});
   const [queueSplitHeightByAgent, setQueueSplitHeightByAgent] = useState<Record<string, number>>(
     {},
@@ -5360,6 +5368,7 @@ function MainApp() {
       newResearchFolderRequest !== null ||
       publicationTarget ||
       commandPaletteOpen ||
+      conversationHistoryOpen ||
       worktreeCreateDialog ||
       closeDialog ||
       exitDialog ||
@@ -8133,6 +8142,7 @@ function MainApp() {
     terminalMapOpen ||
     Boolean(publicationTarget) ||
     commandPaletteOpen ||
+    conversationHistoryOpen ||
     Boolean(
       closeDialog ||
         worktreeCreateDialog ||
@@ -9628,7 +9638,19 @@ function MainApp() {
     }
     setNewAgentOpen(false);
     setNewResearchOpen(false);
+    setConversationHistoryOpen(false);
     setTerminalMapOpen(true);
+  }
+
+  function toggleConversationHistory() {
+    if (conversationHistoryOpenRef.current) {
+      setConversationHistoryOpen(false);
+      return;
+    }
+    setNewAgentOpen(false);
+    setNewResearchOpen(false);
+    setTerminalMapOpen(false);
+    setConversationHistoryOpen(true);
   }
 
   function closeTerminalMap() {
@@ -9714,15 +9736,8 @@ function MainApp() {
     commands.push({
       id: "nav:home",
       section: "Go to",
-      title: sidebarMode === "research" ? "New research" : "Terminal map",
-      hint: "⇧⌘H",
-      action: () => {
-        if (sidebarMode === "research") {
-          createResearchFromSidebar();
-        } else {
-          toggleTerminalMap();
-        }
-      },
+      title: "Terminal map",
+      action: () => toggleTerminalMap(),
     });
     for (const tree of researchTrees) {
       commands.push({
@@ -9755,8 +9770,22 @@ function MainApp() {
       id: "action:conversation-history",
       section: "Actions",
       title: "Conversation history",
-      hint: "Resume or fork Claude and Codex sessions",
-      action: () => setConversationHistoryOpen(true),
+      hint: "⇧⌘H",
+      action: () => toggleConversationHistory(),
+    });
+    commands.push({
+      id: "action:toggle-left-sidebar",
+      section: "Actions",
+      title: "Toggle left sidebar",
+      hint: LEFT_SIDEBAR_TOGGLE_SHORTCUT_LABEL,
+      action: () => setLeftSidebarCollapsedForActivePane(!leftSidebarCollapsed),
+    });
+    commands.push({
+      id: "action:toggle-right-bar",
+      section: "Actions",
+      title: "Toggle right bar",
+      hint: RIGHT_BAR_TOGGLE_SHORTCUT_LABEL,
+      action: () => setRightBarCollapsedForPane(!rightBarCollapsed, activePane?.id),
     });
     commands.push({
       id: "action:new-tab",
@@ -11721,6 +11750,7 @@ function MainApp() {
   // terminal stays keyboard-dead until the next real focus event.
   const modalEditorOpen =
     commandPaletteOpen ||
+    conversationHistoryOpen ||
     settingsOpen ||
     newResearchOpen ||
     newAgentOpen ||
@@ -12429,14 +12459,23 @@ function MainApp() {
         case "focusHome":
           toggleTerminalMap();
           return;
+        case "openConversationHistory":
+          toggleConversationHistory();
+          return;
+        case "toggleLeftSidebar":
+          setLeftSidebarCollapsedForActivePane(!leftSidebarCollapsedRef.current);
+          return;
+        case "toggleRightBar":
+          setRightBarCollapsedForPane(
+            !rightBarCollapsedRef.current,
+            activePaneRef.current?.id,
+          );
+          return;
         case "focusResearchHome":
           createResearchFromSidebar();
           return;
         case "focusTerminalMode":
           changeSidebarMode("terminal");
-          return;
-        case "focusResearchMode":
-          changeSidebarMode("research");
           return;
         case "toggleSidebarMode":
           changeSidebarMode(currentSidebarMode === "terminal" ? "research" : "terminal");
@@ -12591,7 +12630,6 @@ function MainApp() {
       }
       const command = resolveAppShortcut({
         key: event.key,
-        code: event.code,
         metaKey: event.metaKey,
         ctrlKey: event.ctrlKey,
         altKey: event.altKey,
@@ -13477,7 +13515,7 @@ function MainApp() {
             <button
               type="button"
               className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
-              title="Show left sidebar"
+              title={`Show left sidebar (${LEFT_SIDEBAR_TOGGLE_SHORTCUT_LABEL})`}
               aria-label="Show left sidebar"
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
@@ -13502,7 +13540,7 @@ function MainApp() {
           <button
             type="button"
             className="icon-button turn-pane-header-button turn-pane-floating-collapse-button"
-            title="Collapse right bar"
+            title={`Collapse right bar (${RIGHT_BAR_TOGGLE_SHORTCUT_LABEL})`}
             aria-label="Collapse right bar"
             onPointerDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -13547,7 +13585,7 @@ function MainApp() {
           <button
             type="button"
             className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
-            title="Show left sidebar"
+            title={`Show left sidebar (${LEFT_SIDEBAR_TOGGLE_SHORTCUT_LABEL})`}
             aria-label="Show left sidebar"
             onClick={() => setLeftSidebarCollapsedForActivePane(false)}
           >
@@ -13576,7 +13614,7 @@ function MainApp() {
           <button
             type="button"
             className="icon-button turn-pane-header-button turn-pane-floating-restore-button"
-            title="Show right bar"
+            title={`Show right bar (${RIGHT_BAR_TOGGLE_SHORTCUT_LABEL})`}
             aria-label="Show right bar"
             onClick={() => {
               activateTerminalPane(surface.pane.id);
@@ -14088,8 +14126,8 @@ function MainApp() {
               type="button"
               className="icon-button sidebar-header-button"
               aria-label="Conversation history"
-              title="Conversation history"
-              onClick={() => setConversationHistoryOpen(true)}
+              title="Conversation history (⇧⌘H)"
+              onClick={() => toggleConversationHistory()}
             >
               <History size={14} aria-hidden="true" />
             </button>
@@ -14101,7 +14139,7 @@ function MainApp() {
             <button
               type="button"
               className="icon-button sidebar-header-button"
-              title="Collapse left sidebar"
+              title={`Collapse left sidebar (${LEFT_SIDEBAR_TOGGLE_SHORTCUT_LABEL})`}
               aria-label="Collapse left sidebar"
               onClick={() => setLeftSidebarCollapsedForActivePane(true)}
             >
@@ -16884,6 +16922,7 @@ function MainApp() {
               />
               <HomeRails
                 workstreams={homeVisibleWorkstreams}
+                activePaneIds={visibleTerminalPaneIdSet}
                 drafts={globalDrafts}
                 draftsVisible={homeDraftsVisible}
                 onShowDrafts={showHomeDrafts}

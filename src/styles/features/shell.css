@@ -2980,6 +2980,20 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   min-width: 0;
 }
 
+/* The focused terminal, and every sibling in its split, read as the active
+   columns: a very slight lift over the board so they stand out without
+   competing with the cards. ::after extends a little into the gutter so the
+   fill isn't flush with the 280px content box. */
+.home-rail.is-active::after {
+  content: "";
+  position: absolute;
+  inset: 0 -6px;
+  z-index: -1;
+  border-radius: 10px;
+  background: var(--surface-fill-subtle);
+  pointer-events: none;
+}
+
 /* Faint hairline centered in each gutter, between columns only. */
 .home-rail + .home-rail::before {
   content: "";

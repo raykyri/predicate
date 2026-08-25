@@ -45,12 +45,6 @@
   font-weight: 620;
 }
 
-.history-header p {
-  margin: 4px 0 0 26px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
 .history-close,
 .history-refresh {
   width: 28px;
@@ -77,19 +71,21 @@
   color: var(--text-muted);
 }
 
-.history-search:focus-within {
-  border-color: var(--accent-border);
-  box-shadow: 0 0 0 2px var(--accent-shadow);
-}
-
 .history-search input {
   width: 100%;
   border: 0;
-  outline: 0;
+  outline: none;
+  box-shadow: none;
   background: transparent;
   color: var(--text-primary);
   font: inherit;
   font-size: 12px;
+}
+
+.history-search input:focus {
+  border: 0;
+  outline: none;
+  box-shadow: none;
 }
 
 .history-filters {
@@ -148,9 +144,19 @@
   background: var(--surface-fill-hover);
 }
 
-.history-row.is-selected {
-  border-color: var(--accent-border);
-  background: var(--surface-fill-selected, var(--surface-fill-hover));
+.history-row:focus,
+.history-row:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: transparent;
+}
+
+.history-row.is-selected,
+.history-row.is-selected:focus,
+.history-row.is-selected:focus-visible {
+  padding-top: 11px;
+  border-color: var(--surface-border-faint);
+  background: var(--surface-fill-hover);
 }
 
 .history-agent {
@@ -166,6 +172,23 @@
 
 .history-agent--claude { color: #d9a07d; }
 .history-agent--codex { color: #8fc7a6; }
+
+.history-agent-icon {
+  width: 14px;
+  height: 14px;
+  object-fit: contain;
+}
+
+.history-detail-heading .history-agent-icon {
+  width: 16px;
+  height: 16px;
+}
+
+/* Codex's mark is dark-on-transparent, same invert as the launcher chips. */
+.history-agent-icon.is-mono-light {
+  filter: brightness(0) invert(1);
+  opacity: 0.9;
+}
 
 .history-row-copy,
 .history-row-title,
@@ -311,31 +334,6 @@
   flex-wrap: wrap;
   gap: 7px;
   margin-top: 11px;
-}
-
-.history-actions button {
-  display: inline-flex;
-  min-height: 29px;
-  align-items: center;
-  gap: 5px;
-  padding: 0 10px;
-  border: 1px solid var(--control-border);
-  border-radius: var(--radius-md);
-  background: var(--control-bg);
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.history-actions button:first-child {
-  border-color: var(--accent-border);
-  background: var(--accent-bg);
-}
-
-.history-actions button:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 .history-dialog .is-spinning {

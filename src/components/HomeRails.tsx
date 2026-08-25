@@ -79,6 +79,9 @@ export interface HomeRailScrollPosition {
 
 interface HomeRailsProps {
   workstreams: HomeRailWorkstream[];
+  /** Pane ids currently on screen: the focused terminal, or every member of
+   * the active split. Matching rails paint as the active columns. */
+  activePaneIds: ReadonlySet<string>;
   /** Application-global drafts; when enabled, the rail shows on every workspace tab. */
   drafts: GlobalDraft[];
   draftsVisible: boolean;
@@ -496,6 +499,7 @@ function RailComposer({
 
 export default function HomeRails({
   workstreams,
+  activePaneIds,
   drafts,
   draftsVisible,
   onShowDrafts,
@@ -1349,10 +1353,12 @@ export default function HomeRails({
                 />
               </div>
             ) : null}
-            {workstreams.map((workstream) => (
+            {workstreams.map((workstream) => {
+              const active = activePaneIds.has(workstream.paneId);
+              return (
               <div
                 key={workstream.agentId}
-                className={`home-rail${
+                className={`home-rail${active ? " is-active" : ""}${
                   dropRailAgentId === workstream.agentId ? " is-drop-target" : ""
                 }`}
                 data-rail-agent-id={workstream.agentId}
@@ -1360,6 +1366,7 @@ export default function HomeRails({
                 <button
                   type="button"
                   className="home-rail-head"
+                  aria-current={active ? "true" : undefined}
                   aria-label={`Open ${workstream.title} — ${statusLabel(workstream)}${
                     workstream.paused ? ", queue paused" : ""
                   }`}
@@ -1419,7 +1426,8 @@ export default function HomeRails({
                   registerRef={registerComposerRef}
                 />
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>

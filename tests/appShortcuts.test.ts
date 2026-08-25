@@ -41,11 +41,9 @@ test("resolves qmux command and control shortcuts", () => {
   });
   assert.deepEqual(
     resolveAppShortcut(shortcut({ key: "r", metaKey: true, shiftKey: true })),
-    { type: "focusResearchMode" },
+    { type: "toggleSidebarMode" },
   );
-  assert.deepEqual(resolveAppShortcut(shortcut({ key: "`", metaKey: true })), {
-    type: "toggleSidebarMode",
-  });
+  assert.equal(resolveAppShortcut(shortcut({ key: "`", metaKey: true })), null);
   assert.deepEqual(
     resolveAppShortcut(shortcut({ key: "ArrowUp", metaKey: true, altKey: true })),
     {
@@ -67,10 +65,7 @@ test("resolves qmux command and control shortcuts", () => {
     ),
     null,
   );
-  assert.deepEqual(
-    resolveAppShortcut(shortcut({ key: "Dead", code: "Backquote", metaKey: true })),
-    { type: "toggleSidebarMode" },
-  );
+
   assert.equal(resolveAppShortcut(shortcut({ key: ";", metaKey: true })), null);
   assert.equal(resolveAppShortcut(shortcut({ key: ";", ctrlKey: true })), null);
   assert.equal(
@@ -166,15 +161,29 @@ test("binds follow-up navigation and the folder menu to research chords", () => 
   assert.equal(resolveAppShortcut(shortcut({ key: "o", ctrlKey: true })), null);
 });
 
-test("keeps the map / new-research shortcut within the active mode", () => {
-  const command = resolveAppShortcut(
+test("opens conversation history from shift-command-h in either mode", () => {
+  const history = resolveAppShortcut(
     shortcut({ key: "h", metaKey: true, shiftKey: true }),
   );
-  assert.deepEqual(command, { type: "focusHome" });
-  assert.deepEqual(contextualizeAppShortcut(command!, "research"), {
-    type: "focusResearchHome",
-  });
-  assert.deepEqual(contextualizeAppShortcut(command!, "terminal"), command);
+  assert.deepEqual(history, { type: "openConversationHistory" });
+  assert.deepEqual(contextualizeAppShortcut(history!, "research"), history);
+  assert.deepEqual(contextualizeAppShortcut(history!, "terminal"), history);
+});
+
+test("toggles the left and right panes from shift-command-g and shift-command-l", () => {
+  const left = resolveAppShortcut(
+    shortcut({ key: "g", metaKey: true, shiftKey: true }),
+  );
+  assert.deepEqual(left, { type: "toggleLeftSidebar" });
+  assert.deepEqual(contextualizeAppShortcut(left!, "research"), left);
+  assert.deepEqual(contextualizeAppShortcut(left!, "terminal"), left);
+
+  const right = resolveAppShortcut(
+    shortcut({ key: "l", metaKey: true, shiftKey: true }),
+  );
+  assert.deepEqual(right, { type: "toggleRightBar" });
+  assert.deepEqual(contextualizeAppShortcut(right!, "research"), right);
+  assert.deepEqual(contextualizeAppShortcut(right!, "terminal"), right);
 });
 
 test("keeps numbered tab shortcuts within the active mode", () => {
@@ -247,9 +256,6 @@ test("parses semantic commands from native payloads", () => {
   assert.deepEqual(parseAppShortcutCommand("focusTerminalMode", null), {
     type: "focusTerminalMode",
   });
-  assert.deepEqual(parseAppShortcutCommand("focusResearchMode", null), {
-    type: "focusResearchMode",
-  });
   assert.deepEqual(parseAppShortcutCommand("toggleSidebarMode", null), {
     type: "toggleSidebarMode",
   });
@@ -286,7 +292,7 @@ test("parses semantic commands from native payloads", () => {
 test("show/hide accelerator conflicts name the shadowed in-app shortcut", () => {
   // Display-form accelerators come from the backend's shortcut normalizer.
   assert.equal(
-    showHideShortcutConflict("Command+`"),
+    showHideShortcutConflict("Shift+Command+R"),
     "toggle terminal/research mode",
   );
   assert.equal(showHideShortcutConflict("Command+T"), "open a new tab");
@@ -337,6 +343,12 @@ test("only pane-targeted commands are withheld from an unknown origin pane", () 
   assert.equal(appShortcutTargetsActivePane({ type: "focusFollowups" }), false);
   assert.equal(appShortcutTargetsActivePane({ type: "openFolderMenu" }), false);
   assert.equal(appShortcutTargetsActivePane({ type: "focusHome" }), false);
+  assert.equal(
+    appShortcutTargetsActivePane({ type: "openConversationHistory" }),
+    false,
+  );
+  assert.equal(appShortcutTargetsActivePane({ type: "toggleLeftSidebar" }), false);
+  assert.equal(appShortcutTargetsActivePane({ type: "toggleRightBar" }), false);
   assert.equal(appShortcutTargetsActivePane({ type: "openSettings" }), false);
   assert.equal(
     appShortcutTargetsActivePane({ type: "focusTab", tabIndex: 0 }),

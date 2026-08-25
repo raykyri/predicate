@@ -191,14 +191,15 @@ enum AppShortcutCommand {
     FontZoomReset,
     FocusTab(u8),
     HomeOrCycleAdapter,
-    FocusHome,
-    FocusResearchMode,
     ToggleSidebarMode,
     CyclePaneTab(i8),
     CycleAllTab(i8),
     MoveSidebarItem(i8),
     OpenSettings,
     OpenCommandPalette,
+    OpenConversationHistory,
+    ToggleLeftSidebar,
+    ToggleRightBar,
     FocusFollowups,
     OpenFolderMenu,
     ToggleTranscriptOrBrowser,
@@ -218,8 +219,6 @@ impl AppShortcutCommand {
             Self::FontZoomReset => ("fontZoomReset", None),
             Self::FocusTab(index) => ("focusTab", Some(index)),
             Self::HomeOrCycleAdapter => ("homeOrCycleAdapter", None),
-            Self::FocusHome => ("focusHome", None),
-            Self::FocusResearchMode => ("focusResearchMode", None),
             Self::ToggleSidebarMode => ("toggleSidebarMode", None),
             Self::CyclePaneTab(-1) => ("cyclePaneTabPrevious", None),
             Self::CyclePaneTab(_) => ("cyclePaneTabNext", None),
@@ -229,6 +228,9 @@ impl AppShortcutCommand {
             Self::MoveSidebarItem(_) => ("moveSidebarItemDown", None),
             Self::OpenSettings => ("openSettings", None),
             Self::OpenCommandPalette => ("openCommandPalette", None),
+            Self::OpenConversationHistory => ("openConversationHistory", None),
+            Self::ToggleLeftSidebar => ("toggleLeftSidebar", None),
+            Self::ToggleRightBar => ("toggleRightBar", None),
             Self::FocusFollowups => ("focusFollowups", None),
             Self::OpenFolderMenu => ("openFolderMenu", None),
             Self::ToggleTranscriptOrBrowser => ("toggleTranscriptOrBrowser", None),
@@ -287,12 +289,15 @@ fn classify_app_shortcut(
         return Some(AppShortcutCommand::HomeOrCycleAdapter);
     }
     if command && !control && !option && shift && key == "h" {
-        return Some(AppShortcutCommand::FocusHome);
+        return Some(AppShortcutCommand::OpenConversationHistory);
+    }
+    if command && !control && !option && shift && key == "g" {
+        return Some(AppShortcutCommand::ToggleLeftSidebar);
+    }
+    if command && !control && !option && shift && key == "l" {
+        return Some(AppShortcutCommand::ToggleRightBar);
     }
     if command && !control && !option && shift && key == "r" {
-        return Some(AppShortcutCommand::FocusResearchMode);
-    }
-    if command && !control && !option && !shift && key == "`" {
         return Some(AppShortcutCommand::ToggleSidebarMode);
     }
     if !command && control && !option && key == "tab" {
@@ -1854,7 +1859,19 @@ mod tests {
         );
         assert_eq!(
             super::classify_app_shortcut("r", true, false, false, true),
-            Some(AppShortcutCommand::FocusResearchMode)
+            Some(AppShortcutCommand::ToggleSidebarMode)
+        );
+        assert_eq!(
+            super::classify_app_shortcut("h", true, false, false, true),
+            Some(AppShortcutCommand::OpenConversationHistory)
+        );
+        assert_eq!(
+            super::classify_app_shortcut("g", true, false, false, true),
+            Some(AppShortcutCommand::ToggleLeftSidebar)
+        );
+        assert_eq!(
+            super::classify_app_shortcut("l", true, false, false, true),
+            Some(AppShortcutCommand::ToggleRightBar)
         );
         assert_eq!(
             super::classify_app_shortcut("r", false, false, true, true),
@@ -1863,7 +1880,7 @@ mod tests {
         );
         assert_eq!(
             super::classify_app_shortcut("`", false, false, false, true),
-            Some(AppShortcutCommand::ToggleSidebarMode)
+            None
         );
         assert_eq!(
             super::classify_app_shortcut("ArrowUp", false, false, true, true),
@@ -1915,7 +1932,7 @@ mod tests {
         );
         assert_eq!(
             super::classify_web_app_shortcut("`", false, false, false, true),
-            Some(AppShortcutCommand::ToggleSidebarMode)
+            None
         );
         assert_eq!(
             super::classify_web_app_shortcut(",", false, false, false, true),

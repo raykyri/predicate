@@ -188,7 +188,9 @@ final class NativeTerminalPane: NSObject,
                 "super+alt+shift+w",  // close_all_windows
                 "super+t",  // new_tab — qmux: new pane / research
                 "super+n",  // new_window — qmux: new agent / research
-                "super+shift+h",  // qmux: terminal map / new research
+                "super+shift+h",  // qmux: conversation history
+                "super+shift+g",  // qmux: toggle left sidebar
+                "super+shift+l",  // qmux: toggle right bar
                 "super+d",  // new_split:right — qmux: split pane below
                 "super+shift+d",  // new_split:down — qmux: split pane left/right
                 "super+comma",  // open_config — qmux: settings
@@ -218,14 +220,14 @@ final class NativeTerminalPane: NSObject,
                 "super+physical:seven",
                 "super+physical:eight",
                 "super+physical:nine",
-                // No Ghostty default action today, but qmux's terminal/research
-                // mode toggle — keep any future Ghostty binding from claiming
-                // it. Note unbinding alone can NOT reclaim a chord Ghostty has
-                // no binding for: upstream performKeyEquivalent swallows every
-                // unclaimed ⌘ chord regardless, which is why
-                // QmuxTerminalView.performKeyEquivalent offers chords to the
-                // qmux shortcut classifier first.
-                "super+backquote",
+                // No Ghostty default action today, but qmux's
+                // Command-Shift-R terminal/research mode toggle — keep any
+                // future Ghostty binding from claiming it. Note unbinding alone
+                // can NOT reclaim a chord Ghostty has no binding for: upstream
+                // performKeyEquivalent swallows every unclaimed ⌘ chord
+                // regardless, which is why QmuxTerminalView.performKeyEquivalent
+                // offers chords to the qmux shortcut classifier first.
+                "super+shift+r",
             ] {
                 builder.withCustom("keybind", "\(chord)=unbind")
             }

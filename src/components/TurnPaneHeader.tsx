@@ -443,7 +443,7 @@ export default function TurnPaneHeader({
             <button
               type="button"
               className="icon-button turn-pane-header-button"
-              title="Show left sidebar"
+              title="Show left sidebar (⇧⌘G)"
               aria-label="Show left sidebar"
               onClick={onRestoreLeftSidebar}
             >
@@ -460,7 +460,7 @@ export default function TurnPaneHeader({
           <button
             type="button"
             className="icon-button turn-pane-header-button"
-            title="Collapse right bar"
+            title="Collapse right bar (⇧⌘L)"
             aria-label="Collapse right bar"
             onClick={onCollapseRightBar}
           >

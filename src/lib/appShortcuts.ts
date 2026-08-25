@@ -9,13 +9,15 @@ export type AppShortcutCommand =
   | { type: "focusHome" }
   | { type: "focusResearchHome" }
   | { type: "focusTerminalMode" }
-  | { type: "focusResearchMode" }
   | { type: "toggleSidebarMode" }
   | { type: "cyclePaneTab"; direction: -1 | 1 }
   | { type: "cycleAllTab"; direction: -1 | 1 }
   | { type: "moveSidebarItem"; direction: -1 | 1 }
   | { type: "openSettings" }
   | { type: "openCommandPalette" }
+  | { type: "openConversationHistory" }
+  | { type: "toggleLeftSidebar" }
+  | { type: "toggleRightBar" }
   | { type: "newDocument" }
   | { type: "focusFollowups" }
   | { type: "openFolderMenu" }
@@ -29,7 +31,6 @@ export type AppShortcutCommand =
 
 export interface AppShortcutInput {
   key: string;
-  code?: string;
   metaKey: boolean;
   ctrlKey: boolean;
   altKey: boolean;
@@ -50,10 +51,7 @@ function normalizedKey(key: string): string {
 }
 
 export function resolveAppShortcut(input: AppShortcutInput): AppShortcutCommand | null {
-  // WebKit can expose the backquote key as "Dead" (or a composed character)
-  // after focus moves through web content. Use the physical code for this
-  // layout-independent app shortcut so it remains available on Research.
-  const key = input.code === "Backquote" ? "`" : normalizedKey(input.key);
+  const key = normalizedKey(input.key);
   const command = input.metaKey;
   const control = input.ctrlKey;
   const option = input.altKey;
@@ -91,12 +89,15 @@ export function resolveAppShortcut(input: AppShortcutInput): AppShortcutCommand 
     return { type: "homeOrCycleAdapter" };
   }
   if (command && !control && !option && shift && key === "h") {
-    return { type: "focusHome" };
+    return { type: "openConversationHistory" };
+  }
+  if (command && !control && !option && shift && key === "g") {
+    return { type: "toggleLeftSidebar" };
+  }
+  if (command && !control && !option && shift && key === "l") {
+    return { type: "toggleRightBar" };
   }
   if (command && !control && !option && shift && key === "r") {
-    return { type: "focusResearchMode" };
-  }
-  if (command && !control && !option && !shift && key === "`") {
     return { type: "toggleSidebarMode" };
   }
   if (!command && control && !option && key === "tab") {
@@ -169,9 +170,6 @@ export function contextualizeAppShortcut(
   if (sidebarMode === "research" && command.type === "focusTab") {
     return { type: "focusResearchTab", tabIndex: command.tabIndex };
   }
-  if (sidebarMode === "research" && command.type === "focusHome") {
-    return { type: "focusResearchHome" };
-  }
   if (sidebarMode === "research" && command.type === "restoreClosedPane") {
     return { type: "focusTerminalMode" };
   }
@@ -226,8 +224,6 @@ function appShortcutLabel(command: AppShortcutCommand): string {
       return "start a new research";
     case "focusTerminalMode":
       return "switch to terminal mode";
-    case "focusResearchMode":
-      return "switch to research mode";
     case "toggleSidebarMode":
       return "toggle terminal/research mode";
     case "cyclePaneTab":
@@ -239,6 +235,12 @@ function appShortcutLabel(command: AppShortcutCommand): string {
       return "open settings";
     case "openCommandPalette":
       return "open the command palette";
+    case "openConversationHistory":
+      return "open conversation history";
+    case "toggleLeftSidebar":
+      return "toggle the left sidebar";
+    case "toggleRightBar":
+      return "toggle the right bar";
     case "newDocument":
       return "create a document";
     case "focusFollowups":
@@ -296,7 +298,6 @@ function acceleratorToShortcutInput(accelerator: string): AppShortcutInput | nul
   }
   return {
     key: domKey,
-    code: domKey === "`" ? "Backquote" : undefined,
     metaKey: modifiers.has("Command"),
     ctrlKey: modifiers.has("Control"),
     altKey: modifiers.has("Option"),
@@ -346,10 +347,12 @@ export function parseAppShortcutCommand(
     case "focusHome":
     case "focusResearchHome":
     case "focusTerminalMode":
-    case "focusResearchMode":
     case "toggleSidebarMode":
     case "openSettings":
     case "openCommandPalette":
+    case "openConversationHistory":
+    case "toggleLeftSidebar":
+    case "toggleRightBar":
     case "newDocument":
     case "focusFollowups":
     case "openFolderMenu":

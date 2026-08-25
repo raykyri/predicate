@@ -73,7 +73,7 @@ export function ResearchSidebarRestoreButton({
     <button
       type="button"
       className="control-button research-sidebar-restore"
-      title="Show left sidebar"
+      title="Show left sidebar (⇧⌘G)"
       aria-label="Show left sidebar"
       onClick={onClick}
     >
