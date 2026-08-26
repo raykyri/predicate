@@ -1,8 +1,6 @@
 # qmux
 
-qmux is a desktop app for running terminals and coding agents
-side-by-side, with vertical tabs and a Cursor-like sidebar for
-transcript rendering.
+qmux is a desktop terminal multiplexer for coding agents.
 
 <p align="center"><img src="qmux.png" alt="qmux screenshot" width="700" style="max-width: 100%; height: auto;"></p>
 
@@ -120,28 +118,20 @@ CI=true npm run build
 ```
 
 Ordinary builds do not notarize, even when Apple credentials are present in
-`.env`. To build, sign, and notarize release artifacts:
+`.env`. To run the complete release workflow—including tests, signing,
+notarization, updater metadata, checksums, and a draft GitHub release—from a
+clean, pushed `main` checkout:
 
 ```
 npm run build:release
 ```
 
-Run a release build directly:
-
-```
-src-tauri/target/universal-apple-darwin/release/qmux
-```
-
-```
-open src-tauri/target/universal-apple-darwin/release/bundle/macos/qmux.app
-```
+After testing the draft's DMG, publish it with the command printed by the
+release script.
 
 Development:
 
 ```
-# Build the frontend only
-npm run build:site:frontend
-
 # Run the complete JavaScript, plugin, integration, and Rust test suite
 npm test
 

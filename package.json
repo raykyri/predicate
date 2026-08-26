@@ -9,7 +9,7 @@
     "dev:site": "tsx watch web/server.tsx",
     "dev:tauri": "tauri dev",
     "build": "bash scripts/build.sh",
-    "build:release": "bash scripts/build.sh --notarize",
+    "build:release": "bash scripts/release.sh",
     "build:site:frontend": "tsc && vite build",
     "build:site:server": "tsc -p web/tsconfig.json && esbuild web/server.tsx --bundle --packages=external --platform=node --format=esm --target=node20 --outfile=dist-site/server.mjs",
     "start:site": "node dist-site/server.mjs",
