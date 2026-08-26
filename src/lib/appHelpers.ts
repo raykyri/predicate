@@ -671,6 +671,12 @@ export function agentStatusLabel(status: AgentInfo["status"]) {
   }
 }
 
+/** Workspace metadata can arrive in a full AgentInfo payload, but it is not
+ * evidence that the agent's execution lifecycle changed. */
+export function agentEventAffectsThinkingState(eventType: string): boolean {
+  return eventType !== "agent.workspace_changed";
+}
+
 const AGENT_STATUSES_AT_REST = new Set<AgentInfo["status"]>([
   "done",
   "idle",

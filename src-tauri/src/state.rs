@@ -48,6 +48,44 @@ pub enum PaneBackend {
 /// in-pane process can push into persisted state via the control socket.
 const MAX_PANE_CWD_LEN: usize = 8192;
 
+/// Whether a freshly resolved shell workspace describes the same checkout scope
+/// as another pane or agent workspace. Exact cwd matching lets a first successful
+/// Git observation populate peers that do not have cached workspace metadata yet;
+/// matching canonical checkout roots extends the refresh to sibling directories.
+fn workspace_observation_matches(
+    target_cwd: &str,
+    target_workspace: Option<&ActiveWorkspace>,
+    observed_cwd: &str,
+    observed_workspace: &ActiveWorkspace,
+) -> bool {
+    if target_cwd == observed_cwd {
+        return true;
+    }
+    match (
+        target_workspace.and_then(|workspace| workspace.git_root.as_deref()),
+        observed_workspace.git_root.as_deref(),
+    ) {
+        (Some(target_root), Some(observed_root)) => target_root == observed_root,
+        _ => false,
+    }
+}
+
+/// Retarget a checkout-wide observation to one pane or agent without replacing
+/// adapter-specific provenance or qmux ownership metadata already attached to it.
+fn propagated_workspace(
+    observed: &ActiveWorkspace,
+    current: Option<&ActiveWorkspace>,
+    target_cwd: &str,
+) -> ActiveWorkspace {
+    let mut next = observed.clone();
+    next.cwd = target_cwd.to_string();
+    if let Some(current) = current {
+        next.source = current.source;
+        next.managed_by_qmux = current.managed_by_qmux;
+    }
+    next
+}
+
 /// Upper bound on the parsed transcript turns retained in memory per agent. The
 /// store feeds the UI timeline on (re)connect and crash recovery; without a cap a
 /// long session — or selecting a large transcript, which reparses the whole file —
@@ -10400,43 +10438,140 @@ impl AppState {
             .pane_cwd_commit_lock
             .lock()
             .map_err(|_| "pane cwd commit lock poisoned".to_string())?;
-        let should_emit = {
+        let (pane_updates, agent_updates) = {
             let mut model = self
                 .inner
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
-            let Some(pane) = model.panes.get_mut(pane_id) else {
-                return Ok(());
+            let reporter_changed = {
+                let Some(pane) = model.panes.get_mut(pane_id) else {
+                    return Ok(());
+                };
+                // A newer cwd/prompt report supersedes this probe even when it is
+                // for the same directory. Never persist or emit its stale result.
+                if pane.cwd_observation_seq != observation_seq || pane.info.cwd != cwd {
+                    return Ok(());
+                }
+                let workspace_changed = is_shell && pane.info.active_workspace != active_workspace;
+                if workspace_changed {
+                    pane.info.active_workspace = active_workspace.clone();
+                }
+                cwd_changed || workspace_changed
             };
-            // A newer cwd/prompt report supersedes this probe even when it is
-            // for the same directory. Never persist or emit its stale result.
-            if pane.cwd_observation_seq != observation_seq || pane.info.cwd != cwd {
-                return Ok(());
+
+            let mut pane_updates = Vec::new();
+            if reporter_changed && let Some(pane) = model.panes.get(pane_id) {
+                pane_updates.push(pane.info.clone());
             }
-            let workspace_changed = is_shell && pane.info.active_workspace != active_workspace;
-            if workspace_changed {
-                pane.info.active_workspace = active_workspace.clone();
+            let mut agent_updates = Vec::new();
+
+            // A successful shell observation is authoritative for the checkout,
+            // not just the pane that happened to reach a prompt first. Refresh
+            // other local shell panes and agents when they are in the exact same
+            // directory or elsewhere under the same canonical checkout root.
+            // `git_root` is the worktree top-level, deliberately not the common
+            // Git directory: linked worktrees share the latter but have separate
+            // HEADs and therefore must not exchange branch observations.
+            if let Some(observed) = active_workspace.as_ref() {
+                let remote_group_ids = model
+                    .groups
+                    .iter()
+                    .filter(|(_, group)| group.is_remote())
+                    .map(|(group_id, _)| group_id.clone())
+                    .collect::<HashSet<_>>();
+
+                for (peer_id, peer) in model.panes.iter_mut() {
+                    if peer_id == pane_id
+                        || !matches!(peer.info.kind, PaneKind::Shell)
+                        || remote_group_ids.contains(&peer.info.group_id)
+                        || !workspace_observation_matches(
+                            &peer.info.cwd,
+                            peer.info.active_workspace.as_ref(),
+                            &cwd,
+                            observed,
+                        )
+                    {
+                        continue;
+                    }
+                    let next = propagated_workspace(
+                        observed,
+                        peer.info.active_workspace.as_ref(),
+                        &peer.info.cwd,
+                    );
+                    if peer.info.active_workspace.as_ref() == Some(&next) {
+                        continue;
+                    }
+                    peer.info.active_workspace = Some(next);
+                    pane_updates.push(peer.info.clone());
+                }
+
+                for agent in model.agents.values_mut() {
+                    if agent.pane_id.is_none() || remote_group_ids.contains(&agent.group_id) {
+                        continue;
+                    }
+                    let agent_cwd = agent
+                        .active_workspace
+                        .as_ref()
+                        .map(|workspace| workspace.cwd.as_str())
+                        .unwrap_or(agent.worktree_dir.as_str());
+                    if !workspace_observation_matches(
+                        agent_cwd,
+                        agent.active_workspace.as_ref(),
+                        &cwd,
+                        observed,
+                    ) {
+                        continue;
+                    }
+                    let mut next =
+                        propagated_workspace(observed, agent.active_workspace.as_ref(), agent_cwd);
+                    if agent.active_workspace.is_none() {
+                        // Before an adapter reports its first command cwd, a
+                        // locally launched agent may still be using its launch
+                        // workspace. Preserve the ownership meaning normally
+                        // assigned by record_agent_active_workspace.
+                        next.managed_by_qmux = agent.branch.is_some()
+                            && next.git_root.as_deref().is_some_and(|root| {
+                                crate::adapters::same_dir(root, &agent.worktree_dir)
+                            });
+                    }
+                    if agent.active_workspace.as_ref() == Some(&next) {
+                        continue;
+                    }
+                    agent.active_workspace = Some(next);
+                    agent_updates.push(agent.clone());
+                }
             }
-            cwd_changed || workspace_changed
+
+            (pane_updates, agent_updates)
         };
-        if !should_emit {
+        if pane_updates.is_empty() && agent_updates.is_empty() {
             return Ok(());
         }
 
         self.persist();
-        // Carry cwd and workspace together so the tab path, context-menu cwd,
-        // branch, and worktree badge advance as one ordered observation.
-        self.emit(QmuxEvent::new(
-            "pane.cwd_changed",
-            Some(pane_id.to_string()),
-            None,
-            json!({
-                "paneId": pane_id,
-                "cwd": cwd,
-                "activeWorkspace": active_workspace,
-            }),
-        ));
+        for pane in pane_updates {
+            // Carry cwd and workspace together so the tab path, context-menu cwd,
+            // branch, and worktree badge advance as one ordered observation.
+            self.emit(QmuxEvent::new(
+                "pane.cwd_changed",
+                Some(pane.id.clone()),
+                None,
+                json!({
+                    "paneId": pane.id,
+                    "cwd": pane.cwd,
+                    "activeWorkspace": pane.active_workspace,
+                }),
+            ));
+        }
+        for agent in agent_updates {
+            self.emit(QmuxEvent::new(
+                "agent.workspace_changed",
+                agent.pane_id.clone(),
+                Some(agent.id.clone()),
+                json!({ "agent": agent }),
+            ));
+        }
         Ok(())
     }
 
@@ -17607,6 +17742,178 @@ mod tests {
                 .and_then(|workspace| workspace.branch.as_deref()),
             Some("feature/prompt-refresh")
         );
+
+        std::fs::remove_dir_all(workspace).ok();
+    }
+
+    #[test]
+    fn update_pane_cwd_propagates_branch_across_the_checkout_and_agents() {
+        let workspace = temp_workspace();
+        let repo = workspace.join("repo");
+        let repo_alias = workspace.join("repo-alias");
+        let nested = repo.join("nested");
+        let linked = workspace.join("linked");
+        std::fs::create_dir_all(&nested).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .output()
+                .expect("git runs");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&["init", "-b", "main"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "qmux test"]);
+        git(&["commit", "--allow-empty", "-m", "init"]);
+        std::os::unix::fs::symlink(&repo, &repo_alias).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-b",
+            "feature/linked",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ]);
+
+        let state = AppState::new(test_config(workspace.clone()));
+        let repo_cwd = repo.display().to_string();
+        let repo_alias_cwd = repo_alias.display().to_string();
+        let nested_cwd = nested.display().to_string();
+        let linked_cwd = linked.display().to_string();
+
+        let mut reporter = sample_pane_runtime("pane-reporter");
+        reporter.info.cwd = repo_cwd.clone();
+        reporter.info.active_workspace = crate::workspace::resolve_pane_workspace(&repo_cwd);
+        state.insert_pane(reporter).unwrap();
+
+        // Exact-directory propagation also fills a peer whose workspace cache
+        // has not been populated yet.
+        let mut exact_peer = sample_pane_runtime("pane-exact");
+        exact_peer.info.cwd = repo_cwd.clone();
+        exact_peer.info.active_workspace = None;
+        state.insert_pane(exact_peer).unwrap();
+
+        let mut nested_peer = sample_pane_runtime("pane-nested");
+        nested_peer.info.cwd = nested_cwd.clone();
+        nested_peer.info.active_workspace = crate::workspace::resolve_pane_workspace(&nested_cwd);
+        state.insert_pane(nested_peer).unwrap();
+
+        // This checkout shares a common Git directory with the reporter but has
+        // its own HEAD, so checkout-root matching must leave it alone.
+        let mut linked_peer = sample_pane_runtime("pane-linked");
+        linked_peer.info.cwd = linked_cwd.clone();
+        linked_peer.info.active_workspace = crate::workspace::resolve_pane_workspace(&linked_cwd);
+        state.insert_pane(linked_peer).unwrap();
+
+        let mut observed_agent = sample_agent("agent-observed");
+        observed_agent.worktree_dir = repo_cwd.clone();
+        observed_agent.branch = Some("launch-branch-must-not-change".to_string());
+        observed_agent.active_workspace = crate::workspace::resolve_active_workspace(
+            &nested_cwd,
+            crate::workspace::ActiveWorkspaceSource::Codex,
+            true,
+        );
+        state.insert_agent(observed_agent).unwrap();
+
+        let mut launch_agent = sample_agent("agent-launch");
+        launch_agent.worktree_dir = repo_cwd.clone();
+        launch_agent.branch = Some("launch-main".to_string());
+        launch_agent.active_workspace = None;
+        state.insert_agent(launch_agent).unwrap();
+
+        let mut alias_agent = sample_agent("agent-alias");
+        alias_agent.worktree_dir = repo_alias_cwd.clone();
+        alias_agent.branch = Some("launch-alias".to_string());
+        alias_agent.active_workspace = None;
+        alias_agent.pane_id = Some("pane-agent-alias".to_string());
+        state.insert_agent(alias_agent).unwrap();
+
+        git(&["switch", "-c", "feature/shared"]);
+        state
+            .update_pane_cwd("pane-reporter", repo_cwd.clone())
+            .unwrap();
+        // Report the same checkout through a symlink spelling. The exact-cwd
+        // fallback reaches the not-yet-observed agent, while canonical identity
+        // still recognizes its qmux-managed launch root.
+        state
+            .update_pane_cwd("pane-reporter", repo_alias_cwd.clone())
+            .unwrap();
+
+        let panes = state
+            .list_panes()
+            .unwrap()
+            .into_iter()
+            .map(|pane| (pane.id.clone(), pane))
+            .collect::<HashMap<_, _>>();
+        for pane_id in ["pane-reporter", "pane-exact", "pane-nested"] {
+            assert_eq!(
+                panes[pane_id]
+                    .active_workspace
+                    .as_ref()
+                    .and_then(|workspace| workspace.branch.as_deref()),
+                Some("feature/shared"),
+                "{pane_id} did not receive the checkout branch"
+            );
+        }
+        assert_eq!(
+            panes["pane-nested"]
+                .active_workspace
+                .as_ref()
+                .map(|workspace| workspace.cwd.as_str()),
+            Some(nested_cwd.as_str())
+        );
+        assert_eq!(
+            panes["pane-linked"]
+                .active_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("feature/linked")
+        );
+
+        let observed_agent = state.agent("agent-observed").unwrap().unwrap();
+        assert_eq!(
+            observed_agent
+                .active_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("feature/shared")
+        );
+        assert_eq!(
+            observed_agent
+                .active_workspace
+                .as_ref()
+                .map(|workspace| workspace.source),
+            Some(crate::workspace::ActiveWorkspaceSource::Codex)
+        );
+        assert_eq!(
+            observed_agent.branch.as_deref(),
+            Some("launch-branch-must-not-change")
+        );
+
+        let launch_agent = state.agent("agent-launch").unwrap().unwrap();
+        assert_eq!(
+            launch_agent
+                .active_workspace
+                .as_ref()
+                .and_then(|workspace| workspace.branch.as_deref()),
+            Some("feature/shared")
+        );
+        assert_eq!(launch_agent.branch.as_deref(), Some("launch-main"));
+
+        let alias_agent = state.agent("agent-alias").unwrap().unwrap();
+        assert!(
+            alias_agent
+                .active_workspace
+                .as_ref()
+                .is_some_and(|workspace| workspace.managed_by_qmux)
+        );
+        assert_eq!(alias_agent.branch.as_deref(), Some("launch-alias"));
 
         std::fs::remove_dir_all(workspace).ok();
     }

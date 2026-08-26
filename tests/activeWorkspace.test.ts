@@ -5,6 +5,7 @@ import {
   agentDisplayCheckoutRoot,
   agentDisplayDirectory,
   agentDisplayWorktreeRoot,
+  agentEventAffectsThinkingState,
   agentShowsLaunchDirectory,
 } from "../src/lib/appHelpers";
 import type { AgentInfo } from "../src/types";
@@ -22,6 +23,12 @@ function agent(overrides: Partial<AgentInfo> = {}): AgentInfo {
     ...overrides,
   };
 }
+
+test("workspace-only agent events do not affect thinking lifecycle", () => {
+  assert.equal(agentEventAffectsThinkingState("agent.workspace_changed"), false);
+  assert.equal(agentEventAffectsThinkingState("agent.running"), true);
+  assert.equal(agentEventAffectsThinkingState("agent.done"), true);
+});
 
 test("live command cwd and branch override launch metadata for display", () => {
   const current = agent({

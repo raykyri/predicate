@@ -9,6 +9,7 @@ import {
   markEventsListenerReady,
 } from "../lib/api";
 import {
+  agentEventAffectsThinkingState,
   isAgentInfo,
   isGlobalDraft,
   isQueuedTurn,
@@ -416,21 +417,27 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
           // working status restored from disk can't trigger it. "agent.recovered"
           // is excluded too: a recovered agent is waiting for input, not working,
           // even if it momentarily carries a working status.
-          const working =
-            updatedAgent.status === "running" || updatedAgent.status === "starting";
-          setThinkingAgentIds((prev) => {
-            const shouldThink = working && event.type !== "agent.recovered";
-            if (shouldThink === prev.has(updatedAgent.id)) {
-              return prev;
-            }
-            const next = new Set(prev);
-            if (shouldThink) {
-              next.add(updatedAgent.id);
-            } else {
-              next.delete(updatedAgent.id);
-            }
-            return next;
-          });
+          // Workspace-only refreshes carry a full AgentInfo so the display can
+          // update surgically, but they are not lifecycle activity. In
+          // particular, a sibling shell prompt must not make a restored agent
+          // with a stale `running` status light up as "Working…".
+          if (agentEventAffectsThinkingState(event.type)) {
+            const working =
+              updatedAgent.status === "running" || updatedAgent.status === "starting";
+            setThinkingAgentIds((prev) => {
+              const shouldThink = working && event.type !== "agent.recovered";
+              if (shouldThink === prev.has(updatedAgent.id)) {
+                return prev;
+              }
+              const next = new Set(prev);
+              if (shouldThink) {
+                next.add(updatedAgent.id);
+              } else {
+                next.delete(updatedAgent.id);
+              }
+              return next;
+            });
+          }
         } else {
           const seq = (agentRefreshSeq += 1);
           void listAgents()

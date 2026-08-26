@@ -156,6 +156,15 @@ impl CompletionSoundState {
             self.mark_research_agent(agent_id);
         }
 
+        // Workspace refreshes carry a full AgentInfo for the frontend's
+        // surgical display update, but they do not prove that an agent started,
+        // resumed, or finished work. Letting their persisted status participate
+        // here could arm a restored `running` agent for a false completion sound
+        // merely because a sibling shell observed a branch change.
+        if event.event_type == "agent.workspace_changed" {
+            return None;
+        }
+
         let status = event
             .payload
             .get("agent")
@@ -330,6 +339,44 @@ mod tests {
             state.observe_event_at(
                 &agent_event("agent.done", "agent-1", "done"),
                 start + Duration::from_secs(1),
+            ),
+            Some("default".to_string())
+        );
+    }
+
+    #[test]
+    fn workspace_changes_do_not_arm_or_disarm_completion_tracking() {
+        let start = Instant::now();
+        let mut state = CompletionSoundState::default();
+
+        // A persisted running status carried only to refresh branch display is
+        // not evidence that this process observed the agent begin working.
+        state.observe_event_at(
+            &agent_event("agent.workspace_changed", "restored", "running"),
+            start,
+        );
+        assert_eq!(
+            state.observe_event_at(
+                &agent_event("agent.done", "restored", "done"),
+                start + Duration::from_secs(1),
+            ),
+            None
+        );
+
+        // Conversely, a workspace payload with a stale resting status must not
+        // erase a real running observation before its matching completion.
+        state.observe_event_at(
+            &agent_event("agent.running", "live", "running"),
+            start + Duration::from_secs(2),
+        );
+        state.observe_event_at(
+            &agent_event("agent.workspace_changed", "live", "done"),
+            start + Duration::from_millis(2_500),
+        );
+        assert_eq!(
+            state.observe_event_at(
+                &agent_event("agent.done", "live", "done"),
+                start + Duration::from_secs(3),
             ),
             Some("default".to_string())
         );
