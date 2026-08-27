@@ -100,7 +100,15 @@ button.user-notification-open:hover {
   line-height: 1.35;
 }
 
-.user-notification-copy strong {
+.user-notification-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.user-notification-heading strong {
+  min-width: 0;
   overflow: hidden;
   font-size: var(--fs-sm);
   font-weight: 650;
@@ -108,7 +116,14 @@ button.user-notification-open:hover {
   white-space: nowrap;
 }
 
-.user-notification-copy > span {
+.user-notification-time {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 450;
+}
+
+.user-notification-body {
   overflow-wrap: anywhere;
   color: var(--text-secondary);
   font-size: var(--fs-sm);

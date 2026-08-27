@@ -9669,6 +9669,7 @@ function MainApp() {
           tone: normalizedTone,
           timeoutMs: Math.min(30_000, Math.max(1_000, timeoutMs)),
           paneId: event.paneId ?? null,
+          createdAt: Date.now(),
         },
       ].slice(-20),
     );

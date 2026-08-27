@@ -11,6 +11,19 @@ export interface UserNotificationItem {
   tone: UserNotificationTone;
   timeoutMs: number;
   paneId: string | null;
+  createdAt: number;
+}
+
+/** Compact age for overlay toasts: "now", "5s", "3m", "2h", "1d". */
+export function formatShortRelativeTime(createdAt: number, now = Date.now()): string {
+  const seconds = Math.max(0, Math.floor((now - createdAt) / 1000));
+  if (seconds < 1) return "now";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
 }
 
 interface UserNotificationStackProps {
@@ -38,11 +51,13 @@ function ToneIcon({ tone }: { tone: UserNotificationTone }) {
 
 function NotificationCard({
   notification,
+  now,
   active,
   onDismiss,
   onOpenPane,
 }: {
   notification: UserNotificationItem;
+  now: number;
   active: boolean;
   onDismiss: (id: string) => void;
   onOpenPane: (paneId: string) => void;
@@ -88,8 +103,16 @@ function NotificationCard({
         <ToneIcon tone={notification.tone} />
       </span>
       <span className="user-notification-copy">
-        <strong>{notification.title}</strong>
-        <span>{notification.body}</span>
+        <span className="user-notification-heading">
+          <strong>{notification.title}</strong>
+          <time
+            className="user-notification-time"
+            dateTime={new Date(notification.createdAt).toISOString()}
+          >
+            {formatShortRelativeTime(notification.createdAt, now)}
+          </time>
+        </span>
+        <span className="user-notification-body">{notification.body}</span>
       </span>
     </>
   );
@@ -137,11 +160,19 @@ export function UserNotificationStack({
   const [windowActive, setWindowActive] = useState(
     () => document.visibilityState === "visible" && document.hasFocus(),
   );
+  const [now, setNow] = useState(() => Date.now());
   const visible = notifications.slice(0, MAX_VISIBLE);
   const regionRef = useNativeWebOverlayRegion<HTMLDivElement>(
     visible.length > 0,
     visible.map((notification) => notification.id).join("\0"),
   );
+
+  useEffect(() => {
+    if (visible.length === 0) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [visible.length]);
 
   useEffect(() => {
     const update = () =>
@@ -163,6 +194,7 @@ export function UserNotificationStack({
         <NotificationCard
           key={notification.id}
           notification={notification}
+          now={now}
           active={windowActive}
           onDismiss={onDismiss}
           onOpenPane={onOpenPane}
