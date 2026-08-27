@@ -668,9 +668,6 @@ function JournalPane({
               onChange={(event) => setDraft(event.currentTarget.value)}
               onKeyDown={handleKeyDown}
             />
-            <div className="journal-composer-hint">
-              Enter to add — a tweet URL becomes an embedded tweet
-            </div>
           </form>
           {pendingUndo ? (
             <div className="journal-undo" role="status">

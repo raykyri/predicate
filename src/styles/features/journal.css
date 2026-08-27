@@ -45,12 +45,6 @@
   color: var(--text-subtle);
 }
 
-.journal-composer-hint {
-  padding-left: 2px;
-  color: var(--text-subtle);
-  font-size: 11px;
-}
-
 .journal-feed {
   display: flex;
   flex-direction: column;
@@ -231,9 +225,8 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
-  /* Clear the hover menu trigger in the entry's top-right corner so it never
-     overlaps the X mark. */
-  padding-right: 22px;
+  /* Clear the top-right control column (X mark + hover menu trigger). */
+  padding-right: 48px;
 }
 
 .journal-tweet-who {
@@ -290,10 +283,18 @@
   text-overflow: ellipsis;
 }
 
+/* The X mark shares the entry's top-right control column with the hover menu
+   trigger: two 20px boxes on one row, the X just left of the ⋯ so the pair
+   reads as one cluster. Positioned against the .journal-entry card. */
 .journal-tweet-x {
-  flex: none;
-  align-self: flex-start;
-  margin-left: auto;
+  position: absolute;
+  top: 5px;
+  right: 27px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
   color: var(--text-subtle);
 }
 
@@ -305,6 +306,7 @@
 
 .journal-tweet-x:hover {
   color: var(--text-interactive);
+  background: var(--surface-fill-hover);
 }
 
 .journal-tweet-reply {
