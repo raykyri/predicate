@@ -35,6 +35,12 @@ private enum CompletionSoundPlayer {
         }
     }
 
+    static func play(systemPath: String) -> Bool {
+        play(cacheKey: "system-file:\(systemPath)") {
+            NSSound(contentsOfFile: systemPath, byReference: true)
+        }
+    }
+
     static func play(name: String, data: Data) -> Bool {
         play(cacheKey: "bundled:\(name)") {
             NSSound(data: data)
@@ -66,6 +72,18 @@ public func qmuxNativeCompletionSoundPlay(
     }
     return onTerminalMain {
         CompletionSoundPlayer.play(systemName: systemName) ? 1 : 0
+    }
+}
+
+@_cdecl("qmux_native_completion_sound_play_file")
+public func qmuxNativeCompletionSoundPlayFile(
+    _ systemPath: UnsafePointer<CChar>?
+) -> Int32 {
+    guard let systemPath = terminalString(systemPath) else {
+        return 0
+    }
+    return onTerminalMain {
+        CompletionSoundPlayer.play(systemPath: systemPath) ? 1 : 0
     }
 }
 

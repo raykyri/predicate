@@ -11,6 +11,12 @@ const SUCCESS_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/compl
 const CONFIRMATION_SOUND_BYTES: &[u8] =
     include_bytes!("../../src/assets/sounds/completion/confirmation.mp3");
 const CHIME_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/chime.wav");
+const NOKIA_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/nokia.wav");
+const METAL_GEAR_SOUND_BYTES: &[u8] =
+    include_bytes!("../../src/assets/sounds/completion/metal-gear.mp3");
+const MINECRAFT_SOUND_BYTES: &[u8] =
+    include_bytes!("../../src/assets/sounds/completion/minecraft.mp3");
+const DOOR_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/door.mp3");
 const LIGHT_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/light.wav");
 const WATER_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/water.wav");
 const WARP_SOUND_BYTES: &[u8] = include_bytes!("../../src/assets/sounds/completion/warp.mp3");
@@ -30,6 +36,10 @@ fn bundled_sound(name: &str) -> Option<CompletionSound> {
         "success" => ("success", SUCCESS_SOUND_BYTES),
         "confirmation" => ("confirmation", CONFIRMATION_SOUND_BYTES),
         "chime" => ("chime", CHIME_SOUND_BYTES),
+        "nokia" => ("nokia", NOKIA_SOUND_BYTES),
+        "metal-gear" => ("metal-gear", METAL_GEAR_SOUND_BYTES),
+        "minecraft" => ("minecraft", MINECRAFT_SOUND_BYTES),
+        "door" => ("door", DOOR_SOUND_BYTES),
         "light" => ("light", LIGHT_SOUND_BYTES),
         "water" => ("water", WATER_SOUND_BYTES),
         "warp" => ("warp", WARP_SOUND_BYTES),
@@ -54,6 +64,7 @@ struct CompletionSoundOption {
     label: String,
     bundled_name: Option<String>,
     system_name: Option<String>,
+    system_path: Option<String>,
 }
 
 static SOUND_OPTIONS: LazyLock<Vec<CompletionSoundOption>> = LazyLock::new(|| {
@@ -64,6 +75,7 @@ static SOUND_OPTIONS: LazyLock<Vec<CompletionSoundOption>> = LazyLock::new(|| {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CompletionSound {
     System(&'static str),
+    SystemFile(&'static str),
     Bundled {
         name: &'static str,
         bytes: &'static [u8],
@@ -79,14 +91,16 @@ pub fn sound_for_id(sound_id: &str) -> Result<Option<CompletionSound>, String> {
     match (
         option.bundled_name.as_deref(),
         option.system_name.as_deref(),
+        option.system_path.as_deref(),
     ) {
-        (Some(name), None) => bundled_sound(name)
+        (Some(name), None, None) => bundled_sound(name)
             .map(Some)
             .ok_or_else(|| format!("unknown bundled completion sound {name:?}")),
-        (None, Some(name)) => Ok(Some(CompletionSound::System(name))),
-        (None, None) => Ok(None),
-        (Some(_), Some(_)) => Err(format!(
-            "completion sound {sound_id:?} cannot be both bundled and system-provided"
+        (None, Some(name), None) => Ok(Some(CompletionSound::System(name))),
+        (None, None, Some(path)) => Ok(Some(CompletionSound::SystemFile(path))),
+        (None, None, None) => Ok(None),
+        _ => Err(format!(
+            "completion sound {sound_id:?} must have at most one audio source"
         )),
     }
 }
@@ -259,6 +273,40 @@ mod tests {
         assert!(matches!(
             sound_for_id("chime"),
             Ok(Some(CompletionSound::Bundled { name: "chime", .. }))
+        ));
+        assert_eq!(
+            sound_for_id("messages"),
+            Ok(Some(CompletionSound::SystemFile(
+                "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/SentMessage.caf"
+            )))
+        );
+        assert_eq!(
+            sound_for_id("apple-pay"),
+            Ok(Some(CompletionSound::SystemFile(
+                "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/payment_success.aif"
+            )))
+        );
+        assert!(matches!(
+            sound_for_id("nokia"),
+            Ok(Some(CompletionSound::Bundled { name: "nokia", .. }))
+        ));
+        assert!(matches!(
+            sound_for_id("metal-gear"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "metal-gear",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("minecraft"),
+            Ok(Some(CompletionSound::Bundled {
+                name: "minecraft",
+                ..
+            }))
+        ));
+        assert!(matches!(
+            sound_for_id("door"),
+            Ok(Some(CompletionSound::Bundled { name: "door", .. }))
         ));
         assert!(matches!(
             sound_for_id("light"),

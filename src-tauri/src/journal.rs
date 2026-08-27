@@ -169,7 +169,10 @@ mod tests {
             ("20", "bad token"),
             ("20", "../etc"),
         ] {
-            assert!(validate_tweet_fetch_args(id, token).is_err(), "{id} {token}");
+            assert!(
+                validate_tweet_fetch_args(id, token).is_err(),
+                "{id} {token}"
+            );
         }
         assert!(validate_tweet_fetch_args("20", "6dq1a2xwd93").is_ok());
     }

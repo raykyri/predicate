@@ -5,6 +5,7 @@ export interface CompletionSoundOption {
   label: string;
   bundledName?: string;
   systemName: string | null;
+  systemPath?: string;
 }
 
 /** Canonical catalog shared with the Rust backend through the JSON source. */

@@ -402,6 +402,7 @@ mod imp {
     unsafe extern "C" {
         fn qmux_native_application_is_active() -> i32;
         fn qmux_native_completion_sound_play(system_name: *const c_char) -> i32;
+        fn qmux_native_completion_sound_play_file(system_path: *const c_char) -> i32;
         fn qmux_native_completion_sound_play_data(
             name: *const c_char,
             bytes: *const u8,
@@ -538,6 +539,17 @@ mod imp {
             Ok(())
         } else {
             Err("completion sound was not recognized or could not be played".to_string())
+        }
+    }
+
+    pub fn play_system_sound_file(system_path: &str) -> Result<(), String> {
+        let system_path = cstring(system_path, "completion system sound path")?;
+        // SAFETY: Swift copies the allowlisted path synchronously and loads the
+        // OS-provided audio file on the main actor.
+        if unsafe { qmux_native_completion_sound_play_file(system_path.as_ptr()) } == 1 {
+            Ok(())
+        } else {
+            Err("completion system sound file could not be played".to_string())
         }
     }
 
@@ -1105,6 +1117,10 @@ mod imp {
         Err("completion sounds are only available on macOS".to_string())
     }
 
+    pub fn play_system_sound_file(_system_path: &str) -> Result<(), String> {
+        Err("completion sounds are only available on macOS".to_string())
+    }
+
     pub fn play_bundled_sound(_name: &str, _bytes: &[u8]) -> Result<(), String> {
         Err("completion sounds are only available on macOS".to_string())
     }
@@ -1638,6 +1654,7 @@ pub fn play_completion_sound(sound_id: &str) -> Result<(), String> {
 
     match crate::completion_sound::sound_for_id(sound_id)? {
         Some(CompletionSound::System(name)) => imp::play_system_sound(name),
+        Some(CompletionSound::SystemFile(path)) => imp::play_system_sound_file(path),
         Some(CompletionSound::Bundled { name, bytes }) => imp::play_bundled_sound(name, bytes),
         None => Ok(()),
     }
