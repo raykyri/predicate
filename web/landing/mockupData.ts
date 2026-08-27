@@ -1744,12 +1744,22 @@ export interface MockTweetRun {
 export interface MockJournalTweet {
   name: string;
   handle: string;
+  verified?: boolean;
   runs: MockTweetRun[];
   /** Media is bundled with the site; the page loads nothing from elsewhere. */
   media?: { src: string; alt: string; width: number; height: number };
-  quoted?: { name: string; handle: string; runs: MockTweetRun[] };
-  /** X's own stamp format, frozen rather than computed. */
-  date: string;
+  quoted?: {
+    name: string;
+    handle: string;
+    verified?: boolean;
+    runs: MockTweetRun[];
+  };
+  /** The timeline's age stamp, frozen rather than computed off the clock. */
+  age: string;
+  /** Engagement as captured. The card renders these as metadata, never as
+      controls: nothing in the replica reaches X. */
+  replies: string;
+  likes: string;
 }
 
 export type MockJournalEntry =
@@ -1776,6 +1786,7 @@ export const MOCK_JOURNAL_ENTRIES: MockJournalEntry[] = [
     tweet: {
       name: "Terminal Notes",
       handle: "terminalnotes",
+      verified: true,
       runs: [
         {
           text: "the thing nobody tells you about scrollback is that the hard part isn't storing it, it's keeping the cursor and the selection pinned to the right row after a resize rewraps everything under them",
@@ -1795,7 +1806,9 @@ export const MOCK_JOURNAL_ENTRIES: MockJournalEntry[] = [
           { text: "scrollbackweekly.example/12", link: true },
         ],
       },
-      date: "9:14 AM · Aug 24, 2026",
+      age: "Aug 24",
+      replies: "37",
+      likes: "1,204",
     },
   },
 ];

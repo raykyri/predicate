@@ -2572,24 +2572,12 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   display: none;
 }
 
-/* --- research sidebar --- */
-.app-mockup .journal-sidebar-tab {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  margin-bottom: 8px;
-  padding: 0 7px;
-}
-
+/* The tab is an ordinary research row (same nesting, same metrics); it only
+   needs the gap that separates it from the Research heading below. */
+/* The tab is an ordinary research row (same nesting, same metrics); it only
+   needs the gap that separates it from the Research heading below. */
 .app-mockup .journal-sidebar-row {
-  gap: 6px;
-  min-height: 24px;
-  padding: 2px 6px;
-}
-
-.app-mockup .journal-sidebar-row .lucide {
-  flex: none;
-  opacity: 0.75;
+  margin-bottom: 8px;
 }
 
 .app-mockup .research-sidebar-section {
@@ -2772,46 +2760,6 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 
 .app-mockup .research-sidebar-row.is-selected .research-sidebar-menu-trigger {
   background: var(--control-bg-hover);
-}
-
-/* The app shows these only while the meta key is held. The replica freezes
-   that frame the way the mini-mockups freeze a menu mid-open, and yields the
-   corner as soon as the pointer arrives — where the row's menu trigger goes. */
-.app-mockup .pane-tab-shortcut-hint {
-  position: absolute;
-  top: 50%;
-  right: 8px;
-  z-index: 3;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 25px;
-  min-height: 18px;
-  padding: 1px 6px;
-  transform: translateY(-50%);
-  border: 1px solid #3a4245;
-  border-radius: var(--radius-md);
-  color: var(--text-secondary);
-  background: var(--transcript-code-bg);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  line-height: 1;
-  opacity: 0.88;
-  pointer-events: none;
-}
-
-.app-mockup .research-sidebar-row.is-selected .pane-tab-shortcut-hint {
-  border-color: #566165;
-  color: var(--text-primary);
-}
-
-/* The unseen tag and the running spinner already own the row's trailing edge.
-   The app can afford to stack a held-key hint on top of them for the moment
-   the key is down; a shot that holds that frame forever cannot. */
-.app-mockup .research-sidebar-row:has(.research-sidebar-unseen) .pane-tab-shortcut-hint,
-.app-mockup .research-sidebar-row:has(.research-sidebar-spinner) .pane-tab-shortcut-hint {
-  display: none;
 }
 
 .app-mockup .research-sidebar-folder-row {
@@ -3453,59 +3401,205 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 /* --- the tweet card: an X embed with no chrome of its own --- */
+/* — Tweet card: a timeline post, not an embed. Avatar in its own column,
+     one-line header (name · handle · age), everything else in the content
+     column beside it. — */
+
+.app-mockup .journal-tweet {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+}
+
+.app-mockup .journal-tweet-avatar-link {
+  display: block;
+  line-height: 0;
+}
+
+.app-mockup .journal-tweet-main {
+  min-width: 0;
+}
+
 .app-mockup .journal-tweet-head {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 6px;
-  /* Clear the top-right control column (X mark + hover menu trigger). */
-  padding-right: 48px;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: 2px;
+  /* Clear the entry's hover menu trigger in the card's top-right corner. */
+  padding-right: 22px;
 }
 
 .app-mockup .journal-tweet-who {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  gap: 4px;
   min-width: 0;
   color: inherit;
+  text-decoration: none;
 }
 
 .app-mockup .journal-tweet-avatar {
   flex: none;
   border-radius: 50%;
+  user-select: none;
+  object-fit: cover;
 }
 
-/* The app falls back to an initial disc when a snapshot carries no avatar; the
-   replica always does, so the page fetches nothing from anyone else's host. */
 .app-mockup .journal-tweet-avatar-fallback {
   display: grid;
   place-items: center;
-  color: #ffffff;
-  font-size: 14px;
+  color: #fff;
+  font-size: 15px;
   font-weight: 700;
-  background: #4a6f7d;
 }
 
 .app-mockup .journal-tweet-quote-head .journal-tweet-avatar-fallback {
   font-size: 9px;
 }
 
-.app-mockup .journal-tweet-names {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.3;
-}
-
 .app-mockup .journal-tweet-author {
-  font-size: 13.5px;
+  /* The display name gives way first: a truncated name still reads, while a
+     truncated handle stops identifying anyone. */
+  flex: 0 8 auto;
+  min-width: 3ch;
+  font-size: 14px;
   font-weight: 700;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.app-mockup .journal-tweet-who:hover .journal-tweet-author {
+  text-decoration: underline;
+}
+
+.app-mockup .journal-tweet-verified {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  align-self: center;
+  color: #1d9bf0;
+}
+
 .app-mockup .journal-tweet-handle {
+  flex: 0 1 auto;
+  color: var(--text-subtle);
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.journal-tweet-dot,
+.app-mockup .journal-tweet-age {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+
+.app-mockup .journal-tweet-age:hover {
+  text-decoration: underline;
+}
+
+.app-mockup .journal-tweet-reply {
+  margin: 0 0 3px;
+  color: var(--text-subtle);
+  font-size: 13px;
+}
+
+.app-mockup .journal-tweet-reply span {
+  color: var(--accent-color);
+}
+
+.app-mockup .journal-tweet-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.app-mockup .journal-tweet-text.is-quote {
+  font-size: 13.5px;
+}
+
+.app-mockup .journal-tweet-text a {
+  color: var(--accent-color);
+  text-decoration: none;
+}
+
+.app-mockup .journal-tweet-text a:hover {
+  text-decoration: underline;
+}
+
+/* The timeline's own affordance for a post that runs past its preview. */
+.app-mockup .journal-tweet-more {
+  display: inline-block;
+  margin-top: 2px;
+  color: var(--accent-color);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+
+.app-mockup a.journal-tweet-more:hover {
+  text-decoration: underline;
+}
+
+/* Link preview: a bordered card under the text. The large variant stacks its
+   image over the copy; the small one sets a square thumbnail beside it. */
+.app-mockup .journal-tweet-card {
+  display: flex;
+  flex-direction: row;
+  margin-top: 8px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 12px;
+  color: inherit;
+  text-decoration: none;
+  overflow: hidden;
+}
+
+.app-mockup .journal-tweet-card.is-large {
+  flex-direction: column;
+}
+
+.app-mockup .journal-tweet-card:hover {
+  background: var(--surface-fill-hover);
+}
+
+.app-mockup .journal-tweet-card-media {
+  flex: none;
+  display: block;
+  width: 84px;
+  align-self: stretch;
+  border-right: 1px solid var(--surface-border-default);
+  background: var(--surface-fill-hover);
+}
+
+.app-mockup .journal-tweet-card.is-large .journal-tweet-card-media {
+  width: auto;
+  aspect-ratio: 1.91 / 1;
+  border-right: 0;
+  border-bottom: 1px solid var(--surface-border-default);
+}
+
+.app-mockup .journal-tweet-card-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.app-mockup .journal-tweet-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 8px 11px;
+}
+
+.app-mockup .journal-tweet-card-domain {
   color: var(--text-subtle);
   font-size: 12.5px;
   white-space: nowrap;
@@ -3513,44 +3607,43 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   text-overflow: ellipsis;
 }
 
-/* The X mark shares the entry's top-right control column with the hover menu
-   trigger: two 20px boxes on one row, the X just left of the ⋯ so the pair
-   reads as one cluster. Positioned against the .journal-entry card. */
-.app-mockup .journal-tweet-x {
-  position: absolute;
-  top: 5px;
-  right: 27px;
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 5px;
+.journal-tweet-card-title,
+.app-mockup .journal-tweet-card-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13.5px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.app-mockup .journal-tweet-card-desc {
   color: var(--text-subtle);
-}
-
-.app-mockup .journal-tweet-x svg {
-  display: block;
-  width: 15px;
-  height: 15px;
-}
-
-.app-mockup .journal-tweet-text {
-  margin: 0;
-  font-size: 14px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-}
-
-.app-mockup .journal-tweet-text.is-quote {
   font-size: 13px;
 }
 
-.app-mockup .journal-tweet-link {
-  color: var(--accent-color);
+/* Captured engagement, rendered as metadata: no hover, no target, nothing
+   here reaches X. */
+.app-mockup .journal-tweet-stats {
+  display: flex;
+  gap: 18px;
+  margin-top: 8px;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Known dimensions reserve the media box, so the feed does not reflow as the
-   image lands. */
+.app-mockup .journal-tweet-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.app-mockup .journal-tweet-stat svg {
+  width: 14px;
+  height: 14px;
+}
+
 .app-mockup .journal-tweet-media {
   display: grid;
   gap: 4px;
@@ -3594,12 +3687,6 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 .app-mockup .journal-tweet-quote-head .journal-tweet-handle {
-  font-size: 12px;
-}
-
-.app-mockup .journal-tweet-foot {
-  margin-top: 8px;
-  color: var(--text-subtle);
   font-size: 12px;
 }
 
@@ -3662,10 +3749,6 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 .app-mockup.is-interactive .research-sidebar-row:focus-within > .research-sidebar-menu-trigger,
 .app-mockup.is-interactive .research-sidebar-row.has-open-menu > .research-sidebar-menu-trigger {
   display: grid;
-}
-
-.app-mockup.is-interactive .research-sidebar-row:hover .pane-tab-shortcut-hint {
-  display: none;
 }
 
 .app-mockup.is-interactive .research-sidebar-menu-trigger:hover,

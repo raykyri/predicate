@@ -63,7 +63,9 @@ import {
   Trash2Icon,
   Undo2Icon,
   XIcon,
-  XMarkIcon,
+  TweetLikeIcon,
+  TweetReplyIcon,
+  VerifiedBadgeIcon,
 } from "./icons";
 import {
   ARTIFACTS,
@@ -213,19 +215,8 @@ function ResearchRowIcon({ kind }: { kind: MockResearchDoc["kind"] }) {
   return null;
 }
 
-/**
- * The rows carrying a ⌘-number shortcut, in the display order the app walks:
- * starred first, then the main list, with a collapsed folder's members left
- * out. The app renumbers as folders open and close; the replica freezes the
- * numbering of the state it was rendered in, the way it freezes a menu
- * mid-open.
- */
-const RESEARCH_SHORTCUT_IDS = [
-  ...MOCK_RESEARCH_STARRED,
-  ...MOCK_RESEARCH_UNITS.flatMap((unit) =>
-    unit.kind === "doc" ? [unit.id] : unit.collapsed ? [] : unit.ids,
-  ),
-].slice(0, 9);
+// The app's ⌘-number jump hints appear only while ⌘ is held, so the replica
+// shows none: a still frame of a held modifier reads as permanent chrome.
 
 function ResearchRow({
   id,
@@ -239,7 +230,6 @@ function ResearchRow({
   member?: boolean;
 }) {
   const doc = MOCK_RESEARCH_DOCS[id];
-  const shortcutIndex = archived ? -1 : RESEARCH_SHORTCUT_IDS.indexOf(id);
   return (
     <div
       className={`research-sidebar-row${archived ? " is-archived" : ""}${
@@ -271,9 +261,6 @@ function ResearchRow({
       <span className="control-button research-sidebar-menu-trigger" data-mock-research-menu-trigger>
         <EllipsisIcon size={14} />
       </span>
-      {shortcutIndex >= 0 ? (
-        <span className="pane-tab-shortcut-hint">⌘{shortcutIndex + 1}</span>
-      ) : null}
     </div>
   );
 }
@@ -308,7 +295,7 @@ function ResearchFolder({
             <span className="research-sidebar-title">
               <FolderIcon className="lucide research-sidebar-folder-icon" size={12} />
               <span className="research-sidebar-title-text">{name}</span>
-              <span className="research-sidebar-folder-count">({ids.length})</span>
+              <span className="research-sidebar-folder-count">{ids.length}</span>
             </span>
           </span>
         </span>
@@ -323,15 +310,21 @@ function ResearchFolder({
 function ResearchSidebarList({ selectedId = DEFAULT_RESEARCH_DOC_ID }: { selectedId?: string }) {
   return (
     <>
-      <div className="journal-sidebar-tab" role="group" aria-label="Journal">
-        <span
-          className="research-sidebar-row journal-sidebar-row"
-          data-mock-research-row={JOURNAL_VIEW_ID}
-          data-mock-research-title="Journal"
-          data-mock-research-thread=""
-        >
-          <NotebookPenIcon size={12} />
-          <span className="research-sidebar-title-text">Journal</span>
+      {/* The tab uses the row/select/copy nesting every research row uses, so
+          it inherits the list's metrics rather than restating them. */}
+      <div
+        className="research-sidebar-row journal-sidebar-row"
+        data-mock-research-row={JOURNAL_VIEW_ID}
+        data-mock-research-title="Journal"
+        data-mock-research-thread=""
+      >
+        <span className="control-button research-sidebar-select">
+          <span className="research-sidebar-copy">
+            <span className="research-sidebar-title">
+              <NotebookPenIcon size={12} className="research-sidebar-doc-icon" />
+              <span className="research-sidebar-title-text">Journal</span>
+            </span>
+          </span>
         </span>
       </div>
       <section className="research-sidebar-section" aria-label="Research">
@@ -557,47 +550,59 @@ function JournalEntryBody({ entry }: { entry: MockJournalEntry }) {
   }
   const { tweet } = entry;
   return (
+    // A timeline post, not an embed: the avatar takes its own column and the
+    // header is one line — name, badge, handle, age.
     <article className="journal-tweet" aria-label={`Tweet by @${tweet.handle}`}>
-      <header className="journal-tweet-head">
-        <span className="journal-tweet-who">
-          <TweetAvatar name={tweet.name} size={32} />
-          <span className="journal-tweet-names">
+      <span className="journal-tweet-avatar-link">
+        <TweetAvatar name={tweet.name} size={40} />
+      </span>
+      <div className="journal-tweet-main">
+        <div className="journal-tweet-head">
+          <span className="journal-tweet-who">
             <span className="journal-tweet-author">{tweet.name}</span>
+            {tweet.verified ? <VerifiedBadgeIcon /> : null}
             <span className="journal-tweet-handle">@{tweet.handle}</span>
           </span>
-        </span>
-        <span className="journal-tweet-x">
-          <XMarkIcon />
-        </span>
-      </header>
-      <TweetText runs={tweet.runs} className="journal-tweet-text" />
-      {tweet.media ? (
-        <div className="journal-tweet-media">
-          <span className="journal-tweet-media-item">
-            <img
-              src={tweet.media.src}
-              alt={tweet.media.alt}
-              width={tweet.media.width}
-              height={tweet.media.height}
-              loading="lazy"
-              decoding="async"
-            />
+          <span className="journal-tweet-dot">·</span>
+          <span className="journal-tweet-age">{tweet.age}</span>
+        </div>
+        <TweetText runs={tweet.runs} className="journal-tweet-text" />
+        {tweet.media ? (
+          <div className="journal-tweet-media">
+            <span className="journal-tweet-media-item">
+              <img
+                src={tweet.media.src}
+                alt={tweet.media.alt}
+                width={tweet.media.width}
+                height={tweet.media.height}
+                loading="lazy"
+                decoding="async"
+              />
+            </span>
+          </div>
+        ) : null}
+        {tweet.quoted ? (
+          <div className="journal-tweet-quote">
+            <div className="journal-tweet-quote-head">
+              <TweetAvatar name={tweet.quoted.name} size={18} />
+              <span className="journal-tweet-author">{tweet.quoted.name}</span>
+              {tweet.quoted.verified ? <VerifiedBadgeIcon /> : null}
+              <span className="journal-tweet-handle">@{tweet.quoted.handle}</span>
+            </div>
+            <TweetText runs={tweet.quoted.runs} className="journal-tweet-text is-quote" />
+          </div>
+        ) : null}
+        <div className="journal-tweet-stats">
+          <span className="journal-tweet-stat">
+            <TweetReplyIcon />
+            {tweet.replies}
+          </span>
+          <span className="journal-tweet-stat">
+            <TweetLikeIcon />
+            {tweet.likes}
           </span>
         </div>
-      ) : null}
-      {tweet.quoted ? (
-        <div className="journal-tweet-quote">
-          <div className="journal-tweet-quote-head">
-            <TweetAvatar name={tweet.quoted.name} size={16} />
-            <span className="journal-tweet-author">{tweet.quoted.name}</span>
-            <span className="journal-tweet-handle">@{tweet.quoted.handle}</span>
-          </div>
-          <TweetText runs={tweet.quoted.runs} className="journal-tweet-text is-quote" />
-        </div>
-      ) : null}
-      <footer className="journal-tweet-foot">
-        <span>{tweet.date}</span>
-      </footer>
+      </div>
     </article>
   );
 }

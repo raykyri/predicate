@@ -1150,6 +1150,24 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="journal-tweet-handle">@terminalnotes</);
   assert.match(body, /class="journal-tweet-quote"/);
   assert.match(body, /class="journal-tweet-avatar journal-tweet-avatar-fallback"/);
+  // The card is a timeline post, not an embed: avatar in its own column, a
+  // one-line header ending in the age, and counts rendered as metadata.
+  assert.match(body, /class="journal-tweet-avatar-link"/);
+  assert.match(body, /class="journal-tweet-main"/);
+  assert.match(body, /class="journal-tweet-age">Aug 24</);
+  assert.match(body, /class="journal-tweet-stat"/);
+  assert.match(body, /class="journal-tweet-verified"/);
+  assert.doesNotMatch(body, /journal-tweet-foot/);
+  // The Journal tab is an ordinary research row.
+  assert.match(
+    body,
+    /class="research-sidebar-row journal-sidebar-row"[^>]*>\s*<span class="control-button research-sidebar-select">/,
+  );
+  // A resting sidebar shows no ⌘-number hints: those appear only while the
+  // modifier is held, which a still frame cannot represent.
+  assert.doesNotMatch(body, /pane-tab-shortcut-hint/);
+  // Folder counts are bare numbers.
+  assert.match(body, /class="research-sidebar-folder-count">2</);
   // The replica fetches nothing from anyone else's host, tweet media included.
   assert.equal((body.match(/src="https?:\/\//g) ?? []).length, 0);
   // Both menu families ship closed, carrying the app's own keycaps.
