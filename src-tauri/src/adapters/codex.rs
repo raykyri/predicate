@@ -9,6 +9,7 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
+use crate::host;
 use crate::pty::{
     CommandPlan, InitialPaneSize, PaneMeta, agent_pane_envs, plan_to_spec, recoverable_dir,
     spawn_pty,
@@ -22,8 +23,8 @@ use crate::transcript::{
 use crate::turn_queue::is_shell_escape_turn;
 use crate::workspace::{
     ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
-    mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
-    prepare_agent_workspace_with_parent,
+    configured_worktree_root_for_cwd, mark_agent_failed, mark_agent_spawn_failed,
+    prepare_agent_workspace, prepare_agent_workspace_with_parent,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -37,6 +38,7 @@ use std::time::Duration;
 
 const CODEX_QMUX_PROFILE: &str = "qmux-codex";
 const CODEX_CODE_MODE_HOST: &str = "codex-code-mode-host";
+const CODEX_QMUX_WORKTREE_INSTRUCTIONS: &str = "Qmux worktree policy: When you directly create a Git worktree for the user, ensure the directory in the QMUX_WORKTREE_ROOT environment variable exists and use it as the worktree's parent directory. Do not use QMUX_WORKSPACE_ROOT as the worktree parent. Treat QMUX_WORKTREE_ROOT as an opaque filesystem path.";
 const CODEX_HOOK_EVENTS: &[&str] = &[
     "SessionStart",
     "UserPromptSubmit",
@@ -371,16 +373,21 @@ impl CodexAdapter {
         } else {
             prompt_tail_args(&request.prompt)
         };
+        let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let args = build_codex_args(
             &cwd,
             Some(&state.config().workspace_root),
             request.model.as_deref(),
             &options,
+            worktree_root
+                .as_deref()
+                .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
             tail_args,
         );
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         // Bind before spawn so a fast SessionStart hook can authenticate against the
         // pane/agent scope and record the native session identity. The spawn-failure
@@ -441,16 +448,21 @@ impl CodexAdapter {
             reasoning_effort: agent.effort.clone(),
             ..CodexLaunchOptions::default()
         };
+        let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let (args, resumed) = build_codex_resume_args(
             &cwd,
             Some(&state.config().workspace_root),
             agent.model.as_deref(),
             &options,
+            worktree_root
+                .as_deref()
+                .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
             agent.session_id.as_deref(),
         );
 
         let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         let spec = plan_to_spec(
             state,
@@ -562,11 +574,15 @@ impl CodexAdapter {
         };
         let prompt = prompt.map(str::trim).unwrap_or_default();
         let has_initial_prompt = !prompt.is_empty();
+        let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let args = build_codex_fork_args(
             &cwd,
             Some(&state.config().workspace_root),
             agent.model.as_deref(),
             &options,
+            worktree_root
+                .as_deref()
+                .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
             &session_id,
             if has_initial_prompt {
                 Some(prompt)
@@ -578,6 +594,7 @@ impl CodexAdapter {
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         // Bind before spawn so a fast Codex SessionStart hook passes the control
         // socket's agent/pane scope check. mark_agent_spawn_failed clears this
@@ -699,15 +716,20 @@ impl CodexAdapter {
         )?;
 
         let options = CodexLaunchOptions::default();
+        let worktree_root = codex_worktree_root(state, &agent, &agent_cwd)?;
         let args = build_codex_args(
             &shell_cwd,
             Some(&state.config().workspace_root),
             None,
             &options,
+            worktree_root
+                .as_deref()
+                .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
             request.args,
         );
         let mut envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
         envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
         let agent_id = agent.id.clone();
         let launch_cwd = shell_cwd.display().to_string();
 
@@ -1033,6 +1055,7 @@ fn build_codex_args(
     additional_workspace_root: Option<&Path>,
     model: Option<&str>,
     options: &CodexLaunchOptions,
+    developer_instructions: Option<&str>,
     tail_args: Vec<String>,
 ) -> Vec<String> {
     let mut args = vec!["--cd".to_string(), cwd.display().to_string()];
@@ -1047,6 +1070,13 @@ fn build_codex_args(
     }
     args.push("--profile".to_string());
     args.push(CODEX_QMUX_PROFILE.to_string());
+    if let Some(developer_instructions) = developer_instructions {
+        args.push("--config".to_string());
+        args.push(format!(
+            "developer_instructions={}",
+            toml_string(developer_instructions)
+        ));
+    }
     let sandbox = options.sandbox.as_deref().unwrap_or("workspace-write");
     args.push("--sandbox".to_string());
     args.push(sandbox.to_string());
@@ -1081,6 +1111,7 @@ fn build_codex_resume_args(
     additional_workspace_root: Option<&Path>,
     model: Option<&str>,
     options: &CodexLaunchOptions,
+    developer_instructions: Option<&str>,
     session_id: Option<&str>,
 ) -> (Vec<String>, bool) {
     let Some(session_id) = session_id
@@ -1088,7 +1119,14 @@ fn build_codex_resume_args(
         .filter(|session_id| !session_id.is_empty())
     else {
         return (
-            build_codex_args(cwd, additional_workspace_root, model, options, Vec::new()),
+            build_codex_args(
+                cwd,
+                additional_workspace_root,
+                model,
+                options,
+                developer_instructions,
+                Vec::new(),
+            ),
             false,
         );
     };
@@ -1099,6 +1137,7 @@ fn build_codex_resume_args(
             additional_workspace_root,
             model,
             options,
+            developer_instructions,
             vec!["resume".to_string(), session_id.to_string()],
         ),
         true,
@@ -1110,6 +1149,7 @@ fn build_codex_fork_args(
     additional_workspace_root: Option<&Path>,
     model: Option<&str>,
     options: &CodexLaunchOptions,
+    developer_instructions: Option<&str>,
     session_id: &str,
     prompt: Option<&str>,
 ) -> Vec<String> {
@@ -1122,7 +1162,36 @@ fn build_codex_fork_args(
         tail_args.push("--".to_string());
         tail_args.push(prompt.to_string());
     }
-    build_codex_args(cwd, additional_workspace_root, model, options, tail_args)
+    build_codex_args(
+        cwd,
+        additional_workspace_root,
+        model,
+        options,
+        developer_instructions,
+        tail_args,
+    )
+}
+
+fn codex_worktree_root(
+    state: &AppState,
+    agent: &AgentInfo,
+    cwd: &Path,
+) -> Result<Option<String>, String> {
+    let group = state
+        .group(&agent.group_id)?
+        .ok_or_else(|| format!("group {} was not found", agent.group_id))?;
+    let host = host::for_group(group.remote.as_ref());
+    let cwd = cwd
+        .to_str()
+        .ok_or_else(|| "Codex working directory is not valid UTF-8".to_string())?;
+    configured_worktree_root_for_cwd(state, &host, cwd, &group)
+        .map(|root| root.map(|root| root.display().to_string()))
+}
+
+fn add_codex_worktree_root_env(envs: &mut Vec<(String, String)>, root: Option<&str>) {
+    if let Some(root) = root {
+        envs.push(("QMUX_WORKTREE_ROOT".to_string(), root.to_string()));
+    }
 }
 
 fn prompt_tail_args(prompt: &str) -> Vec<String> {
@@ -2900,6 +2969,7 @@ mod tests {
             Some(Path::new("/tmp/qmux/.qmux/workspaces")),
             Some("gpt-5"),
             &options,
+            Some("Use QMUX_WORKTREE_ROOT.\nTreat it as an opaque path."),
             vec!["--".to_string(), "start here".to_string()],
         );
 
@@ -2914,6 +2984,8 @@ mod tests {
                 "gpt-5",
                 "--profile",
                 "qmux-codex",
+                "--config",
+                "developer_instructions=\"Use QMUX_WORKTREE_ROOT.\\nTreat it as an opaque path.\"",
                 "--sandbox",
                 "workspace-write",
                 "--ask-for-approval",
@@ -2934,7 +3006,14 @@ mod tests {
         }))
         .unwrap();
 
-        let args = build_codex_args(Path::new("/tmp/qmux"), None, None, &options, Vec::new());
+        let args = build_codex_args(
+            Path::new("/tmp/qmux"),
+            None,
+            None,
+            &options,
+            None,
+            Vec::new(),
+        );
 
         assert_eq!(
             args,
@@ -2949,6 +3028,22 @@ mod tests {
                 "approvals_reviewer=\"auto_review\"",
                 "--search"
             ]
+        );
+    }
+
+    #[test]
+    fn worktree_root_env_is_only_added_when_resolved() {
+        let mut envs = vec![("EXISTING".to_string(), "value".to_string())];
+        add_codex_worktree_root_env(&mut envs, None);
+        assert_eq!(envs.len(), 1);
+
+        add_codex_worktree_root_env(&mut envs, Some("/repo/.claude/worktrees"));
+        assert_eq!(
+            envs.last(),
+            Some(&(
+                "QMUX_WORKTREE_ROOT".to_string(),
+                "/repo/.claude/worktrees".to_string()
+            ))
         );
     }
 
@@ -2975,6 +3070,7 @@ mod tests {
             None,
             Some("gpt-5.6-luna"),
             &options,
+            None,
             Vec::new(),
         );
 
@@ -3158,6 +3254,7 @@ mod tests {
             Some(Path::new("/tmp/qmux/.qmux/workspaces")),
             Some("gpt-5"),
             &options,
+            None,
             Some(" session-123 "),
         );
 
@@ -3197,6 +3294,7 @@ mod tests {
             Some(Path::new("/tmp/qmux/.qmux/workspaces")),
             Some("gpt-5"),
             &options,
+            None,
             " session-123 ",
             Some("  continue here  "),
         );
@@ -3234,6 +3332,7 @@ mod tests {
             None,
             None,
             &options,
+            None,
             "session-123",
             Some("   "),
         );
@@ -3258,8 +3357,14 @@ mod tests {
     fn resume_args_fall_back_to_fresh_launch_without_session_id() {
         let options = CodexLaunchOptions::default();
 
-        let (args, resumed) =
-            build_codex_resume_args(Path::new("/tmp/qmux"), None, None, &options, Some("   "));
+        let (args, resumed) = build_codex_resume_args(
+            Path::new("/tmp/qmux"),
+            None,
+            None,
+            &options,
+            None,
+            Some("   "),
+        );
 
         assert!(!resumed);
         assert_eq!(

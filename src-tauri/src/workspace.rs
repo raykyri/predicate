@@ -1983,6 +1983,40 @@ fn worktree_root(
     Ok(root)
 }
 
+/// Resolves the parent directory qmux would use for a newly requested Git
+/// worktree without creating it or changing the repository's exclude file.
+/// Agent adapters use this to describe qmux's placement policy to tools that
+/// may create worktrees themselves.
+pub(crate) fn configured_worktree_root_for_cwd(
+    state: &AppState,
+    host: &Host,
+    cwd: &str,
+    group: &GroupInfo,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(root) = host.remote_workspace_root()? {
+        return Ok(Some(PathBuf::from(root).join(&group.id)));
+    }
+
+    let location = persistence::load_preferences(&state.config().workspace_root)?
+        .worktree_location
+        .unwrap_or_default();
+    if location == WorktreeLocation::Global {
+        return Ok(Some(PathBuf::from(&group.managed_dir)));
+    }
+
+    // A non-Git directory cannot host a Git worktree request. Keep ordinary
+    // agent launches working there and omit the worktree-specific context.
+    let Ok(project_root) = git_main_checkout(host, cwd) else {
+        return Ok(None);
+    };
+    let relative_root = match location {
+        WorktreeLocation::Global => unreachable!(),
+        WorktreeLocation::LocalQmux => Path::new(".qmux/worktrees"),
+        WorktreeLocation::LocalClaude => Path::new(".claude/worktrees"),
+    };
+    Ok(Some(project_root.join(relative_root)))
+}
+
 fn allocate_named_worktree_dir(
     state: &AppState,
     host: &Host,
@@ -3089,6 +3123,16 @@ mod tests {
         )
         .unwrap();
         let group = allocation_group(&repo, &managed);
+        assert_eq!(
+            configured_worktree_root_for_cwd(
+                &state,
+                &Host::Local,
+                linked.to_str().unwrap(),
+                &group,
+            )
+            .unwrap(),
+            Some(fs::canonicalize(&repo).unwrap().join(".qmux/worktrees"))
+        );
         let created = create_shell_worktree(
             &state,
             &Host::Local,
@@ -3157,6 +3201,16 @@ mod tests {
             },
         )
         .unwrap();
+        assert_eq!(
+            configured_worktree_root_for_cwd(
+                &state,
+                &Host::Local,
+                linked.to_str().unwrap(),
+                &group,
+            )
+            .unwrap(),
+            Some(managed.clone())
+        );
         let global_created = create_shell_worktree(
             &state,
             &Host::Local,
@@ -4892,6 +4946,16 @@ mod tests {
         .unwrap();
         let group = allocation_group(&project, &managed);
         let canonical_project = fs::canonicalize(&project).unwrap();
+        assert_eq!(
+            configured_worktree_root_for_cwd(
+                &state,
+                &Host::Local,
+                project.to_str().unwrap(),
+                &group,
+            )
+            .unwrap(),
+            None
+        );
 
         let first = allocate_agent_worktree_dir(
             &state,
@@ -5007,6 +5071,17 @@ mod tests {
         )
         .unwrap();
         let group = allocation_group(&nested, &managed);
+
+        assert_eq!(
+            configured_worktree_root_for_cwd(
+                &state,
+                &Host::Local,
+                nested.to_str().unwrap(),
+                &group,
+            )
+            .unwrap(),
+            Some(canonical_project.join(".claude/worktrees"))
+        );
 
         let first = allocate_agent_worktree_dir(
             &state,
