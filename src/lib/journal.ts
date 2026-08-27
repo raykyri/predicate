@@ -209,6 +209,21 @@ export function removeJournalEntry(state: JournalState, id: string): JournalStat
   return entries.length === state.entries.length ? state : { ...state, entries };
 }
 
+/** Insert an entry at a position (clamped), for undoing a removal. A no-op
+ * when the id already exists, so a double-undo can't duplicate. */
+export function insertJournalEntryAt(
+  state: JournalState,
+  entry: JournalEntry,
+  index: number,
+): JournalState {
+  if (state.entries.some((existing) => existing.id === entry.id)) {
+    return state;
+  }
+  const entries = [...state.entries];
+  entries.splice(Math.max(0, Math.min(index, entries.length)), 0, entry);
+  return { ...state, entries };
+}
+
 /** Record a hydration outcome on a tweet entry. No-op for other kinds or
  * unknown ids (the entry may have been deleted while the fetch was out). */
 export function setJournalTweetHydration(

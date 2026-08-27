@@ -15,13 +15,18 @@ import {
   type JournalEntry,
   type JournalTweetEntry,
 } from "../src/lib/journal";
+import { insertJournalEntryAt } from "../src/lib/journal";
 import {
   syndicationToken,
   tweetIdFromUrl,
   tweetSnapshotFromSyndication,
   type TweetSnapshot,
 } from "../src/lib/journalTweets";
-import { JournalTweetCard } from "../src/components/research/JournalPane";
+import {
+  JournalTweetCard,
+  journalEntryMenuItems,
+  journalEntryUrl,
+} from "../src/components/research/JournalPane";
 
 // Real syndication payloads captured from cdn.syndication.twimg.com, one per
 // content shape the feed must handle.
@@ -233,6 +238,80 @@ test("hydration reducer records outcomes and tolerates deleted entries", () => {
   // Unknown ids (entry deleted while the fetch was out) are a no-op.
   assert.equal(setJournalTweetHydration(ok, "gone", { hydration: "pending" }), ok);
   assert.deepEqual(removeJournalEntry(ok, "a").entries, []);
+});
+
+test("insert-at restores a removed entry at its original position", () => {
+  const at = (n: number) =>
+    createJournalEntry({ kind: "note", text: `n${n}` }, `id${n}`, "2026-08-27");
+  let state = emptyJournalState();
+  for (const n of [0, 1, 2]) {
+    state = appendJournalEntry(state, at(n));
+  }
+  const removed = removeJournalEntry(state, "id1");
+  const restored = insertJournalEntryAt(removed, at(1), 1);
+  assert.deepEqual(restored, state);
+  // Double-undo can't duplicate.
+  assert.equal(insertJournalEntryAt(restored, at(1), 1), restored);
+  // Out-of-range indices clamp instead of throwing.
+  assert.equal(insertJournalEntryAt(removed, at(1), 99).entries.length, 3);
+  assert.equal(insertJournalEntryAt(removed, at(1), -5).entries[0].text, "n1");
+});
+
+test("context menu items and keycaps track entry kind and state", () => {
+  const note = createJournalEntry({ kind: "note", text: "hi" }, "a", "2026-08-27");
+  assert.deepEqual(
+    journalEntryMenuItems(note).map((item) => [item.action, item.key]),
+    [
+      ["copy", "C"],
+      ["delete", "D"],
+    ],
+  );
+  assert.equal(journalEntryUrl(note), null);
+
+  const link = createJournalEntry(
+    { kind: "link", url: "https://example.com" },
+    "b",
+    "2026-08-27",
+  );
+  assert.deepEqual(
+    journalEntryMenuItems(link).map((item) => item.action),
+    ["open", "copy", "delete"],
+  );
+  assert.equal(journalEntryUrl(link), "https://example.com");
+
+  const pendingTweet = createJournalEntry(
+    { kind: "tweet", url: "https://x.com/jack/status/20", tweetId: "20" },
+    "c",
+    "2026-08-27",
+  );
+  // No retry while a fetch is already owed.
+  assert.deepEqual(
+    journalEntryMenuItems(pendingTweet).map((item) => item.action),
+    ["open", "copy", "delete"],
+  );
+
+  const okTweet = { ...tweetEntry(snapshot("20")) };
+  const okItems = journalEntryMenuItems(okTweet);
+  assert.deepEqual(
+    okItems.map((item) => [item.action, item.key]),
+    [
+      ["open", "O"],
+      ["copy", "C"],
+      ["retry", "R"],
+      ["delete", "D"],
+    ],
+  );
+  assert.equal(okItems.find((item) => item.action === "retry")?.label, "Refresh tweet");
+  assert.ok(okItems.find((item) => item.action === "delete")?.danger);
+  // The canonical hydrated permalink wins over what the user typed.
+  assert.equal(journalEntryUrl({ ...okTweet, url: "https://x.com/JACK/status/20?x=1" }),
+    "https://x.com/jack/status/20");
+
+  const failedTweet = { ...pendingTweet, hydration: "failed" as const };
+  assert.equal(
+    journalEntryMenuItems(failedTweet).find((item) => item.action === "retry")?.label,
+    "Retry tweet",
+  );
 });
 
 test("append dedupes by id", () => {

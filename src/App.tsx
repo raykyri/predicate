@@ -149,10 +149,12 @@ import {
   classifyJournalInput,
   createJournalEntry,
   emptyJournalState,
+  insertJournalEntryAt,
   newJournalEntryId,
   normalizeJournalState,
   removeJournalEntry as removeEntryFromJournal,
   setJournalTweetHydration,
+  type JournalEntry,
   type JournalState,
 } from "./lib/journal";
 import { syndicationToken, tweetSnapshotFromSyndication } from "./lib/journalTweets";
@@ -8197,12 +8199,59 @@ function MainApp() {
     },
     [commitJournal, hydrateJournalTweet],
   );
+  // The last journal removal, restorable for a grace window. Single-slot: a
+  // second removal replaces the first (the feed is a stream of small items,
+  // not a document worth a real history).
+  const [journalUndo, setJournalUndo] = useState<{
+    entry: JournalEntry;
+    index: number;
+  } | null>(null);
+  const journalUndoRef = useRef(journalUndo);
+  journalUndoRef.current = journalUndo;
+  const journalUndoTimerRef = useRef<number | null>(null);
+  const dismissJournalUndo = useCallback(() => {
+    if (journalUndoTimerRef.current !== null) {
+      window.clearTimeout(journalUndoTimerRef.current);
+      journalUndoTimerRef.current = null;
+    }
+    journalUndoRef.current = null;
+    setJournalUndo(null);
+  }, []);
   const removeJournalEntry = useCallback(
     (entryId: string) => {
-      commitJournal(removeEntryFromJournal(journalRef.current, entryId));
+      const state = journalRef.current;
+      const index = state.entries.findIndex((entry) => entry.id === entryId);
+      if (index < 0) {
+        return;
+      }
+      const entry = state.entries[index];
+      commitJournal(removeEntryFromJournal(state, entryId));
+      if (journalUndoTimerRef.current !== null) {
+        window.clearTimeout(journalUndoTimerRef.current);
+      }
+      const undo = { entry, index };
+      journalUndoRef.current = undo;
+      setJournalUndo(undo);
+      journalUndoTimerRef.current = window.setTimeout(() => {
+        journalUndoTimerRef.current = null;
+        journalUndoRef.current = null;
+        setJournalUndo(null);
+      }, 10_000);
     },
     [commitJournal],
   );
+  const undoJournalRemove = useCallback(() => {
+    const undo = journalUndoRef.current;
+    if (!undo) {
+      return;
+    }
+    dismissJournalUndo();
+    commitJournal(insertJournalEntryAt(journalRef.current, undo.entry, undo.index));
+    // A restored tweet that never finished hydrating re-enters the fetch.
+    if (undo.entry.kind === "tweet" && undo.entry.hydration === "pending") {
+      hydrateJournalTweet(undo.entry.id, undo.entry.tweetId);
+    }
+  }, [commitJournal, dismissJournalUndo, hydrateJournalTweet]);
   const retryJournalTweet = useCallback(
     (entryId: string) => {
       const entry = journalRef.current.entries.find(
@@ -16770,9 +16819,12 @@ function MainApp() {
           {researchStageView === "journal" ? (
             <JournalPane
               entries={journal.entries}
+              pendingUndo={journalUndo ? { entry: journalUndo.entry } : null}
               onAddEntry={addJournalEntry}
               onRemoveEntry={removeJournalEntry}
               onRetryTweet={retryJournalTweet}
+              onUndoRemove={undoJournalRemove}
+              onDismissUndo={dismissJournalUndo}
             />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to

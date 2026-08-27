@@ -1,20 +1,102 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, KeyboardEvent, MouseEvent } from "react";
-import { LoaderCircle, Play, RotateCw, X } from "lucide-react";
+import { createPortal } from "react-dom";
+import {
+  Copy,
+  ExternalLink,
+  LoaderCircle,
+  MoreHorizontal,
+  Play,
+  RotateCw,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react";
 import type { JournalEntry, JournalTweetEntry } from "../../lib/journal";
 import type {
   QuotedTweetSnapshot,
   TweetTextRun,
 } from "../../lib/journalTweets";
 import { openExternalUrl } from "../../lib/api";
+import { writeClipboardText } from "../../lib/clipboard";
 import { ResearchDocumentFrame } from "./ResearchDocumentChrome";
 
 interface JournalPaneProps {
   /** Oldest first (storage order); the feed renders newest first. */
   entries: JournalEntry[];
+  /** The most recently removed entry, still restorable. */
+  pendingUndo: { entry: JournalEntry } | null;
   onAddEntry: (input: string) => void;
   onRemoveEntry: (id: string) => void;
   onRetryTweet: (id: string) => void;
+  onUndoRemove: () => void;
+  onDismissUndo: () => void;
+}
+
+const JOURNAL_MENU_WIDTH = 180;
+const JOURNAL_MENU_HEIGHT_ESTIMATE = 132;
+const JOURNAL_VIEWPORT_MARGIN = 8;
+
+export type JournalMenuAction = "open" | "copy" | "retry" | "delete";
+
+export interface JournalMenuItem {
+  action: JournalMenuAction;
+  label: string;
+  /** Single-letter keycap shown in the menu; pressing it fires the item. */
+  key: string;
+  danger?: boolean;
+}
+
+/** The URL an entry stands for, if any: the canonical tweet permalink once
+ * hydrated, otherwise what the user entered. Notes have none. */
+export function journalEntryUrl(entry: JournalEntry): string | null {
+  if (entry.kind === "link") {
+    return entry.url;
+  }
+  if (entry.kind === "tweet") {
+    return entry.tweet?.url ?? entry.url;
+  }
+  return null;
+}
+
+/** Context-menu items for an entry. Pure, so tests can pin the layout and
+ * keycaps per entry kind without driving the portal menu. */
+export function journalEntryMenuItems(entry: JournalEntry): JournalMenuItem[] {
+  const items: JournalMenuItem[] = [];
+  if (journalEntryUrl(entry)) {
+    items.push({
+      action: "open",
+      label: entry.kind === "tweet" ? "Open on X" : "Open link",
+      key: "O",
+    });
+  }
+  items.push({
+    action: "copy",
+    label: entry.kind === "note" ? "Copy text" : "Copy link",
+    key: "C",
+  });
+  if (entry.kind === "tweet" && entry.hydration !== "pending") {
+    items.push({
+      action: "retry",
+      label: entry.hydration === "failed" ? "Retry tweet" : "Refresh tweet",
+      key: "R",
+    });
+  }
+  items.push({ action: "delete", label: "Delete", key: "D", danger: true });
+  return items;
+}
+
+function menuItemIcon(action: JournalMenuAction) {
+  switch (action) {
+    case "open":
+      return <ExternalLink size={13} aria-hidden="true" />;
+    case "copy":
+      return <Copy size={13} aria-hidden="true" />;
+    case "retry":
+      return <RotateCw size={13} aria-hidden="true" />;
+    case "delete":
+      return <Trash2 size={13} aria-hidden="true" />;
+  }
 }
 
 function externalLinkClick(url: string) {
@@ -286,11 +368,15 @@ export function JournalTweetCard({ entry }: { entry: JournalTweetEntry }) {
 
 function JournalEntryCard({
   entry,
-  onRemove,
+  menuOpen,
+  onOpenMenu,
+  onOpenContextMenu,
   onRetryTweet,
 }: {
   entry: JournalEntry;
-  onRemove: (id: string) => void;
+  menuOpen: boolean;
+  onOpenMenu: (entryId: string, trigger: HTMLButtonElement) => void;
+  onOpenContextMenu: (entryId: string, clientX: number, clientY: number) => void;
   onRetryTweet: (id: string) => void;
 }) {
   let body;
@@ -356,18 +442,28 @@ function JournalEntryCard({
   }
   return (
     <article
-      className={`journal-entry ${variant}`}
+      className={`journal-entry ${variant}${menuOpen ? " has-open-menu" : ""}`}
       title={new Date(entry.createdAt).toLocaleString()}
+      onContextMenu={(event) => {
+        // Right-clicking a link or the quote card keeps the entry menu too —
+        // the browser menu has nothing useful to offer inside the shell.
+        event.preventDefault();
+        event.stopPropagation();
+        onOpenContextMenu(entry.id, event.clientX, event.clientY);
+      }}
     >
       {body}
       <button
-        className="control-button journal-entry-remove"
+        className="control-button journal-entry-menu-trigger"
         type="button"
-        title="Remove from journal"
-        aria-label="Remove from journal"
-        onClick={() => onRemove(entry.id)}
+        title="Entry actions"
+        aria-label="Entry actions"
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        data-journal-menu-trigger
+        onClick={(event) => onOpenMenu(entry.id, event.currentTarget)}
       >
-        <X size={12} aria-hidden="true" />
+        <MoreHorizontal size={13} aria-hidden="true" />
       </button>
     </article>
   );
@@ -375,12 +471,167 @@ function JournalEntryCard({
 
 function JournalPane({
   entries,
+  pendingUndo,
   onAddEntry,
   onRemoveEntry,
   onRetryTweet,
+  onUndoRemove,
+  onDismissUndo,
 }: JournalPaneProps) {
   const [draft, setDraft] = useState("");
+  const [menu, setMenu] = useState<{ entryId: string; left: number; top: number } | null>(
+    null,
+  );
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const feed = useMemo(() => [...entries].reverse(), [entries]);
+  const menuEntry = menu
+    ? entries.find((entry) => entry.id === menu.entryId) ?? null
+    : null;
+  const menuItems = menuEntry ? journalEntryMenuItems(menuEntry) : [];
+
+  function runMenuAction(entry: JournalEntry, action: JournalMenuAction) {
+    setMenu(null);
+    if (action === "open") {
+      const url = journalEntryUrl(entry);
+      if (url) {
+        void openExternalUrl(url);
+      }
+      return;
+    }
+    if (action === "copy") {
+      void writeClipboardText(
+        entry.kind === "note" ? entry.text : journalEntryUrl(entry) ?? "",
+      );
+      return;
+    }
+    if (action === "retry") {
+      onRetryTweet(entry.id);
+      return;
+    }
+    onRemoveEntry(entry.id);
+  }
+
+  function clampedMenuPosition(clientX: number, clientY: number) {
+    return {
+      left: Math.max(
+        JOURNAL_VIEWPORT_MARGIN,
+        Math.min(clientX, window.innerWidth - JOURNAL_MENU_WIDTH - JOURNAL_VIEWPORT_MARGIN),
+      ),
+      top: Math.max(
+        JOURNAL_VIEWPORT_MARGIN,
+        Math.min(
+          clientY,
+          window.innerHeight - JOURNAL_MENU_HEIGHT_ESTIMATE - JOURNAL_VIEWPORT_MARGIN,
+        ),
+      ),
+    };
+  }
+
+  function openMenuFromTrigger(entryId: string, trigger: HTMLButtonElement) {
+    if (menu?.entryId === entryId) {
+      setMenu(null);
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    setMenu({
+      entryId,
+      ...clampedMenuPosition(rect.right - JOURNAL_MENU_WIDTH, rect.bottom + 4),
+    });
+  }
+
+  function openContextMenu(entryId: string, clientX: number, clientY: number) {
+    setMenu({ entryId, ...clampedMenuPosition(clientX, clientY) });
+  }
+
+  // Menu dismissal and its keycap shortcuts, mirroring the research sidebar
+  // menus: outside mousedown, Escape, viewport reflow all close; a bare
+  // keycap letter fires its item.
+  useEffect(() => {
+    if (!menu) {
+      return;
+    }
+    const closeMenu = (event: globalThis.MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        !menuRef.current?.contains(target) &&
+        !(target instanceof Element && target.closest("[data-journal-menu-trigger]"))
+      ) {
+        setMenu(null);
+      }
+    };
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMenu(null);
+        return;
+      }
+      if (event.metaKey || event.ctrlKey || event.altKey) {
+        return;
+      }
+      const entry = entries.find((candidate) => candidate.id === menu.entryId);
+      if (!entry) {
+        return;
+      }
+      const item = journalEntryMenuItems(entry).find(
+        (candidate) => candidate.key.toLowerCase() === event.key.toLowerCase(),
+      );
+      if (!item) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      runMenuAction(entry, item.action);
+    };
+    const closeOnReflow = () => setMenu(null);
+    document.addEventListener("mousedown", closeMenu);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", closeOnReflow);
+    window.addEventListener("scroll", closeOnReflow, true);
+    return () => {
+      document.removeEventListener("mousedown", closeMenu);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", closeOnReflow);
+      window.removeEventListener("scroll", closeOnReflow, true);
+    };
+    // runMenuAction and entries are stable enough per menu lifetime; the menu
+    // closes on any entry mutation the actions cause.
+  });
+
+  // The height estimate that positioned the menu is a guess (items vary per
+  // entry kind); clamp the real menu back inside the viewport once rendered.
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!menu || !element) {
+      return;
+    }
+    const height = element.getBoundingClientRect().height;
+    const top = Math.max(
+      JOURNAL_VIEWPORT_MARGIN,
+      Math.min(menu.top, window.innerHeight - JOURNAL_VIEWPORT_MARGIN - height),
+    );
+    if (top !== menu.top) {
+      element.style.top = `${top}px`;
+    }
+  }, [menu]);
+
+  // ⌘Z / Ctrl-Z restores the last removed entry while the undo bar shows.
+  useEffect(() => {
+    if (!pendingUndo) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "z"
+      ) {
+        event.preventDefault();
+        onUndoRemove();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onUndoRemove, pendingUndo]);
 
   function submit() {
     const text = draft.trim();
@@ -421,12 +672,39 @@ function JournalPane({
               Enter to add — a tweet URL becomes an embedded tweet
             </div>
           </form>
+          {pendingUndo ? (
+            <div className="journal-undo" role="status">
+              <span className="journal-undo-label">
+                {pendingUndo.entry.kind === "note" ? "Note" : "Entry"} removed
+              </span>
+              <button
+                className="control-button journal-undo-restore"
+                type="button"
+                onClick={onUndoRemove}
+              >
+                <Undo2 size={12} aria-hidden="true" />
+                <span>Undo</span>
+                <kbd className="context-menu-shortcut is-keycap">⌘Z</kbd>
+              </button>
+              <button
+                className="control-button journal-undo-dismiss"
+                type="button"
+                title="Dismiss"
+                aria-label="Dismiss undo"
+                onClick={onDismissUndo}
+              >
+                <X size={12} aria-hidden="true" />
+              </button>
+            </div>
+          ) : null}
           <div className="journal-feed" role="feed" aria-label="Journal entries">
             {feed.map((entry) => (
               <JournalEntryCard
                 key={entry.id}
                 entry={entry}
-                onRemove={onRemoveEntry}
+                menuOpen={menu?.entryId === entry.id}
+                onOpenMenu={openMenuFromTrigger}
+                onOpenContextMenu={openContextMenu}
                 onRetryTweet={onRetryTweet}
               />
             ))}
@@ -438,6 +716,42 @@ function JournalPane({
           </div>
         </div>
       </div>
+      {menu && menuEntry
+        ? createPortal(
+            <div
+              ref={menuRef}
+              className="popover-surface popover-surface--context pane-context-menu journal-entry-menu"
+              role="menu"
+              aria-label="Journal entry actions"
+              style={{ left: menu.left, top: menu.top }}
+              onMouseDown={(event) => event.stopPropagation()}
+              onContextMenu={(event) => event.preventDefault()}
+            >
+              <div className="group-context-actions">
+                {menuItems.map((item, index) => (
+                  <span key={item.action} style={{ display: "contents" }}>
+                    {item.danger && index > 0 ? (
+                      <div className="context-menu-divider" role="separator" />
+                    ) : null}
+                    <button
+                      className={`control-button context-menu-has-shortcut${
+                        item.danger ? " context-menu-danger" : ""
+                      }`}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => runMenuAction(menuEntry, item.action)}
+                    >
+                      {menuItemIcon(item.action)}
+                      <span>{item.label}</span>
+                      <kbd className="context-menu-shortcut is-keycap">{item.key}</kbd>
+                    </button>
+                  </span>
+                ))}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </ResearchDocumentFrame>
   );
 }
