@@ -15,6 +15,7 @@ import {
 import type { JournalEntry, JournalTweetEntry } from "../../lib/journal";
 import type {
   QuotedTweetSnapshot,
+  TweetSnapshot,
   TweetTextRun,
 } from "../../lib/journalTweets";
 import { openExternalUrl } from "../../lib/api";
@@ -240,8 +241,9 @@ function TweetMediaStrip({
   );
 }
 
-/** X-style local-time stamp: "8:23 AM · May 31, 2018". */
-function formatTweetDate(iso: string | undefined): string | null {
+/** The timeline's age stamp: "29m" and "5h" inside a day, "Jul 27" inside the
+ * year, "Mar 21, 2006" beyond it. */
+function formatTweetAge(iso: string | undefined, now = Date.now()): string | null {
   if (!iso) {
     return null;
   }
@@ -249,16 +251,96 @@ function formatTweetDate(iso: string | undefined): string | null {
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
-  const time = parsed.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-  const day = parsed.toLocaleDateString(undefined, {
-    year: "numeric",
+  const seconds = Math.max(0, Math.round((now - parsed.getTime()) / 1000));
+  if (seconds < 60) {
+    return `${seconds}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.floor(seconds / 60)}m`;
+  }
+  if (seconds < 86_400) {
+    return `${Math.floor(seconds / 3600)}h`;
+  }
+  const sameYear = parsed.getFullYear() === new Date(now).getFullYear();
+  return parsed.toLocaleDateString(undefined, {
     month: "short",
     day: "numeric",
+    ...(sameYear ? {} : { year: "numeric" }),
   });
-  return `${time} · ${day}`;
+}
+
+/** The full stamp behind the age, for the title tooltip. */
+function formatTweetDate(iso: string | undefined): string | null {
+  if (!iso) {
+    return null;
+  }
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toLocaleString();
+}
+
+/** Engagement counts the way a timeline abbreviates them: exact under ten
+ * thousand, whole thousands past it, one decimal past a million. */
+function formatTweetCount(value: number): string {
+  if (value < 10_000) {
+    return value.toLocaleString();
+  }
+  if (value < 1_000_000) {
+    return `${Math.floor(value / 1000)}K`;
+  }
+  return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}M`;
+}
+
+function ReplyGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
+    </svg>
+  );
+}
+
+function LikeGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+      <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" />
+    </svg>
+  );
+}
+
+function VerifiedBadge() {
+  return (
+    <svg
+      className="journal-tweet-verified"
+      viewBox="0 0 22 22"
+      fill="currentColor"
+      aria-label="Verified"
+      role="img"
+    >
+      <path d="M20.396 11c-.018-.646-.215-1.275-.57-1.816-.354-.54-.852-.972-1.438-1.246.223-.607.27-1.264.14-1.897-.131-.634-.437-1.218-.882-1.687-.47-.445-1.053-.75-1.687-.882-.633-.13-1.29-.083-1.897.14-.273-.587-.704-1.086-1.245-1.44S11.647 1.62 11 1.604c-.646.017-1.273.213-1.813.568s-.969.854-1.24 1.44c-.608-.223-1.267-.272-1.902-.14-.635.13-1.22.436-1.69.882-.445.47-.749 1.055-.878 1.688-.13.633-.08 1.29.144 1.896-.587.274-1.087.705-1.443 1.245-.356.54-.555 1.17-.574 1.817.02.647.218 1.276.574 1.816.356.54.856.972 1.443 1.245-.224.606-.274 1.263-.144 1.896.13.634.433 1.218.877 1.688.47.443 1.054.747 1.687.878.633.132 1.29.084 1.897-.136.274.586.705 1.084 1.246 1.439.54.354 1.17.551 1.816.569.647-.016 1.276-.213 1.817-.567s.972-.854 1.245-1.44c.604.239 1.266.296 1.903.164.636-.132 1.22-.447 1.68-.907.46-.46.776-1.044.908-1.681s.075-1.299-.165-1.903c.586-.274 1.084-.705 1.439-1.246.354-.54.551-1.17.569-1.816zM9.662 14.85l-3.429-3.428 1.293-1.302 2.072 2.072 4.4-4.794 1.347 1.246z" />
+    </svg>
+  );
+}
+
+function TweetLinkCardView({ card }: { card: NonNullable<TweetSnapshot["card"]> }) {
+  return (
+    <a
+      className={`journal-tweet-card${card.large ? " is-large" : ""}`}
+      href={card.url}
+      onClick={externalLinkClick(card.url)}
+    >
+      {card.imageUrl ? (
+        <span className="journal-tweet-card-media">
+          <img src={card.imageUrl} alt="" loading="lazy" draggable={false} />
+        </span>
+      ) : null}
+      <span className="journal-tweet-card-copy">
+        <span className="journal-tweet-card-domain">{card.domain}</span>
+        <span className="journal-tweet-card-title">{card.title}</span>
+        {card.description ? (
+          <span className="journal-tweet-card-desc">{card.description}</span>
+        ) : null}
+      </span>
+    </a>
+  );
 }
 
 /** The hydrated tweet, rendered as the entry's whole content — an X-embed
@@ -270,88 +352,124 @@ export function JournalTweetCard({ entry }: { entry: JournalTweetEntry }) {
   if (!tweet) {
     return null;
   }
-  const date = formatTweetDate(tweet.createdAt);
   const quoted = tweet.quoted;
+  const authorUrl = `https://x.com/${tweet.author.handle}`;
+  const age = formatTweetAge(tweet.createdAt);
   return (
     <article className="journal-tweet" aria-label={`Tweet by @${tweet.author.handle}`}>
-      <header className="journal-tweet-head">
-        <a
-          className="journal-tweet-who"
-          href={`https://x.com/${tweet.author.handle}`}
-          onClick={externalLinkClick(`https://x.com/${tweet.author.handle}`)}
-        >
-          <TweetAvatar
-            name={tweet.author.name}
-            handle={tweet.author.handle}
-            avatarUrl={tweet.author.avatarUrl}
-            size={32}
-          />
-          <span className="journal-tweet-names">
+      <a
+        className="journal-tweet-avatar-link"
+        href={authorUrl}
+        aria-hidden="true"
+        tabIndex={-1}
+        onClick={externalLinkClick(authorUrl)}
+      >
+        <TweetAvatar
+          name={tweet.author.name}
+          handle={tweet.author.handle}
+          avatarUrl={tweet.author.avatarUrl}
+          size={40}
+        />
+      </a>
+      <div className="journal-tweet-main">
+        <div className="journal-tweet-head">
+          <a
+            className="journal-tweet-who"
+            href={authorUrl}
+            onClick={externalLinkClick(authorUrl)}
+          >
             <span className="journal-tweet-author">{tweet.author.name}</span>
+            {tweet.author.verified ? <VerifiedBadge /> : null}
             <span className="journal-tweet-handle">@{tweet.author.handle}</span>
-          </span>
-        </a>
-      </header>
-      {tweet.replyTo ? (
-        <p className="journal-tweet-reply">Replying to @{tweet.replyTo.handle}</p>
-      ) : null}
-      <TweetText runs={tweet.runs} className="journal-tweet-text" />
-      {tweet.partial ? (
-        <p className="journal-tweet-partial">
-          Long post —{" "}
-          <a href={tweet.url} onClick={externalLinkClick(tweet.url)}>
-            full text on X
           </a>
-        </p>
-      ) : null}
-      <TweetMediaStrip media={tweet.media} />
-      {quoted ? (
-        <div
-          className="journal-tweet-quote"
-          role="link"
-          tabIndex={0}
-          onClick={(event) => {
-            // Links inside the quoted text keep their own targets.
-            if ((event.target as HTMLElement).closest("a")) {
-              return;
-            }
-            void openExternalUrl(quoted.url);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter") {
-              void openExternalUrl(quoted.url);
-            }
-          }}
-        >
-          <div className="journal-tweet-quote-head">
-            <TweetAvatar
-              name={quoted.author.name}
-              handle={quoted.author.handle}
-              avatarUrl={quoted.author.avatarUrl}
-              size={16}
-            />
-            <span className="journal-tweet-author">{quoted.author.name}</span>
-            <span className="journal-tweet-handle">@{quoted.author.handle}</span>
-          </div>
-          <TweetText runs={quoted.runs} className="journal-tweet-text is-quote" />
-          {quoted.partial ? (
-            <p className="journal-tweet-partial">
-              Long post —{" "}
-              <a href={quoted.url} onClick={externalLinkClick(quoted.url)}>
-                full text on X
+          {age ? (
+            <>
+              <span className="journal-tweet-dot" aria-hidden="true">
+                ·
+              </span>
+              <a
+                className="journal-tweet-age"
+                href={tweet.url}
+                title={formatTweetDate(tweet.createdAt) ?? undefined}
+                onClick={externalLinkClick(tweet.url)}
+              >
+                {age}
               </a>
-            </p>
+            </>
           ) : null}
-          <TweetMediaStrip media={quoted.media} compact />
         </div>
-      ) : null}
-      {date ? (
-        <footer className="journal-tweet-foot">
-          <a href={tweet.url} onClick={externalLinkClick(tweet.url)}>
-            {date}
+        {tweet.replyTo ? (
+          <p className="journal-tweet-reply">
+            Replying to <span>@{tweet.replyTo.handle}</span>
+          </p>
+        ) : null}
+        <TweetText runs={tweet.runs} className="journal-tweet-text" />
+        {tweet.partial ? (
+          <a
+            className="journal-tweet-more"
+            href={tweet.url}
+            onClick={externalLinkClick(tweet.url)}
+          >
+            Show more
           </a>
-        </footer>
-      ) : null}
+        ) : null}
+        <TweetMediaStrip media={tweet.media} />
+        {tweet.card ? <TweetLinkCardView card={tweet.card} /> : null}
+        {quoted ? (
+          <div
+            className="journal-tweet-quote"
+            role="link"
+            tabIndex={0}
+            onClick={(event) => {
+              // Links inside the quoted text keep their own targets.
+              if ((event.target as HTMLElement).closest("a")) {
+                return;
+              }
+              void openExternalUrl(quoted.url);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                void openExternalUrl(quoted.url);
+              }
+            }}
+          >
+            <div className="journal-tweet-quote-head">
+              <TweetAvatar
+                name={quoted.author.name}
+                handle={quoted.author.handle}
+                avatarUrl={quoted.author.avatarUrl}
+                size={18}
+              />
+              <span className="journal-tweet-author">{quoted.author.name}</span>
+              {quoted.author.verified ? <VerifiedBadge /> : null}
+              <span className="journal-tweet-handle">@{quoted.author.handle}</span>
+            </div>
+            <TweetText runs={quoted.runs} className="journal-tweet-text is-quote" />
+            {quoted.partial ? (
+              <span className="journal-tweet-more">Show more</span>
+            ) : null}
+            <TweetMediaStrip media={quoted.media} compact />
+          </div>
+        ) : null}
+        {tweet.replies !== undefined || tweet.likes !== undefined ? (
+          // Counts as captured, not controls: this is a journal entry, so the
+          // engagement reads as metadata and nothing here acts on X.
+          <div className="journal-tweet-stats">
+            {tweet.replies !== undefined ? (
+              <span className="journal-tweet-stat" title={`${tweet.replies} replies`}>
+                <ReplyGlyph />
+                {formatTweetCount(tweet.replies)}
+              </span>
+            ) : null}
+            {tweet.likes !== undefined ? (
+              <span className="journal-tweet-stat" title={`${tweet.likes} likes`}>
+                <LikeGlyph />
+                {formatTweetCount(tweet.likes)}
+              </span>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
     </article>
   );
 }

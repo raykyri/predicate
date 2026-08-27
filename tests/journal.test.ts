@@ -103,13 +103,40 @@ test("plain tweet hydrates author, text, and date", () => {
 });
 
 test("t.co link entities expand into labeled link runs", () => {
-  const tweet = snapshot("1628832338187636740");
-  const link = tweet.runs.find((run) => run.kind === "link");
+  // The quoted tweet keeps its link inline (its own card is not this tweet's).
+  const quoted = snapshot("1599367266448994304").quoted;
+  assert.ok(quoted);
+  const link = quoted.runs.find((run) => run.kind === "link");
   assert.ok(link);
   assert.ok(link.url?.startsWith("https://"));
   assert.ok(!link.url?.includes("t.co"));
   assert.ok(!link.text.includes("t.co"));
-  assert.ok(tweet.runs.every((run) => !run.text.includes("https://t.co")));
+  assert.ok(quoted.runs.every((run) => !run.text.includes("https://t.co")));
+});
+
+test("a link card is lifted out of the text it stands for", () => {
+  const tweet = snapshot("1628832338187636740");
+  const card = tweet.card;
+  assert.ok(card);
+  assert.equal(card.domain, "nextjs.org");
+  assert.equal(card.title, "Next.js 13.2");
+  assert.ok(card.description);
+  assert.ok(card.large);
+  assert.ok(card.imageUrl?.startsWith("https://pbs.twimg.com/card_img/"));
+  assert.ok(card.url.startsWith("https://nextjs.org"));
+  // The trailing t.co that produced the card no longer doubles as body text.
+  assert.ok(tweet.runs.every((run) => run.url !== card.url));
+  assert.ok(!tweet.runs[tweet.runs.length - 1].text.endsWith(" "));
+  // Tweets without a preview carry no card.
+  assert.equal(snapshot("20").card, undefined);
+});
+
+test("engagement counts and verification come through", () => {
+  const tweet = snapshot("20");
+  assert.equal(tweet.likes, 309060);
+  assert.equal(tweet.replies, 17999);
+  assert.equal(tweet.author.verified, true);
+  assert.equal(snapshot("1628832338187636740").author.verified, false);
 });
 
 test("reply context is captured", () => {
@@ -337,7 +364,7 @@ test("tweet card renders header, text, media, and linked timestamp", () => {
   assert.match(html, /Sunsets don(&#x27;|')t get much better/);
   assert.match(html, /journal-tweet-media/);
   assert.match(html, /pbs\.twimg\.com\/media/);
-  assert.match(html, /https:\/\/x\.com\/Interior\/status\/463440424141459456/);
+  assert.match(html, /journal-tweet-age"[^>]*href="https:\/\/x\.com\/Interior\/status\/463440424141459456"/);
 });
 
 test("tweet card renders quote tweets as a nested mini-card", () => {
@@ -351,14 +378,42 @@ test("tweet card renders quote tweets as a nested mini-card", () => {
   assert.match(html, /codesandbox\.io/);
 });
 
-test("tweet card marks long posts with a full-text link", () => {
+test("tweet card offers Show more on a long post", () => {
   const html = renderCard(tweetEntry(snapshot("1623411400545632256")));
-  assert.match(html, /journal-tweet-partial/);
-  assert.match(html, /full text on X/);
+  assert.match(html, /journal-tweet-more/);
+  assert.match(html, /Show more/);
   assert.match(html, /…/);
+});
+
+test("tweet card lays out avatar, inline header, and stats like a timeline", () => {
+  const html = renderCard(tweetEntry(snapshot("20")));
+  // Avatar sits outside the content column, and the header is one line:
+  // name, badge, handle, then the age linking to the post.
+  assert.match(html, /journal-tweet-avatar-link/);
+  assert.match(html, /journal-tweet-main/);
+  assert.match(html, /journal-tweet-author">jack<\/span>/);
+  assert.match(html, /journal-tweet-verified/);
+  assert.match(html, /journal-tweet-handle">@jack<\/span>/);
+  assert.match(html, /journal-tweet-age"[^>]*>[^<]+<\/a>/);
+  // Counts read as metadata, never as controls.
+  assert.match(html, /journal-tweet-stat/);
+  assert.match(html, /309K/);
+  assert.doesNotMatch(html, /<button/);
+  // The embed chrome is gone.
+  assert.doesNotMatch(html, /journal-tweet-x"/);
+  assert.doesNotMatch(html, /journal-tweet-foot/);
+});
+
+test("tweet card renders a link preview card", () => {
+  const html = renderCard(tweetEntry(snapshot("1628832338187636740")));
+  assert.match(html, /journal-tweet-card is-large/);
+  assert.match(html, /journal-tweet-card-domain">nextjs\.org</);
+  assert.match(html, /journal-tweet-card-title">Next\.js 13\.2</);
+  assert.match(html, /card_img/);
 });
 
 test("tweet card shows reply context", () => {
   const html = renderCard(tweetEntry(snapshot("1674865731136020505")));
-  assert.match(html, /Replying to @xDaily/);
+  assert.match(html, /journal-tweet-reply/);
+  assert.match(html, /Replying to <span>@xDaily<\/span>/);
 });

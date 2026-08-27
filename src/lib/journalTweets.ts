@@ -75,14 +75,34 @@ export interface TweetTextRun {
   text: string;
   /** Expanded destination, for link runs. */
   url?: string;
+  /** The t.co this run replaced, so a link card can find the run it stands
+   * for. Kept off the wire when absent. */
+  tco?: string;
 }
 
 /** The hydrated form of a tweet stored on a journal entry: everything the
  * feed card renders, and nothing tied to the syndication payload's shape. */
+/** A link preview the tweet carries — the bordered card X renders under the
+ * text for a shared URL. `large` is the wide-image variant. */
+export interface TweetLinkCard {
+  url: string;
+  domain: string;
+  title: string;
+  description?: string;
+  imageUrl?: string;
+  large: boolean;
+}
+
 export interface TweetSnapshot {
   id: string;
   url: string;
-  author: { name: string; handle: string; avatarUrl?: string };
+  author: {
+    name: string;
+    handle: string;
+    avatarUrl?: string;
+    /** Carries a verification badge (blue or legacy). */
+    verified?: boolean;
+  };
   /** ISO timestamp of the tweet itself (not the capture). */
   createdAt?: string;
   runs: TweetTextRun[];
@@ -90,6 +110,10 @@ export interface TweetSnapshot {
    * available from the syndication endpoint). */
   partial: boolean;
   media: TweetMedia[];
+  card?: TweetLinkCard;
+  /** Engagement counts as captured. Absent when the payload omits them. */
+  replies?: number;
+  likes?: number;
   replyTo?: { handle: string; id?: string };
   quoted?: QuotedTweetSnapshot;
 }
@@ -141,7 +165,7 @@ function textRuns(raw: string, entities: unknown): TweetTextRun[] {
     }
     subs.push({
       tco,
-      run: { kind: "link", text: str(u.display_url) ?? expanded, url: expanded },
+      run: { kind: "link", text: str(u.display_url) ?? expanded, url: expanded, tco },
     });
   }
   for (const m of records(source.media)) {
@@ -222,6 +246,48 @@ function mediaItems(v: Payload): TweetMedia[] {
   return items;
 }
 
+/** The link preview a tweet carries, if any. Binding values are a flat bag of
+ * typed entries; the image variants are many sizes of one picture, so this
+ * takes the one that suits the card's layout. */
+function linkCard(v: Payload, runs: TweetTextRun[]): TweetLinkCard | undefined {
+  const card = (v.card ?? null) as Payload | null;
+  const bindings = (card?.binding_values ?? null) as Payload | null;
+  if (!bindings) {
+    return undefined;
+  }
+  const text = (key: string) => {
+    const entry = bindings[key] as Payload | undefined;
+    return entry?.type === "STRING" ? str(entry.string_value) : undefined;
+  };
+  const image = (key: string) => {
+    const entry = bindings[key] as Payload | undefined;
+    const value = entry?.type === "IMAGE" ? (entry.image_value as Payload) : undefined;
+    return value ? str(value.url) : undefined;
+  };
+  const title = text("title");
+  const domain = text("domain") ?? text("vanity_url");
+  if (!title || !domain) {
+    return undefined;
+  }
+  const large = str(card?.name)?.includes("large_image") ?? false;
+  // The card's own t.co, resolved through the text runs to the destination the
+  // reader would actually visit.
+  const cardUrl = text("card_url");
+  const resolved = runs.find(
+    (run) => run.kind === "link" && run.url && cardUrl && run.tco === cardUrl,
+  );
+  return {
+    url: resolved?.url ?? str(card?.url) ?? cardUrl ?? "",
+    domain,
+    title,
+    description: text("description"),
+    imageUrl: large
+      ? image("photo_image_full_size_large") ?? image("summary_photo_image_large")
+      : image("thumbnail_image") ?? image("thumbnail_image_small"),
+    large,
+  };
+}
+
 function snapshotCore(fallbackId: string, v: Payload): QuotedTweetSnapshot | null {
   const user = (v.user ?? {}) as Payload;
   const handle = str(user.screen_name);
@@ -231,6 +297,22 @@ function snapshotCore(fallbackId: string, v: Payload): QuotedTweetSnapshot | nul
   const id = str(v.id_str) ?? fallbackId;
   const partial = v.note_tweet !== undefined;
   const runs = textRuns(str(v.text) ?? "", v.entities);
+  const card = linkCard(v, runs);
+  // A link card stands for its URL, so the trailing t.co that produced it
+  // drops out of the text — the way it does in a timeline.
+  if (card) {
+    const last = runs[runs.length - 1];
+    if (last?.kind === "link" && last.url === card.url) {
+      runs.pop();
+      const tail = runs[runs.length - 1];
+      if (tail?.kind === "text") {
+        tail.text = tail.text.replace(/\s+$/, "");
+        if (!tail.text) {
+          runs.pop();
+        }
+      }
+    }
+  }
   // A preview is by definition cut off, so the text trails an ellipsis.
   if (partial && runs.length > 0) {
     const last = runs[runs.length - 1];
@@ -247,11 +329,15 @@ function snapshotCore(fallbackId: string, v: Payload): QuotedTweetSnapshot | nul
       name: str(user.name) ?? "Unknown",
       handle,
       avatarUrl: str(user.profile_image_url_https),
+      verified: user.is_blue_verified === true || user.verified === true,
     },
     createdAt: str(v.created_at),
     runs,
     partial,
     media: mediaItems(v),
+    ...(card ? { card } : {}),
+    replies: num(v.conversation_count),
+    likes: num(v.favorite_count),
   };
 }
 
