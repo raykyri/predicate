@@ -136,6 +136,7 @@ export interface UseQmuxEventsHandlers {
   onTerminalTitleChanged?: (paneId: string, title: string) => void;
   onResearchChanged?: (event: QmuxEvent) => void;
   onUserNotificationRequested?: (event: QmuxEvent) => void;
+  onNotificationLogChanged?: (event: QmuxEvent) => void;
   onNotificationOpenPane?: (paneId: string) => void;
 }
 
@@ -192,6 +193,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onTerminalTitleChanged,
     onResearchChanged,
     onUserNotificationRequested,
+    onNotificationLogChanged,
     onNotificationOpenPane,
   } = handlers;
 
@@ -240,6 +242,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       }
       if (event.type === "app.notification_requested") {
         onUserNotificationRequested?.(event);
+      }
+      if (event.type === "app.notification_log_changed") {
+        onNotificationLogChanged?.(event);
       }
       if (event.type === "app.notification_open_pane" && event.paneId) {
         onNotificationOpenPane?.(event.paneId);

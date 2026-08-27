@@ -42,10 +42,15 @@ export const MOCKUP_CSS = `
   --status-active-border: rgba(215, 168, 79, 0.42);
   --status-pending-fg: #7f8884;
   --status-warning-fg: #d8b878;
+  --status-info-fg: #6da7ec;
+  --status-info-bg: rgba(109, 167, 236, 0.08);
   --status-success-fg: #81c784;
   --status-attention-fg: #e0796d;
   --pane-status-active-dot: #5fb89f;
   --danger-fg-strong: #ffb4a3;
+  --danger-bg: #2c1a17;
+  --danger-bg-hover: #3a221d;
+  --danger-border: #7a3b34;
   --split-border-active: rgba(255, 220, 143, 0.78);
 
   --surface-border-subtle: rgba(255, 255, 255, 0.075);
@@ -1377,7 +1382,7 @@ export const MOCKUP_CSS = `
 }
 
 /* ------------------------------------------------------------------ */
-/* The four panels the header opens. Each ships hidden; the script only flips
+/* The five panels the header opens. Each ships hidden; the script only flips
    the hidden attribute and the button's pressed state. */
 .app-mockup [data-mock-panel][hidden] {
   display: none;
@@ -1385,7 +1390,8 @@ export const MOCKUP_CSS = `
 
 /* Prompt library (turn-pane.css). Anchored under its trigger rather than
    portaled — inside the replica there is nothing to escape. */
-.app-mockup .prompt-library-menu {
+.app-mockup .prompt-library-menu,
+.app-mockup .notification-journal-menu {
   position: absolute;
   top: 46px;
   right: 10px;
@@ -1405,6 +1411,168 @@ export const MOCKUP_CSS = `
   opacity: 1;
   isolation: isolate;
   box-shadow: var(--popover-shadow);
+}
+
+.app-mockup .notification-journal-menu {
+  width: min(340px, calc(100% - 20px));
+  gap: 8px;
+}
+
+.app-mockup .notification-journal {
+  position: relative;
+  display: flex;
+}
+
+.app-mockup .notification-journal .turn-pane-header-button {
+  position: relative;
+}
+
+.app-mockup .notification-journal-unread-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-info-fg);
+  pointer-events: none;
+}
+
+.app-mockup .notification-journal-unread-dot[hidden] {
+  display: none;
+}
+
+.app-mockup .notification-journal-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.app-mockup .notification-journal-toggle {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 2px 4px 2px 2px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.app-mockup.is-interactive .notification-journal-toggle:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+.app-mockup .notification-journal-toggle.is-off .home-group-checkbox {
+  border-color: var(--surface-border-default);
+  background: transparent;
+  color: transparent;
+}
+
+.app-mockup .notification-journal-mark-all {
+  flex: none;
+  min-height: 0;
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+}
+
+.app-mockup .notification-journal-mark-all:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.app-mockup .notification-journal-feed {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.app-mockup .notification-journal-empty {
+  margin: 12px 4px;
+  color: var(--text-subtle);
+  font-size: var(--fs-sm);
+}
+
+.app-mockup .notification-journal-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-divider);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.app-mockup .notification-journal-item.is-unread {
+  border-color: color-mix(in srgb, var(--status-info-fg) 40%, var(--surface-divider));
+  background: var(--status-info-bg);
+}
+
+.app-mockup .notification-journal-item-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.app-mockup .notification-journal-item-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-info-fg);
+}
+
+.app-mockup .notification-journal-item-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mockup .notification-journal-item-time {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 450;
+}
+
+.app-mockup .notification-journal-item-body {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+}
+
+.app-mockup .notification-journal-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.app-mockup .notification-journal-item-actions .control-button {
+  min-height: 0;
+  padding: 3px 8px;
+  font-size: var(--fs-xs);
+}
+
+.app-mockup .notification-journal-clear {
+  margin-left: auto;
 }
 
 .app-mockup .prompt-library-search {
@@ -1888,6 +2056,43 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   justify-content: center;
   padding: 18px;
   background: rgba(8, 10, 12, 0.58);
+}
+
+.app-mockup .confirm-dialog-backdrop[hidden] {
+  display: none;
+}
+
+.app-mockup .confirm-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(440px, 100%);
+  gap: 10px;
+  border: 1px solid var(--dialog-border);
+  border-radius: 10px;
+  background: var(--content-card-bg);
+  box-shadow: var(--dialog-shadow);
+  padding: 16px;
+}
+
+.app-mockup .confirm-dialog p {
+  margin: 0;
+  font-size: var(--fs-base);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.app-mockup .confirm-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.app-mockup .confirm-dialog-actions .control-button {
+  min-height: var(--control-h-md);
+  padding: 0 12px;
+  font-size: var(--fs-base);
 }
 
 .app-mockup .confirm-dialog-backdrop.terminal-map-backdrop {
@@ -4022,7 +4227,8 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 @container mockup (max-width: 36rem) {
   /* The session id is the header's most useful text; drop the secondary
      controls before letting it truncate to nothing. */
-  .app-mockup .turn-pane-header-controls > .turn-pane-header-button:nth-child(-n + 3) {
+  .app-mockup .turn-pane-header-controls > .turn-pane-header-button:nth-child(-n + 4),
+  .app-mockup .turn-pane-header-controls > .notification-journal {
     display: none;
   }
 }

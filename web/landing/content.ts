@@ -64,6 +64,10 @@ export const FEATURES: Feature[] = [
     copy: "Reuse Markdown prompts globally or per project.",
   },
   {
+    name: "Journal",
+    copy: "A feed of current and past notifications, with unread marks and overlay toasts you can mute.",
+  },
+  {
     name: "Research trees",
     copy: "Explore questions in branching research trees and publish browsable results.",
   },

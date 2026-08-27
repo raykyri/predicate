@@ -1416,14 +1416,40 @@ export const TERMINAL_BLOCKS = MOCK_SESSIONS[DEFAULT_SESSION_ID].terminalBlocks;
 export const AGENT_TURN = MOCK_SESSIONS[DEFAULT_SESSION_ID].agentTurn;
 export const USER_TURN = MOCK_SESSIONS[DEFAULT_SESSION_ID].userTurn;
 
-// The prompt library's saved prompts, the artifacts the default qmux agent
-// opened, and the address the browser overlay is previewing.
+// The prompt library's saved prompts, the notification journal's feed, the
+// artifacts the default qmux agent opened, and the address the browser overlay
+// is previewing.
 export const SAVED_PROMPTS = [
   "Review the diff for correctness bugs only. Skip style.",
   "Read the existing implementation first, and say what it already handles.",
   "Write the failing test first, then make it pass.",
   "Summarise what changed and what is still unmerged.",
   "Run the failing directory only, and report each failure with the command to reproduce it.",
+];
+
+export interface MockNotification {
+  id: string;
+  title: string;
+  body: string;
+  age: string;
+  unread: boolean;
+}
+
+export const MOCK_NOTIFICATIONS: MockNotification[] = [
+  {
+    id: "ci-main",
+    title: "qmux",
+    body: "CI finished on main.",
+    age: "2s",
+    unread: true,
+  },
+  {
+    id: "draft-published",
+    title: "research-agent",
+    body: "Published the draft.",
+    age: "1h",
+    unread: false,
+  },
 ];
 
 export interface MockArtifact {

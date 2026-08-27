@@ -4,6 +4,7 @@ use crate::state::{
     ArtifactInfo, GlobalDraft, PaneInfo, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
 };
 use crate::thread_graph::ThreadRecord;
+use crate::user_notifications::NotificationLog;
 use crate::workspace::{AgentInfo, GroupInfo};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -128,6 +129,10 @@ pub struct PersistedState {
     /// dropped-if-empty so older state files round-trip byte-identically.
     #[serde(default, skip_serializing_if = "JournalState::is_empty")]
     pub journal: JournalState,
+    /// `qmux send` notification history. Optional and dropped-if-empty so
+    /// older state files round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "NotificationLog::is_empty")]
+    pub notification_log: NotificationLog,
 }
 
 impl Default for PersistedState {
@@ -154,6 +159,7 @@ impl Default for PersistedState {
             research_nodes: HashMap::new(),
             research_folders: ResearchFolderState::default(),
             journal: JournalState::default(),
+            notification_log: NotificationLog::default(),
         }
     }
 }
@@ -772,6 +778,16 @@ fn deserialize_lenient(value: Value) -> (PersistedState, Vec<String>) {
             }
         },
         None => JournalState::default(),
+    };
+    state.notification_log = match map.remove("notificationLog") {
+        Some(value) => match serde_json::from_value(value) {
+            Ok(log) => log,
+            Err(err) => {
+                dropped.push(format!("notification log: {err}"));
+                NotificationLog::default()
+            }
+        },
+        None => NotificationLog::default(),
     };
     state.active_tab_id = map
         .get("activeTabId")

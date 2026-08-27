@@ -503,6 +503,22 @@ export function fetchJournalTweet(id: string, token: string) {
   return invoke<string>("journal_fetch_tweet", { id, token });
 }
 
+export function getNotificationLog() {
+  return invoke<unknown>("notification_log_get");
+}
+
+export function markNotificationRead(id: string) {
+  return invoke<unknown>("notification_log_mark_read", { id });
+}
+
+export function markAllNotificationsRead() {
+  return invoke<unknown>("notification_log_mark_all_read");
+}
+
+export function clearNotificationLogEntry(id: string) {
+  return invoke<unknown>("notification_log_clear", { id });
+}
+
 export function getResearchTree(treeId: string) {
   return invoke<ResearchTreeDetail>("get_research_tree", { treeId });
 }

@@ -145,6 +145,10 @@ import ResearchDocument from "./components/research/ResearchDocument";
 import ExportToResearchDialog from "./components/research/ExportToResearchDialog";
 import JournalPane from "./components/research/JournalPane";
 import {
+  normalizeNotificationLog,
+  type NotificationLogEntry,
+} from "./lib/notificationLog";
+import {
   appendJournalEntry,
   classifyJournalInput,
   createJournalEntry,
@@ -520,6 +524,10 @@ import {
   getJournalState,
   setJournalState as persistJournalState,
   fetchJournalTweet,
+  getNotificationLog,
+  markNotificationRead,
+  markAllNotificationsRead,
+  clearNotificationLogEntry,
   getResearchTree,
   markAppWindowReady,
   moveQueuedAgentTurn,
@@ -2836,6 +2844,7 @@ function MainApp() {
     tone: "normal" | "warning";
   } | null>(null);
   const [userNotifications, setUserNotifications] = useState<UserNotificationItem[]>([]);
+  const [notificationLog, setNotificationLog] = useState<NotificationLogEntry[]>([]);
   const [notificationPermission, setNotificationPermission] =
     useState<NotificationPermissionInfo | null>(null);
   const [notificationPermissionBusy, setNotificationPermissionBusy] = useState(false);
@@ -7201,6 +7210,7 @@ function MainApp() {
           existingPublications,
           existingArtifacts,
           existingJournal,
+          existingNotificationLog,
         ] = await Promise.all([
           getRuntimeConfig(),
           getLauncherAdapterPreference().catch(() => null),
@@ -7215,6 +7225,7 @@ function MainApp() {
           listPublications().catch((): PublicationBinding[] => []),
           artifactList().catch((): ArtifactInfo[] => []),
           getJournalState().catch((): unknown => null),
+          getNotificationLog().catch((): unknown => null),
         ]);
         if (cancelled) {
           return;
@@ -7265,6 +7276,7 @@ function MainApp() {
         const bootJournal = normalizeJournalState(existingJournal);
         journalRef.current = bootJournal;
         setJournal(bootJournal);
+        setNotificationLog(normalizeNotificationLog(existingNotificationLog));
         setPublicationBindings(existingPublications);
         void hydrateSecondaryFast(existingAgents);
         const savedResearchTreeId = localStorage.getItem(ACTIVE_RESEARCH_TREE_KEY);
@@ -9647,7 +9659,7 @@ function MainApp() {
   }, []);
 
   const handleUserNotificationRequested = useCallback((event: QmuxEvent) => {
-    const { id, title, body, tone, timeoutMs, sound } = event.payload;
+    const { id, title, body, tone, timeoutMs, sound, createdAt } = event.payload;
     if (
       typeof id !== "string" ||
       typeof title !== "string" ||
@@ -9655,6 +9667,9 @@ function MainApp() {
       typeof timeoutMs !== "number" ||
       !Number.isFinite(timeoutMs)
     ) {
+      return;
+    }
+    if (!settingsRef.current.showNotifications) {
       return;
     }
     const normalizedTone: UserNotificationTone =
@@ -9669,13 +9684,20 @@ function MainApp() {
           tone: normalizedTone,
           timeoutMs: Math.min(30_000, Math.max(1_000, timeoutMs)),
           paneId: event.paneId ?? null,
-          createdAt: Date.now(),
+          createdAt:
+            typeof createdAt === "number" && Number.isFinite(createdAt)
+              ? createdAt
+              : Date.now(),
         },
       ].slice(-20),
     );
     if (sound === true) {
       void playCompletionSound(settingsRef.current.completionSound).catch(() => undefined);
     }
+  }, []);
+
+  const handleNotificationLogChanged = useCallback((event: QmuxEvent) => {
+    setNotificationLog(normalizeNotificationLog(event.payload));
   }, []);
 
   const notificationOpenPaneRef = useRef<(paneId: string) => void>(() => undefined);
@@ -9693,6 +9715,19 @@ function MainApp() {
       current.filter((notification) => notification.id !== id),
     );
   }, []);
+  const adoptNotificationLog = useCallback((value: unknown) => {
+    setNotificationLog(normalizeNotificationLog(value));
+  }, []);
+  const handleMarkNotificationRead = useCallback((id: string) => {
+    void markNotificationRead(id).then(adoptNotificationLog).catch(() => undefined);
+  }, [adoptNotificationLog]);
+  const handleMarkAllNotificationsRead = useCallback(() => {
+    void markAllNotificationsRead().then(adoptNotificationLog).catch(() => undefined);
+  }, [adoptNotificationLog]);
+  const handleClearNotification = useCallback((id: string) => {
+    dismissUserNotification(id);
+    void clearNotificationLogEntry(id).then(adoptNotificationLog).catch(() => undefined);
+  }, [adoptNotificationLog, dismissUserNotification]);
 
   useQmuxEvents({
     appendHookEvent,
@@ -9746,6 +9781,7 @@ function MainApp() {
     onTerminalTitleChanged: handleTerminalTitleChange,
     onResearchChanged: handleResearchEvent,
     onUserNotificationRequested: handleUserNotificationRequested,
+    onNotificationLogChanged: handleNotificationLogChanged,
     onNotificationOpenPane: handleNotificationOpenPane,
   });
 
@@ -14137,6 +14173,15 @@ function MainApp() {
                   stickyUserMessages: !current.stickyUserMessages,
                 }))
               }
+              notificationLog={notificationLog}
+              showNotifications={settings.showNotifications}
+              onShowNotificationsChange={(show) =>
+                setSettings((current) => ({ ...current, showNotifications: show }))
+              }
+              onMarkNotificationRead={handleMarkNotificationRead}
+              onMarkAllNotificationsRead={handleMarkAllNotificationsRead}
+              onClearNotification={handleClearNotification}
+              onOpenNotificationPane={handleNotificationOpenPane}
             />
           ) : undefined
         }

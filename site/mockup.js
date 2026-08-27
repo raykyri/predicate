@@ -18,10 +18,12 @@
 //   terminal-map — opens the sidebar dashboard's modal: every pane's queue side
 //             by side, with working stream chips, per-rail composers, and rail
 //             heads that hand you to their session.
-//   panels  — the four surfaces the right pane's header opens: the prompt
-//             library, the split queue, the browser overlay, and the artifact
-//             tray. They interlock: a saved prompt lands in the composer, and
-//             opening an artifact hands it to the browser.
+//   panels  — the five surfaces the right pane's header opens: the prompt
+//             library, the notification journal, the split queue, the browser
+//             overlay, and the artifact tray. They interlock: a saved prompt
+//             lands in the composer, opening an artifact hands it to the
+//             browser, and the journal marks, mutes, and confirms-to-clear
+//             notifications.
 //   images  — opens transcript thumbnails at their original resolution in the
 //             same modal lightbox as the desktop app.
 //   menus   — opens the transcript-message and composer overflow menus. Their
@@ -1123,10 +1125,12 @@ function enhanceQmuxMockup(mockup, replayBoot) {
 
   const PANEL_LABELS = {
     "prompt-library": ["Show saved prompts", "Hide saved prompts"],
+    journal: ["Journal", "Hide the journal"],
     "queue-split": ["Split the queue out of the transcript", "Float the queue over the transcript"],
     browser: ["Show the browser", "Hide the browser"],
     artifacts: ["Show the artifact tray", "Hide the artifact tray"],
   };
+  const POPOVER_PANELS = ["prompt-library", "journal", "artifacts"];
 
   function createPanels() {
     const composerField = () => mockup.querySelector(".mock-textarea");
@@ -1184,8 +1188,12 @@ function enhanceQmuxMockup(mockup, replayBoot) {
     /** @param {string} name */
     function togglePanel(name) {
       const open = !isOpen(name);
-      if (open && (name === "prompt-library" || name === "artifacts")) {
-        setPanel(name === "prompt-library" ? "artifacts" : "prompt-library", false);
+      if (open) {
+        for (const other of POPOVER_PANELS) {
+          if (other !== name) {
+            setPanel(other, false);
+          }
+        }
       }
       setPanel(name, open);
     }
@@ -1300,6 +1308,148 @@ function enhanceQmuxMockup(mockup, replayBoot) {
       });
     }
 
+    // The journal is a feed of current and past notifications. Marking read is
+    // immediate; clearing asks first. The checkbox only mutes overlay toasts,
+    // which the replica does not render — the control still has to work.
+    const logUnread = mockup.querySelector("[data-mock-log-unread]");
+    const logEmpty = mockup.querySelector(".notification-journal-empty");
+    const logMarkAllNode = mockup.querySelector("[data-mock-log-mark-all]");
+    const logMarkAll = logMarkAllNode ? promote(logMarkAllNode, "button") : null;
+    const logShowNode = mockup.querySelector("[data-mock-log-show]");
+    const logShow = logShowNode ? promote(logShowNode, "button") : null;
+    const logConfirm = mockup.querySelector("[data-mock-log-confirm]");
+    const logConfirmMessage = mockup.querySelector("[data-mock-log-confirm-message]");
+    const logConfirmCancelNode = mockup.querySelector("[data-mock-log-confirm-cancel]");
+    const logConfirmOkNode = mockup.querySelector("[data-mock-log-confirm-ok]");
+    const logConfirmCancel = logConfirmCancelNode ? promote(logConfirmCancelNode, "button") : null;
+    const logConfirmOk = logConfirmOkNode ? promote(logConfirmOkNode, "button") : null;
+    /** @type {HTMLElement | null} */
+    let pendingClear = null;
+
+    function logItems() {
+      return /** @type {HTMLElement[]} */ (
+        [...mockup.querySelectorAll("[data-mock-log-item]")].filter(
+          (item) => item instanceof HTMLElement,
+        )
+      );
+    }
+
+    function syncJournalChrome() {
+      const unread = logItems().some((item) => item.classList.contains("is-unread"));
+      if (logUnread instanceof HTMLElement) {
+        logUnread.hidden = !unread;
+      }
+      if (logMarkAll instanceof HTMLButtonElement) {
+        logMarkAll.disabled = !unread;
+      }
+      if (logEmpty instanceof HTMLElement) {
+        logEmpty.hidden = logItems().length > 0;
+      }
+    }
+
+    /** @param {HTMLElement} item */
+    function markLogItemRead(item) {
+      item.classList.remove("is-unread");
+      item.querySelector("[data-mock-log-dot]")?.remove();
+      item.querySelector("[data-mock-log-read]")?.remove();
+      syncJournalChrome();
+    }
+
+    /** @param {boolean} open */
+    function setLogConfirmOpen(open) {
+      if (!(logConfirm instanceof HTMLElement)) {
+        return;
+      }
+      logConfirm.hidden = !open;
+      logConfirm.toggleAttribute("inert", !open);
+      if (!open) {
+        pendingClear = null;
+      }
+    }
+
+    if (logShow instanceof HTMLElement) {
+      logShow.addEventListener("click", () => {
+        const on = logShow.getAttribute("aria-checked") !== "true";
+        logShow.setAttribute("aria-checked", String(on));
+        logShow.classList.toggle("is-off", !on);
+        const check = logShow.querySelector(".lucide");
+        if (check instanceof SVGElement) {
+          check.toggleAttribute("hidden", !on);
+        }
+        announce(on ? "Overlay toasts on." : "Overlay toasts off.");
+      });
+    }
+
+    if (logMarkAll instanceof HTMLElement) {
+      logMarkAll.addEventListener("click", () => {
+        for (const item of logItems()) {
+          markLogItemRead(item);
+        }
+        announce("All notifications marked read.");
+      });
+    }
+
+    for (const node of [...mockup.querySelectorAll("[data-mock-log-read]")]) {
+      const button = promote(node, "button");
+      if (!button) {
+        continue;
+      }
+      button.addEventListener("click", () => {
+        const item = button.closest("[data-mock-log-item]");
+        if (item instanceof HTMLElement) {
+          markLogItemRead(item);
+        }
+      });
+    }
+
+    for (const node of [...mockup.querySelectorAll("[data-mock-log-open]")]) {
+      const button = promote(node, "button");
+      if (!button) {
+        continue;
+      }
+      button.addEventListener("click", () => {
+        const item = button.closest("[data-mock-log-item]");
+        if (item instanceof HTMLElement) {
+          markLogItemRead(item);
+        }
+        setPanel("journal", false);
+        announce("Opened the pane.");
+      });
+    }
+
+    for (const node of [...mockup.querySelectorAll("[data-mock-log-clear]")]) {
+      const button = promote(node, "button");
+      if (!button) {
+        continue;
+      }
+      button.addEventListener("click", () => {
+        const item = button.closest("[data-mock-log-item]");
+        if (!(item instanceof HTMLElement) || !(logConfirmMessage instanceof HTMLElement)) {
+          return;
+        }
+        const title = item.querySelector("strong")?.textContent ?? "this notification";
+        logConfirmMessage.textContent = `Clear “${title}”? This cannot be undone.`;
+        pendingClear = item;
+        setLogConfirmOpen(true);
+      });
+    }
+
+    logConfirmCancel?.addEventListener("click", () => setLogConfirmOpen(false));
+    logConfirmOk?.addEventListener("click", () => {
+      pendingClear?.remove();
+      setLogConfirmOpen(false);
+      syncJournalChrome();
+      announce("Notification cleared.");
+    });
+    if (logConfirm instanceof HTMLElement) {
+      logConfirm.addEventListener("mousedown", (event) => {
+        if (event.target === logConfirm) {
+          setLogConfirmOpen(false);
+        }
+      });
+    }
+    syncJournalChrome();
+
     // The empty state has to follow the queue, which is another feature's
     // business — so watch the stack rather than reaching into it.
     const stack = mockup.querySelector(".queued-turn-stack");
@@ -1309,9 +1459,15 @@ function enhanceQmuxMockup(mockup, replayBoot) {
 
     // A popover closes on Escape and on a click outside it.
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        setPanel("prompt-library", false);
-        setPanel("artifacts", false);
+      if (event.key !== "Escape") {
+        return;
+      }
+      if (logConfirm instanceof HTMLElement && !logConfirm.hidden) {
+        setLogConfirmOpen(false);
+        return;
+      }
+      for (const name of POPOVER_PANELS) {
+        setPanel(name, false);
       }
     });
     document.addEventListener("pointerdown", (event) => {
@@ -1319,7 +1475,10 @@ function enhanceQmuxMockup(mockup, replayBoot) {
       if (!(target instanceof Element)) {
         return;
       }
-      for (const name of ["prompt-library", "artifacts"]) {
+      if (logConfirm instanceof HTMLElement && !logConfirm.hidden) {
+        return;
+      }
+      for (const name of POPOVER_PANELS) {
         const panel = panels.get(name);
         if (!panel || panel.hidden || panel.contains(target)) {
           continue;

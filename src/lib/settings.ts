@@ -344,6 +344,8 @@ export interface AppSettings {
    * messages (before the next user/system message, or at the transcript tail).
    */
   showAssistantTimestamps: boolean;
+  /** Overlay toasts for `qmux send` notifications. The Journal still records them. */
+  showNotifications: boolean;
   /** require Command+Enter instead of bare Enter for composer submit shortcuts */
   requireCmdEnterToSend: boolean;
 }
@@ -382,6 +384,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   completionSound: DEFAULT_COMPLETION_SOUND,
   stickyUserMessages: true,
   showAssistantTimestamps: false,
+  showNotifications: true,
   requireCmdEnterToSend: true,
 };
 
@@ -598,6 +601,10 @@ export function loadSettings(): AppSettings {
       typeof parsed.showAssistantTimestamps === "boolean"
         ? parsed.showAssistantTimestamps
         : DEFAULT_SETTINGS.showAssistantTimestamps;
+    const showNotifications =
+      typeof parsed.showNotifications === "boolean"
+        ? parsed.showNotifications
+        : DEFAULT_SETTINGS.showNotifications;
     const requireCmdEnterToSend =
       typeof parsed.requireCmdEnterToSend === "boolean"
         ? parsed.requireCmdEnterToSend
@@ -644,6 +651,7 @@ export function loadSettings(): AppSettings {
       completionSound,
       stickyUserMessages,
       showAssistantTimestamps,
+      showNotifications,
       requireCmdEnterToSend,
     };
   } catch {

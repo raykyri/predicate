@@ -150,3 +150,158 @@ button.user-notification-open:hover {
   background: color-mix(in srgb, var(--text-primary) 8%, transparent);
   color: var(--text-primary);
 }
+
+.notification-journal {
+  position: relative;
+  display: flex;
+}
+
+.notification-journal .turn-pane-header-button {
+  position: relative;
+}
+
+.notification-journal-unread-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-info-fg);
+  pointer-events: none;
+}
+
+.notification-journal-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.notification-journal-toolbar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.notification-journal-toggle {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  padding: 2px 4px 2px 2px;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.notification-journal-toggle:hover {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  color: var(--text-primary);
+}
+
+.notification-journal-mark-all {
+  flex: none;
+  min-height: 0;
+  padding: 4px 8px;
+  font-size: var(--fs-xs);
+}
+
+.notification-journal-mark-all:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.notification-journal-feed {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+}
+
+.notification-journal-empty {
+  margin: 12px 4px;
+  color: var(--text-subtle);
+  font-size: var(--fs-sm);
+}
+
+.notification-journal-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-divider);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.notification-journal-item.is-unread {
+  border-color: color-mix(in srgb, var(--status-info-fg) 40%, var(--surface-divider));
+  background: var(--status-info-bg);
+}
+
+.notification-journal-item-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.notification-journal-item-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--status-info-fg);
+}
+
+.notification-journal-item-heading strong {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-journal-item-time {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 450;
+}
+
+.notification-journal-item-body {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  white-space: pre-wrap;
+}
+
+.notification-journal-item-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.notification-journal-item-actions .control-button {
+  min-height: 0;
+  padding: 3px 8px;
+  font-size: var(--fs-xs);
+}
+
+.notification-journal-clear {
+  margin-left: auto;
+}

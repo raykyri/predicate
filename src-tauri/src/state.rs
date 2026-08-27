@@ -388,6 +388,9 @@ struct Model {
     /// are opaque records here — the format lives in the frontend (see
     /// journal.rs module docs).
     journal: journal::JournalState,
+    /// Persistent feed of `qmux send` notifications. Oldest first; capped by
+    /// the notifications module. Distinct from the research Journal.
+    notification_log: crate::user_notifications::NotificationLog,
     /// Pane ids with a backend retirement worker in flight. Transient and deduplicated.
     research_retiring_panes: HashSet<String>,
     agent_turn_queues: HashMap<String, VecDeque<QueuedTurn>>,
@@ -2518,6 +2521,7 @@ impl AppState {
             // against a possibly-incomplete navigation snapshot.
             model.research_folders = persisted.research_folders;
             model.journal = persisted.journal;
+            model.notification_log = persisted.notification_log;
             let known_research_tree_ids =
                 model.research_trees.keys().cloned().collect::<HashSet<_>>();
             research::reconcile_research_folder_state(
@@ -2804,6 +2808,7 @@ impl AppState {
                 research_nodes: model.research_nodes.clone(),
                 research_folders: model.research_folders.clone(),
                 journal: model.journal.clone(),
+                notification_log: model.notification_log.clone(),
             }
         };
         persistence::save(&self.inner.config.workspace_root, &snapshot)
@@ -3753,6 +3758,96 @@ impl AppState {
         }
         self.persist();
         Ok(state)
+    }
+
+    pub fn notification_log(
+        &self,
+    ) -> Result<crate::user_notifications::NotificationLog, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model.notification_log.clone())
+    }
+
+    pub fn append_notification_log(
+        &self,
+        entry: crate::user_notifications::NotificationLogEntry,
+    ) -> Result<crate::user_notifications::NotificationLog, String> {
+        let log = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            crate::user_notifications::record_log_entry(&mut model.notification_log, entry);
+            model.notification_log.clone()
+        };
+        self.persist();
+        Ok(log)
+    }
+
+    pub fn mark_notification_read(
+        &self,
+        id: &str,
+    ) -> Result<crate::user_notifications::NotificationLog, String> {
+        let log = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if let Some(entry) = model
+                .notification_log
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id == id)
+            {
+                entry.read = true;
+            }
+            model.notification_log.clone()
+        };
+        self.persist();
+        Ok(log)
+    }
+
+    pub fn mark_all_notifications_read(
+        &self,
+    ) -> Result<crate::user_notifications::NotificationLog, String> {
+        let log = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            for entry in &mut model.notification_log.entries {
+                entry.read = true;
+            }
+            model.notification_log.clone()
+        };
+        self.persist();
+        Ok(log)
+    }
+
+    pub fn clear_notification(
+        &self,
+        id: &str,
+    ) -> Result<crate::user_notifications::NotificationLog, String> {
+        let log = {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            model
+                .notification_log
+                .entries
+                .retain(|entry| entry.id != id);
+            model.notification_log.clone()
+        };
+        self.persist();
+        Ok(log)
     }
 
     /// Replaces the stored grouping with a client-supplied one. Structural

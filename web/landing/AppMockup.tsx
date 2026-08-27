@@ -44,6 +44,7 @@ import {
   LoaderCircleIcon,
   MessageSquareTextIcon,
   Minimize2Icon,
+  NotebookIcon,
   NotebookPenIcon,
   PanelBottomCloseIcon,
   PanelBottomOpenIcon,
@@ -80,6 +81,7 @@ import {
   MOCK_HOME_DRAFTS,
   MOCK_HOME_RAILS,
   MOCK_JOURNAL_ENTRIES,
+  MOCK_NOTIFICATIONS,
   MOCK_RESEARCH_ARCHIVED,
   MOCK_RESEARCH_DOCS,
   MOCK_RESEARCH_STARRED,
@@ -1085,6 +1087,15 @@ function TurnPaneHeader() {
         >
           <BookMarkedIcon size={14} />
         </span>
+        <div className="notification-journal">
+          <span
+            className="control-button turn-pane-header-button"
+            data-mock-action="journal"
+          >
+            <NotebookIcon size={14} />
+            <span className="notification-journal-unread-dot" data-mock-log-unread />
+          </span>
+        </div>
         <span
           className="control-button turn-pane-header-button"
           data-mock-action="queue-split"
@@ -1217,6 +1228,98 @@ function PromptLibrary() {
       <p className="prompt-library-empty" hidden>
         No prompt matches.
       </p>
+    </div>
+  );
+}
+
+// Current and past `qmux send` notifications. The script marks items read,
+// mutes overlay toasts, and confirms before clearing one.
+function NotificationJournal() {
+  return (
+    <div
+      className="popover-surface notification-journal-menu"
+      data-mock-panel="journal"
+      hidden
+    >
+      <div className="notification-journal-toolbar">
+        <span
+          className="notification-journal-toggle"
+          role="checkbox"
+          aria-checked="true"
+          data-mock-log-show
+        >
+          <span className="home-group-checkbox">
+            <CheckIcon size={10} strokeWidth={3} />
+          </span>
+          Show notifications
+        </span>
+        <span className="control-button notification-journal-mark-all" data-mock-log-mark-all>
+          Mark all read
+        </span>
+      </div>
+      <div className="notification-journal-feed" role="feed" aria-label="Notifications">
+        {MOCK_NOTIFICATIONS.map((item) => (
+          <article
+            className={`notification-journal-item${item.unread ? " is-unread" : ""}`}
+            data-mock-log-item={item.id}
+            key={item.id}
+          >
+            <div className="notification-journal-item-heading">
+              {item.unread ? (
+                <span className="notification-journal-item-dot" data-mock-log-dot />
+              ) : null}
+              <strong>{item.title}</strong>
+              <time className="notification-journal-item-time">{item.age}</time>
+            </div>
+            <p className="notification-journal-item-body">{item.body}</p>
+            <div className="notification-journal-item-actions">
+              {item.id === "ci-main" ? (
+                <span className="control-button" data-mock-log-open>
+                  Open pane
+                </span>
+              ) : null}
+              {item.unread ? (
+                <span className="control-button" data-mock-log-read>
+                  Mark read
+                </span>
+              ) : null}
+              <span
+                className="control-button notification-journal-clear"
+                data-mock-log-clear
+                aria-label={`Clear ${item.title}`}
+              >
+                <XIcon size={13} />
+                Clear
+              </span>
+            </div>
+          </article>
+        ))}
+        <p className="notification-journal-empty" hidden>
+          No notifications yet
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function NotificationJournalConfirm() {
+  return (
+    <div
+      className="confirm-dialog-backdrop"
+      data-mock-log-confirm
+      hidden
+    >
+      <div className="confirm-dialog" role="dialog" aria-modal="true" aria-label="Clear notification">
+        <p data-mock-log-confirm-message>Clear this notification? This cannot be undone.</p>
+        <div className="confirm-dialog-actions">
+          <span className="control-button" data-mock-log-confirm-cancel>
+            Cancel
+          </span>
+          <span className="control-button" data-mock-log-confirm-ok>
+            Clear
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1952,6 +2055,7 @@ export default function AppMockup({
             <div className="turn-sidebar has-header">
               <TurnPaneHeader />
               {features.includes("panels") ? <PromptLibrary /> : null}
+              {features.includes("panels") ? <NotificationJournal /> : null}
               <ArtifactTray />
               <Transcript stageReplay={stageReplay} sessionIds={sessionIds} />
               <Composer />
@@ -1969,6 +2073,7 @@ export default function AppMockup({
             )
           : null}
         {features.includes("terminal-map") ? <TerminalMap /> : null}
+        {features.includes("panels") ? <NotificationJournalConfirm /> : null}
         {features.includes("research-menus")
           ? Object.keys(MOCK_RESEARCH_DOCS).map((id) => <ResearchRowMenu key={id} id={id} />)
           : null}

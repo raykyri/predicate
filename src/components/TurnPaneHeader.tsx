@@ -14,8 +14,10 @@ import { createPortal } from "react-dom";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
 import PromptLibraryMenu from "./PromptLibraryMenu";
+import NotificationJournalMenu from "./NotificationJournalMenu";
 import TerminalMapButton from "./TerminalMapButton";
 import { formatRelativeTime, sessionMenuTitle } from "../lib/transcriptSessions";
+import type { NotificationLogEntry } from "../lib/notificationLog";
 import type { TranscriptOption } from "../types";
 
 // How long the "copied" toast stays up after copying the session id.
@@ -72,6 +74,13 @@ interface TurnPaneHeaderProps {
   // its home-relative display form (shown beside the Project heading).
   promptProjectDir?: string | null;
   promptProjectPath?: string | null;
+  notificationLog: NotificationLogEntry[];
+  showNotifications: boolean;
+  onShowNotificationsChange: (show: boolean) => void;
+  onMarkNotificationRead: (id: string) => void;
+  onMarkAllNotificationsRead: () => void;
+  onClearNotification: (id: string) => void;
+  onOpenNotificationPane: (paneId: string) => void;
 }
 
 type MenuPos = {
@@ -111,6 +120,13 @@ export default function TurnPaneHeader({
   promptProjectPath,
   stickyUserMessages,
   onToggleStickyUserMessages,
+  notificationLog,
+  showNotifications,
+  onShowNotificationsChange,
+  onMarkNotificationRead,
+  onMarkAllNotificationsRead,
+  onClearNotification,
+  onOpenNotificationPane,
 }: TurnPaneHeaderProps) {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   // One pulse when a new artifact lands (the count ticks up), so an agent
@@ -342,6 +358,15 @@ export default function TurnPaneHeader({
           onInsert={onInsertPrompt}
           projectDir={promptProjectDir}
           projectPath={promptProjectPath}
+        />
+        <NotificationJournalMenu
+          entries={notificationLog}
+          showNotifications={showNotifications}
+          onShowNotificationsChange={onShowNotificationsChange}
+          onMarkRead={onMarkNotificationRead}
+          onMarkAllRead={onMarkAllNotificationsRead}
+          onClear={onClearNotification}
+          onOpenPane={onOpenNotificationPane}
         />
         <button
           type="button"

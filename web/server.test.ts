@@ -1007,6 +1007,10 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.doesNotMatch(body, /<strong>Git worktrees<\/strong>/);
   // The prompt library is a shipped feature again, so it belongs in the list.
   assert.match(body, /<strong>Prompt library<\/strong>/);
+  assert.match(body, /<strong>Journal<\/strong>/);
+  assert.ok(
+    body.indexOf("<strong>Journal</strong>") > body.indexOf("<strong>Prompt library</strong>"),
+  );
   assert.doesNotMatch(body, /<strong>Browser overlay<\/strong>/);
   // The FAQ and footer brand mark have been removed completely.
   assert.doesNotMatch(body, /href="#faq-title"/);
@@ -1067,6 +1071,12 @@ test("the landing page renders the app replica and its own image policy", async 
   // Header panels are rendered in the markup rather than being built at runtime;
   // the artifact tray is the initial view, while transient popovers start closed.
   assert.match(body, /data-mock-panel="prompt-library" hidden/);
+  assert.match(body, /data-mock-action="journal"/);
+  assert.match(body, /data-mock-panel="journal" hidden/);
+  assert.equal((body.match(/data-mock-panel="journal" hidden/g) ?? []).length, 2);
+  assert.match(body, /Show notifications/);
+  assert.match(body, /Mark all read/);
+  assert.match(body, /CI finished on main/);
   assert.match(body, /data-mock-panel="artifacts"/);
   assert.doesNotMatch(body, /data-mock-panel="artifacts" hidden/);
   assert.match(body, /data-mock-panel="browser" hidden/);
