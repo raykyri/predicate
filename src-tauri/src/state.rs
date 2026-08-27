@@ -1,6 +1,7 @@
 use crate::adapters::MessageAnchor;
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
+use crate::journal;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
 use crate::research::{
     self, CreateResearchDocumentRequest, CreateResearchTreeRequest, ResearchBranchRemoval,
@@ -383,6 +384,10 @@ struct Model {
     /// never drift; reconciled against the live tree set at load and scrubbed
     /// when a tree is removed.
     research_folders: research::ResearchFolderState,
+    /// Client-authored journal feed (notes, links, hydrated tweets). Entries
+    /// are opaque records here — the format lives in the frontend (see
+    /// journal.rs module docs).
+    journal: journal::JournalState,
     /// Pane ids with a backend retirement worker in flight. Transient and deduplicated.
     research_retiring_panes: HashSet<String>,
     agent_turn_queues: HashMap<String, VecDeque<QueuedTurn>>,
@@ -2512,6 +2517,7 @@ impl AppState {
             // was off (deleted elsewhere) drop here instead of on every refresh
             // against a possibly-incomplete navigation snapshot.
             model.research_folders = persisted.research_folders;
+            model.journal = persisted.journal;
             let known_research_tree_ids =
                 model.research_trees.keys().cloned().collect::<HashSet<_>>();
             research::reconcile_research_folder_state(
@@ -2797,6 +2803,7 @@ impl AppState {
                 research_tree_order: ordered_research_tree_ids(&model),
                 research_nodes: model.research_nodes.clone(),
                 research_folders: model.research_folders.clone(),
+                journal: model.journal.clone(),
             }
         };
         persistence::save(&self.inner.config.workspace_root, &snapshot)
@@ -3713,6 +3720,39 @@ impl AppState {
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
         Ok(model.research_folders.clone())
+    }
+
+    pub fn journal(&self) -> Result<journal::JournalState, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model.journal.clone())
+    }
+
+    /// Replaces the stored journal with a client-supplied one, mirroring
+    /// `set_research_folders`: structural normalization only (the frontend
+    /// owns the entry format), last write wins, and the frontend adopts the
+    /// normalized state returned.
+    pub fn set_journal(
+        &self,
+        mut state: journal::JournalState,
+    ) -> Result<journal::JournalState, String> {
+        journal::normalize_journal_state(&mut state);
+        {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            if model.journal == state {
+                return Ok(state);
+            }
+            model.journal = state.clone();
+        }
+        self.persist();
+        Ok(state)
     }
 
     /// Replaces the stored grouping with a client-supplied one. Structural

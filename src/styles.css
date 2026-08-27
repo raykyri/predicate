@@ -4,6 +4,7 @@
 @import "./styles/base.css" layer(base);
 @import "./styles/primitives.css" layer(primitives);
 @import "./styles/features/research.css" layer(features);
+@import "./styles/features/journal.css" layer(features);
 @import "./styles/features/shell.css" layer(features);
 @import "./styles/features/terminal.css" layer(features);
 @import "./styles/features/turn-pane.css" layer(features);
