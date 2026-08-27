@@ -225,8 +225,8 @@
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
-  /* Clear the top-right control column (X mark + hover menu trigger). */
-  padding-right: 48px;
+  /* Clear the entry's hover menu trigger in the card's top-right corner. */
+  padding-right: 22px;
 }
 
 .journal-tweet-who {
@@ -281,32 +281,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* The X mark shares the entry's top-right control column with the hover menu
-   trigger: two 20px boxes on one row, the X just left of the ⋯ so the pair
-   reads as one cluster. Positioned against the .journal-entry card. */
-.journal-tweet-x {
-  position: absolute;
-  top: 5px;
-  right: 27px;
-  display: grid;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 5px;
-  color: var(--text-subtle);
-}
-
-.journal-tweet-x svg {
-  display: block;
-  width: 15px;
-  height: 15px;
-}
-
-.journal-tweet-x:hover {
-  color: var(--text-interactive);
-  background: var(--surface-fill-hover);
 }
 
 .journal-tweet-reply {
@@ -448,22 +422,8 @@
 
 /* — Sidebar tab above the Research heading — */
 
-.journal-sidebar-tab {
-  display: flex;
-  flex-direction: column;
-  margin-bottom: 8px;
-}
-
+/* The tab is an ordinary research row (same nesting, same metrics); it only
+   needs the gap that separates it from the Research heading below. */
 .journal-sidebar-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 2px 6px;
-  cursor: default;
-}
-
-.journal-sidebar-row svg {
-  flex: none;
-  opacity: 0.75;
+  margin-bottom: 8px;
 }

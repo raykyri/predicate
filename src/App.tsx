@@ -8134,10 +8134,22 @@ function MainApp() {
   // left standing (the journal outranks the document in the stage selector),
   // so closing the journal by picking a tree is a plain selection.
   const openJournal = useCallback(() => {
+    // The Journal is a peer page of a research document, not an overlay on one:
+    // opening it drops the tree selection the way Home does, so the sidebar
+    // never shows a selected row behind the tab that is actually forward.
+    researchDetailRequestSeqRef.current += 1;
     dismissPristineNewDocumentComposer();
     setSidebarMode("research");
     setActiveSurface("research");
     setResearchMultiSelectIds([]);
+    activeResearchPaneIdRef.current = null;
+    setActiveResearchPaneId(null);
+    localStorage.removeItem(ACTIVE_RESEARCH_PANE_KEY);
+    activeResearchTreeIdRef.current = null;
+    setActiveResearchTreeId(null);
+    setActiveResearchDetail(null);
+    setActiveResearchDetailError(null);
+    localStorage.removeItem(ACTIVE_RESEARCH_TREE_KEY);
     setJournalOpen(true);
   }, [dismissPristineNewDocumentComposer, setActiveSurface, setJournalOpen, setSidebarMode]);
   // In-flight tweet hydrations by entry id, so a re-render or a second
@@ -14536,18 +14548,32 @@ function MainApp() {
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
           aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
         >
+          {/* The Journal tab uses the same row/select/copy nesting every
+              research row uses, so it inherits the list's metrics rather than
+              restating them. */}
           {sidebarMode === "research" ? (
-            <div className="journal-sidebar-tab" role="group" aria-label="Journal">
+            <div
+              className={`research-sidebar-row journal-sidebar-row${
+                researchStageView === "journal" ? " is-selected" : ""
+              }`}
+            >
               <button
                 type="button"
-                className={`research-sidebar-row journal-sidebar-row${
-                  researchStageView === "journal" ? " is-selected" : ""
-                }`}
+                className="control-button research-sidebar-select"
                 aria-current={researchStageView === "journal" ? "page" : undefined}
+                title="Journal"
                 onClick={openJournal}
               >
-                <NotebookPen size={12} aria-hidden="true" />
-                <span className="research-sidebar-title-text">Journal</span>
+                <span className="research-sidebar-copy">
+                  <span className="research-sidebar-title">
+                    <NotebookPen
+                      className="research-sidebar-doc-icon"
+                      size={12}
+                      aria-hidden="true"
+                    />
+                    <span className="research-sidebar-title-text">Journal</span>
+                  </span>
+                </span>
               </button>
             </div>
           ) : null}
