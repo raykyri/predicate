@@ -1005,7 +1005,8 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.doesNotMatch(body, /<strong>First-class agents<\/strong>/);
   assert.doesNotMatch(body, /<strong>Vertical splittable tabs<\/strong>/);
   assert.doesNotMatch(body, /<strong>Git worktrees<\/strong>/);
-  assert.doesNotMatch(body, /<strong>Prompt library<\/strong>/);
+  // The prompt library is a shipped feature again, so it belongs in the list.
+  assert.match(body, /<strong>Prompt library<\/strong>/);
   assert.doesNotMatch(body, /<strong>Browser overlay<\/strong>/);
   // The FAQ and footer brand mark have been removed completely.
   assert.doesNotMatch(body, /href="#faq-title"/);
@@ -1029,12 +1030,15 @@ test("the landing page renders the app replica and its own image policy", async 
   // Every visible sidebar tab ships a complete terminal/transcript pair in
   // each replica. The defaults are visible without JavaScript and the
   // enhancement swaps the rest independently.
-  assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 28);
-  assert.equal((body.match(/data-mock-session-view=/g) ?? []).length, 56);
+  // Three replicas list all fourteen tabs; the research replica ships only the
+  // default session's terminal/transcript pair, because its mode toggle is what
+  // it demonstrates rather than session switching.
+  assert.equal((body.match(/data-mock-session-tab=/g) ?? []).length, 42);
+  assert.equal((body.match(/data-mock-session-view=/g) ?? []).length, 58);
   assert.ok((body.match(/class="mock-terminal-block"/g) ?? []).length >= 230);
   assert.ok((body.match(/class="mock-terminal-line"/g) ?? []).length >= 860);
-  assert.equal((body.match(/data-mock-session-status="active"/g) ?? []).length, 8);
-  assert.equal((body.match(/class="turn-thinking"/g) ?? []).length, 8);
+  assert.equal((body.match(/data-mock-session-status="active"/g) ?? []).length, 12);
+  assert.equal((body.match(/class="turn-thinking"/g) ?? []).length, 9);
   assert.match(body, /data-mock-session-view="qmux-landing-transcript"/);
   assert.match(body, /data-mock-session-view="porffor-replace-all" hidden/);
   assert.match(body, /data-mock-session-view="nanochat-tokenizer" hidden/);
@@ -1050,7 +1054,7 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="turn-image"/);
   assert.match(body, /src="\/qmux\.png"/);
   assert.match(body, /alt="The qmux desktop interface"/);
-  assert.equal((body.match(/data-mock-image-src="\/qmux\.png"/g) ?? []).length, 2);
+  assert.equal((body.match(/data-mock-image-src="\/qmux\.png"/g) ?? []).length, 3);
   assert.equal((body.match(/data-mock-image-lightbox="true"/g) ?? []).length, 2);
   assert.match(body, /class="mock-image-lightbox-img"[^>]*width="2704" height="1704"/);
   assert.doesNotMatch(body, /qmux desktop layout reference/);
@@ -1101,6 +1105,62 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /<span>Join with terminal below<\/span>/);
   assert.match(body, /<span>Detach from split<\/span>/);
   assert.doesNotMatch(body, /<span>Split terminal<\/span>/);
+  // The third replica opens in research mode: the sidebar's second list, the
+  // Journal tab above it, and the stage behind them all ship server-rendered,
+  // so the mode is complete before any script runs.
+  assert.match(body, /data-mock-features="research journal research-menus"/);
+  assert.match(body, /class="app-shell has-turn-sidebar is-research-mode"/);
+  assert.match(body, /class="sidebar is-code-mode is-research-mode"/);
+  assert.match(body, /data-mock-sidebar-list="terminal" hidden/);
+  assert.match(body, /data-mock-sidebar-list="research"/);
+  assert.match(body, /data-mock-mode="terminal"/);
+  assert.match(body, /data-mock-mode="research"/);
+  assert.equal((body.match(/data-mock-research-row=/g) ?? []).length, 9);
+  assert.equal((body.match(/data-mock-research-doc=/g) ?? []).length, 9);
+  assert.match(body, /data-mock-research-row="journal" data-mock-research-title="Journal"/);
+  assert.match(body, /class="research-sidebar-starred"/);
+  assert.match(body, /class="research-sidebar-folder is-collapsed"/);
+  assert.match(body, /class="research-sidebar-unseen">New</);
+  assert.match(body, /class="research-sidebar-spinner"/);
+  assert.match(body, /class="research-sidebar-row is-archived"/);
+  // The open document: breadcrumb, question bubble, the two marked passages,
+  // an anchored follow-up card, and the thread composer.
+  assert.match(body, /data-mock-research-doc="scrollback-reflow"(?! hidden)/);
+  assert.match(body, /data-mock-research-doc="journal" hidden/);
+  assert.match(body, /class="research-breadcrumb" aria-label="Research path"/);
+  assert.match(body, /class="research-prompt"/);
+  assert.match(body, /class="mock-research-mark is-saved"/);
+  assert.match(body, /class="mock-research-mark is-anchor"/);
+  assert.match(body, /class="control-button research-followup-card is-anchored" style="top:96px"/);
+  assert.match(body, /class="research-followup-unread"/);
+  assert.match(body, /Continue thread/);
+  assert.match(body, /Ask a follow-up/);
+  // A run still streaming carries its segment's own terminal and cancel
+  // controls, and the sidebar spinner that goes with them.
+  assert.match(body, /class="control-button research-segment-action">Cancel</);
+  // The Journal is reachable from the same replica: a composer, an undo bar
+  // that ships closed, and a feed holding a note, a link, and a tweet.
+  assert.match(body, /data-mock-journal-input/);
+  assert.match(body, /Add a note or paste a URL/);
+  assert.match(body, /data-mock-journal-undo="true" hidden/);
+  assert.equal((body.match(/data-mock-journal-entry=/g) ?? []).length, 3);
+  assert.match(body, /class="journal-entry is-note"/);
+  assert.match(body, /class="journal-entry is-link"/);
+  assert.match(body, /class="journal-entry is-tweet"/);
+  assert.match(body, /class="journal-tweet-handle">@terminalnotes</);
+  assert.match(body, /class="journal-tweet-quote"/);
+  assert.match(body, /class="journal-tweet-avatar journal-tweet-avatar-fallback"/);
+  // The replica fetches nothing from anyone else's host, tweet media included.
+  assert.equal((body.match(/src="https?:\/\//g) ?? []).length, 0);
+  // Both menu families ship closed, carrying the app's own keycaps.
+  assert.equal((body.match(/data-mock-research-menu=/g) ?? []).length, 8);
+  assert.equal((body.match(/data-mock-journal-menu=/g) ?? []).length, 3);
+  assert.match(body, /data-mock-research-menu="scrollback-reflow"[^>]*hidden/);
+  assert.match(body, /data-mock-journal-menu="journal-embed-tweet"[^>]*hidden/);
+  assert.match(body, /<kbd class="context-menu-shortcut is-keycap">A<\/kbd>/);
+  assert.match(body, /<kbd class="context-menu-shortcut is-keycap">D<\/kbd>/);
+  assert.match(body, /<span>Open on X<\/span>/);
+  assert.match(body, /data-mock-journal-delete/);
   // Four miniature feature replicas sit below the window replica in the hero,
   // each an inert illustration captioned like a feature card.
   assert.equal((body.match(/class="mini-mockup"/g) ?? []).length, 4);
@@ -1154,6 +1214,9 @@ test("the landing page's enhancement script is served as JavaScript", async (t) 
   assert.match(body, /querySelectorAll\("\.app-mockup"\)/);
   assert.match(body, /for \(const mockup of mockups\)/);
   assert.match(body, /createImageLightbox/);
+  assert.match(body, /createResearch/);
+  assert.match(body, /createJournal/);
+  assert.match(body, /createResearchMenus/);
 
   const bootResponse = await fetch(`http://127.0.0.1:${address.port}/mockup-boot.js`);
   const bootBody = await bootResponse.text();

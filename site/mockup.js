@@ -30,6 +30,17 @@
 //   sidebar-menus — the sidebar's right-click menus: a tab's details menu and
 //             the group menu behind the … button. Only the collapse item does
 //             work; the rest dismiss, like every other menu here.
+//   research — the sidebar's Terminal/Research toggle and the half of the window
+//             behind it: switching modes swaps the sidebar's list and the stage,
+//             selecting a research row opens that document, and a folder expands
+//             and collapses in place.
+//   journal — the Journal tab's feed. Its composer adds entries for real, an
+//             entry's menu deletes one, and the undo bar puts it back. Nothing
+//             is hydrated here, so a pasted URL lands as a link card; the
+//             embedded tweets are the ones the fixture shipped.
+//   research-menus — the research sidebar's right-click menus, one per row,
+//             carrying the app's A and D keycaps. Their items dismiss, like
+//             every other menu here.
 //
 // Each is independent: `data-mock-features` on the replica selects which ones
 // run, and any that is dropped leaves the rendered finished state in place.
@@ -348,6 +359,50 @@ function enhanceQmuxMockup(mockup, replayBoot) {
     }
     node.replaceWith(replacement);
     return replacement;
+  }
+
+  /**
+   * Positions a portaled context menu at coordinates already relative to the
+   * replica, then clamps it inside — the app's clampContextMenuToViewport,
+   * against the window rather than the page.
+   * @param {HTMLElement} menu
+   * @param {number} x
+   * @param {number} y
+   */
+  function placeContextMenu(menu, x, y) {
+    menu.hidden = false;
+    menu.style.left = `${Math.max(8, Math.min(x, mockup.clientWidth - menu.offsetWidth - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, mockup.clientHeight - menu.offsetHeight - 8))}px`;
+  }
+
+  /**
+   * Pointer coordinates relative to the replica, which is what every menu here
+   * is positioned against.
+   * @param {MouseEvent} event
+   */
+  function pointerInMockup(event) {
+    const rect = mockup.getBoundingClientRect();
+    return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  }
+
+  /**
+   * The open menu's item whose single-letter keycap matches a pressed key, if
+   * any. Menus that display keycaps honor them while open; what the item then
+   * does is the caller's decision, same as a click on it.
+   * @param {HTMLElement} menu
+   * @param {string} key
+   */
+  function keycapItem(menu, key) {
+    if (key.length !== 1) {
+      return null;
+    }
+    for (const item of menu.querySelectorAll("[data-mock-context-item]")) {
+      const cap = item.querySelector("kbd");
+      if (cap && cap.textContent && cap.textContent.trim().toLowerCase() === key.toLowerCase()) {
+        return item instanceof HTMLElement ? item : null;
+      }
+    }
+    return null;
   }
 
   function createQueue() {
@@ -1870,6 +1925,643 @@ function enhanceQmuxMockup(mockup, replayBoot) {
     return {};
   }
 
+  // --------------------------------------------------------------- research
+
+  /**
+   * Research mode. Both sidebar lists and both stages ship inside the same
+   * window, so switching is a class on the shell plus a hidden flip: nothing is
+   * fetched, and a replica whose script never loads is simply whichever mode
+   * the server rendered.
+   */
+  function createResearch() {
+    const shellNode = mockup.querySelector(".app-shell");
+    const toggleNode = mockup.querySelector(".sidebar [data-mock-mode-toggle]");
+    const lists = /** @type {HTMLElement[]} */ (
+      [...mockup.querySelectorAll("[data-mock-sidebar-list]")]
+    );
+    const views = /** @type {HTMLElement[]} */ (
+      [...mockup.querySelectorAll("[data-mock-research-doc]")]
+    );
+    const rowNodes = [...mockup.querySelectorAll("[data-mock-research-row]")];
+    if (
+      !(shellNode instanceof HTMLElement) ||
+      !(toggleNode instanceof HTMLElement) ||
+      lists.length === 0 ||
+      views.length === 0 ||
+      rowNodes.length === 0
+    ) {
+      return null;
+    }
+    const shell = shellNode;
+
+    // A real tablist now that the toggle switches something. Each panel names
+    // itself rather than pointing at its tab: ids would collide between the
+    // replicas that share a page.
+    toggleNode.setAttribute("role", "tablist");
+    toggleNode.setAttribute("aria-label", "Sidebar mode");
+    for (const list of lists) {
+      list.setAttribute("role", "tabpanel");
+      list.setAttribute(
+        "aria-label",
+        list.dataset.mockSidebarList === "research" ? "Research" : "Terminal tabs",
+      );
+    }
+
+    /** @type {HTMLElement[]} */
+    const tabs = [];
+
+    /** @param {string} mode */
+    function setMode(mode) {
+      shell.classList.toggle("is-research-mode", mode === "research");
+      for (const list of lists) {
+        list.hidden = list.dataset.mockSidebarList !== mode;
+      }
+      for (const tab of tabs) {
+        const selected = tab.dataset.mockMode === mode;
+        tab.classList.toggle("is-selected", selected);
+        tab.setAttribute("aria-selected", String(selected));
+      }
+      announce(
+        mode === "research"
+          ? "Research mode: the sidebar lists research and the Journal."
+          : "Terminal mode: the sidebar lists terminals.",
+      );
+    }
+
+    for (const node of [...toggleNode.children]) {
+      const mode = node instanceof HTMLElement ? node.dataset.mockMode ?? "" : "";
+      const tab = promote(node, "button");
+      if (!tab || !mode) {
+        continue;
+      }
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(tab.classList.contains("is-selected")));
+      tab.addEventListener("click", () => setMode(mode));
+      tabs.push(tab);
+    }
+
+    /** @type {{ row: HTMLElement, button: HTMLElement }[]} */
+    const rows = [];
+
+    /** @param {HTMLElement} row */
+    function openRow(row) {
+      const id = row.dataset.mockResearchRow ?? "";
+      if (!id) {
+        return;
+      }
+      for (const entry of rows) {
+        const selected = entry.row === row;
+        entry.row.classList.toggle("is-selected", selected);
+        if (selected) {
+          entry.button.setAttribute("aria-current", "page");
+        } else {
+          entry.button.removeAttribute("aria-current");
+        }
+      }
+      for (const view of views) {
+        view.hidden = view.dataset.mockResearchDoc !== id;
+        if (!view.hidden) {
+          // A document the reader comes back to opens at its top; the app
+          // restores a remembered scroll, which a fresh selection has none of.
+          view.scrollTop = 0;
+        }
+      }
+      const title = row.dataset.mockResearchTitle || id;
+      const crumb = mockup.querySelector("[data-mock-research-crumb]");
+      if (crumb) {
+        crumb.textContent = title;
+      }
+      const threadCount = mockup.querySelector("[data-mock-research-thread-count]");
+      if (threadCount) {
+        threadCount.textContent = row.dataset.mockResearchThread || "";
+      }
+      announce(`Opened ${title}.`);
+    }
+
+    for (const node of rowNodes) {
+      if (!(node instanceof HTMLElement)) {
+        continue;
+      }
+      // An ordinary row carries its control inside; the Journal tab is one.
+      const select = node.querySelector(".research-sidebar-select");
+      const button = promote(select ?? node, "button");
+      if (!button) {
+        continue;
+      }
+      const row = select ? node : button;
+      const title = row.dataset.mockResearchTitle || row.dataset.mockResearchRow || "research";
+      button.setAttribute("aria-label", `Open ${title}`);
+      button.addEventListener("click", () => openRow(row));
+      rows.push({ row, button });
+    }
+
+    // Every folder ships its members whatever its state, so opening one is a
+    // class — the same contract the terminal sidebar's groups keep. The header
+    // is the target, and the chevron's own click bubbles into it.
+    for (const folder of [...mockup.querySelectorAll("[data-mock-research-folder]")]) {
+      const name = folder instanceof HTMLElement ? folder.dataset.mockResearchFolder ?? "" : "";
+      const collapse = promote(
+        folder.querySelector(".research-sidebar-folder-collapse"),
+        "button",
+      );
+      const header = folder.querySelector(".research-sidebar-folder-row");
+      if (!collapse || !header) {
+        continue;
+      }
+      collapse.setAttribute("aria-label", `${name} research`);
+      collapse.setAttribute("aria-expanded", String(!folder.classList.contains("is-collapsed")));
+      header.addEventListener("click", () => {
+        const collapsed = folder.classList.toggle("is-collapsed");
+        collapse.setAttribute("aria-expanded", String(!collapsed));
+        announce(`${name} research ${collapsed ? "collapsed" : "expanded"}.`);
+      });
+    }
+
+    return {};
+  }
+
+  // ---------------------------------------------------------------- journal
+
+  const ELLIPSIS_ICON =
+    '<svg class="lucide" xmlns="http://www.w3.org/2000/svg" width="13" height="13" ' +
+    'viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' +
+    '<circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>' +
+    '<circle cx="5" cy="12" r="1"/></svg>';
+
+  const JOURNAL_MENU_GAP = 4;
+
+  /**
+   * The Journal's feed. The composer adds entries for real, an entry's menu
+   * deletes one, and the undo bar puts it back — the removal is the only menu
+   * item anywhere in this file that does work, because the bar it raises is
+   * the thing worth showing. Nothing is hydrated here, so a pasted URL lands
+   * as a link card; the embedded tweets are the ones the fixture shipped.
+   */
+  function createJournal() {
+    const feedNode = mockup.querySelector(".journal-feed");
+    const fieldNode = mockup.querySelector("[data-mock-journal-input]");
+    const undoNode = mockup.querySelector("[data-mock-journal-undo]");
+    if (
+      !(feedNode instanceof HTMLElement) ||
+      !(fieldNode instanceof HTMLElement) ||
+      !(undoNode instanceof HTMLElement)
+    ) {
+      return null;
+    }
+    const feed = feedNode;
+    const undoBar = undoNode;
+    const undoLabel = undoBar.querySelector("[data-mock-journal-undo-label]");
+
+    // One menu per entry kind, captured before anything can be deleted, so a
+    // card added later carries exactly the items the app gives that kind.
+    /** @type {Map<string, HTMLElement>} */
+    const menuTemplates = new Map();
+    for (const entry of [...mockup.querySelectorAll("[data-mock-journal-entry]")]) {
+      const id = entry instanceof HTMLElement ? entry.dataset.mockJournalEntry ?? "" : "";
+      const menu = id ? mockup.querySelector(`[data-mock-journal-menu="${id}"]`) : null;
+      const kind = entry.classList.contains("is-note")
+        ? "note"
+        : entry.classList.contains("is-link")
+          ? "link"
+          : "tweet";
+      if (menu instanceof HTMLElement && !menuTemplates.has(kind)) {
+        menuTemplates.set(kind, /** @type {HTMLElement} */ (menu.cloneNode(true)));
+      }
+    }
+
+    /** @type {HTMLElement | null} */
+    let openMenu = null;
+    /** @type {HTMLElement | null} */
+    let openTrigger = null;
+    /** @type {HTMLElement | null} */
+    let openEntry = null;
+    /** @type {{ node: HTMLElement, next: Element | null } | null} */
+    let removed = null;
+    let addedCount = 0;
+
+    /** @param {boolean} refocus */
+    function closeMenu(refocus) {
+      openEntry?.classList.remove("has-open-menu");
+      if (openMenu) {
+        openMenu.hidden = true;
+      }
+      if (openTrigger) {
+        openTrigger.setAttribute("aria-expanded", "false");
+        if (refocus) {
+          openTrigger.focus();
+        }
+      }
+      openMenu = null;
+      openTrigger = null;
+      openEntry = null;
+    }
+
+    /** @param {HTMLElement} entry */
+    function menuFor(entry) {
+      const id = entry.dataset.mockJournalEntry ?? "";
+      const menu = id ? mockup.querySelector(`[data-mock-journal-menu="${id}"]`) : null;
+      return menu instanceof HTMLElement ? menu : null;
+    }
+
+    /**
+     * @param {HTMLElement} entry
+     * @param {number} x
+     * @param {number} y
+     * @param {HTMLElement | null} trigger
+     */
+    function openMenuAt(entry, x, y, trigger) {
+      const menu = menuFor(entry);
+      if (!menu) {
+        return;
+      }
+      closeMenu(false);
+      placeContextMenu(menu, x, y);
+      entry.classList.add("has-open-menu");
+      trigger?.setAttribute("aria-expanded", "true");
+      openMenu = menu;
+      openTrigger = trigger;
+      openEntry = entry;
+    }
+
+    /** @param {HTMLElement} entry */
+    function deleteEntry(entry) {
+      const note = entry.classList.contains("is-note");
+      removed = { node: entry, next: entry.nextElementSibling };
+      entry.remove();
+      if (undoLabel) {
+        undoLabel.textContent = `${note ? "Note" : "Entry"} removed`;
+      }
+      undoBar.hidden = false;
+      announce(`${note ? "Note" : "Entry"} removed. Undo is available.`);
+    }
+
+    function undoRemove() {
+      if (!removed) {
+        return;
+      }
+      if (removed.next && removed.next.parentElement === feed) {
+        feed.insertBefore(removed.node, removed.next);
+      } else {
+        feed.append(removed.node);
+      }
+      removed = null;
+      undoBar.hidden = true;
+      announce("Entry restored.");
+    }
+
+    function dismissUndo() {
+      removed = null;
+      undoBar.hidden = true;
+    }
+
+    /** @param {HTMLElement} menu */
+    function wireMenu(menu) {
+      menu.addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return;
+        }
+        const item = target.closest("[data-mock-context-item]");
+        if (!(item instanceof HTMLElement)) {
+          return;
+        }
+        // Only the removal acts; opening, copying, and refetching are the
+        // app's business, not a marketing page's.
+        const entry = openEntry;
+        const remove = item.hasAttribute("data-mock-journal-delete");
+        closeMenu(!remove);
+        if (remove && entry) {
+          deleteEntry(entry);
+        }
+      });
+      menu.addEventListener("contextmenu", (event) => event.preventDefault());
+    }
+
+    /** @param {HTMLElement} entry */
+    function wireEntry(entry) {
+      const existing = entry.querySelector(".journal-entry-menu-trigger");
+      // A server-rendered entry ships its trigger as a span; one added at
+      // runtime has none yet and gets the same control built here.
+      let menuTrigger = promote(existing, "button");
+      if (!menuTrigger) {
+        const created = document.createElement("button");
+        created.type = "button";
+        created.className = "control-button journal-entry-menu-trigger";
+        created.innerHTML = ELLIPSIS_ICON;
+        entry.append(created);
+        menuTrigger = created;
+      }
+      menuTrigger.setAttribute("aria-haspopup", "menu");
+      menuTrigger.setAttribute("aria-expanded", "false");
+      menuTrigger.setAttribute("aria-label", "Entry actions");
+      menuTrigger.setAttribute("title", "Entry actions");
+      menuTrigger.addEventListener("click", () => {
+        if (openEntry === entry) {
+          closeMenu(true);
+          return;
+        }
+        const menu = menuFor(entry);
+        if (!menu) {
+          return;
+        }
+        // Unhide before measuring: the menu is right-aligned on its trigger,
+        // which needs its width.
+        menu.hidden = false;
+        const origin = mockup.getBoundingClientRect();
+        const rect = menuTrigger.getBoundingClientRect();
+        openMenuAt(
+          entry,
+          rect.right - origin.left - menu.offsetWidth,
+          rect.bottom - origin.top + JOURNAL_MENU_GAP,
+          menuTrigger,
+        );
+      });
+      entry.addEventListener("contextmenu", (event) => {
+        if (!(event instanceof MouseEvent) || !menuFor(entry)) {
+          return;
+        }
+        // Right-clicking a link or the quote card keeps the entry menu too:
+        // the browser's own has nothing useful to offer inside the replica.
+        event.preventDefault();
+        const at = pointerInMockup(event);
+        openMenuAt(entry, at.x, at.y, null);
+      });
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.className = fieldNode.className;
+    textarea.rows = 2;
+    textarea.placeholder = fieldNode.textContent || "";
+    textarea.setAttribute("aria-label", "New journal entry (demo)");
+    fieldNode.replaceWith(textarea);
+
+    function submit() {
+      const text = textarea.value.trim();
+      if (!text) {
+        textarea.focus();
+        return;
+      }
+      const link = /^https?:\/\/\S+$/i.test(text);
+      const kind = link ? "link" : "note";
+      addedCount += 1;
+      const id = `mock-journal-${addedCount}`;
+      const entry = document.createElement("article");
+      entry.className = `journal-entry is-${kind}`;
+      entry.dataset.mockJournalEntry = id;
+      const body = document.createElement(link ? "span" : "p");
+      body.className = link ? "journal-link-url" : "journal-note-text";
+      body.textContent = text;
+      entry.append(body);
+      const template = menuTemplates.get(kind);
+      if (template) {
+        const menu = /** @type {HTMLElement} */ (template.cloneNode(true));
+        menu.dataset.mockJournalMenu = id;
+        menu.hidden = true;
+        mockup.append(menu);
+        wireMenu(menu);
+      }
+      // The feed reads newest first, so a new entry lands at the top.
+      feed.prepend(entry);
+      wireEntry(entry);
+      textarea.value = "";
+      textarea.focus();
+      announce(link ? "Link added to the journal." : "Note added to the journal.");
+    }
+
+    textarea.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.shiftKey) {
+        return;
+      }
+      event.preventDefault();
+      submit();
+    });
+
+    for (const entry of [...mockup.querySelectorAll("[data-mock-journal-entry]")]) {
+      if (entry instanceof HTMLElement) {
+        wireEntry(entry);
+      }
+    }
+    for (const menu of [...mockup.querySelectorAll("[data-mock-journal-menu]")]) {
+      if (menu instanceof HTMLElement) {
+        wireMenu(menu);
+      }
+    }
+
+    const restore = promote(undoBar.querySelector("[data-mock-journal-undo-restore]"), "button");
+    if (restore) {
+      restore.setAttribute("aria-label", "Undo the removal");
+      restore.addEventListener("click", undoRemove);
+    }
+    const dismiss = promote(undoBar.querySelector("[data-mock-journal-undo-dismiss]"), "button");
+    if (dismiss) {
+      dismiss.setAttribute("aria-label", "Dismiss undo");
+      dismiss.setAttribute("title", "Dismiss");
+      dismiss.addEventListener("click", dismissUndo);
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && openMenu) {
+        closeMenu(openTrigger !== null);
+        return;
+      }
+      // The keycaps the menu displays are live while it is open, exactly as
+      // they behave on an item's click: D removes the entry, the rest dismiss.
+      if (openMenu && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        const item = keycapItem(openMenu, event.key);
+        if (item) {
+          event.preventDefault();
+          const entry = openEntry;
+          const remove = item.hasAttribute("data-mock-journal-delete");
+          closeMenu(!remove && openTrigger !== null);
+          if (remove && entry) {
+            deleteEntry(entry);
+          }
+          return;
+        }
+      }
+      // The app restores the last removal on the platform's undo chord, and
+      // only while its bar is up.
+      if (
+        removed &&
+        (event.metaKey || event.ctrlKey) &&
+        !event.shiftKey &&
+        !event.altKey &&
+        event.key.toLowerCase() === "z"
+      ) {
+        event.preventDefault();
+        undoRemove();
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (
+        openMenu &&
+        target instanceof Element &&
+        !openMenu.contains(target) &&
+        !(openTrigger && openTrigger.contains(target))
+      ) {
+        closeMenu(false);
+      }
+    });
+
+    return {};
+  }
+
+  // --------------------------------------------------------- research-menus
+
+  /**
+   * The research sidebar's right-click menus, one per row. They carry the A and
+   * D keycaps the app shows, and — like every other menu here — their items
+   * dismiss rather than archiving or deleting anything.
+   */
+  function createResearchMenus() {
+    const listNode = mockup.querySelector('[data-mock-sidebar-list="research"]');
+    const menus = [...mockup.querySelectorAll("[data-mock-research-menu]")];
+    if (!(listNode instanceof HTMLElement) || menus.length === 0) {
+      return null;
+    }
+    const list = listNode;
+
+    /** @type {HTMLElement | null} */
+    let openMenu = null;
+    /** @type {HTMLElement | null} */
+    let openTrigger = null;
+    /** @type {Element | null} */
+    let openRow = null;
+
+    /** @param {boolean} refocus */
+    function close(refocus) {
+      openRow?.classList.remove("has-open-menu");
+      if (openMenu) {
+        openMenu.hidden = true;
+      }
+      if (openTrigger) {
+        openTrigger.setAttribute("aria-expanded", "false");
+        if (refocus) {
+          openTrigger.focus();
+        }
+      }
+      openMenu = null;
+      openTrigger = null;
+      openRow = null;
+    }
+
+    /** @param {Element} row */
+    function menuFor(row) {
+      const id = row instanceof HTMLElement ? row.dataset.mockResearchRow ?? "" : "";
+      const menu = id ? mockup.querySelector(`[data-mock-research-menu="${id}"]`) : null;
+      return menu instanceof HTMLElement ? menu : null;
+    }
+
+    /**
+     * @param {Element} row
+     * @param {number} x
+     * @param {number} y
+     * @param {HTMLElement | null} trigger
+     */
+    function open(row, x, y, trigger) {
+      const menu = menuFor(row);
+      if (!menu) {
+        return;
+      }
+      close(false);
+      placeContextMenu(menu, x, y);
+      row.classList.add("has-open-menu");
+      trigger?.setAttribute("aria-expanded", "true");
+      openMenu = menu;
+      openTrigger = trigger;
+      openRow = row;
+    }
+
+    // The Journal tab has no menu, so its right-click falls through rather than
+    // opening an empty one.
+    list.addEventListener("contextmenu", (event) => {
+      const target = event.target;
+      if (!(target instanceof Element) || !(event instanceof MouseEvent)) {
+        return;
+      }
+      const row = target.closest("[data-mock-research-row]");
+      if (!row || !menuFor(row)) {
+        return;
+      }
+      event.preventDefault();
+      const at = pointerInMockup(event);
+      open(row, at.x, at.y, null);
+    });
+
+    for (const node of [...list.querySelectorAll(".research-sidebar-menu-trigger")]) {
+      const row = node.closest("[data-mock-research-row]");
+      const trigger = promote(node, "button");
+      if (!trigger || !row || !menuFor(row)) {
+        continue;
+      }
+      trigger.setAttribute("aria-haspopup", "menu");
+      trigger.setAttribute("aria-expanded", "false");
+      trigger.setAttribute("aria-label", "Research actions");
+      trigger.setAttribute("title", "Research actions");
+      trigger.addEventListener("click", (event) => {
+        // The row's own click opens the document; the app's trigger stops
+        // propagation for the same reason.
+        event.stopPropagation();
+        if (openRow === row) {
+          close(true);
+          return;
+        }
+        const menu = menuFor(row);
+        if (!menu) {
+          return;
+        }
+        menu.hidden = false;
+        const origin = mockup.getBoundingClientRect();
+        const rect = trigger.getBoundingClientRect();
+        open(row, rect.right - origin.left - menu.offsetWidth, rect.bottom - origin.top + 2, trigger);
+      });
+    }
+
+    for (const menu of menus) {
+      menu.addEventListener("click", (event) => {
+        const target = event.target;
+        if (target instanceof Element && target.closest("[data-mock-context-item]")) {
+          close(true);
+        }
+      });
+      menu.addEventListener("contextmenu", (event) => event.preventDefault());
+    }
+
+    document.addEventListener("keydown", (event) => {
+      if (!openMenu) {
+        return;
+      }
+      if (event.key === "Escape") {
+        close(openTrigger !== null);
+        return;
+      }
+      // The A/D keycaps are live while the menu is open; like the items they
+      // sit on, they dismiss rather than archiving or deleting anything.
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && keycapItem(openMenu, event.key)) {
+        event.preventDefault();
+        close(openTrigger !== null);
+      }
+    });
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.target;
+      if (
+        openMenu &&
+        target instanceof Element &&
+        !openMenu.contains(target) &&
+        !(openTrigger && openTrigger.contains(target))
+      ) {
+        close(false);
+      }
+    });
+
+    // A scrolling list leaves the menu pointing at nothing.
+    list.addEventListener("scroll", () => close(false), { passive: true, capture: true });
+
+    return {};
+  }
+
   // ------------------------------------------------------------- bootstrap
 
   const replay = features.has("replay") ? createReplay() : null;
@@ -1882,6 +2574,9 @@ function enhanceQmuxMockup(mockup, replayBoot) {
   const images = features.has("images") ? createImageLightbox() : null;
   const menus = features.has("menus") ? createMenus() : null;
   const sidebarMenus = features.has("sidebar-menus") ? createSidebarMenus() : null;
+  const research = features.has("research") ? createResearch() : null;
+  const journal = features.has("journal") ? createJournal() : null;
+  const researchMenus = features.has("research-menus") ? createResearchMenus() : null;
   if (replayBoot) {
     replay?.prepare();
   }
@@ -1895,7 +2590,10 @@ function enhanceQmuxMockup(mockup, replayBoot) {
     !panels &&
     !images &&
     !menus &&
-    !sidebarMenus
+    !sidebarMenus &&
+    !research &&
+    !journal &&
+    !researchMenus
   ) {
     return;
   }
@@ -1907,7 +2605,9 @@ function enhanceQmuxMockup(mockup, replayBoot) {
   mockup.removeAttribute("aria-labelledby");
   hideFromAssistiveTech([
     ".mock-traffic-lights",
-    ".sidebar-mode-toggle",
+    // The mode toggle is decoration until the research feature turns it into a
+    // real tablist; hiding the container would then take its tabs with it.
+    ...(research ? [] : [".sidebar-mode-toggle"]),
     // The sidebar header's buttons are promoted to real controls (hide-sidebar
     // by panes, the terminal map by terminal-map), so the subtree as a whole
     // must stay exposed; promote() strips aria-hidden from each swap.

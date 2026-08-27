@@ -51,8 +51,11 @@ export const MOCKUP_CSS = `
   --surface-border-subtle: rgba(255, 255, 255, 0.075);
   --surface-border-default: rgba(255, 255, 255, 0.12);
   --surface-border-faint: rgba(255, 255, 255, 0.06);
+  --surface-fill-hover: rgba(255, 255, 255, 0.06);
   --sidebar-switcher-bg: rgba(0, 0, 0, 0.18);
+  --sidebar-switcher-hover-bg: rgba(255, 255, 255, 0.045);
   --sidebar-switcher-active-bg: rgba(255, 255, 255, 0.105);
+  --transition-fast: 120ms ease;
   --sidebar-group-bg: rgba(255, 255, 255, 0.013);
 
   /* green-blob (the default application theme) */
@@ -60,6 +63,7 @@ export const MOCKUP_CSS = `
   --right-pane-bg: #171b1d;
   --workspace-bg: #17191b;
   --research-workspace-bg: #151719;
+  --research-sidebar-hover-bg: #1b1f21;
   --field-bg: #111315;
   --chrome-header-bg: #14171a;
   --content-card-bg: #1d2224;
@@ -309,7 +313,10 @@ export const MOCKUP_CSS = `
   background: var(--sidebar-switcher-bg);
 }
 
-.app-mockup .sidebar-mode-toggle > span {
+/* The sidebar's own toggle becomes a real tablist once the research feature
+   runs, so every rule here has to survive the span-to-button swap. */
+.app-mockup .sidebar-mode-toggle > span,
+.app-mockup .sidebar-mode-toggle > button {
   display: flex;
   min-width: 0;
   min-height: 27px;
@@ -317,12 +324,15 @@ export const MOCKUP_CSS = `
   justify-content: center;
   gap: 6px;
   padding: 0 8px;
+  border: 0;
   border-radius: 5px;
   color: #818a85;
   font-size: 13px;
+  background: transparent;
 }
 
-.app-mockup .sidebar-mode-toggle > span.is-selected {
+.app-mockup .sidebar-mode-toggle > span.is-selected,
+.app-mockup .sidebar-mode-toggle > button.is-selected {
   color: var(--text-interactive);
   background: var(--sidebar-switcher-active-bg);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
@@ -2505,6 +2515,1095 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 }
 
 /* ------------------------------------------------------------------ */
+/* Research mode (research.css + journal.css). The sidebar's second list and
+   the stage it opens ship inside the same window as the terminal ones, so the
+   mode toggle is a class on the shell plus a hidden flip: no layout is rebuilt
+   and nothing is fetched. Without the script the replica is simply whichever
+   mode the server rendered. */
+.app-mockup .mock-sidebar-list {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-mockup .mock-sidebar-list[hidden] {
+  display: none;
+}
+
+.app-mockup .sidebar.is-research-mode {
+  gap: 0;
+}
+
+/* Keep the fixed controls where they were while the space around the research
+   list moves inside its own scroll area. */
+.app-mockup .sidebar.is-research-mode .sidebar-mode-toggle {
+  margin-bottom: 14px;
+}
+
+.app-mockup .sidebar.is-research-mode .pane-list {
+  padding-block: 14px 0;
+}
+
+/* Each mode keeps its own launchers; the shell's class picks one. */
+.app-mockup [data-mock-actions-for="research"] {
+  display: none;
+}
+
+.app-mockup .app-shell.is-research-mode [data-mock-actions-for="terminal"] {
+  display: none;
+}
+
+.app-mockup .app-shell.is-research-mode [data-mock-actions-for="research"] {
+  display: grid;
+}
+
+/* The research stage takes everything right of the sidebar: this mode has no
+   terminal and no turn pane. */
+.app-mockup .app-shell.is-research-mode {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+
+.app-mockup .app-shell.is-research-mode > .mock-terminal,
+.app-mockup .app-shell.is-research-mode > .turn-pane,
+.app-mockup .app-shell.is-research-mode > .browser-overlay {
+  display: none;
+}
+
+/* --- research sidebar --- */
+.app-mockup .journal-sidebar-tab {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  margin-bottom: 8px;
+  padding: 0 7px;
+}
+
+.app-mockup .journal-sidebar-row {
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 6px;
+}
+
+.app-mockup .journal-sidebar-row .lucide {
+  flex: none;
+  opacity: 0.75;
+}
+
+.app-mockup .research-sidebar-section {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0 7px 5px;
+  /* Reserve the scrollbar whether or not it is needed, so opening a folder
+     never shifts the list's icons sideways. */
+  scrollbar-gutter: stable;
+}
+
+.app-mockup .research-sidebar-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  padding: 0 6px;
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.app-mockup .research-sidebar-heading .control-button {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: transparent;
+}
+
+/* Starred research sits above the rest of the list; the space below it is the
+   only divider. */
+.app-mockup .research-sidebar-starred {
+  margin-bottom: 16px;
+}
+
+.app-mockup .research-sidebar-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding-right: 3px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--control-fg-muted);
+  font-size: 13px;
+  text-align: left;
+  background: transparent;
+}
+
+/* Selected mirrors the terminal sidebar's pane tabs, so the two modes read as
+   one control set. */
+.app-mockup .research-sidebar-row.is-selected {
+  color: #ffffff;
+  background: var(--control-bg-hover);
+}
+
+.app-mockup .research-sidebar-row.is-archived {
+  color: #89918d;
+}
+
+.app-mockup .research-sidebar-select {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 6px;
+  align-items: start;
+  justify-content: start;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  padding: 4px 4px 4px 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+  background: transparent;
+}
+
+.app-mockup .research-sidebar-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+/* Titles are raw prompts and often long; two clamped lines keep the list
+   scannable without capping what a row can hold. */
+.app-mockup .research-sidebar-title {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.app-mockup .research-sidebar-title-text {
+  display: -webkit-box;
+  min-width: 0;
+  overflow: hidden;
+  flex: 1;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.app-mockup .research-sidebar-doc-icon,
+.app-mockup .research-sidebar-folder-icon {
+  flex: none;
+  margin-top: 2px;
+  margin-right: 5px;
+  color: #8f9893;
+  transform: translateY(1px);
+}
+
+/* A live run reads as activity rather than a count. */
+.app-mockup .research-sidebar-spinner {
+  display: inline-grid;
+  width: 14px;
+  height: 14px;
+  align-self: center;
+  flex: none;
+  place-items: center;
+  color: var(--accent-color);
+  animation: mock-research-spin 0.9s linear infinite;
+  transform-origin: center;
+}
+
+@keyframes mock-research-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Overlaid on the row's corner rather than held in the grid, so the tag never
+   steals width from the title. */
+.app-mockup .research-sidebar-unseen {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  color: #b8cfea;
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  background: rgba(90, 130, 178, 0.16);
+}
+
+/* Overlays the row's trailing edge so the trigger never steals title width. It
+   appears on hover, which only the enhanced replica can be. */
+.app-mockup .research-sidebar-menu-trigger {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  bottom: 0;
+  z-index: 2;
+  display: none;
+  width: 22px;
+  height: 22px;
+  min-height: 0;
+  margin-block: auto;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+  background: var(--research-sidebar-hover-bg);
+}
+
+.app-mockup .research-sidebar-row.is-selected .research-sidebar-menu-trigger {
+  background: var(--control-bg-hover);
+}
+
+/* The app shows these only while the meta key is held. The replica freezes
+   that frame the way the mini-mockups freeze a menu mid-open, and yields the
+   corner as soon as the pointer arrives — where the row's menu trigger goes. */
+.app-mockup .pane-tab-shortcut-hint {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 3;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 25px;
+  min-height: 18px;
+  padding: 1px 6px;
+  transform: translateY(-50%);
+  border: 1px solid #3a4245;
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background: var(--transcript-code-bg);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  line-height: 1;
+  opacity: 0.88;
+  pointer-events: none;
+}
+
+.app-mockup .research-sidebar-row.is-selected .pane-tab-shortcut-hint {
+  border-color: #566165;
+  color: var(--text-primary);
+}
+
+/* The unseen tag and the running spinner already own the row's trailing edge.
+   The app can afford to stack a held-key hint on top of them for the moment
+   the key is down; a shot that holds that frame forever cannot. */
+.app-mockup .research-sidebar-row:has(.research-sidebar-unseen) .pane-tab-shortcut-hint,
+.app-mockup .research-sidebar-row:has(.research-sidebar-spinner) .pane-tab-shortcut-hint {
+  display: none;
+}
+
+.app-mockup .research-sidebar-folder-row {
+  color: var(--control-fg-muted);
+}
+
+.app-mockup .research-sidebar-folder-collapse {
+  display: grid;
+  width: 20px;
+  height: 22px;
+  min-height: 0;
+  flex: none;
+  place-items: center;
+  margin-left: 2px;
+  padding: 0;
+  border: 0;
+  color: var(--text-subtle);
+  background: transparent;
+}
+
+.app-mockup .research-sidebar-folder-collapse .lucide {
+  transform: rotate(90deg);
+  transform-origin: center;
+  transform-box: fill-box;
+  transition: transform var(--transition-fast);
+}
+
+.app-mockup .research-sidebar-folder.is-collapsed .research-sidebar-folder-collapse .lucide {
+  transform: rotate(0deg);
+}
+
+/* Shares the row's grid; only the tone differs. */
+.app-mockup .research-sidebar-folder-heading {
+  padding-left: 2px;
+  font-weight: 500;
+}
+
+.app-mockup .research-sidebar-folder-count {
+  flex: none;
+  margin-left: 0.25em;
+  color: #747d79;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* Members indent past the folder header's own icon. Every folder ships its
+   members whatever its state; collapsing only stops showing them, so the
+   script can open one without fetching anything. */
+.app-mockup .research-sidebar-row.is-folder-member {
+  width: calc(100% - 22px);
+  margin-left: 22px;
+}
+
+.app-mockup .research-sidebar-folder.is-collapsed .research-sidebar-row.is-folder-member {
+  display: none;
+}
+
+/* --- research document --- */
+.app-mockup .research-workspace {
+  display: none;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: #dfe3df;
+  background: var(--research-workspace-bg);
+  /* One size for the answer meta line, the follow-up cards, and the composer,
+     so the document's secondary text stays uniform. */
+  --research-meta-font-size: 13px;
+}
+
+.app-mockup .app-shell.is-research-mode > .research-workspace {
+  display: block;
+}
+
+.app-mockup .research-document {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.app-mockup .research-document-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px 18px;
+  border-bottom: 1px solid var(--surface-border-subtle);
+  background: var(--chrome-header-bg);
+}
+
+/* Browser-style back/forward, left of the breadcrumb. Link styling rather than
+   button chrome, so they read as quiet affordances beside the path. */
+.app-mockup .research-history-nav {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.app-mockup .research-history-button {
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 3px;
+  border: 0;
+  color: #aeb6b1;
+  background: transparent;
+}
+
+.app-mockup .research-history-button.is-disabled {
+  color: #4b524e;
+}
+
+.app-mockup .research-breadcrumb {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.app-mockup .research-breadcrumb > span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.app-mockup .research-breadcrumb .control-button {
+  display: block;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0 3px;
+  overflow: hidden;
+  border: 0;
+  color: #aeb6b1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: transparent;
+}
+
+.app-mockup .research-document-followup-count {
+  flex: 0 0 auto;
+  color: #78817c;
+  font-size: var(--fs-base);
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.app-mockup .research-document-scroll {
+  width: 100%;
+  min-height: 0;
+  padding: 44px clamp(24px, 5vw, 72px) 40px;
+  /* Vertical only: wide content scrolls inside its own container, so this one
+     never scrolls sideways legitimately. */
+  overflow: hidden auto;
+  overscroll-behavior: contain;
+}
+
+.app-mockup .research-document-scroll[hidden] {
+  display: none;
+}
+
+.app-mockup .research-document-content {
+  width: min(100%, 1160px);
+  min-width: 0;
+  margin: 0 auto;
+  --research-content-column-gap: clamp(28px, 4vw, 52px);
+}
+
+/* The question, kept visually distinct from the answer below it. */
+.app-mockup .research-prompt {
+  width: fit-content;
+  max-width: min(100%, 640px);
+  margin: 0 0 26px -14px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--content-card-bg);
+}
+
+.app-mockup .research-prompt > * {
+  max-width: 100%;
+}
+
+.app-mockup .research-prompt .turn-markdown {
+  color: #f0f2ef;
+  font-size: 14.5px;
+  line-height: 1.5;
+}
+
+/* The passage a targeted follow-up was asked about, above its question. */
+.app-mockup .research-prompt-quote {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 3px solid var(--accent-color);
+  color: #a6aea9;
+  font-size: 13.5px;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+/* The answer column is capped at 640px with the follow-up rail beside it. Both
+   caps are spelled literally in the app because the Tauri webview has dropped
+   var() substitution here; they stay literal so the two stay in step. */
+.app-mockup .research-response-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 640px) minmax(220px, 260px);
+  align-items: start;
+  gap: var(--research-content-column-gap);
+  min-width: 0;
+  max-width: 100%;
+}
+
+.app-mockup .research-response {
+  min-width: 0;
+  max-width: 640px;
+}
+
+.app-mockup .research-response-content-root {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 9px;
+  line-height: 1.62;
+  overflow-wrap: anywhere;
+}
+
+.app-mockup .research-response-item,
+.app-mockup .research-response-message {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+  min-width: 0;
+}
+
+.app-mockup .research-response-content-root .turn-markdown {
+  display: grid;
+  gap: 12px;
+  font-size: 14.5px;
+}
+
+.app-mockup .research-response-content-root ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+/* The app paints saved highlights and follow-up anchors with the Custom
+   Highlight API, which needs live ranges. The replica marks the runs in the
+   markup instead and uses the same two gold washes: an anchored passage sits a
+   step stronger than a plain highlight, so the passage that owns a margin card
+   reads as distinct from an ordinary one. */
+.app-mockup .mock-research-mark.is-saved {
+  background: rgba(216, 196, 95, 0.14);
+}
+
+.app-mockup .mock-research-mark.is-anchor {
+  background: rgba(216, 196, 95, 0.17);
+}
+
+.app-mockup .research-answer-meta {
+  display: flex;
+  min-height: 24px;
+  align-items: center;
+  gap: 6px 12px;
+  margin-top: 20px;
+  color: #69716d;
+  font-size: var(--research-meta-font-size);
+  line-height: 1.3;
+}
+
+.app-mockup .research-answer-menu-trigger {
+  display: inline-flex;
+  min-width: 22px;
+  min-height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: #7d8782;
+  background: transparent;
+}
+
+/* Terminal and cancel controls for a run that is still streaming. */
+.app-mockup .research-segment-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.app-mockup .research-answer-meta .research-segment-action {
+  min-height: 0;
+  padding: 1px 8px;
+  font-size: calc(var(--research-meta-font-size) - 1px);
+}
+
+/* The follow-up rail stays in the document's flow beside the answer, and is the
+   positioning context for anchored cards. */
+.app-mockup .research-followups {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 2px;
+  padding-right: 2px;
+}
+
+.app-mockup .research-followup-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.app-mockup .research-followup-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  text-align: left;
+  background: transparent;
+}
+
+/* A targeted follow-up sits beside the passage it was asked about. The app
+   resolves that offset from the live range; the replica ships the settled
+   position, because it does no layout of its own. */
+.app-mockup .research-followup-card.is-anchored {
+  position: absolute;
+  z-index: 1;
+  right: 2px;
+  left: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: 10px;
+  background: var(--content-card-bg);
+}
+
+/* An answer that settled while the reader was elsewhere, still unopened. */
+.app-mockup .research-followup-unread {
+  position: absolute;
+  top: 3px;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-color);
+}
+
+.app-mockup .research-followup-card.is-anchored .research-followup-unread {
+  top: 11px;
+  right: 11px;
+}
+
+.app-mockup .research-followup-card > strong,
+.app-mockup .research-followup-card .research-followup-preview,
+.app-mockup .research-followup-card small {
+  display: block;
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.app-mockup .research-followup-card > strong {
+  display: -webkit-box;
+  overflow: hidden;
+  color: #e6e9e5;
+  font-size: var(--research-meta-font-size);
+  font-weight: 400;
+  line-height: 1.42;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+}
+
+/* Dimmer than the question above it, so a card keeps two clear tiers rather
+   than two lines at nearly the same tone. */
+.app-mockup .research-followup-card .research-followup-preview {
+  display: -webkit-box;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #767e79;
+  font-size: var(--research-meta-font-size);
+  line-height: 1.42;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.app-mockup .research-followup-card small {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 8px;
+  color: #767e79;
+}
+
+.app-mockup .research-followup-status-spinner {
+  flex: none;
+  animation: mock-research-spin 0.9s linear infinite;
+}
+
+/* The thread composer is the conversation's next turn, so it sits at the end
+   of the thread in the answer column rather than in the rail. */
+.app-mockup .research-thread-composer-row {
+  margin-top: 30px;
+}
+
+.app-mockup .research-thread-composer-cell {
+  min-width: 0;
+  max-width: 640px;
+}
+
+.app-mockup .research-followup-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: var(--research-meta-font-size);
+}
+
+.app-mockup .research-followup-composer.is-thread {
+  position: relative;
+  padding: 10px 12px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 10px;
+  background: var(--content-card-bg);
+}
+
+.app-mockup .research-followup-mode-toggle {
+  box-sizing: border-box;
+  width: 100%;
+  margin: 0;
+}
+
+.app-mockup .research-followup-mode-toggle > span {
+  min-height: 24px;
+  padding: 0 10px;
+  font-size: 12.5px;
+}
+
+.app-mockup .research-followup-composer .mock-textarea {
+  min-height: 62px;
+}
+
+.app-mockup .research-followup-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.app-mockup .research-followup-hint-row {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.app-mockup .research-followup-composer small {
+  color: #737c77;
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+
+.app-mockup .research-followup-footer .native-input-submit-actions {
+  flex: 0 0 auto;
+}
+
+.app-mockup .research-followup-composer .native-input-submit-actions .control-button {
+  min-height: 26px;
+  padding: 0 8px;
+  font-size: 12.5px;
+}
+
+/* The research row and journal entry menus, both action-only. */
+.app-mockup .research-sidebar-menu {
+  width: min(240px, calc(100% - 16px));
+  padding: 4px;
+  user-select: none;
+}
+
+.app-mockup .journal-entry-menu {
+  width: min(180px, calc(100% - 16px));
+  padding: 4px;
+  user-select: none;
+}
+
+.app-mockup [data-mock-research-menu][hidden],
+.app-mockup [data-mock-journal-menu][hidden] {
+  display: none;
+}
+
+/* --- journal (journal.css) ---
+   A research-surface page holding a narrow, left-aligned feed. Note and link
+   cards borrow the question card's recipe; a tweet entry drops the padding so
+   the tweet card IS the entry — a feed of tweets, not tweets framed inside
+   content items. */
+.app-mockup .journal-scroll {
+  padding: 28px clamp(20px, 4vw, 48px) 48px;
+}
+
+.app-mockup .journal-column {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(100%, 380px);
+}
+
+.app-mockup .journal-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.app-mockup .journal-composer-input {
+  width: 100%;
+  min-height: 54px;
+  padding: 9px 12px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 10px;
+  color: var(--placeholder-color);
+  font-size: 13.5px;
+  line-height: 1.45;
+  background: var(--content-card-bg);
+  resize: none;
+}
+
+.app-mockup .journal-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* The same surface as the question bubble. */
+.app-mockup .journal-entry {
+  position: relative;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--content-card-bg);
+}
+
+.app-mockup .journal-entry.is-tweet {
+  padding: 12px 14px;
+}
+
+.app-mockup .journal-entry.has-open-menu {
+  outline: 1px solid var(--surface-border-default);
+}
+
+.app-mockup .journal-entry-menu-trigger {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+  background: var(--content-card-bg);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+/* The undo bar for the last removal sits between the composer and the feed, so
+   it never covers the entry that would replace it. It ships closed: nothing
+   has been deleted until someone deletes something. */
+.app-mockup .journal-undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border: 1px dashed var(--surface-border-default);
+  border-radius: 10px;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+}
+
+.app-mockup .journal-undo[hidden] {
+  display: none;
+}
+
+.app-mockup .journal-undo-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-mockup .journal-undo-restore {
+  gap: 5px;
+  min-height: 0;
+  padding: 3px 8px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font-size: 12px;
+}
+
+.app-mockup .journal-undo-dismiss {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  min-height: 0;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+  background: transparent;
+}
+
+.app-mockup .journal-note-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.app-mockup .journal-link-url {
+  color: var(--accent-color);
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+/* --- the tweet card: an X embed with no chrome of its own --- */
+.app-mockup .journal-tweet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  /* Clear the top-right control column (X mark + hover menu trigger). */
+  padding-right: 48px;
+}
+
+.app-mockup .journal-tweet-who {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: inherit;
+}
+
+.app-mockup .journal-tweet-avatar {
+  flex: none;
+  border-radius: 50%;
+}
+
+/* The app falls back to an initial disc when a snapshot carries no avatar; the
+   replica always does, so the page fetches nothing from anyone else's host. */
+.app-mockup .journal-tweet-avatar-fallback {
+  display: grid;
+  place-items: center;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 700;
+  background: #4a6f7d;
+}
+
+.app-mockup .journal-tweet-quote-head .journal-tweet-avatar-fallback {
+  font-size: 9px;
+}
+
+.app-mockup .journal-tweet-names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.app-mockup .journal-tweet-author {
+  font-size: 13.5px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.app-mockup .journal-tweet-handle {
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The X mark shares the entry's top-right control column with the hover menu
+   trigger: two 20px boxes on one row, the X just left of the ⋯ so the pair
+   reads as one cluster. Positioned against the .journal-entry card. */
+.app-mockup .journal-tweet-x {
+  position: absolute;
+  top: 5px;
+  right: 27px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--text-subtle);
+}
+
+.app-mockup .journal-tweet-x svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
+.app-mockup .journal-tweet-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.app-mockup .journal-tweet-text.is-quote {
+  font-size: 13px;
+}
+
+.app-mockup .journal-tweet-link {
+  color: var(--accent-color);
+}
+
+/* Known dimensions reserve the media box, so the feed does not reflow as the
+   image lands. */
+.app-mockup .journal-tweet-media {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.app-mockup .journal-tweet-media-item {
+  display: block;
+  min-width: 0;
+}
+
+.app-mockup .journal-tweet-media img {
+  display: block;
+  width: 100%;
+  max-height: 200px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: 10px;
+  color: transparent;
+  background: var(--surface-fill-hover);
+  object-fit: cover;
+}
+
+.app-mockup .journal-tweet-quote {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 10px;
+  transition: background-color var(--transition-fast);
+}
+
+.app-mockup .journal-tweet-quote-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 3px;
+}
+
+.app-mockup .journal-tweet-quote-head .journal-tweet-author {
+  font-size: 12.5px;
+}
+
+.app-mockup .journal-tweet-quote-head .journal-tweet-handle {
+  font-size: 12px;
+}
+
+.app-mockup .journal-tweet-foot {
+  margin-top: 8px;
+  color: var(--text-subtle);
+  font-size: 12px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Enhanced-only affordances. Hover and focus states are scoped to
    .is-interactive so the static replica never advertises a control that
    would not respond. */
@@ -2543,6 +3642,69 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   border-color: var(--hover-border);
   background: var(--hover-bg);
   color: var(--hover-fg);
+}
+
+/* Research rows and journal entries only reveal their menu triggers on hover,
+   which is a state the static replica can never reach. The shortcut hint gives
+   up the same corner as the pointer arrives, rather than stacking two boxes
+   on it. */
+.app-mockup.is-interactive .research-sidebar-row,
+.app-mockup.is-interactive .research-sidebar-folder-row {
+  cursor: pointer;
+}
+
+.app-mockup.is-interactive .research-sidebar-row:hover {
+  color: var(--text-interactive);
+  background: var(--research-sidebar-hover-bg);
+}
+
+.app-mockup.is-interactive .research-sidebar-row:hover > .research-sidebar-menu-trigger,
+.app-mockup.is-interactive .research-sidebar-row:focus-within > .research-sidebar-menu-trigger,
+.app-mockup.is-interactive .research-sidebar-row.has-open-menu > .research-sidebar-menu-trigger {
+  display: grid;
+}
+
+.app-mockup.is-interactive .research-sidebar-row:hover .pane-tab-shortcut-hint {
+  display: none;
+}
+
+.app-mockup.is-interactive .research-sidebar-menu-trigger:hover,
+.app-mockup.is-interactive .research-sidebar-menu-trigger:focus-visible {
+  color: var(--text-interactive);
+  background: #303639;
+}
+
+.app-mockup.is-interactive .sidebar-mode-toggle > button:hover:not(.is-selected) {
+  color: #d6dbd6;
+  background: var(--sidebar-switcher-hover-bg);
+}
+
+.app-mockup.is-interactive .research-history-button:not(.is-disabled):hover,
+.app-mockup.is-interactive .research-breadcrumb .control-button:hover {
+  color: #f0f2ef;
+}
+
+.app-mockup.is-interactive .research-followup-card:hover > strong {
+  color: #f2f4f1;
+}
+
+.app-mockup.is-interactive .research-followup-card.is-anchored:hover,
+.app-mockup.is-interactive .research-followup-card.is-anchored:focus-visible {
+  z-index: 4;
+  border-color: rgba(255, 255, 255, 0.1);
+}
+
+.app-mockup.is-interactive .journal-entry:hover .journal-entry-menu-trigger,
+.app-mockup.is-interactive .journal-entry:focus-within .journal-entry-menu-trigger,
+.app-mockup.is-interactive .journal-entry.has-open-menu .journal-entry-menu-trigger {
+  opacity: 1;
+}
+
+.app-mockup.is-interactive .journal-entry-menu-trigger:hover,
+.app-mockup.is-interactive .journal-undo-dismiss:hover,
+.app-mockup.is-interactive .journal-undo-restore:hover {
+  color: var(--text-interactive);
+  background: var(--surface-fill-hover);
 }
 
 .app-mockup.is-interactive .menu-item:hover:not(:disabled) {
@@ -2632,7 +3794,9 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   color: var(--hover-chrome-fg);
 }
 
-.app-mockup.is-interactive .mock-textarea {
+/* Only a promoted field: a ghost composer that stays a span keeps the
+   placeholder tone the static replica renders it in. */
+.app-mockup.is-interactive textarea.mock-textarea {
   min-height: 40px;
   max-height: 120px;
   overflow-y: auto;
@@ -2643,12 +3807,18 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   cursor: text;
 }
 
-.app-mockup.is-interactive .mock-textarea::placeholder {
+/* The journal's field opens two rows tall, as the app's does. */
+.app-mockup.is-interactive textarea.journal-composer-input {
+  min-height: 54px;
+  max-height: 140px;
+}
+
+.app-mockup.is-interactive textarea.mock-textarea::placeholder {
   color: var(--placeholder-color);
   opacity: 1;
 }
 
-.app-mockup.is-interactive .mock-textarea:focus,
+.app-mockup.is-interactive textarea.mock-textarea:focus,
 .app-mockup.is-interactive button:focus-visible {
   border-color: var(--focus-ring, #6cae9d);
   outline: none;
@@ -2705,6 +3875,23 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
     --sidebar-width: 250px;
     --turn-pane-width: 340px;
     height: 600px;
+  }
+}
+
+/* The answer column and the follow-up rail stop fitting side by side well
+   before the terminal does: below this the rail drops under the answer, and an
+   anchored card — with nothing left to sit beside — rejoins the flow. */
+@container mockup (max-width: 60rem) {
+  .app-mockup .research-response-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .app-mockup .research-followups {
+    margin-top: 24px;
+  }
+
+  .app-mockup .research-followup-card.is-anchored {
+    position: static;
   }
 }
 
@@ -2768,7 +3955,10 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
     display: none;
   }
 
-  .app-mockup .sidebar-mode-toggle > span > span {
+  /* Only the sidebar's toggle loses its labels; the follow-up composer's
+     borrows the same class but keeps the room for them. */
+  .app-mockup .sidebar .sidebar-mode-toggle > span > span,
+  .app-mockup .sidebar .sidebar-mode-toggle > button > span {
     display: none;
   }
 }
@@ -2776,7 +3966,9 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 @media (prefers-reduced-motion: reduce) {
   .app-mockup .pane-tab-dot,
   .app-mockup .turn-thinking-dot,
-  .app-mockup .mock-terminal-cursor {
+  .app-mockup .mock-terminal-cursor,
+  .app-mockup .research-sidebar-spinner,
+  .app-mockup .research-followup-status-spinner {
     animation: none;
   }
 }

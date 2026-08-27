@@ -3,10 +3,11 @@
 // component tree and one build.
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import AppMockup, { MOCKUP_FEATURES } from "./AppMockup";
+import AppMockup, { MOCKUP_FEATURES, RESEARCH_MOCKUP_FEATURES } from "./AppMockup";
 import FeatureMiniMockups from "./MiniMockups";
 import { HeroAgents } from "./agentIcons";
 import { FEATURES, GITHUB_URL, RELEASES_URL, SITE_DESCRIPTION, SITE_TITLE } from "./content";
+import { DEFAULT_SESSION_ID } from "./mockupData";
 import { LANDING_CSS } from "./landingCss";
 import { MOCKUP_CSS } from "./mockupCss";
 
@@ -86,6 +87,23 @@ function Hero() {
             features={SECONDARY_MOCKUP_FEATURES}
             initialSidebarCollapsed
             initialTranscriptExpanded
+          />
+        </div>
+        <div className="research-product-intro">
+          <p className="research-product-heading">Research in the same window.</p>
+          <p className="product-thesis-description">
+            Flip the sidebar to Research to ask a question, branch the answer where it gets
+            interesting, and keep the notes and links that led there.
+          </p>
+        </div>
+        {/* The third replica opens in research mode. It lists every terminal tab
+            but ships only the default session's scrollback: the mode toggle here
+            demonstrates the swap, not session switching. */}
+        <div className="research-product-shot">
+          <AppMockup
+            features={RESEARCH_MOCKUP_FEATURES}
+            initialSidebarMode="research"
+            sessionIds={[DEFAULT_SESSION_ID]}
           />
         </div>
         <div className="feature-product-intro">
