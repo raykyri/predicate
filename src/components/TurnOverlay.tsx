@@ -283,6 +283,18 @@ export default function TurnOverlay({
   const handleRegenerateTitleFromUserMessage = useCallback((message: string) => {
     regenerateTitleFromUserMessageRef.current?.(message);
   }, []);
+  // Relative footer labels ("just now" / "N min ago") drift; a coarse tick
+  // keeps them honest without re-parsing markdown. Message bodies live in a
+  // memoized child, so this only refreshes the timestamps.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!showAssistantTimestamps) {
+      return;
+    }
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, [showAssistantTimestamps]);
 
   const queueSplitDragRef = useRef<QueueSplitDrag | null>(null);
   const queueSplitPointerReleaseRef = useRef<(() => void) | null>(null);
@@ -1325,6 +1337,7 @@ export default function TurnOverlay({
                 // but a newer live response elsewhere must not suppress its
                 // timestamp as though this were the real working tail.
                 working: readerMode ? false : thinking,
+                now,
               });
             // The candidate keeps its marker class even while sticky is
             // disarmed (the height measurement finds it by this class); the
@@ -1371,7 +1384,7 @@ export default function TurnOverlay({
                       dateTime={new Date(groupTimestamp).toISOString()}
                       title={formatAbsoluteMessageTimestamp(groupTimestamp)}
                     >
-                      {formatMessageTimestamp(groupTimestamp)}
+                      {formatMessageTimestamp(groupTimestamp, now)}
                     </time>
                     {assistantTurnFocusEnabled && !historical && !readerMode && onFocusAssistantTurn ? (
                       <button
