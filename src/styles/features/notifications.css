@@ -15,7 +15,6 @@
   position: relative;
   display: flex;
   overflow: hidden;
-  min-height: 68px;
   border: 1px solid var(--surface-divider);
   border-radius: 12px;
   background: color-mix(in srgb, var(--popover-bg) 96%, transparent);
@@ -55,11 +54,15 @@
   align-items: flex-start;
   gap: 11px;
   border: 0;
-  padding: 13px 38px 13px 14px;
+  padding: 11px 38px 11px 14px;
   background: transparent;
   color: inherit;
   font: inherit;
+  line-height: 1.35;
   text-align: left;
+  /* WKWebView buttons default to white-space: pre, so JSX newlines between the
+     icon and copy become anonymous flex items and pad the toast from below. */
+  white-space: normal;
 }
 
 button.user-notification-open {
