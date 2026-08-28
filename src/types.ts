@@ -32,6 +32,7 @@ export interface AgentAdapterMetadata {
    * head. Gates the transcript's per-message fork action, which is hidden
    * rather than disabled for adapters without it. */
   supportsForkAtMessage: boolean;
+  supportsRemote: boolean;
   configuredBinary: string;
   resolvedBinary: string | null;
   readiness: AgentReadiness;
@@ -42,6 +43,13 @@ export interface AgentAdapterMetadata {
   checkedAt: number | null;
   loginCommand: string | null;
   installUrl: string | null;
+  updateCommand: string | null;
+  instanceId: string;
+  target: {
+    kind: "local" | "remote";
+    id: string | null;
+    label: string;
+  };
 }
 
 export type AgentReadiness =

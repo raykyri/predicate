@@ -32,9 +32,11 @@ use opencode::OpencodeAdapter;
 use pi::PiAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use claude::{PrepareShellClaudeLaunchRequest, SpawnClaudeRequest};
@@ -1011,6 +1013,7 @@ impl AdapterRegistry {
                     supports_fork: adapter.supports_fork(),
                     supports_research: adapter.supports_research(),
                     supports_fork_at_message: adapter.supports_fork_at_message(),
+                    supports_remote: adapter.supports_remote(),
                     configured_binary,
                     resolved_binary,
                     readiness: if installed {
@@ -1034,6 +1037,12 @@ impl AdapterRegistry {
                     checked_at: None,
                     login_command,
                     install_url: adapter_install_url(adapter.id()).map(str::to_string),
+                    update_command: adapter_update_command(
+                        adapter.id(),
+                        adapter.configured_binary(),
+                    ),
+                    instance_id: format!("local:{}", adapter.id()),
+                    target: AdapterTargetMetadata::local(),
                 }
             })
             .collect()
@@ -1073,6 +1082,7 @@ pub struct AdapterMetadata {
     /// session head. Gates the transcript's per-message fork action, which is
     /// hidden rather than disabled for adapters without it.
     pub supports_fork_at_message: bool,
+    pub supports_remote: bool,
     /// Executable name/path from qmux.config.json after home expansion.
     pub configured_binary: String,
     /// Resolved executable used for launch, absent when it cannot be found.
@@ -1087,6 +1097,30 @@ pub struct AdapterMetadata {
     pub checked_at: Option<u64>,
     pub login_command: Option<String>,
     pub install_url: Option<String>,
+    pub update_command: Option<String>,
+    /// Stable provider-instance identity. The first implementation has one
+    /// configured instance per adapter and target; the contract does not need
+    /// to change when account/home profiles are added later.
+    pub instance_id: String,
+    pub target: AdapterTargetMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdapterTargetMetadata {
+    pub kind: String,
+    pub id: Option<String>,
+    pub label: String,
+}
+
+impl AdapterTargetMetadata {
+    fn local() -> Self {
+        Self {
+            kind: "local".to_string(),
+            id: None,
+            label: "This Mac".to_string(),
+        }
+    }
 }
 
 struct ProbeOutput {
@@ -1131,6 +1165,17 @@ fn adapter_install_url(adapter_id: &str) -> Option<&'static str> {
         "pi" => Some("https://github.com/badlogic/pi-mono"),
         "cursor" => Some("https://cursor.com/docs/cli/overview"),
         "devin" => Some("https://docs.devin.ai/work-with-devin/devin-cli"),
+        _ => None,
+    }
+}
+
+fn adapter_update_command(adapter_id: &str, binary: &str) -> Option<String> {
+    let binary = shell_quote_arg(binary);
+    match adapter_id {
+        "claude" => Some(format!("{binary} update")),
+        "codex" => Some("npm install -g @openai/codex@latest".to_string()),
+        "opencode" => Some(format!("{binary} upgrade")),
+        "pi" => Some("npm install -g @mariozechner/pi-coding-agent@latest".to_string()),
         _ => None,
     }
 }
@@ -1297,28 +1342,115 @@ fn probe_adapter_metadata(mut metadata: AdapterMetadata) -> AdapterMetadata {
 
 /// Runs provider probes concurrently so one slow CLI consumes only its own
 /// timeout rather than serially delaying every status card and launcher.
-pub fn probe_adapter_metadata_for_config(config: &QmuxConfig) -> Vec<AdapterMetadata> {
-    let handles = adapter_registry(config)
-        .metadata()
-        .into_iter()
-        .map(|metadata| std::thread::spawn(move || probe_adapter_metadata(metadata)))
-        .collect::<Vec<_>>();
-    handles
-        .into_iter()
-        .filter_map(|handle| handle.join().ok())
-        .collect()
+struct AdapterProbeCacheEntry {
+    stored_at: Instant,
+    metadata: Vec<AdapterMetadata>,
+}
+
+static ADAPTER_PROBE_CACHE: OnceLock<Mutex<HashMap<String, AdapterProbeCacheEntry>>> =
+    OnceLock::new();
+const ADAPTER_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn adapter_probe_cache() -> &'static Mutex<HashMap<String, AdapterProbeCacheEntry>> {
+    ADAPTER_PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn adapter_probe_cache_key(metadata: &[AdapterMetadata], remote_id: Option<&str>) -> String {
+    let target = remote_id.unwrap_or("local");
+    format!(
+        "{target}\n{}",
+        metadata
+            .iter()
+            .map(|adapter| format!("{}={}", adapter.id, adapter.configured_binary))
+            .collect::<Vec<_>>()
+            .join("\n")
+    )
+}
+
+fn cached_adapter_metadata(key: &str) -> Option<Vec<AdapterMetadata>> {
+    let cache = adapter_probe_cache().lock().ok()?;
+    let entry = cache.get(key)?;
+    (entry.stored_at.elapsed() <= ADAPTER_PROBE_CACHE_TTL).then(|| entry.metadata.clone())
+}
+
+pub fn probe_adapter_metadata_for_config(
+    config: &QmuxConfig,
+    remote_target: Option<(&str, &str)>,
+    force: bool,
+) -> Result<Vec<AdapterMetadata>, String> {
+    let mut base = adapter_registry(config).metadata();
+    let key = adapter_probe_cache_key(&base, remote_target.map(|(id, _)| id));
+    if !force && let Some(metadata) = cached_adapter_metadata(&key) {
+        return Ok(metadata);
+    }
+
+    let metadata = if let Some((remote_id, remote_label)) = remote_target {
+        let checked_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        for adapter in &mut base {
+            adapter.target = AdapterTargetMetadata {
+                kind: "remote".to_string(),
+                id: Some(remote_id.to_string()),
+                label: remote_label.to_string(),
+            };
+            adapter.instance_id = format!("remote:{remote_id}:{}", adapter.id);
+            adapter.checked_at = checked_at;
+            if !adapter.supports_remote {
+                adapter.readiness = AdapterReadiness::Error;
+                adapter.research_readiness = AdapterReadiness::Error;
+                adapter.message = Some(format!(
+                    "{} cannot run on remote '{}' yet; its integration currently requires local paths and hooks.",
+                    adapter.label, remote_label
+                ));
+            } else {
+                // No adapter opts in today. Keeping an explicit error here
+                // prevents a future opt-in from silently reusing local state;
+                // the adapter must add a target-side probe with its support.
+                adapter.readiness = AdapterReadiness::Error;
+                adapter.research_readiness = AdapterReadiness::Error;
+                adapter.message = Some(format!(
+                    "{} has not implemented readiness checks for remote '{}'.",
+                    adapter.label, remote_label
+                ));
+            }
+        }
+        base
+    } else {
+        let handles = base
+            .into_iter()
+            .map(|metadata| {
+                let fallback = metadata.clone();
+                let handle = std::thread::spawn(move || probe_adapter_metadata(metadata));
+                (fallback, handle)
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|(fallback, handle)| handle.join().unwrap_or(fallback))
+            .collect()
+    };
+    if let Ok(mut cache) = adapter_probe_cache().lock() {
+        cache.insert(
+            key,
+            AdapterProbeCacheEntry {
+                stored_at: Instant::now(),
+                metadata: metadata.clone(),
+            },
+        );
+    }
+    Ok(metadata)
 }
 
 pub fn ensure_adapter_ready_for_research(
     config: &QmuxConfig,
     adapter_id: &str,
 ) -> Result<AdapterMetadata, String> {
-    let metadata = adapter_registry(config)
-        .metadata()
+    let metadata = probe_adapter_metadata_for_config(config, None, false)?
         .into_iter()
         .find(|metadata| metadata.id == adapter_id)
         .ok_or_else(|| format!("unknown agent adapter '{adapter_id}'"))?;
-    let metadata = probe_adapter_metadata(metadata);
     if metadata.research_readiness == AdapterReadiness::Ready {
         Ok(metadata)
     } else {
@@ -1614,7 +1746,9 @@ pub(crate) fn new_uuid_v4() -> Result<String, String> {
 /// its session), else the first fork-capable adapter. The frontend mirrors
 /// this preference to resolve adapter-specific composer affordances.
 pub fn default_fork_adapter(config: &QmuxConfig) -> Result<String, String> {
-    let metadata = adapter_registry(config).metadata();
+    let base = adapter_registry(config).metadata();
+    let key = adapter_probe_cache_key(&base, None);
+    let metadata = cached_adapter_metadata(&key).unwrap_or(base);
     metadata
         .iter()
         .find(|adapter| {
@@ -1970,6 +2104,12 @@ mod tests {
         assert!(!metadata[6].default);
         assert_eq!(metadata[7].id, "devin");
         assert!(!metadata[7].default);
+        assert!(metadata.iter().all(|adapter| !adapter.supports_remote));
+        assert!(
+            metadata
+                .iter()
+                .all(|adapter| adapter.target.kind == "local")
+        );
         let config = test_config();
         assert!(!adapter_supports_fork(&config, "cursor"));
         assert!(!adapter_supports_fork_at_message(&config, "cursor"));
@@ -2050,6 +2190,25 @@ mod tests {
             ),
             AdapterAuthState::Unknown
         );
+    }
+
+    #[test]
+    fn remote_probe_never_reuses_local_provider_readiness() {
+        let config = test_config();
+
+        let metadata =
+            probe_adapter_metadata_for_config(&config, Some(("build-host", "Build host")), true)
+                .expect("remote metadata");
+        assert_eq!(metadata.len(), 8);
+        assert!(metadata.iter().all(|adapter| {
+            adapter.target.kind == "remote"
+                && adapter.target.id.as_deref() == Some("build-host")
+                && adapter.readiness == AdapterReadiness::Error
+                && adapter
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("cannot run on remote"))
+        }));
     }
 
     #[test]

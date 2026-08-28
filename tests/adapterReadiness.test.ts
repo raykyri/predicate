@@ -23,6 +23,7 @@ function adapter(
     supportsFork: true,
     supportsResearch: true,
     supportsForkAtMessage: true,
+    supportsRemote: false,
     configuredBinary: id,
     resolvedBinary: readiness === "missing" ? null : `/bin/${id}`,
     readiness,
@@ -33,6 +34,9 @@ function adapter(
     checkedAt: null,
     loginCommand: null,
     installUrl: null,
+    updateCommand: null,
+    instanceId: `local:${id}`,
+    target: { kind: "local", id: null, label: "This Mac" },
   };
 }
 

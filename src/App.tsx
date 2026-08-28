@@ -597,6 +597,7 @@ import {
   worktreeStatus,
 } from "./lib/api";
 import type {
+  AgentAdapterMetadata,
   AgentInfo,
   ArtifactInfo,
   ClaudeSkill,
@@ -1795,24 +1796,45 @@ function MainApp() {
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
   const [adapterProbeLoading, setAdapterProbeLoading] = useState(false);
   const [adapterProbeError, setAdapterProbeError] = useState<string | null>(null);
-  const adapterProbeRequestRef = useRef(0);
-  const refreshAdapterReadiness = useCallback(async () => {
-    const request = ++adapterProbeRequestRef.current;
+  const [adapterStatusesByTarget, setAdapterStatusesByTarget] = useState<
+    Record<string, AgentAdapterMetadata[]>
+  >({});
+  const adapterProbeRequestRef = useRef(new Map<string, number>());
+  const adapterProbeCompletedAtRef = useRef(new Map<string, number>());
+  const refreshAdapterReadiness = useCallback(async (options?: {
+    targetId?: string | null;
+    groupId?: string | null;
+    force?: boolean;
+  }) => {
+    const key = options?.targetId ?? "local";
+    const request = (adapterProbeRequestRef.current.get(key) ?? 0) + 1;
+    adapterProbeRequestRef.current.set(key, request);
     setAdapterProbeLoading(true);
     setAdapterProbeError(null);
     try {
-      const adapters = await probeAgentAdapters();
-      if (adapterProbeRequestRef.current === request) {
-        setConfig((current) => (current ? { ...current, adapters } : current));
+      const adapters = await probeAgentAdapters({
+        groupId: options?.groupId,
+        force: options?.force,
+      });
+      if (adapterProbeRequestRef.current.get(key) === request) {
+        adapterProbeCompletedAtRef.current.set(key, Date.now());
+        if (options?.targetId) {
+          setAdapterStatusesByTarget((current) => ({
+            ...current,
+            [options.targetId!]: adapters,
+          }));
+        } else {
+          setConfig((current) => (current ? { ...current, adapters } : current));
+        }
       }
       return adapters;
     } catch (err) {
-      if (adapterProbeRequestRef.current === request) {
+      if (adapterProbeRequestRef.current.get(key) === request) {
         setAdapterProbeError(unknownErrorMessage(err));
       }
       throw err;
     } finally {
-      if (adapterProbeRequestRef.current === request) {
+      if (adapterProbeRequestRef.current.get(key) === request) {
         setAdapterProbeLoading(false);
       }
     }
@@ -4651,13 +4673,31 @@ function MainApp() {
     }
   }, [turns]);
 
+  const launcherGroup = groupById.get(launchGroupId() ?? "") ?? null;
+  const launcherRemote = launcherGroup?.remote ?? null;
+  const launcherRuntimeAdapters = launcherRemote
+    ? adapterStatusesByTarget[launcherGroup!.id] ??
+      (config?.adapters ?? []).map((adapter) => ({
+        ...adapter,
+        readiness: "error" as const,
+        researchReadiness: "error" as const,
+        message: `Checking ${adapter.label} on ${launcherRemote.label}…`,
+        checkedAt: null,
+        instanceId: `remote:${launcherGroup!.id}:${adapter.id}`,
+        target: {
+          kind: "remote" as const,
+          id: launcherGroup!.id,
+          label: launcherRemote.label,
+        },
+      }))
+    : config?.adapters ?? [];
   const readyLauncherAdapter = config
-    ? preferredReadyAdapter(config.adapters, launcherAdapterId)
+    ? preferredReadyAdapter(launcherRuntimeAdapters, launcherAdapterId)
     : null;
   const runtimeDefaultAdapterId =
     readyLauncherAdapter?.id ??
-    config?.adapters.find((adapter) => adapter.default)?.id ??
-    config?.adapters[0]?.id ??
+    launcherRuntimeAdapters.find((adapter) => adapter.default)?.id ??
+    launcherRuntimeAdapters[0]?.id ??
     "claude";
   const selectedLauncherAdapterId = launcherAdapterId ?? runtimeDefaultAdapterId;
   const effectiveLauncherAdapterId =
@@ -4666,7 +4706,7 @@ function MainApp() {
     () => getAgentUiAdapter(effectiveLauncherAdapterId),
     [effectiveLauncherAdapterId],
   );
-  const launchAdapterMetadata = config?.adapters.find(
+  const launchAdapterMetadata = launcherRuntimeAdapters.find(
     (adapter) => adapter.id === launchAdapter.id,
   );
   const launchAdapterReady = !config || adapterCanLaunchTerminal(launchAdapterMetadata);
@@ -4680,7 +4720,9 @@ function MainApp() {
       : null;
   const launcherAdapters = useMemo(() => {
     const runtimeAdapters = config
-      ? readyAdaptersFirst(config.adapters).filter((adapter) => findAgentUiAdapter(adapter.id))
+      ? readyAdaptersFirst(launcherRuntimeAdapters).filter((adapter) =>
+          findAgentUiAdapter(adapter.id),
+        )
       : [];
     return runtimeAdapters.length > 0
       ? runtimeAdapters
@@ -4691,6 +4733,7 @@ function MainApp() {
           supportsFork: true,
           supportsResearch: false,
           supportsForkAtMessage: false,
+          supportsRemote: false,
           configuredBinary: adapter.id,
           resolvedBinary: adapter.id,
           readiness: "ready" as const,
@@ -4701,8 +4744,11 @@ function MainApp() {
           checkedAt: null,
           loginCommand: null,
           installUrl: null,
+          updateCommand: null,
+          instanceId: `local:${adapter.id}`,
+          target: { kind: "local" as const, id: null, label: "This Mac" },
         }));
-  }, [config]);
+  }, [config, launcherRuntimeAdapters]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
     () =>
       launcherAdapters.map((adapter, index) => ({
@@ -9290,6 +9336,7 @@ function MainApp() {
         // The dialog displays the rethrown error itself — the global banner
         // renders behind the modal backdrop where it reads as a dead button.
         void refreshResearchNavigation().catch(() => undefined);
+        void refreshAdapterReadiness({ force: true }).catch(() => undefined);
         throw err;
       }
       adoptCreatedResearchTree(detail);
@@ -10101,11 +10148,45 @@ function MainApp() {
   }, [newResearchOpen, refreshAdapterReadiness]);
 
   useEffect(() => {
+    if (!config || adapterProbeCompletedAtRef.current.has("local")) {
+      return;
+    }
+    void refreshAdapterReadiness().catch(() => undefined);
+  }, [config, refreshAdapterReadiness]);
+
+  useEffect(() => {
     if (!settingsOpen || settingsTab !== "agents") {
       return;
     }
     void refreshAdapterReadiness().catch(() => undefined);
   }, [refreshAdapterReadiness, settingsOpen, settingsTab]);
+
+  useEffect(() => {
+    const refreshStaleTargets = () => {
+      if (document.visibilityState === "hidden") {
+        return;
+      }
+      const targets: Array<{ targetId: string | null; groupId: string | null }> = [
+        { targetId: null, groupId: null },
+      ];
+      if (launcherRemote && launcherGroup) {
+        targets.push({ targetId: launcherGroup.id, groupId: launcherGroup.id });
+      }
+      for (const target of targets) {
+        const key = target.targetId ?? "local";
+        const lastChecked = adapterProbeCompletedAtRef.current.get(key) ?? 0;
+        if (Date.now() - lastChecked >= 5 * 60 * 1000) {
+          void refreshAdapterReadiness({ ...target, force: true }).catch(() => undefined);
+        }
+      }
+    };
+    window.addEventListener("focus", refreshStaleTargets);
+    document.addEventListener("visibilitychange", refreshStaleTargets);
+    return () => {
+      window.removeEventListener("focus", refreshStaleTargets);
+      document.removeEventListener("visibilitychange", refreshStaleTargets);
+    };
+  }, [launcherGroup?.id, launcherRemote?.id, refreshAdapterReadiness]);
 
   function toggleTerminalMap() {
     if (terminalMapOpenRef.current) {
@@ -11790,6 +11871,11 @@ function MainApp() {
       setAgents(latestAgents);
     } catch (err) {
       setNewAgentError(err instanceof Error ? err.message : String(err));
+      void refreshAdapterReadiness({
+        targetId: launcherRemote ? launcherGroup?.id ?? null : null,
+        groupId: launcherRemote ? launcherGroup?.id ?? null : null,
+        force: true,
+      }).catch(() => undefined);
     } finally {
       launchingAgentRef.current = false;
     }
@@ -13175,7 +13261,10 @@ function MainApp() {
     setNewAgentError(null);
     // PATH can change while qmux stays open (for example after installing a
     // provider), so refresh binary readiness whenever the launcher is opened.
-    void refreshAdapterReadiness().catch(() => undefined);
+    void refreshAdapterReadiness({
+      targetId: launcherRemote ? launcherGroup?.id ?? null : null,
+      groupId: launcherRemote ? launcherGroup?.id ?? null : null,
+    }).catch(() => undefined);
     // Re-read the plugin's skills on open so newly added ones show up without a
     // restart. Failures (e.g. no plugin dir) just leave the list empty.
     void listClaudeSkills()
@@ -13185,7 +13274,7 @@ function MainApp() {
       launcherInputRef.current?.focus();
       launcherInputRef.current?.select();
     });
-  }, [newAgentOpen, refreshAdapterReadiness]);
+  }, [launcherGroup?.id, launcherRemote?.id, newAgentOpen, refreshAdapterReadiness]);
 
   // Selecting a non-Claude adapter clears any chosen skill; measure the faint
   // command prefix so the composer's first line is indented past it.
@@ -13624,13 +13713,17 @@ function MainApp() {
           </button>
         </div>
       </div>
-      {newAgentError || (config && !config.adapters.some(adapterCanLaunchTerminal)) ? (
+      {newAgentError ||
+      (config && !launcherRuntimeAdapters.some(adapterCanLaunchTerminal)) ? (
         <div className="new-research-footer">
           <p className="new-research-error" role="alert">
             {newAgentError ??
+              launcherRuntimeAdapters.find((adapter) => adapter.message)?.message ??
               "No agent CLI was found. Install a supported agent or configure its binary path."}
           </p>
-          {config && !config.adapters.some(adapterCanLaunchTerminal) ? (
+          {config &&
+          !launcherRemote &&
+          !launcherRuntimeAdapters.some(adapterCanLaunchTerminal) ? (
             <button
               type="button"
               className="control-button new-research-setup-button"
@@ -15664,7 +15757,9 @@ function MainApp() {
                     type="button"
                     className="control-button settings-agent-refresh"
                     disabled={adapterProbeLoading}
-                    onClick={() => void refreshAdapterReadiness().catch(() => undefined)}
+                    onClick={() =>
+                      void refreshAdapterReadiness({ force: true }).catch(() => undefined)
+                    }
                   >
                     <RefreshCw
                       size={13}
@@ -15681,7 +15776,11 @@ function MainApp() {
                 ) : null}
                 <div className="settings-agent-list">
                   {readyAdaptersFirst(config?.adapters ?? []).map((adapter) => (
-                    <section className="settings-agent-card" key={adapter.id}>
+                    <section
+                      className="settings-agent-card"
+                      key={adapter.instanceId}
+                      title={`${adapter.target.label} · ${adapter.instanceId}`}
+                    >
                       <div className="settings-agent-card-header">
                         <div className="settings-agent-identity">
                           {ADAPTER_ICON_BY_ID[adapter.id] ? (
@@ -15737,6 +15836,20 @@ function MainApp() {
                         <p className="settings-agent-message">{adapter.message}</p>
                       ) : null}
                       <div className="settings-agent-actions">
+                        {adapter.updateCommand &&
+                        (adapter.readiness === "unsupportedVersion" ||
+                          adapter.researchReadiness === "unsupportedVersion") ? (
+                          <button
+                            type="button"
+                            className="control-button"
+                            onClick={() => {
+                              void writeClipboardText(adapter.updateCommand ?? "");
+                              showAppToast("Update command copied");
+                            }}
+                          >
+                            Copy update command
+                          </button>
+                        ) : null}
                         {adapter.loginCommand && adapter.readiness === "needsAuth" ? (
                           <button
                             type="button"

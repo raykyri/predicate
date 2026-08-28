@@ -220,8 +220,28 @@ fn get_runtime_config(state: tauri::State<'_, AppState>) -> RuntimeConfig {
 #[tauri::command(async)]
 fn probe_agent_adapters(
     state: tauri::State<'_, AppState>,
+    group_id: Option<String>,
+    force: Option<bool>,
 ) -> Result<Vec<adapters::AdapterMetadata>, String> {
-    Ok(adapters::probe_adapter_metadata_for_config(state.config()))
+    let group = group_id
+        .as_deref()
+        .map(|group_id| {
+            state
+                .group(group_id)?
+                .ok_or_else(|| format!("group {group_id} was not found"))
+        })
+        .transpose()?;
+    let remote_target = group.as_ref().and_then(|group| {
+        group
+            .remote
+            .as_ref()
+            .map(|remote| (group.id.as_str(), remote.label.as_str()))
+    });
+    adapters::probe_adapter_metadata_for_config(
+        state.config(),
+        remote_target,
+        force.unwrap_or(false),
+    )
 }
 
 // Commands below are marked `async` when they block: on this Tauri version a
