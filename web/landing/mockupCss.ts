@@ -3402,16 +3402,33 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
   background: var(--content-card-bg);
 }
 
-.app-mockup .research-followup-mode-toggle {
-  box-sizing: border-box;
-  width: 100%;
-  margin: 0;
+.app-mockup .research-followup-send-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
 }
 
-.app-mockup .research-followup-mode-toggle > span {
-  min-height: 24px;
-  padding: 0 10px;
-  font-size: 12.5px;
+.app-mockup .research-followup-send-group .research-followup-send {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* Scoped past the group-wide .control-button sizing rule below, which sets
+   the Send button's padding for the whole submit row. */
+.app-mockup
+  .research-followup-composer
+  .native-input-submit-actions
+  .control-button.research-followup-mode-trigger {
+  flex: 0 0 auto;
+  min-width: 20px;
+  margin-left: -1px;
+  padding: 0 3px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.app-mockup .research-followup-mode-trigger svg {
+  opacity: 0.82;
 }
 
 .app-mockup .research-followup-composer .mock-textarea {
@@ -3441,6 +3458,7 @@ html.mock-replay-boot .app-mockup [data-replay-pending],
 
 .app-mockup .research-followup-footer .native-input-submit-actions {
   flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .app-mockup .research-followup-composer .native-input-submit-actions .control-button {

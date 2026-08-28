@@ -484,26 +484,23 @@ function ResearchDocumentView({ id, selected }: { id: string; selected: boolean 
         <div className="research-response-grid research-thread-composer-row">
           <div className="research-thread-composer-cell">
             <div className="research-followup-composer is-thread">
-              <div
-                className="sidebar-mode-toggle research-followup-mode-toggle"
-                aria-label="Follow-up mode"
-              >
-                <span className="is-selected">
-                  <span>Continue thread</span>
-                </span>
-                <span>
-                  <span>New branch</span>
-                </span>
-              </div>
               <div className="mock-textarea">{RESEARCH_COMPOSER_PLACEHOLDER}</div>
               <div className="research-followup-footer">
                 <div className="research-followup-hint-row">
                   <small>Continues the thread under this answer</small>
                 </div>
                 <div className="native-input-submit-actions">
-                  <span className="control-button">
-                    <span>Send</span>
-                    <span className="shortcut-hint">⌘↵</span>
+                  {/* Thread vs. branch is a property of the submission, so it
+                      rides Send as a split control rather than a tab strip
+                      above the field. */}
+                  <span className="research-followup-send-group">
+                    <span className="control-button research-followup-send">
+                      <span>Send</span>
+                      <span className="shortcut-hint">⌘↵</span>
+                    </span>
+                    <span className="control-button research-followup-mode-trigger">
+                      <ChevronDownIcon size={13} />
+                    </span>
                   </span>
                 </div>
               </div>
