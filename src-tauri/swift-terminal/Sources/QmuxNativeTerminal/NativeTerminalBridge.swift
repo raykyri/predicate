@@ -301,6 +301,13 @@ public func qmuxNativeTerminalSetIframeShortcutFallback(_ active: Int32) -> Int3
     }
 }
 
+@_cdecl("qmux_native_terminal_set_browser_overlay_open")
+public func qmuxNativeTerminalSetBrowserOverlayOpen(_ active: Int32) -> Int32 {
+    onTerminalMain {
+        NativeTerminalHost.shared.setBrowserOverlayOpen(active == 1) ? 1 : 0
+    }
+}
+
 @_cdecl("qmux_native_terminal_set_human_browser_webview")
 public func qmuxNativeTerminalSetHumanBrowserWebView(
     _ nativeView: UnsafeMutableRawPointer?,

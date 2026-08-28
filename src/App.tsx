@@ -555,6 +555,7 @@ import {
   setActiveTab,
   setGroupCollapsed,
   setCompletionSound,
+  setNativeTerminalBrowserOverlayOpen,
   setNativeTerminalKeyboardOwner,
   setNativeTerminalStageBackstop,
   setPaneLayout,
@@ -1731,6 +1732,9 @@ function MainApp() {
   const activeBrowserOwnerIdRef = useRef<string | null>(null);
   const toggleActiveBrowserOverlayRef = useRef<() => void>(() => {});
   const closeActiveBrowserOverlayRef = useRef<() => void>(() => {});
+  const browserEscapeDispatcherRef = useRef<() => "exclusive" | "theme" | null>(
+    () => null,
+  );
   const terminalSplitResizeRef = useRef<{
     splitId: string;
     path: string;
@@ -5507,6 +5511,14 @@ function MainApp() {
     webEditableFocused,
     webSelectionActive,
   });
+  useLayoutEffect(() => {
+    if (!IS_MAC) {
+      return;
+    }
+    void setNativeTerminalBrowserOverlayOpen(activeBrowserOverlay?.open === true).catch(
+      () => undefined,
+    );
+  }, [activeBrowserOverlay?.open]);
   useLayoutEffect(() => {
     if (!IS_MAC) {
       return;
@@ -9776,6 +9788,9 @@ function MainApp() {
     onTerminalActivated: activateTerminalPane,
     onTerminalShortcut: handleNativeTerminalShortcut,
     onAppShortcut: handleNativeAppShortcut,
+    onBrowserEscapeRequested: () => {
+      browserEscapeDispatcherRef.current();
+    },
     onTerminalCommandModifier: handleNativeTerminalCommandModifier,
     onTerminalOpenUrl: openPaneLink,
     onTerminalTitleChanged: handleTerminalTitleChange,
@@ -12213,6 +12228,33 @@ function MainApp() {
     };
   });
 
+  // Escape can originate in three separate AppKit responders while the
+  // browser is visible: the outer app webview, the child human-browser
+  // WKWebView, or a native terminal whose ownership release is still crossing
+  // the bridge. The native monitor funnels all three through this live
+  // dispatcher. The DOM listener below uses it too so lightbox/theme/browser
+  // priority stays single-sourced.
+  browserEscapeDispatcherRef.current = () => {
+    if (getImageLightbox() !== null) {
+      closeImageLightbox();
+      return "exclusive";
+    }
+    if (getDiagramLightbox() !== null) {
+      closeDiagramLightbox();
+      return "exclusive";
+    }
+    if (themePickerOpen) {
+      closeThemePicker();
+      requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
+      return "theme";
+    }
+    if (!activeBrowserOwnerId || !browserOverlayByPane[activeBrowserOwnerId]?.open) {
+      return null;
+    }
+    closeActiveBrowserOverlayRef.current();
+    return "exclusive";
+  };
+
   // One capture-phase listener dispatches Escape across the app-level
   // overlays in a fixed order. These used to be independent window listeners
   // whose effects re-registered when their deps changed, so their relative
@@ -12226,47 +12268,16 @@ function MainApp() {
       }
       const overlays = escapeOverlayStateRef.current;
 
-      // The image and diagram lightboxes are the frontmost modals (they float
-      // above every pane and the browser overlay), so they take Escape first
-      // and exclusively. Their state lives in module stores rather than App
-      // state, so read them directly here instead of mirroring them into the
-      // overlay ref above.
-      if (getImageLightbox() !== null) {
+      // Lightboxes float above the browser and claim Escape exclusively. The
+      // theme picker is the one non-exclusive higher-priority child: dismiss
+      // it without swallowing sibling component listeners.
+      const browserEscapeDisposition = browserEscapeDispatcherRef.current();
+      if (browserEscapeDisposition !== null) {
         event.preventDefault();
         event.stopPropagation();
-        event.stopImmediatePropagation();
-        closeImageLightbox();
-        return;
-      }
-      if (getDiagramLightbox() !== null) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        closeDiagramLightbox();
-        return;
-      }
-
-      // The theme list is a child popup of Settings. Dismiss it first so a
-      // preview can be cancelled without also closing the entire panel.
-      if (overlays.themePickerOpen) {
-        event.preventDefault();
-        event.stopPropagation();
-        closeThemePicker();
-        requestAnimationFrame(() => themePickerTriggerRef.current?.focus());
-        return;
-      }
-
-      // The browser overlay claims Escape exclusively, including from
-      // component-level listeners registered after this one.
-      const browserOwnerId = activeBrowserOwnerIdRef.current;
-      const browserOpen = browserOwnerId
-        ? browserOverlayByPaneRef.current[browserOwnerId]?.open === true
-        : false;
-      if (browserOpen) {
-        event.preventDefault();
-        event.stopPropagation();
-        event.stopImmediatePropagation();
-        closeActiveBrowserOverlayRef.current();
+        if (browserEscapeDisposition === "exclusive") {
+          event.stopImmediatePropagation();
+        }
         return;
       }
 

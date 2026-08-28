@@ -131,6 +131,7 @@ export interface UseQmuxEventsHandlers {
     repeat: boolean,
   ) => void;
   onAppShortcut?: (command: AppShortcutCommand, repeat: boolean) => void;
+  onBrowserEscapeRequested?: () => void;
   onTerminalCommandModifier?: (paneId: string, active: boolean) => void;
   onTerminalOpenUrl?: (paneId: string, url: string) => void;
   onTerminalTitleChanged?: (paneId: string, title: string) => void;
@@ -188,6 +189,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     onTerminalActivated,
     onTerminalShortcut,
     onAppShortcut,
+    onBrowserEscapeRequested,
     onTerminalCommandModifier,
     onTerminalOpenUrl,
     onTerminalTitleChanged,
@@ -374,6 +376,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         if (command !== null) {
           onAppShortcut?.(command, event.payload.repeat === true);
         }
+      }
+      if (event.type === "browser.escape_requested") {
+        onBrowserEscapeRequested?.();
       }
       if (event.type === "terminal.command_modifier_changed" && event.paneId) {
         onTerminalCommandModifier?.(event.paneId, event.payload.active === true);

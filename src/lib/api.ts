@@ -1345,6 +1345,22 @@ export function setNativeTerminalKeyboardOwner(paneId: string | null) {
   });
 }
 
+/**
+ * Tells the native key monitor whether the currently rendered browser overlay
+ * owns Escape. AppKit sees key events before either Ghostty or a child browser
+ * document, so this closes the focus-routing gap between those surfaces and
+ * the outer React document's Escape dispatcher. Serialize transitions so a
+ * rapid open/close cannot leave the native claim stuck on if invokes complete
+ * out of order; a failed update must not poison the next transition.
+ */
+let nativeTerminalBrowserOverlayUpdate: Promise<void> = Promise.resolve();
+export function setNativeTerminalBrowserOverlayOpen(active: boolean) {
+  nativeTerminalBrowserOverlayUpdate = nativeTerminalBrowserOverlayUpdate
+    .catch(() => undefined)
+    .then(() => invoke<void>("native_terminal_set_browser_overlay_open", { active }));
+  return nativeTerminalBrowserOverlayUpdate;
+}
+
 export interface NativeWebOverlayRegion {
   regionId: string;
   x: number;

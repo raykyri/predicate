@@ -415,6 +415,13 @@ mod imp {
             responder_state: i32,
             iframe_fallback_eligible: i32,
         ) -> i32;
+        fn qmux_native_terminal_should_claim_browser_escape(
+            browser_overlay_open: i32,
+            key: *const c_char,
+            control: i32,
+            option: i32,
+            command: i32,
+        ) -> i32;
         fn qmux_native_terminal_human_browser_defers_editable_sensitive_shortcut(
             key: *const c_char,
             shift: i32,
@@ -459,6 +466,7 @@ mod imp {
             visible: i32,
         ) -> i32;
         fn qmux_native_terminal_set_iframe_shortcut_fallback(active: i32) -> i32;
+        fn qmux_native_terminal_set_browser_overlay_open(active: i32) -> i32;
         fn qmux_native_terminal_set_human_browser_webview(
             native_view: *mut c_void,
             active: i32,
@@ -580,6 +588,29 @@ mod imp {
                 i32::from(has_terminal_keyboard_owner),
                 responder_state,
                 i32::from(iframe_fallback_eligible),
+            ) == 1
+        }
+    }
+
+    pub fn should_claim_browser_escape(
+        browser_overlay_open: bool,
+        key: &str,
+        control: bool,
+        option: bool,
+        command: bool,
+    ) -> bool {
+        let Ok(key) = CString::new(key) else {
+            return false;
+        };
+        // SAFETY: the key is a valid NUL-terminated string for the duration of
+        // this pure routing probe and all remaining arguments are scalar.
+        unsafe {
+            qmux_native_terminal_should_claim_browser_escape(
+                i32::from(browser_overlay_open),
+                key.as_ptr(),
+                i32::from(control),
+                i32::from(option),
+                i32::from(command),
             ) == 1
         }
     }
@@ -800,6 +831,15 @@ mod imp {
     pub fn set_iframe_shortcut_fallback(active: bool) -> Result<(), String> {
         // SAFETY: the scalar is copied synchronously on the main actor.
         if unsafe { qmux_native_terminal_set_iframe_shortcut_fallback(i32::from(active)) } == 1 {
+            Ok(())
+        } else {
+            Err("native terminal host is not attached".to_string())
+        }
+    }
+
+    pub fn set_browser_overlay_open(active: bool) -> Result<(), String> {
+        // SAFETY: the scalar is copied synchronously on the main actor.
+        if unsafe { qmux_native_terminal_set_browser_overlay_open(i32::from(active)) } == 1 {
             Ok(())
         } else {
             Err("native terminal host is not attached".to_string())
@@ -1174,6 +1214,10 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn set_browser_overlay_open(_active: bool) -> Result<(), String> {
+        Err("native terminals are only available on macOS".to_string())
+    }
+
     pub fn set_human_browser_webview(
         _native_view: *mut c_void,
         _active: bool,
@@ -1242,9 +1286,10 @@ pub use imp::{
     action, application_is_active, available, create_host_managed, focus,
     human_browser_history_state, initialize, is_ready_for_replay, paste_approved_text,
     play_bundled_sound, play_system_sound, prepare_for_webview_reload, read_viewport_text, receive,
-    remove, seed_settings, send_text, set_human_browser_loading_background,
-    set_human_browser_webview, set_iframe_shortcut_fallback, set_layout, set_stage_backstop,
-    set_web_overlay_region, set_web_pointer_claimed, shutdown, submit, update_settings,
+    remove, seed_settings, send_text, set_browser_overlay_open,
+    set_human_browser_loading_background, set_human_browser_webview, set_iframe_shortcut_fallback,
+    set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
+    submit, update_settings,
 };
 
 fn with_app_state(operation: impl FnOnce(&AppState)) {
@@ -1475,6 +1520,28 @@ pub extern "C" fn qmux_native_terminal_did_receive_escape(pane_id: *const std::f
     with_app_state(|state| crate::workspace::watch_agent_after_escape(state, &pane_id));
 }
 
+/// AppKit claimed Escape while the currently selected browser overlay was
+/// open, before dispatch could choose Ghostty or either browser document.
+/// Consume the key only once the frontend event listener is live; otherwise
+/// Swift lets it continue through the original responder chain.
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_request_browser_escape() -> i32 {
+    if !events_listener_ready() {
+        return 0;
+    }
+    let mut emitted = false;
+    with_app_state(|state| {
+        state.emit(QmuxEvent::new(
+            "browser.escape_requested",
+            None,
+            None,
+            serde_json::json!({}),
+        ));
+        emitted = true;
+    });
+    i32::from(emitted)
+}
+
 /// A possible application shortcut typed while a native pane owned the
 /// keyboard. Only exact qmux commands are consumed; every unrecognized chord
 /// returns to AppKit/Ghostty unchanged.
@@ -1635,6 +1702,11 @@ pub fn native_terminal_set_iframe_shortcut_fallback(active: bool) -> Result<(), 
 }
 
 #[tauri::command]
+pub fn native_terminal_set_browser_overlay_open(active: bool) -> Result<(), String> {
+    set_browser_overlay_open(active)
+}
+
+#[tauri::command]
 pub fn native_terminal_set_stage_backstop(
     x: f64,
     y: f64,
@@ -1773,6 +1845,29 @@ mod tests {
             HUMAN_BROWSER,
             false
         ));
+    }
+
+    #[test]
+    fn browser_escape_is_claimed_before_terminal_or_browser_responder_routing() {
+        let escape = "\u{1b}";
+        assert!(!super::imp::should_claim_browser_escape(
+            false, escape, false, false, false
+        ));
+        assert!(super::imp::should_claim_browser_escape(
+            true, escape, false, false, false
+        ));
+        assert!(!super::imp::should_claim_browser_escape(
+            true, "x", false, false, false
+        ));
+        for (control, option, command) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert!(!super::imp::should_claim_browser_escape(
+                true, escape, control, option, command
+            ));
+        }
     }
 
     #[test]

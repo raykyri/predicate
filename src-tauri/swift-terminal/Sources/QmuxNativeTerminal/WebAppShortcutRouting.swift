@@ -5,6 +5,25 @@ enum WebAppShortcutResponderState: Int32 {
     case humanBrowser
 }
 
+/// The browser overlay owns bare Escape before AppKit chooses between the
+/// native terminal, the outer app webview, and either embedded browser
+/// document. Shift is deliberately ignored, matching the existing DOM and
+/// terminal Escape handlers; Command/Control/Option variants keep their native
+/// meaning and continue through the responder chain.
+func shouldClaimBrowserEscape(
+    browserOverlayOpen: Bool,
+    key: String?,
+    control: Bool,
+    option: Bool,
+    command: Bool
+) -> Bool {
+    browserOverlayOpen
+        && key == "\u{1b}"
+        && !control
+        && !option
+        && !command
+}
+
 /// Native fallback is reserved for responder states that cannot deliver a key
 /// to the DOM. A healthy WebKit descendant must keep the event so focused
 /// inputs and component-level shortcut exclusions continue to work. The child
@@ -62,6 +81,25 @@ public func qmuxNativeTerminalShouldClaimWebAppShortcut(
         hasTerminalKeyboardOwner: hasTerminalKeyboardOwner == 1,
         responderState: responderState,
         iframeFallbackEligible: iframeFallbackEligible == 1
+    ) ? 1 : 0
+}
+
+/// C-ABI probe used by the Rust suite to exercise the browser-Escape routing
+/// decision in the production Swift package.
+@_cdecl("qmux_native_terminal_should_claim_browser_escape")
+public func qmuxNativeTerminalShouldClaimBrowserEscape(
+    _ browserOverlayOpen: Int32,
+    _ key: UnsafePointer<CChar>?,
+    _ control: Int32,
+    _ option: Int32,
+    _ command: Int32
+) -> Int32 {
+    shouldClaimBrowserEscape(
+        browserOverlayOpen: browserOverlayOpen == 1,
+        key: key.map { String(cString: $0) },
+        control: control == 1,
+        option: option == 1,
+        command: command == 1
     ) ? 1 : 0
 }
 

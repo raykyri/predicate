@@ -222,7 +222,8 @@ hosted view can show proposal status without a separate collaboration database.
 - `Cmd-Shift-H`: focus Home.
 - `Cmd-Shift-E` / `Ctrl-Shift-E`: expand or restore the active transcript pane,
   or toggle the browser overlay on shell-only panes.
-- `Escape`: close the browser overlay when it is open and the key reaches qmux.
+- `Escape`: close the browser overlay when it is open, including while the
+  terminal or embedded page holds keyboard focus.
 - `Cmd-D` / `Cmd-Shift-D`: split the active terminal downward (in Research,
   plain `Cmd-D` creates a new document instead).
 - `Cmd-W`: close the active pane.

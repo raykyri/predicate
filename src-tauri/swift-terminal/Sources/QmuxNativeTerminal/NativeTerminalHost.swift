@@ -12,6 +12,9 @@ private func nativeTerminalDidReceiveAppShortcut(
     _ repeat: Int32
 ) -> Int32
 
+@_silgen_name("qmux_native_terminal_did_request_browser_escape")
+private func nativeTerminalDidRequestBrowserEscape() -> Int32
+
 @_silgen_name("qmux_native_terminal_did_commit_geometry")
 private func nativeTerminalDidCommitGeometry(_ paneID: UnsafePointer<CChar>)
 
@@ -96,6 +99,10 @@ final class NativeTerminalHost {
     /// handlers never fire — so the key monitor must claim recognized ⌘ app
     /// shortcuts itself or they die inside the frame.
     private var iframeShortcutFallbackActive = false
+    /// True while the currently selected browser overlay is rendered. Its
+    /// Escape claim is resolved before responder dispatch so neither Ghostty
+    /// nor a child browsing document can strand the key.
+    private var browserOverlayOpen = false
     private var windowLiveResizeActive = false
     private var clientDeferredGeometryPaneIDs: Set<String> = []
     private var pendingPaneFrames: [String: CGRect] = [:]
@@ -507,6 +514,12 @@ final class NativeTerminalHost {
         return true
     }
 
+    func setBrowserOverlayOpen(_ active: Bool) -> Bool {
+        guard container != nil else { return false }
+        browserOverlayOpen = active
+        return true
+    }
+
     /// Registers Tauri's external child WKWebView for responder routing. Rust
     /// owns its lifecycle and geometry; Swift retains only a weak reference.
     func setHumanBrowserWebView(_ webView: WKWebView?, active: Bool) -> Bool {
@@ -567,6 +580,7 @@ final class NativeTerminalHost {
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
+        browserOverlayOpen = false
         humanBrowserWebView = nil
         // Layout revisions and deferred frames belong to the old document. A
         // replacement document must be able to publish a complete layout even
@@ -710,6 +724,7 @@ final class NativeTerminalHost {
         webGesturePointerActive = false
         webOverlayRegions.removeAll()
         iframeShortcutFallbackActive = false
+        browserOverlayOpen = false
         for pane in panes.values {
             pane.cancelPendingPtyResize()
             pane.view.removeFromSuperview()
@@ -1347,13 +1362,26 @@ final class NativeTerminalHost {
                 pane.consumedShortcutKeyCodes.remove(event.keyCode)
             }
         }
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.window === window,
+           shouldClaimBrowserEscape(
+               browserOverlayOpen: browserOverlayOpen,
+               key: event.charactersIgnoringModifiers,
+               control: modifiers.contains(.control),
+               option: modifiers.contains(.option),
+               command: modifiers.contains(.command)
+           ),
+           nativeTerminalDidRequestBrowserEscape() == 1
+        {
+            consumedAppShortcutKeyCodes.insert(event.keyCode)
+            return nil
+        }
         guard let pane = keyboardPane(for: event) else {
             if claimWebAppShortcut(event) {
                 return nil
             }
             return event
         }
-        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let shortcutModifiers = modifiers.intersection([.shift, .control, .option, .command])
         let key = event.charactersIgnoringModifiers?.lowercased()
         if shortcutModifiers == .command, key == "f" {

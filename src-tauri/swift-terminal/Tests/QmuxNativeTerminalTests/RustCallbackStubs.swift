@@ -114,6 +114,11 @@ func nativeTerminalDidReceiveAppShortcutStub(
     0
 }
 
+@_cdecl("qmux_native_terminal_did_request_browser_escape")
+func nativeTerminalDidRequestBrowserEscapeStub() -> Int32 {
+    0
+}
+
 @_cdecl("qmux_native_terminal_did_commit_geometry")
 func nativeTerminalDidCommitGeometryStub(_: UnsafePointer<CChar>) {}
 
