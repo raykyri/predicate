@@ -62,6 +62,7 @@ import {
 } from "../../lib/researchNavigation";
 import {
   createResearchSelectionSnapper,
+  researchSelectionActionPlacement,
   shouldDismissEmptyResearchAskOnClick,
   type ResearchSelectionSnapper,
 } from "../../lib/researchSelection";
@@ -520,15 +521,16 @@ function quoteDisplayText(exact: string) {
   return exact.split(/\s+/).join(" ").trim();
 }
 
-/** Where the action bar sits for a selection rect: just under it, clamped to
- * the viewport with `reservedWidth` room for the buttons before the right
- * edge (wider when an Expand button joins Remove and Ask). */
-function highlightActionPlacement(rect: DOMRect, reservedWidth = 260) {
-  return {
-    left: Math.max(8, Math.min(rect.left, window.innerWidth - reservedWidth)),
-    top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 35)),
-    offscreen: rect.bottom < 0 || rect.top > window.innerHeight,
-  };
+/** Where the action bar sits for a selection: beside the final rendered line,
+ * with a below-the-line fallback when the remaining viewport is too narrow. */
+function highlightActionPlacement(range: Range, reservedWidth = 260) {
+  return researchSelectionActionPlacement({
+    fragments: Array.from(range.getClientRects()),
+    boundingRect: range.getBoundingClientRect(),
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    reservedWidth,
+  });
 }
 
 // Rounded-elbow connector path: out from the passage's line into the gutter,
@@ -3641,13 +3643,12 @@ function ResearchDocument({
       ),
     });
     const expandOffsets = expandedResearchHighlightOffsets(offsets, resolvedRanges);
-    const rect = range.getBoundingClientRect();
     setHighlightAction({
       nodeId,
       anchor: anchorForOffsets(offsets),
       highlightIds,
       expandAnchor: expandOffsets ? anchorForOffsets(expandOffsets) : null,
-      ...highlightActionPlacement(rect, expandOffsets ? 340 : 260),
+      ...highlightActionPlacement(range, expandOffsets ? 340 : 260),
     });
   }, []);
 
@@ -4217,13 +4218,13 @@ function ResearchDocument({
           setHighlightAction(null);
           return;
         }
-        const rect = selection.getRangeAt(0).getBoundingClientRect();
+        const range = selection.getRangeAt(0);
         setHighlightAction((current) => {
           if (!current) {
             return current;
           }
           const placement = highlightActionPlacement(
-            rect,
+            range,
             current.expandAnchor ? 340 : 260,
           );
           return current.left !== placement.left ||

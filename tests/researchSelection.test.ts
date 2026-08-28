@@ -1,9 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  researchSelectionActionPlacement,
   shouldDismissEmptyResearchAskOnClick,
   snapResearchDragSelection,
 } from "../src/lib/researchSelection";
+
+function rect(left: number, top: number, width: number, height: number) {
+  return {
+    left,
+    right: left + width,
+    top,
+    bottom: top + height,
+    width,
+    height,
+  };
+}
+
+test("places selection actions beside the final line of a multi-line selection", () => {
+  assert.deepEqual(
+    researchSelectionActionPlacement({
+      fragments: [rect(80, 40, 900, 24), rect(80, 64, 230, 24)],
+      boundingRect: rect(80, 40, 900, 48),
+      viewportWidth: 1200,
+      viewportHeight: 800,
+      reservedWidth: 260,
+    }),
+    { left: 314, top: 58.5, offscreen: false },
+  );
+});
+
+test("drops selection actions below the final line when they do not fit beside it", () => {
+  assert.deepEqual(
+    researchSelectionActionPlacement({
+      fragments: [rect(80, 40, 900, 24), rect(900, 64, 230, 24)],
+      boundingRect: rect(80, 40, 1050, 48),
+      viewportWidth: 1200,
+      viewportHeight: 800,
+      reservedWidth: 260,
+    }),
+    { left: 870, top: 92, offscreen: false },
+  );
+});
 
 test("dismisses an empty targeted ask only when a click clears the selection", () => {
   const base = {

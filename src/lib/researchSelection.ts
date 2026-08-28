@@ -9,6 +9,58 @@ export type ResearchSelectionSnapper = (
   focusOffset: number,
 ) => SnappedResearchSelection | null;
 
+export interface ResearchSelectionRect {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+  width: number;
+  height: number;
+}
+
+/** Positions the selection actions beside the end of the selected passage.
+ * A Range bounding box starts at the first line of a multi-line selection,
+ * which made the bar appear below and far to the left of the selected text.
+ * The last rendered fragment is the visual end of the normalized Range, so it
+ * is the useful anchor regardless of which direction the user dragged.
+ *
+ * When the bar cannot fit beside that fragment, it drops below it and remains
+ * aligned to the fragment's right edge. */
+export function researchSelectionActionPlacement(input: {
+  fragments: readonly ResearchSelectionRect[];
+  boundingRect: ResearchSelectionRect;
+  viewportWidth: number;
+  viewportHeight: number;
+  reservedWidth?: number;
+  reservedHeight?: number;
+}) {
+  const margin = 8;
+  const gap = 4;
+  const reservedWidth = input.reservedWidth ?? 260;
+  const reservedHeight = input.reservedHeight ?? 35;
+  const renderedFragments = input.fragments.filter(
+    (rect) => rect.width > 0 && rect.height > 0,
+  );
+  const fragment = renderedFragments[renderedFragments.length - 1] ?? input.boundingRect;
+  const maximumLeft = Math.max(margin, input.viewportWidth - reservedWidth - margin);
+  const maximumTop = Math.max(margin, input.viewportHeight - reservedHeight - margin);
+  const besideLeft = fragment.right + gap;
+  const fitsBeside = besideLeft + reservedWidth <= input.viewportWidth - margin;
+
+  return {
+    left: fitsBeside
+      ? besideLeft
+      : Math.max(margin, Math.min(fragment.right - reservedWidth, maximumLeft)),
+    top: fitsBeside
+      ? Math.max(
+          margin,
+          Math.min(fragment.top + (fragment.height - reservedHeight) / 2, maximumTop),
+        )
+      : Math.max(margin, Math.min(fragment.bottom + gap, maximumTop)),
+    offscreen: fragment.bottom < 0 || fragment.top > input.viewportHeight,
+  };
+}
+
 /** An empty targeted-ask composer follows its passage selection: clicking
  * away closes it, while composer controls, selection actions, and clicks that
  * leave a live passage selection alone do not. */
