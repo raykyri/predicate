@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentAdapterMetadata } from "../../types";
 import { LauncherSelect, type LauncherSelectOption } from "../LauncherSelect";
 import {
@@ -175,21 +175,21 @@ export default function NewResearchDialog({
     setAdapter(adapters.find((candidate) => candidate.default)?.id ?? adapters[0]?.id ?? "");
   }, [adapter, adapters, open]);
 
-  // Grow the textarea to fit its content, like the Home launcher: multi-line
-  // prompts expand the composer until the CSS max-height caps it.
-  const growPromptInput = useCallback(() => {
+  // Grow the textarea to fit the committed prompt value. Measuring directly in
+  // onChange can catch WebKit between its native edit and React restoring the
+  // controlled value, briefly sizing the field for a different wrap count.
+  // useLayoutEffect keeps the value and height in the same pre-paint commit.
+  useLayoutEffect(() => {
+    if (!open || !visible) {
+      return;
+    }
     const textarea = promptRef.current;
     if (!textarea) {
       return;
     }
     textarea.style.height = "auto";
     textarea.style.height = `${textarea.scrollHeight}px`;
-  }, []);
-  useLayoutEffect(() => {
-    if (open && visible) {
-      growPromptInput();
-    }
-  }, [growPromptInput, open, visible]);
+  }, [open, prompt, visible]);
 
   useEffect(() => {
     if (!open || !visible) {
@@ -325,7 +325,6 @@ export default function NewResearchDialog({
           onChange={(event) => {
             sessionDraftTouchedRef.current = true;
             setPrompt(event.currentTarget.value);
-            growPromptInput();
           }}
           onKeyDown={(event) => {
             if (isComposerSubmitShortcut(event, requireCmdEnterToSend)) {
