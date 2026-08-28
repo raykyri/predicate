@@ -57,6 +57,13 @@ import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapte
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
+import {
+  adapterIsReady,
+  adapterReadinessLabel,
+  adapterReadinessMessage,
+  preferredReadyAdapter,
+  readyAdaptersFirst,
+} from "./lib/adapterReadiness";
 import CommandPalette, { type PaletteCommand } from "./components/CommandPalette";
 import GlobalTaskLauncher from "./components/GlobalTaskLauncher";
 import ConversationHistoryDialog from "./components/ConversationHistoryDialog";
@@ -2349,6 +2356,7 @@ function MainApp() {
     () => readSessionDraftJson(SESSION_DRAFT_KEYS.newResearchModal) !== null,
   );
   const [newAgentOpen, setNewAgentOpen] = useState(false);
+  const [newAgentError, setNewAgentError] = useState<string | null>(null);
   const [terminalMapOpen, setTerminalMapOpen] = useState(false);
   const newAgentOpenRef = useRef(newAgentOpen);
   newAgentOpenRef.current = newAgentOpen;
@@ -4612,13 +4620,25 @@ function MainApp() {
     }
   }, [turns]);
 
+  const readyLauncherAdapter = config
+    ? preferredReadyAdapter(config.adapters, launcherAdapterId)
+    : null;
   const runtimeDefaultAdapterId =
-    config?.adapters.find((adapter) => adapter.default)?.id ?? config?.adapters[0]?.id ?? "claude";
+    readyLauncherAdapter?.id ??
+    config?.adapters.find((adapter) => adapter.default)?.id ??
+    config?.adapters[0]?.id ??
+    "claude";
   const selectedLauncherAdapterId = launcherAdapterId ?? runtimeDefaultAdapterId;
+  const effectiveLauncherAdapterId =
+    readyLauncherAdapter?.id ?? selectedLauncherAdapterId;
   const launchAdapter = useMemo(
-    () => getAgentUiAdapter(selectedLauncherAdapterId),
-    [selectedLauncherAdapterId],
+    () => getAgentUiAdapter(effectiveLauncherAdapterId),
+    [effectiveLauncherAdapterId],
   );
+  const launchAdapterMetadata = config?.adapters.find(
+    (adapter) => adapter.id === launchAdapter.id,
+  );
+  const launchAdapterReady = !config || adapterIsReady(launchAdapterMetadata);
   const launcherOptions = launcherOptionsByAdapter[launchAdapter.id] ?? {};
   const LauncherOptions = launchAdapter.LauncherOptions;
   // Skills only apply to Claude (the only adapter with a qmux plugin today).
@@ -4628,18 +4648,37 @@ function MainApp() {
       ? availableSkills.find((skill) => skill.id === selectedSkillId) ?? null
       : null;
   const launcherAdapters = useMemo(() => {
-    const runtimeAdapters = config?.adapters
-      .map((adapter) => findAgentUiAdapter(adapter.id))
-      .filter((adapter): adapter is NonNullable<typeof adapter> => Boolean(adapter));
-    return runtimeAdapters && runtimeAdapters.length > 0 ? runtimeAdapters : agentUiAdapters;
+    const runtimeAdapters = config
+      ? readyAdaptersFirst(config.adapters).filter((adapter) => findAgentUiAdapter(adapter.id))
+      : [];
+    return runtimeAdapters.length > 0
+      ? runtimeAdapters
+      : agentUiAdapters.map((adapter) => ({
+          id: adapter.id,
+          label: adapter.label,
+          default: false,
+          supportsFork: true,
+          supportsResearch: false,
+          supportsForkAtMessage: false,
+          configuredBinary: adapter.id,
+          resolvedBinary: adapter.id,
+          readiness: "ready" as const,
+          message: null,
+        }));
   }, [config]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
     () =>
-      launcherAdapters.map((adapter) => ({
+      launcherAdapters.map((adapter, index) => ({
         value: adapter.id,
         label: adapter.label,
         iconSrc: ADAPTER_ICON_BY_ID[adapter.id],
         iconClassName: adapterIconClassName(adapter.id),
+        detail: adapterReadinessLabel(adapter),
+        disabled: !adapterIsReady(adapter),
+        dividerBefore:
+          !adapterIsReady(adapter) &&
+          index > 0 &&
+          adapterIsReady(launcherAdapters[index - 1]),
       })),
     [launcherAdapters],
   );
@@ -4658,9 +4697,11 @@ function MainApp() {
     const currentIndex = launcherAdapterOptions.findIndex(
       (option) => option.value === launchAdapter.id,
     );
+    const enabledOptions = launcherAdapterOptions.filter((option) => !option.disabled);
+    const enabledIndex = enabledOptions.findIndex((option) => option.value === launchAdapter.id);
     const nextIndex =
-      currentIndex === -1 ? 0 : (currentIndex + 1) % launcherAdapterOptions.length;
-    const nextAdapterId = launcherAdapterOptions[nextIndex]?.value;
+      enabledIndex === -1 ? 0 : (enabledIndex + 1) % enabledOptions.length;
+    const nextAdapterId = enabledOptions[nextIndex]?.value;
     if (nextAdapterId && nextAdapterId !== launchAdapter.id) {
       rememberLauncherAdapter(nextAdapterId);
     }
@@ -9972,6 +10013,7 @@ function MainApp() {
   function openNewAgentPopover() {
     setTerminalMapOpen(false);
     setNewResearchOpen(false);
+    setNewAgentError(null);
     setNewAgentOpen(true);
     if (sidebarModeRef.current !== "terminal") {
       setSidebarMode("terminal");
@@ -9980,6 +10022,7 @@ function MainApp() {
   }
 
   function closeNewAgentPopover() {
+    setNewAgentError(null);
     setNewAgentOpen(false);
   }
 
@@ -10000,6 +10043,13 @@ function MainApp() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [newAgentOpen]);
+
+  useEffect(() => {
+    if (!newResearchOpen) {
+      return;
+    }
+    void getRuntimeConfig().then(setConfig).catch(() => undefined);
+  }, [newResearchOpen]);
 
   function toggleTerminalMap() {
     if (terminalMapOpenRef.current) {
@@ -11637,12 +11687,20 @@ function MainApp() {
     if (launchingAgentRef.current) {
       return;
     }
+    if (!launchAdapterReady) {
+      setNewAgentError(
+        launchAdapterMetadata
+          ? adapterReadinessMessage(launchAdapterMetadata)
+          : `${launchAdapter.label} is not available.`,
+      );
+      return;
+    }
     launchingAgentRef.current = true;
     const trimmed = promptRef.current.trim();
     // A selected skill is sent as a leading slash command so the launched agent
     // invokes it before the user's prompt (e.g. `/qmux:open-in-browser <prompt>`).
     const finalPrompt = selectedSkill ? `${selectedSkill.command} ${trimmed}`.trim() : trimmed;
-    setError(null);
+    setNewAgentError(null);
     rememberLauncherAdapter(launchAdapter.id);
     try {
       const targetGroupId = launchGroupId();
@@ -11675,7 +11733,7 @@ function MainApp() {
       const [latestAgents] = await Promise.all([listAgents(), refreshGroups()]);
       setAgents(latestAgents);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setNewAgentError(err instanceof Error ? err.message : String(err));
     } finally {
       launchingAgentRef.current = false;
     }
@@ -13058,6 +13116,10 @@ function MainApp() {
     // New agents default to no worktree and no skill each time the launcher opens.
     setCreateInWorktree(false);
     setSelectedSkillId(null);
+    setNewAgentError(null);
+    // PATH can change while qmux stays open (for example after installing a
+    // provider), so refresh binary readiness whenever the launcher is opened.
+    void getRuntimeConfig().then(setConfig).catch(() => undefined);
     // Re-read the plugin's skills on open so newly added ones show up without a
     // restart. Failures (e.g. no plugin dir) just leave the list empty.
     void listClaudeSkills()
@@ -13480,6 +13542,7 @@ function MainApp() {
               options={launcherAdapterOptions}
               ariaLabel="Agent"
               onChange={(adapterId) => {
+                setNewAgentError(null);
                 rememberLauncherAdapter(adapterId);
                 focusLauncherInput();
               }}
@@ -13488,8 +13551,15 @@ function MainApp() {
           <button
             type="submit"
             className="control-button command-launcher-send"
+            disabled={!launchAdapterReady}
             aria-label={`Launch ${launchAdapter.label}`}
-            title={`Launch ${launchAdapter.label}`}
+            title={
+              launchAdapterReady
+                ? `Launch ${launchAdapter.label}`
+                : launchAdapterMetadata
+                  ? adapterReadinessMessage(launchAdapterMetadata)
+                  : `${launchAdapter.label} is unavailable`
+            }
           >
             <ComposerSubmitShortcutGlyph
               requireCmdEnter={settings.requireCmdEnterToSend}
@@ -13498,6 +13568,14 @@ function MainApp() {
           </button>
         </div>
       </div>
+      {newAgentError || (config && !config.adapters.some(adapterIsReady)) ? (
+        <div className="new-research-footer">
+          <p className="new-research-error" role="alert">
+            {newAgentError ??
+              "No agent CLI was found. Install a supported agent or configure its binary path."}
+          </p>
+        </div>
+      ) : null}
     </form>
   );
 

@@ -96,6 +96,10 @@ impl AgentAdapter for DevinAdapter {
         "Devin"
     }
 
+    fn configured_binary(&self) -> &str {
+        &self.binary
+    }
+
     fn launch(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
         self.spawn_pane(state, request)
     }

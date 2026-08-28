@@ -32,6 +32,10 @@ export interface AgentAdapterMetadata {
    * head. Gates the transcript's per-message fork action, which is hidden
    * rather than disabled for adapters without it. */
   supportsForkAtMessage: boolean;
+  configuredBinary: string;
+  resolvedBinary: string | null;
+  readiness: "ready" | "missing";
+  message: string | null;
 }
 
 export interface ClaudeSkill {

@@ -793,6 +793,8 @@ impl ComposerPolicy {
 pub trait AgentAdapter: Send + Sync {
     fn id(&self) -> &'static str;
     fn display_name(&self) -> &'static str;
+    /// The configured executable name or path used by every launch and probe.
+    fn configured_binary(&self) -> &str;
 
     fn launch(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String>;
 
@@ -993,16 +995,42 @@ impl AdapterRegistry {
     pub fn metadata(&self) -> Vec<AdapterMetadata> {
         self.adapters
             .iter()
-            .map(|adapter| AdapterMetadata {
-                id: adapter.id().to_string(),
-                label: adapter.display_name().to_string(),
-                default: adapter.id() == "claude",
-                supports_fork: adapter.supports_fork(),
-                supports_research: adapter.supports_research(),
-                supports_fork_at_message: adapter.supports_fork_at_message(),
+            .map(|adapter| {
+                let configured_binary = adapter.configured_binary().to_string();
+                let resolved_binary =
+                    ensure_on_path(&configured_binary).map(|path| path.display().to_string());
+                let installed = resolved_binary.is_some();
+                AdapterMetadata {
+                    id: adapter.id().to_string(),
+                    label: adapter.display_name().to_string(),
+                    default: adapter.id() == "claude",
+                    supports_fork: adapter.supports_fork(),
+                    supports_research: adapter.supports_research(),
+                    supports_fork_at_message: adapter.supports_fork_at_message(),
+                    configured_binary,
+                    resolved_binary,
+                    readiness: if installed {
+                        AdapterReadiness::Ready
+                    } else {
+                        AdapterReadiness::Missing
+                    },
+                    message: (!installed).then(|| {
+                        format!(
+                            "{} was not found. Install it or configure its binary path.",
+                            adapter.display_name()
+                        )
+                    }),
+                }
             })
             .collect()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdapterReadiness {
+    Ready,
+    Missing,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1020,6 +1048,12 @@ pub struct AdapterMetadata {
     /// session head. Gates the transcript's per-message fork action, which is
     /// hidden rather than disabled for adapters without it.
     pub supports_fork_at_message: bool,
+    /// Executable name/path from qmux.config.json after home expansion.
+    pub configured_binary: String,
+    /// Resolved executable used for launch, absent when it cannot be found.
+    pub resolved_binary: Option<String>,
+    pub readiness: AdapterReadiness,
+    pub message: Option<String>,
 }
 
 pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
@@ -1310,8 +1344,16 @@ pub fn default_fork_adapter(config: &QmuxConfig) -> Result<String, String> {
     let metadata = adapter_registry(config).metadata();
     metadata
         .iter()
-        .find(|adapter| adapter.default && adapter.supports_research)
-        .or_else(|| metadata.iter().find(|adapter| adapter.supports_research))
+        .find(|adapter| {
+            adapter.default
+                && adapter.supports_research
+                && adapter.readiness == AdapterReadiness::Ready
+        })
+        .or_else(|| {
+            metadata.iter().find(|adapter| {
+                adapter.supports_research && adapter.readiness == AdapterReadiness::Ready
+            })
+        })
         .map(|adapter| adapter.id.clone())
         .ok_or_else(|| "no installed agent supports research follow-ups".to_string())
 }
@@ -1673,6 +1715,31 @@ mod tests {
         assert!(!adapter_supports_fork_at_message(&config, "muse"));
         assert!(!adapter_supports_fork(&config, "devin"));
         assert!(!adapter_supports_fork_at_message(&config, "devin"));
+    }
+
+    #[test]
+    fn runtime_metadata_reports_a_missing_configured_binary() {
+        let mut config = test_config();
+        config.adapters.claude.binary =
+            Some("/definitely/missing/qmux-test-provider-binary".to_string());
+
+        let metadata = adapter_registry(&config).metadata();
+        let claude = metadata
+            .iter()
+            .find(|adapter| adapter.id == "claude")
+            .expect("claude metadata");
+        assert_eq!(
+            claude.configured_binary,
+            "/definitely/missing/qmux-test-provider-binary"
+        );
+        assert_eq!(claude.resolved_binary, None);
+        assert_eq!(claude.readiness, AdapterReadiness::Missing);
+        assert!(
+            claude
+                .message
+                .as_deref()
+                .is_some_and(|message| { message.contains("Claude was not found") })
+        );
     }
 
     #[test]

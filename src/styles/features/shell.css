@@ -2629,6 +2629,24 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   white-space: nowrap;
 }
 
+.launcher-select-item:disabled {
+  color: var(--text-secondary);
+  cursor: default;
+  opacity: 0.72;
+}
+
+.launcher-select-item-detail {
+  margin-left: auto;
+  padding-left: 14px;
+  color: var(--placeholder-color);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.launcher-select-item:disabled .launcher-select-item-detail {
+  color: var(--status-attention-fg);
+}
+
 .launcher-select-separator {
   height: 1px;
   margin: 3px 4px;

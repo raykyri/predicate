@@ -23,6 +23,13 @@ import {
   selectedModelPreset,
 } from "../../lib/launcherModels";
 import { launcherTabAction } from "../../lib/launcherKeyboard";
+import {
+  adapterIsReady,
+  adapterReadinessLabel,
+  adapterReadinessMessage,
+  preferredReadyAdapter,
+  readyAdaptersFirst,
+} from "../../lib/adapterReadiness";
 
 // GPT-5.4 stops at extra high; every other Codex preset (and a custom model,
 // whose ceiling is unknown here) offers the full range and lets the CLI
@@ -96,9 +103,11 @@ export default function NewResearchDialog({
   // General terminal-session fork support is intentionally wider than the
   // runtimes supported by research.
   const adapters = useMemo(
-    () => allAdapters.filter((candidate) => candidate.supportsResearch),
+    () => readyAdaptersFirst(allAdapters.filter((candidate) => candidate.supportsResearch)),
     [allAdapters],
   );
+  const selectedAdapter = adapters.find((candidate) => candidate.id === adapter) ?? null;
+  const adapterReady = adapterIsReady(selectedAdapter);
 
   useEffect(() => {
     if (!open) {
@@ -118,7 +127,7 @@ export default function NewResearchDialog({
     setEffortChoice("");
     setError(null);
     setAdapter(
-      restored?.adapter ??
+      preferredReadyAdapter(adapters, restored?.adapter)?.id ??
         adapters.find((candidate) => candidate.default)?.id ??
         adapters[0]?.id ??
         "",
@@ -169,10 +178,10 @@ export default function NewResearchDialog({
   ]);
 
   useEffect(() => {
-    if (!open || adapters.some((candidate) => candidate.id === adapter)) {
+    if (!open || adapterIsReady(adapters.find((candidate) => candidate.id === adapter))) {
       return;
     }
-    setAdapter(adapters.find((candidate) => candidate.default)?.id ?? adapters[0]?.id ?? "");
+    setAdapter(preferredReadyAdapter(adapters)?.id ?? adapters[0]?.id ?? "");
   }, [adapter, adapters, open]);
 
   // Grow the textarea to fit the committed prompt value. Measuring directly in
@@ -220,7 +229,7 @@ export default function NewResearchDialog({
   const resolvedEffort = selectedEffort || null;
 
   async function submit() {
-    if (!prompt.trim() || !adapter || submitting) {
+    if (!prompt.trim() || !adapter || !adapterReady || submitting) {
       return;
     }
     setSubmitting(true);
@@ -260,20 +269,25 @@ export default function NewResearchDialog({
     onClose();
   }
 
-  const adapterOptions: LauncherSelectOption[] = adapters.map((candidate) => ({
+  const adapterOptions: LauncherSelectOption[] = adapters.map((candidate, index) => ({
     value: candidate.id,
     label: candidate.label,
     iconSrc: ADAPTER_ICON_BY_ID[candidate.id],
     iconClassName: adapterIconClassName(candidate.id),
+    detail: adapterReadinessLabel(candidate),
+    disabled: !adapterIsReady(candidate),
+    dividerBefore:
+      !adapterIsReady(candidate) && index > 0 && adapterIsReady(adapters[index - 1]),
   }));
 
   function cycleAdapter() {
     if (adapterOptions.length === 0) {
       return;
     }
-    const currentIndex = adapterOptions.findIndex((option) => option.value === adapter);
-    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % adapterOptions.length;
-    const nextAdapter = adapterOptions[nextIndex]?.value;
+    const enabledOptions = adapterOptions.filter((option) => !option.disabled);
+    const currentIndex = enabledOptions.findIndex((option) => option.value === adapter);
+    const nextIndex = currentIndex === -1 ? 0 : (currentIndex + 1) % enabledOptions.length;
+    const nextAdapter = enabledOptions[nextIndex]?.value;
     if (nextAdapter && nextAdapter !== adapter) {
       sessionDraftTouchedRef.current = true;
       setAdapter(nextAdapter);
@@ -378,6 +392,7 @@ export default function NewResearchDialog({
                 ariaLabel="Agent"
                 onChange={(nextAdapter) => {
                   sessionDraftTouchedRef.current = true;
+                  setError(null);
                   setAdapter(nextAdapter);
                 }}
               />
@@ -385,7 +400,7 @@ export default function NewResearchDialog({
             <button
               type="submit"
               className="control-button command-launcher-send new-research-send"
-              disabled={!prompt.trim() || !adapter || submitting}
+              disabled={!prompt.trim() || !adapter || !adapterReady || submitting}
               aria-label={submitting ? "Starting research" : "Start research"}
               title={submitting ? "Starting research" : "Start research"}
             >
@@ -397,11 +412,13 @@ export default function NewResearchDialog({
           </div>
         </div>
       </div>
-      {adapters.length === 0 || error ? (
+      {!adapters.some(adapterIsReady) || error ? (
         <div className="new-research-footer">
-          {adapters.length === 0 ? (
+          {!adapters.some(adapterIsReady) ? (
             <p className="new-research-unavailable" role="alert">
-              No installed agent supports research follow-ups.
+              {selectedAdapter
+                ? adapterReadinessMessage(selectedAdapter)
+                : "No supported research agent is available."}
             </p>
           ) : null}
           {error ? (

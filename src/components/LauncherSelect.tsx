@@ -9,6 +9,8 @@ export interface LauncherSelectOption {
   iconClassName?: string;
   dividerBefore?: boolean;
   tone?: "danger";
+  detail?: string;
+  disabled?: boolean;
 }
 
 interface LauncherSelectProps {
@@ -128,6 +130,8 @@ export function LauncherSelect({ value, options, onChange, ariaLabel }: Launcher
                       type="button"
                       role="option"
                       aria-selected={active}
+                      aria-disabled={option.disabled || undefined}
+                      disabled={option.disabled}
                       className={`menu-item launcher-select-item${toneClass(option.tone)}${
                         active ? " is-active" : ""
                       }`}
@@ -147,6 +151,9 @@ export function LauncherSelect({ value, options, onChange, ariaLabel }: Launcher
                         />
                       ) : null}
                       <span className="launcher-select-item-label">{option.label}</span>
+                      {option.detail ? (
+                        <span className="launcher-select-item-detail">{option.detail}</span>
+                      ) : null}
                       {active ? (
                         <Check size={14} className="launcher-select-check" aria-hidden="true" />
                       ) : null}
