@@ -3,7 +3,10 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import HomeGroupSelector from "../src/components/HomeGroupSelector";
-import { railLinkPath } from "../src/components/HomeRails";
+import {
+  centeredHorizontalScrollLeft,
+  railLinkPath,
+} from "../src/components/HomeRails";
 import {
   latestUserTurnTimestamp,
   mergeRailPastTurns,
@@ -165,6 +168,29 @@ test("rail text helpers strip instruction blocks with raw-text fallback", () => 
   ];
   assert.equal(railLatestUserTurn(turns), "real prompt");
   assert.equal(latestUserTurnTimestamp(turns), 100);
+});
+
+test("terminal map centers its horizontal viewport on the active rail", () => {
+  assert.equal(centeredHorizontalScrollLeft(600, 1_400, [{ start: 700, end: 980 }]), 540);
+});
+
+test("terminal map centers the full span of an active split", () => {
+  assert.equal(
+    centeredHorizontalScrollLeft(600, 1_400, [
+      { start: 300, end: 580 },
+      { start: 596, end: 876 },
+    ]),
+    288,
+  );
+});
+
+test("terminal map initial horizontal position clamps at either edge", () => {
+  assert.equal(centeredHorizontalScrollLeft(600, 1_400, [{ start: 14, end: 294 }]), 0);
+  assert.equal(centeredHorizontalScrollLeft(600, 1_400, [{ start: 1_120, end: 1_400 }]), 800);
+});
+
+test("terminal map leaves horizontal position alone without a visible active rail", () => {
+  assert.equal(centeredHorizontalScrollLeft(600, 1_400, []), null);
 });
 
 test("railLinkPath draws a straight line for level cards", () => {

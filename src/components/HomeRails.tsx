@@ -228,6 +228,20 @@ function formatElapsedShort(ms: number): string | null {
   return rest > 0 && hours < 10 ? `${hours}h ${rest}m` : `${hours}h`;
 }
 
+export function centeredHorizontalScrollLeft(
+  viewportWidth: number,
+  contentWidth: number,
+  targetRanges: ReadonlyArray<{ start: number; end: number }>,
+): number | null {
+  if (targetRanges.length === 0) {
+    return null;
+  }
+  const targetStart = Math.min(...targetRanges.map((range) => range.start));
+  const targetEnd = Math.max(...targetRanges.map((range) => range.end));
+  const centered = (targetStart + targetEnd - viewportWidth) / 2;
+  return Math.min(Math.max(centered, 0), Math.max(contentWidth - viewportWidth, 0));
+}
+
 // Links route orthogonally along the gutter between rails: a short horizontal
 // exit, a rounded corner, a vertical run hugging the source column's edge, and
 // a horizontal approach ending in the arrowhead at the target card's edge — so
@@ -620,6 +634,36 @@ export default function HomeRails({
       queuedCardRefs.current.set(key, element);
     } else {
       queuedCardRefs.current.delete(key);
+    }
+  }, []);
+
+  // The map remounts HomeRails each time it opens. Place its initial horizontal
+  // viewport around the complete active split before paint, then leave later
+  // scrolling and rail changes under the user's control.
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current;
+    const inner = innerRef.current;
+    if (!wrap || !inner) {
+      return;
+    }
+    const wrapRect = wrap.getBoundingClientRect();
+    const targetRanges = Array.from(
+      inner.querySelectorAll<HTMLElement>(".home-rail.is-active"),
+      (rail) => {
+        const railRect = rail.getBoundingClientRect();
+        return {
+          start: railRect.left - wrapRect.left - wrap.clientLeft + wrap.scrollLeft,
+          end: railRect.right - wrapRect.left - wrap.clientLeft + wrap.scrollLeft,
+        };
+      },
+    );
+    const scrollLeft = centeredHorizontalScrollLeft(
+      wrap.clientWidth,
+      wrap.scrollWidth,
+      targetRanges,
+    );
+    if (scrollLeft !== null) {
+      wrap.scrollLeft = scrollLeft;
     }
   }, []);
 
