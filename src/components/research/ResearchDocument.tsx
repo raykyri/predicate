@@ -4714,6 +4714,7 @@ function ResearchDocument({
         canContinueThread(detail.nodes, composerTarget)),
   );
   const tailActive = Boolean(tailNode && isActiveResearchStatus(tailNode.status));
+  const waitingForThreadTail = !ask && followupMode === "thread" && tailActive;
   const tailUnusable = Boolean(
     tailNode && (tailNode.status === "failed" || tailNode.status === "cancelled"),
   );
@@ -4732,20 +4733,23 @@ function ResearchDocument({
     ? null
     : composerAwaitingCheckpoint
       ? "Waiting for the native session checkpoint before continuing."
-      : !ask && followupMode === "thread" && tailActive
-        ? "Waiting for the answer above to finish."
-        : !ask && followupMode === "thread" && tailUnusable
-          ? `The last follow-up ${tailNode?.status === "failed" ? "failed" : "was cancelled"} — ${
-              canRetryTail
-                ? "retry it, delete it, or branch instead."
-                : "delete it to continue the thread, or branch instead."
-            }`
-          : !ask &&
-              followupMode === "branch" &&
-              composerTarget &&
-              composerTarget.id !== tailNode?.id
-            ? "Branches from the last completed answer in this thread."
-            : null;
+      : !ask && followupMode === "thread" && tailUnusable
+        ? `The last follow-up ${tailNode?.status === "failed" ? "failed" : "was cancelled"} — ${
+            canRetryTail
+              ? "retry it, delete it, or branch instead."
+              : "delete it to continue the thread, or branch instead."
+          }`
+        : !ask &&
+            followupMode === "branch" &&
+            composerTarget &&
+            composerTarget.id !== tailNode?.id
+          ? "Branches from the last completed answer in this thread."
+          : null;
+  const submitButtonLabel = submitting
+    ? "Sending…"
+    : waitingForThreadTail
+      ? "Waiting..."
+      : "Send";
   const composerPlaceholder = ask
     ? "Ask about the highlighted text…"
     : followupMode === "branch"
@@ -4872,8 +4876,8 @@ function ResearchDocument({
             disabled={!canSubmitFollowup}
             onClick={() => void submitFollowup()}
           >
-            <span>{submitting ? "Sending…" : "Send"}</span>
-            {!submitting ? (
+            <span>{submitButtonLabel}</span>
+            {!submitting && !waitingForThreadTail ? (
               <ComposerSubmitShortcutGlyph
                 requireCmdEnter
                 className="shortcut-hint"
