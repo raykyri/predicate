@@ -19,6 +19,7 @@ import {
   upsertAgent,
 } from "../lib/appHelpers";
 import { parseAppShortcutCommand, type AppShortcutCommand } from "../lib/appShortcuts";
+import { sessionPickerTopologyChanged } from "../lib/transcriptSessions";
 import type { ExitPreflightRequest, PaneContextMenuState } from "../appTypes";
 import type {
   ActiveWorkspace,
@@ -101,6 +102,9 @@ export interface UseQmuxEventsHandlers {
   isResearchAgent?: (agentId: string) => boolean;
   refreshAgentTurnQueue: (agentId: string) => Promise<void>;
   refreshTranscriptOptions: (agentId: string) => Promise<void>;
+  // A session binding/removal changes the candidate set and "In use" flags for
+  // sibling agents too, not just the agent named by the event.
+  refreshVisibleTranscriptOptions: () => void;
   // Binds a browser-overlay URL to a pane (the backend emits the fully-formed URL).
   openBrowserOverlay: (
     paneId: string,
@@ -175,6 +179,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
     isResearchAgent,
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
+    refreshVisibleTranscriptOptions,
     openBrowserOverlay,
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady,
@@ -268,6 +273,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
           return nextPanes;
         });
         setPaneContextMenu((current) => (current?.paneId === exitedPaneId ? null : current));
+      }
+      if (sessionPickerTopologyChanged(event.type)) {
+        refreshVisibleTranscriptOptions();
       }
       if (event.type === "pane.focus_requested" && event.paneId) {
         onPaneFocusRequested?.(event.paneId);
@@ -611,9 +619,6 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         // A notice usually follows a recovery/rotation; refresh the picker so the
         // active session and any new candidates are reflected.
         void refreshTranscriptOptions(agentId).catch(() => undefined);
-      }
-      if (event.agentId && event.type === "agent.transcript_recovered") {
-        void refreshTranscriptOptions(event.agentId).catch(() => undefined);
       }
     };
 

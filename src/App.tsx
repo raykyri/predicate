@@ -282,6 +282,7 @@ import {
 } from "./lib/browserOverlay";
 import { artifactTrayVisible, isArtifactBrowserOpen } from "./lib/artifacts";
 import { createTranscriptScrollCaptureSlot } from "./lib/transcriptScroll";
+import { TranscriptOptionsRequestTracker } from "./lib/transcriptSessions";
 import {
   buildSingleAgentThreadGraph,
   focusedBranchTurns,
@@ -1975,6 +1976,7 @@ function MainApp() {
   const [transcriptOptionsByAgent, setTranscriptOptionsByAgent] = useState<
     Record<string, TranscriptOption[]>
   >({});
+  const transcriptOptionsRequestTrackerRef = useRef(new TranscriptOptionsRequestTracker());
   const loadingConversationThreadIdsRef = useRef(new Set<string>());
   const conversationHistoryRequestSequenceRef = useRef(new Map<string, number>());
   const nextConversationHistoryRequestSequenceRef = useRef(0);
@@ -4575,6 +4577,7 @@ function MainApp() {
   // don't grow unbounded across a long session of spawning and closing agents.
   useEffect(() => {
     const ids = new Set(agents.map((agent) => agent.id));
+    transcriptOptionsRequestTrackerRef.current.retain(ids);
     const pruneRecord = <T,>(current: Record<string, T>): Record<string, T> => {
       const next = Object.fromEntries(Object.entries(current).filter(([id]) => ids.has(id)));
       return Object.keys(next).length === Object.keys(current).length ? current : next;
@@ -5542,6 +5545,8 @@ function MainApp() {
     .map((surface) => surface.agent?.id)
     .filter((agentId): agentId is string => Boolean(agentId));
   const visibleTurnPaneAgentIdsKey = visibleTurnPaneAgentIds.join("\0");
+  const visibleTurnPaneAgentIdsRef = useRef(visibleTurnPaneAgentIds);
+  visibleTurnPaneAgentIdsRef.current = visibleTurnPaneAgentIds;
   const terminalPaneIsReadOnly = (pane: PaneInfo) =>
     groupById.get(pane.groupId)?.scope === "research" &&
     agentByPaneId.get(pane.id)?.status !== "awaitingPermission" &&
@@ -6417,11 +6422,23 @@ function MainApp() {
   }
 
   async function refreshTranscriptOptions(agentId: string) {
+    const request = transcriptOptionsRequestTrackerRef.current.begin(agentId);
     try {
       const options = await listAgentTranscripts(agentId);
+      if (!transcriptOptionsRequestTrackerRef.current.isLatest(agentId, request)) {
+        return;
+      }
       setTranscriptOptionsByAgent((current) => ({ ...current, [agentId]: options }));
     } catch {
       // The picker is a best-effort aid; a failed scan just leaves it hidden.
+    }
+  }
+
+  function refreshVisibleTranscriptOptions(exceptAgentId?: string) {
+    for (const agentId of visibleTurnPaneAgentIdsRef.current) {
+      if (agentId !== exceptAgentId) {
+        void refreshTranscriptOptions(agentId);
+      }
     }
   }
 
@@ -6435,8 +6452,9 @@ function MainApp() {
         current.map((agent) => (agent.id === updated.id ? updated : agent)),
       );
       if (path) {
-        // Re-read the session list so the active flag follows the new binding.
-        await refreshTranscriptOptions(agentId);
+        // Re-read every visible picker: this agent's active flag changed and a
+        // sibling's "In use" badge may have changed with it.
+        refreshVisibleTranscriptOptions();
       } else {
         // With no bound transcript there is no directory to rescan from; keep the
         // already-loaded menu visible, just without an active row.
@@ -6448,6 +6466,7 @@ function MainApp() {
           })),
         }));
         setTranscriptNoticeByAgent((current) => ({ ...current, [agentId]: null }));
+        refreshVisibleTranscriptOptions(agentId);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -9902,6 +9921,7 @@ function MainApp() {
     isResearchAgent: (agentId: string) => researchAgentIdsRef.current.has(agentId),
     refreshAgentTurnQueue,
     refreshTranscriptOptions,
+    refreshVisibleTranscriptOptions,
     openBrowserOverlay,
     selectPaneAfterClose: selectPaneAfterCloseWithContext,
     onEventsReady: handleEventsReady,
@@ -14378,6 +14398,7 @@ function MainApp() {
                   void handleSelectTranscript(agent.id, path);
                 }
               }}
+              onRefreshSessions={agent ? () => refreshTranscriptOptions(agent.id) : undefined}
               showQueueSplit={Boolean(agent) && !researchBound}
               queueSplit={surface.queueSplit}
               onToggleQueueSplit={toggleActiveQueueSplit}

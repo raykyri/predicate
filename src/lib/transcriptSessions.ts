@@ -1,5 +1,42 @@
 import type { TranscriptOption } from "../types";
 
+/**
+ * Per-agent request generations for filesystem-backed session lists. A scan can
+ * be slow enough for a newer scan to finish first, so only the newest response
+ * started for an agent may replace its picker snapshot.
+ */
+export class TranscriptOptionsRequestTracker {
+  private readonly sequenceByAgent = new Map<string, number>();
+
+  begin(agentId: string): number {
+    const sequence = (this.sequenceByAgent.get(agentId) ?? 0) + 1;
+    this.sequenceByAgent.set(agentId, sequence);
+    return sequence;
+  }
+
+  isLatest(agentId: string, sequence: number): boolean {
+    return this.sequenceByAgent.get(agentId) === sequence;
+  }
+
+  retain(agentIds: ReadonlySet<string>): void {
+    for (const agentId of this.sequenceByAgent.keys()) {
+      if (!agentIds.has(agentId)) {
+        this.sequenceByAgent.delete(agentId);
+      }
+    }
+  }
+}
+
+/** Events that can add/remove a selectable session or change an "In use" badge. */
+export function sessionPickerTopologyChanged(eventType: string): boolean {
+  return (
+    eventType === "agent.session_start" ||
+    eventType === "agent.transcript_bound" ||
+    eventType === "agent.transcript_recovered" ||
+    eventType === "pane.removed"
+  );
+}
+
 // A one-line title for a past session: prefer its first usable user-message
 // preview, then a short session id, then a generic fallback. Shared by the header
 // session menu and empty-state transcript picker so they read identically.

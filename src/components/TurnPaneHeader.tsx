@@ -43,6 +43,7 @@ interface TurnPaneHeaderProps {
   transcriptOptions: TranscriptOption[];
   transcriptPath: string | null;
   onSelectTranscript: (path: string | null) => void;
+  onRefreshSessions?: () => Promise<void>;
   showQueueSplit: boolean;
   queueSplit: boolean;
   onToggleQueueSplit: () => void;
@@ -97,6 +98,7 @@ export default function TurnPaneHeader({
   transcriptOptions,
   transcriptPath,
   onSelectTranscript,
+  onRefreshSessions,
   showQueueSplit,
   queueSplit,
   onToggleQueueSplit,
@@ -129,6 +131,7 @@ export default function TurnPaneHeader({
   onOpenNotificationPane,
 }: TurnPaneHeaderProps) {
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [refreshingSessions, setRefreshingSessions] = useState(false);
   // One pulse when a new artifact lands (the count ticks up), so an agent
   // opening a file is noticeable without stealing focus.
   const [artifactPulse, setArtifactPulse] = useState(false);
@@ -247,6 +250,18 @@ export default function TurnPaneHeader({
     onSelectTranscript(path);
   };
 
+  const refreshSessions = useCallback(async () => {
+    if (!onRefreshSessions || refreshingSessions) {
+      return;
+    }
+    setRefreshingSessions(true);
+    try {
+      await onRefreshSessions();
+    } finally {
+      setRefreshingSessions(false);
+    }
+  }, [onRefreshSessions, refreshingSessions]);
+
   const copySessionId = async () => {
     if (!sessionId) {
       return;
@@ -277,7 +292,14 @@ export default function TurnPaneHeader({
             title="Session actions"
             aria-haspopup="menu"
             aria-expanded={sessionMenuOpen}
-            onClick={() => setSessionMenuOpen((open) => !open)}
+            onClick={() => {
+              if (sessionMenuOpen) {
+                setSessionMenuOpen(false);
+              } else {
+                setSessionMenuOpen(true);
+                void refreshSessions();
+              }
+            }}
           >
             {sessionLabel}
           </button>
@@ -314,6 +336,17 @@ export default function TurnPaneHeader({
                 >
                   Copy Session ID
                 </button>
+                {onRefreshSessions ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="menu-item turn-pane-session-menu-item"
+                    disabled={refreshingSessions}
+                    onClick={() => void refreshSessions()}
+                  >
+                    {refreshingSessions ? "Refreshing sessions…" : "Refresh sessions"}
+                  </button>
+                ) : null}
                 {sessionOptions.length > 0 ? (
                   <>
                     <div className="menu-divider turn-pane-session-menu-divider" role="separator" />
