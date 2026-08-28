@@ -1,7 +1,13 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowLeft, Check, Copy, ExternalLink, Highlighter, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, ScrollText, Share2, Terminal, Trash2, Wrench, X } from "lucide-react";
-import { IS_MAC, isEditableTarget } from "../../lib/appHelpers";
+import { ArrowLeft, Check, ChevronDown, Copy, ExternalLink, Highlighter, LoaderCircle, MoreHorizontal, Pencil, RefreshCw, ScrollText, Share2, Terminal, Trash2, Wrench, X } from "lucide-react";
+import {
+  IS_MAC,
+  isEditableTarget,
+  placePanePopover,
+  turnPaneRectFrom,
+} from "../../lib/appHelpers";
+import type { PanePopoverPlacement } from "../../lib/appHelpers";
 import {
   createResearchHighlight,
   getResearchNodeContent,
@@ -175,6 +181,18 @@ const OVERSIZED_MARKDOWN_POLICY = {
 } as const;
 
 const RESEARCH_SWIPE_IDLE_MS = 180;
+// The composer's submit modes, in menu order. ⇧⌘↵ branches from whichever
+// mode is selected, so it is labelled on the branch row; ⌘↵ submits in the
+// selected mode and is labelled on the Send button itself.
+const FOLLOWUP_MODE_OPTIONS: {
+  mode: "thread" | "branch";
+  label: string;
+  shortcut: string | null;
+}[] = [
+  { mode: "thread", label: "Continue thread", shortcut: null },
+  { mode: "branch", label: "New branch in sidebar", shortcut: "⇧⌘↵" },
+];
+
 const FOLLOWUP_MENU_WIDTH = 230;
 const FOLLOWUP_MENU_HEIGHT = 154;
 const DOCUMENT_MENU_HEIGHT = 196;
@@ -1628,6 +1646,11 @@ function ResearchDocument({
   // branch a card from the tail answer. Ask mode overrides both — a targeted
   // ask is always a branch.
   const [followupMode, setFollowupMode] = useState<"thread" | "branch">("thread");
+  // The mode picker hanging off the composer's Send button. Mode is a
+  // property of the submission, so it lives on the control that submits
+  // rather than as a tab strip above the field.
+  const [modeMenuOpen, setModeMenuOpen] = useState(false);
+  const [modeMenuPos, setModeMenuPos] = useState<PanePopoverPlacement | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // The node whose in-place retry request is in flight (id-stable relaunch of
   // a failed/cancelled run), or null. One at a time is plenty: the control
@@ -1704,6 +1727,8 @@ function ResearchDocument({
   const followupTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const followupComposerRef = useRef<HTMLDivElement | null>(null);
   const followupMenuRef = useRef<HTMLDivElement | null>(null);
+  const modeMenuTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const modeMenuRef = useRef<HTMLDivElement | null>(null);
   // Resolved highlight ranges per segment, refreshed by the paint effect.
   const resolvedHighlightsRef = useRef(new Map<string, ResolvedHighlight[]>());
   // Flat-offset ranges of the query-anchor passages that resolved, tagged
@@ -2203,6 +2228,66 @@ function ResearchDocument({
     };
   }, [followupMenu]);
 
+  // The Send button's mode picker: dismiss on an outside click, on Escape,
+  // and on any reflow that would leave the portaled menu stranded from its
+  // trigger. Trigger clicks are left to the trigger's own toggle.
+  useEffect(() => {
+    if (!modeMenuOpen) {
+      return;
+    }
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        modeMenuTriggerRef.current?.contains(target) ||
+        modeMenuRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setModeMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModeMenuOpen(false);
+      }
+    };
+    const closeOnReflow = () => setModeMenuOpen(false);
+    document.addEventListener("mousedown", closeMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeOnReflow);
+    window.addEventListener("scroll", closeOnReflow, true);
+    return () => {
+      document.removeEventListener("mousedown", closeMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeOnReflow);
+      window.removeEventListener("scroll", closeOnReflow, true);
+    };
+  }, [modeMenuOpen]);
+
+  // Measure once the menu is in the DOM so its real size drives the flip /
+  // clamp, then clear the stale placement on close so the next open cannot
+  // paint at the previous anchor for a frame.
+  useLayoutEffect(() => {
+    if (!modeMenuOpen) {
+      setModeMenuPos(null);
+      return;
+    }
+    const trigger = modeMenuTriggerRef.current;
+    const menu = modeMenuRef.current;
+    if (!trigger || !menu) {
+      return;
+    }
+    const { width, height } = menu.getBoundingClientRect();
+    setModeMenuPos(
+      placePanePopover({
+        triggerRect: trigger.getBoundingClientRect(),
+        popoverSize: { width, height },
+        paneRect: turnPaneRectFrom(trigger),
+        align: "end",
+        prefer: "above",
+      }),
+    );
+  }, [modeMenuOpen]);
+
   // Stable (ref-routed) so the memoized segments' comparator never sees a
   // fresh identity for them.
   const openFollowupMenu = useCallback((nodeId: string, clientX: number, clientY: number) => {
@@ -2393,6 +2478,7 @@ function ResearchDocument({
     // tree's composer contents for even one paint of the persist effect.
     setFollowup("");
     setFollowupMode("thread");
+    setModeMenuOpen(false);
   }, [treeId, detail?.tree.rootNodeId]);
 
   // Restore the ordinary composer independently of the targeted-ask restore
@@ -4284,11 +4370,14 @@ function ResearchDocument({
     window.requestAnimationFrame(() => scrollToSegment(target));
   }, [chainKey, chainNodeIds, scrollToSegment]);
 
-  async function submitFollowup() {
+  // `modeOverride` serves ⇧⌘↵, which branches from whichever mode the
+  // composer is in; every other entry point submits in the selected mode.
+  async function submitFollowup(modeOverride?: "thread" | "branch") {
     const prompt = followup.trim();
     if (!prompt || submitting || archived || !detail) {
       return;
     }
+    const mode = modeOverride ?? followupMode;
     // Ask mode targets the segment the passage was selected in and is always
     // a branch; thread mode continues from the tail; branch mode branches
     // from the last completed answer — the same targeting the composer's
@@ -4296,7 +4385,7 @@ function ResearchDocument({
     const askState = ask;
     const target = askState
       ? detail.nodes.find((node) => node.id === askState.nodeId) ?? null
-      : followupMode === "branch"
+      : mode === "branch"
         ? ([...chainNodes].reverse().find((node) => node.status === "complete") ?? null)
         : tailNode;
     // Mirrors the submit button's disabled conditions (same canFollowUpFrom
@@ -4306,7 +4395,7 @@ function ResearchDocument({
     if (!target || !canFollowUpFrom(target)) {
       return;
     }
-    const inline = !askState && followupMode === "thread";
+    const inline = !askState && mode === "thread";
     if (inline && !canContinueThread(detail.nodes, target)) {
       return;
     }
@@ -4746,11 +4835,16 @@ function ResearchDocument({
             composerTarget.id !== tailNode?.id
           ? "Branches from the last completed answer in this thread."
           : null;
+  // With the mode tabs gone the button is where the composer states which
+  // mode it will submit in, so branch mode names itself instead of reading
+  // "Send". Ask mode is always a branch and says so in its own placeholder.
   const submitButtonLabel = submitting
     ? "Sending…"
     : waitingForThreadTail
       ? "Waiting..."
-      : "Send";
+      : !ask && followupMode === "branch"
+        ? "New branch"
+        : "Send";
   const composerPlaceholder = ask
     ? "Ask about the highlighted text…"
     : followupMode === "branch"
@@ -4804,34 +4898,6 @@ function ResearchDocument({
           ⌘J
         </span>
       ) : null}
-      {!dockedAsk ? (
-        <div
-          className="sidebar-mode-toggle research-followup-mode-toggle"
-          role="tablist"
-          aria-label="Follow-up mode"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={followupMode === "thread"}
-            className={`control-button${followupMode === "thread" ? " is-selected" : ""}`}
-            disabled={archived}
-            onClick={() => setFollowupMode("thread")}
-          >
-            <span>Continue thread</span>
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={followupMode === "branch"}
-            className={`control-button${followupMode === "branch" ? " is-selected" : ""}`}
-            disabled={archived}
-            onClick={() => setFollowupMode("branch")}
-          >
-            <span>New branch</span>
-          </button>
-        </div>
-      ) : null}
       <textarea
         ref={followupTextareaRef}
         value={followup}
@@ -4842,7 +4908,10 @@ function ResearchDocument({
         onKeyDown={(event) => {
           if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
             event.preventDefault();
-            void submitFollowup();
+            // ⌘↵ submits in the selected mode (what the button says);
+            // ⇧⌘↵ always branches, so the mode picker is never a required
+            // detour. A targeted ask is already a branch, so it ignores it.
+            void submitFollowup(!dockedAsk && event.shiftKey ? "branch" : undefined);
           }
         }}
         rows={2}
@@ -4871,20 +4940,79 @@ function ResearchDocument({
           </div>
         ) : null}
         <div className="native-input-submit-actions">
-          <button
-            className="control-button"
-            type="button"
-            disabled={!canSubmitFollowup}
-            onClick={() => void submitFollowup()}
-          >
-            <span>{submitButtonLabel}</span>
-            {!submitting && !waitingForThreadTail ? (
-              <ComposerSubmitShortcutGlyph
-                requireCmdEnter
-                className="shortcut-hint"
-              />
+          <div className="research-followup-send-group">
+            <button
+              className="control-button research-followup-send"
+              type="button"
+              disabled={!canSubmitFollowup}
+              onClick={() => void submitFollowup()}
+            >
+              <span>{submitButtonLabel}</span>
+              {!submitting && !waitingForThreadTail ? (
+                <ComposerSubmitShortcutGlyph
+                  requireCmdEnter
+                  className="shortcut-hint"
+                />
+              ) : null}
+            </button>
+            {!dockedAsk ? (
+              <button
+                ref={modeMenuTriggerRef}
+                className="control-button research-followup-mode-trigger"
+                type="button"
+                disabled={archived}
+                aria-haspopup="menu"
+                aria-expanded={modeMenuOpen}
+                aria-label="Follow-up mode"
+                title="Continue this thread or start a new branch"
+                onClick={() => setModeMenuOpen((open) => !open)}
+              >
+                <ChevronDown size={13} aria-hidden="true" />
+              </button>
             ) : null}
-          </button>
+            {!dockedAsk && modeMenuOpen
+              ? createPortal(
+                  <div
+                    ref={modeMenuRef}
+                    className="popover-surface research-followup-mode-menu"
+                    role="menu"
+                    aria-label="Follow-up mode"
+                    // Off-screen until the layout effect has measured the
+                    // menu, so the first paint cannot land at the viewport
+                    // origin.
+                    style={
+                      modeMenuPos
+                        ? { left: modeMenuPos.left, top: modeMenuPos.top }
+                        : { left: -9999, top: -9999 }
+                    }
+                  >
+                    {FOLLOWUP_MODE_OPTIONS.map((option) => (
+                      <button
+                        key={option.mode}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={followupMode === option.mode}
+                        className="menu-item menu-item--compact research-followup-mode-item"
+                        onClick={() => {
+                          setFollowupMode(option.mode);
+                          setModeMenuOpen(false);
+                          followupTextareaRef.current?.focus();
+                        }}
+                      >
+                        <span className="research-followup-mode-check" aria-hidden="true">
+                          {followupMode === option.mode ? <Check size={12} /> : null}
+                        </span>
+                        <span className="research-followup-mode-label">{option.label}</span>
+                        {option.shortcut ? (
+                          <span className="shortcut-hint">{option.shortcut}</span>
+                        ) : null}
+                      </button>
+                    ))}
+                  </div>,
+                  document.body,
+                )
+              : null}
+          </div>
         </div>
       </div>
     </div>

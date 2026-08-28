@@ -1446,12 +1446,13 @@
   background: var(--content-card-bg);
 }
 
-/* Held-⌘ badge for the follow-ups chord, on the thread composer card beside
-   the mode tabs. The base hint style centers on `top`, so pin it inside the
-   card's top padding instead of straddling the border. */
+/* Held-⌘ badge for the follow-ups chord, on the thread composer card. The
+   base hint style centers on `top`, so pin it over the field's first line
+   (transient, and the field is empty whenever the chord is worth showing)
+   rather than straddling the card's border. */
 .research-followup-shortcut-hint {
-  top: 20px;
-  right: 12px;
+  top: 22px;
+  right: 20px;
 }
 
 /* Terminal/cancel controls carried by a run streaming in a non-selected
@@ -1499,17 +1500,73 @@
   padding: 0;
 }
 
-/* Same control as the sidebar's Terminal/Research switch, resized to sit as
-   the composer card's header row. */
-.sidebar-mode-toggle.research-followup-mode-toggle {
-  box-sizing: border-box;
-  width: 100%;
-  margin: 0;
+/* Thread vs. branch is a property of the submission, not of the field, so it
+   rides the Send button as a split control instead of a tab strip above the
+   textarea. Geometry mirrors the composer's queue split button. */
+.research-followup-send-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
 }
 
-.research-followup-mode-toggle button {
-  padding: 0 10px;
-  font-size: calc(var(--research-meta-font-size) - 0.5px);
+.research-followup-send-group > button {
+  position: relative;
+}
+
+.research-followup-send-group > button:focus-visible {
+  z-index: 1;
+}
+
+.research-followup-send-group .research-followup-send:not(:only-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+/* Scoped past `.research-followup-composer .native-input-submit-actions
+   button`, which sets the Send button's optical padding for the whole
+   group. */
+.research-followup-composer .research-followup-mode-trigger {
+  flex: 0 0 auto;
+  min-width: 20px;
+  margin-left: -1px;
+  padding: 0 3px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.research-followup-mode-trigger svg {
+  opacity: 0.82;
+}
+
+.research-followup-mode-menu {
+  width: 240px;
+  gap: 2px;
+  box-sizing: border-box;
+  padding: 4px;
+}
+
+.research-followup-mode-item {
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+
+/* Fixed gutter so both labels align whether or not the row is the current
+   mode. */
+.research-followup-mode-check {
+  display: inline-flex;
+  width: 12px;
+  min-width: 12px;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-color);
+}
+
+.research-followup-mode-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .research-followup-composer .native-input-submit-actions button {
@@ -1548,6 +1605,10 @@
 
 .research-followup-footer .native-input-submit-actions {
   flex: 0 0 auto;
+  /* Holds the submit group at the footer's right edge in the states that
+     render no hint beside it (space-between would otherwise leave a lone
+     child at flex-start). */
+  margin-left: auto;
 }
 
 .research-followup-retry {
@@ -1556,18 +1617,9 @@
   font-size: calc(var(--research-meta-font-size) - 1px);
 }
 
-.research-followup-composer.is-disabled .research-followup-mode-toggle,
 .research-followup-composer.is-disabled textarea,
 .research-followup-composer.is-disabled .native-input-submit-actions {
   opacity: 0.55;
-}
-
-.research-followup-composer.is-disabled
-  .research-followup-mode-toggle
-  button.is-selected {
-  color: #69716d;
-  background: rgba(255, 255, 255, 0.045);
-  box-shadow: none;
 }
 
 .research-followup-cards {
