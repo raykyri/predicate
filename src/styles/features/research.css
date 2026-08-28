@@ -1958,6 +1958,17 @@
   border-top: 1px solid var(--surface-border-faint);
 }
 
+.new-research-setup-button {
+  align-self: flex-start;
+  min-height: 27px;
+  padding: 0 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: var(--control-bg);
+  font-size: var(--fs-sm);
+}
+
 .new-research-model-controls {
   flex-wrap: nowrap;
 }

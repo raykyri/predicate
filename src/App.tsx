@@ -46,6 +46,7 @@ import {
   Pencil,
   PictureInPicture2,
   Plus,
+  RefreshCw,
   Rows2,
   Settings,
   SquareTerminal,
@@ -57,7 +58,10 @@ import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapte
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
+import { writeClipboardText } from "./lib/clipboard";
 import {
+  adapterCanLaunchResearch,
+  adapterCanLaunchTerminal,
   adapterIsReady,
   adapterReadinessLabel,
   adapterReadinessMessage,
@@ -496,6 +500,7 @@ import {
   getShowHideShortcut,
   activatePane,
   getRuntimeConfig,
+  probeAgentAdapters,
   getUseLoginShell,
   getResearchLaunchInstruction,
   getResearchSdkHarness,
@@ -1788,6 +1793,30 @@ function MainApp() {
   const suppressPaneTabClickRef = useRef(false);
   const dismissedRecoveredPaneIdsRef = useRef<Set<string>>(new Set());
   const [config, setConfig] = useState<RuntimeConfig | null>(null);
+  const [adapterProbeLoading, setAdapterProbeLoading] = useState(false);
+  const [adapterProbeError, setAdapterProbeError] = useState<string | null>(null);
+  const adapterProbeRequestRef = useRef(0);
+  const refreshAdapterReadiness = useCallback(async () => {
+    const request = ++adapterProbeRequestRef.current;
+    setAdapterProbeLoading(true);
+    setAdapterProbeError(null);
+    try {
+      const adapters = await probeAgentAdapters();
+      if (adapterProbeRequestRef.current === request) {
+        setConfig((current) => (current ? { ...current, adapters } : current));
+      }
+      return adapters;
+    } catch (err) {
+      if (adapterProbeRequestRef.current === request) {
+        setAdapterProbeError(unknownErrorMessage(err));
+      }
+      throw err;
+    } finally {
+      if (adapterProbeRequestRef.current === request) {
+        setAdapterProbeLoading(false);
+      }
+    }
+  }, []);
   const configRef = useRef<RuntimeConfig | null>(null);
   configRef.current = config;
   const [groups, setGroups] = useState<GroupInfo[]>([]);
@@ -2494,7 +2523,9 @@ function MainApp() {
     () => lastUserInputSeqRef.current > lastWindowFocusSeqRef.current,
     [],
   );
-  const [settingsTab, setSettingsTab] = useState<"basic" | "theme" | "mouseCursor">("basic");
+  const [settingsTab, setSettingsTab] = useState<
+    "basic" | "agents" | "theme" | "mouseCursor"
+  >("basic");
   const [openRouterKeyVisible, setOpenRouterKeyVisible] = useState(false);
   const [showHideShortcutSetting, setShowHideShortcutSetting] =
     useState<ShowHideShortcutSetting>({
@@ -4638,7 +4669,7 @@ function MainApp() {
   const launchAdapterMetadata = config?.adapters.find(
     (adapter) => adapter.id === launchAdapter.id,
   );
-  const launchAdapterReady = !config || adapterIsReady(launchAdapterMetadata);
+  const launchAdapterReady = !config || adapterCanLaunchTerminal(launchAdapterMetadata);
   const launcherOptions = launcherOptionsByAdapter[launchAdapter.id] ?? {};
   const LauncherOptions = launchAdapter.LauncherOptions;
   // Skills only apply to Claude (the only adapter with a qmux plugin today).
@@ -4663,7 +4694,13 @@ function MainApp() {
           configuredBinary: adapter.id,
           resolvedBinary: adapter.id,
           readiness: "ready" as const,
+          researchReadiness: "ready" as const,
           message: null,
+          version: null,
+          auth: "unknown" as const,
+          checkedAt: null,
+          loginCommand: null,
+          installUrl: null,
         }));
   }, [config]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
@@ -4674,7 +4711,7 @@ function MainApp() {
         iconSrc: ADAPTER_ICON_BY_ID[adapter.id],
         iconClassName: adapterIconClassName(adapter.id),
         detail: adapterReadinessLabel(adapter),
-        disabled: !adapterIsReady(adapter),
+        disabled: !adapterCanLaunchTerminal(adapter),
         dividerBefore:
           !adapterIsReady(adapter) &&
           index > 0 &&
@@ -9228,6 +9265,17 @@ function MainApp() {
       effort: string | null;
       workspaceId: string | null;
     }) => {
+      const probedAdapters = await refreshAdapterReadiness();
+      const selectedAdapter = probedAdapters.find(
+        (adapter) => adapter.id === input.adapter,
+      );
+      if (!adapterCanLaunchResearch(selectedAdapter)) {
+        throw new Error(
+          selectedAdapter
+            ? adapterReadinessMessage(selectedAdapter)
+            : "The selected research agent is no longer available.",
+        );
+      }
       const group = await resolveResearchComposerWorkspace(input.workspaceId);
       let detail: ResearchTreeDetail;
       try {
@@ -9255,6 +9303,7 @@ function MainApp() {
       adoptCreatedResearchTree,
       applyGeneratedResearchTreeTitle,
       refreshResearchNavigation,
+      refreshAdapterReadiness,
       resolveResearchComposerWorkspace,
     ],
   );
@@ -10048,8 +10097,15 @@ function MainApp() {
     if (!newResearchOpen) {
       return;
     }
-    void getRuntimeConfig().then(setConfig).catch(() => undefined);
-  }, [newResearchOpen]);
+    void refreshAdapterReadiness().catch(() => undefined);
+  }, [newResearchOpen, refreshAdapterReadiness]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "agents") {
+      return;
+    }
+    void refreshAdapterReadiness().catch(() => undefined);
+  }, [refreshAdapterReadiness, settingsOpen, settingsTab]);
 
   function toggleTerminalMap() {
     if (terminalMapOpenRef.current) {
@@ -13119,7 +13175,7 @@ function MainApp() {
     setNewAgentError(null);
     // PATH can change while qmux stays open (for example after installing a
     // provider), so refresh binary readiness whenever the launcher is opened.
-    void getRuntimeConfig().then(setConfig).catch(() => undefined);
+    void refreshAdapterReadiness().catch(() => undefined);
     // Re-read the plugin's skills on open so newly added ones show up without a
     // restart. Failures (e.g. no plugin dir) just leave the list empty.
     void listClaudeSkills()
@@ -13129,7 +13185,7 @@ function MainApp() {
       launcherInputRef.current?.focus();
       launcherInputRef.current?.select();
     });
-  }, [newAgentOpen]);
+  }, [newAgentOpen, refreshAdapterReadiness]);
 
   // Selecting a non-Claude adapter clears any chosen skill; measure the faint
   // command prefix so the composer's first line is indented past it.
@@ -13568,12 +13624,25 @@ function MainApp() {
           </button>
         </div>
       </div>
-      {newAgentError || (config && !config.adapters.some(adapterIsReady)) ? (
+      {newAgentError || (config && !config.adapters.some(adapterCanLaunchTerminal)) ? (
         <div className="new-research-footer">
           <p className="new-research-error" role="alert">
             {newAgentError ??
               "No agent CLI was found. Install a supported agent or configure its binary path."}
           </p>
+          {config && !config.adapters.some(adapterCanLaunchTerminal) ? (
+            <button
+              type="button"
+              className="control-button new-research-setup-button"
+              onClick={() => {
+                closeNewAgentPopover();
+                setSettingsTab("agents");
+                setSettingsOpen(true);
+              }}
+            >
+              Review agents
+            </button>
+          ) : null}
         </div>
       ) : null}
     </form>
@@ -15521,7 +15590,7 @@ function MainApp() {
           }}
         >
           <div
-            className="settings-panel"
+            className={`settings-panel${settingsTab === "agents" ? " is-agents" : ""}`}
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-title"
@@ -15555,6 +15624,15 @@ function MainApp() {
               <button
                 type="button"
                 role="tab"
+                aria-selected={settingsTab === "agents"}
+                className={`control-button${settingsTab === "agents" ? " is-active" : ""}`}
+                onClick={() => setSettingsTab("agents")}
+              >
+                Agents
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={settingsTab === "theme"}
                 className={`control-button${settingsTab === "theme" ? " is-active" : ""}`}
                 onClick={() => setSettingsTab("theme")}
@@ -15572,7 +15650,128 @@ function MainApp() {
               </button>
             </div>
 
-            {settingsTab === "basic" || settingsTab === "theme" ? (
+            {settingsTab === "agents" ? (
+              <div className="settings-content settings-agents" role="tabpanel">
+                <div className="settings-agents-heading">
+                  <div>
+                    <h3>Agent providers</h3>
+                    <p className="settings-hint">
+                      qmux uses provider CLIs already installed on this machine. Credentials stay
+                      with each provider.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="control-button settings-agent-refresh"
+                    disabled={adapterProbeLoading}
+                    onClick={() => void refreshAdapterReadiness().catch(() => undefined)}
+                  >
+                    <RefreshCw
+                      size={13}
+                      className={adapterProbeLoading ? "is-spinning" : undefined}
+                      aria-hidden="true"
+                    />
+                    <span>{adapterProbeLoading ? "Checking…" : "Check again"}</span>
+                  </button>
+                </div>
+                {adapterProbeError ? (
+                  <p className="settings-agent-error" role="alert">
+                    {adapterProbeError}
+                  </p>
+                ) : null}
+                <div className="settings-agent-list">
+                  {readyAdaptersFirst(config?.adapters ?? []).map((adapter) => (
+                    <section className="settings-agent-card" key={adapter.id}>
+                      <div className="settings-agent-card-header">
+                        <div className="settings-agent-identity">
+                          {ADAPTER_ICON_BY_ID[adapter.id] ? (
+                            <img
+                              src={ADAPTER_ICON_BY_ID[adapter.id]}
+                              className={`settings-agent-icon ${adapterIconClassName(adapter.id)}`}
+                              alt=""
+                              aria-hidden="true"
+                            />
+                          ) : null}
+                          <strong>{adapter.label}</strong>
+                        </div>
+                        <span className={`settings-agent-status is-${adapter.readiness}`}>
+                          {adapterReadinessLabel(adapter)}
+                        </span>
+                      </div>
+                      <dl className="settings-agent-details">
+                        <div>
+                          <dt>Binary</dt>
+                          <dd title={adapter.resolvedBinary ?? adapter.configuredBinary}>
+                            {adapter.resolvedBinary ?? adapter.configuredBinary}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Version</dt>
+                          <dd>{adapter.version ?? (adapter.resolvedBinary ? "Checking…" : "—")}</dd>
+                        </div>
+                        <div>
+                          <dt>Research</dt>
+                          <dd>
+                            {adapter.supportsResearch
+                              ? adapter.researchReadiness === "ready"
+                                ? "Ready"
+                                : adapter.researchReadiness === "unsupportedVersion"
+                                  ? "Needs update"
+                                  : adapterReadinessLabel(adapter)
+                              : "Not supported"}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Checked</dt>
+                          <dd>
+                            {adapter.checkedAt
+                              ? new Date(adapter.checkedAt).toLocaleTimeString([], {
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })
+                              : "Not yet"}
+                          </dd>
+                        </div>
+                      </dl>
+                      {adapter.message ? (
+                        <p className="settings-agent-message">{adapter.message}</p>
+                      ) : null}
+                      <div className="settings-agent-actions">
+                        {adapter.loginCommand && adapter.readiness === "needsAuth" ? (
+                          <button
+                            type="button"
+                            className="control-button"
+                            onClick={() => {
+                              void writeClipboardText(adapter.loginCommand ?? "");
+                              showAppToast("Sign-in command copied");
+                            }}
+                          >
+                            Copy sign-in command
+                          </button>
+                        ) : null}
+                        {adapter.installUrl ? (
+                          <button
+                            type="button"
+                            className="control-button"
+                            onClick={() => {
+                              void openExternalUrl(adapter.installUrl ?? "").catch((err) => {
+                                setAdapterProbeError(unknownErrorMessage(err));
+                              });
+                            }}
+                          >
+                            {adapter.readiness === "missing" ? "Install guide" : "Provider docs"}
+                          </button>
+                        ) : null}
+                      </div>
+                    </section>
+                  ))}
+                </div>
+                <p className="settings-hint">
+                  Custom executable paths can be set under <code>adapters.*.binary</code> in
+                  <code> qmux.config.json</code>.
+                </p>
+              </div>
+            ) : settingsTab === "basic" || settingsTab === "theme" ? (
               <div className="settings-content" role="tabpanel">
             {settingsTab === "theme" ? (
               <>
@@ -17411,6 +17610,11 @@ function MainApp() {
         adapters={config?.adapters ?? []}
         requireCmdEnterToSend={settings.requireCmdEnterToSend}
         workspaceId={researchScope}
+        onOpenAgentSettings={() => {
+          setNewResearchOpen(false);
+          setSettingsTab("agents");
+          setSettingsOpen(true);
+        }}
         onClose={() => setNewResearchOpen(false)}
         onCreate={submitNewResearch}
       />

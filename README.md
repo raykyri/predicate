@@ -71,6 +71,27 @@ natively on Apple Silicon and Intel Macs.
 3. You'll want the agent CLIs you use on your `PATH`: `claude`, `codex`,
    `opencode`, `grok`, `muse`, `pi`, `cursor-agent`, and/or `devin`.
 
+qmux does not install agents or copy their credentials. Install and authenticate
+at least one provider, then open **Settings → Agents** to check the executable,
+version, authentication state, and Research compatibility detected by qmux.
+
+| Provider | Executable | Sign in | Research |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | `claude auth login` | Yes (2.1.0+) |
+| Codex | `codex` | `codex login` | Yes |
+| OpenCode | `opencode` | `opencode auth login` | No |
+| Grok | `grok` | `grok login` | Yes |
+| Muse | `muse` | Follow the CLI's interactive setup | No |
+| Pi | `pi` | Configure a provider in Pi | No (0.80.5+) |
+| Cursor | `cursor-agent` | `cursor-agent login` | No |
+| Devin | `devin` | `devin auth login` | No |
+
+An inconclusive authentication probe is shown as unknown rather than treated
+as logged out, because environment credentials and custom provider endpoints
+cannot always be verified by a CLI status command. A missing executable or a
+definitive Research version/authentication failure is blocked before qmux
+creates the run.
+
 If macOS reports the app is damaged or can't be opened, clear the download
 quarantine flag and launch it again:
 

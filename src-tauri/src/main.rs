@@ -217,6 +217,13 @@ fn get_runtime_config(state: tauri::State<'_, AppState>) -> RuntimeConfig {
     runtime
 }
 
+#[tauri::command(async)]
+fn probe_agent_adapters(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<adapters::AdapterMetadata>, String> {
+    Ok(adapters::probe_adapter_metadata_for_config(state.config()))
+}
+
 // Commands below are marked `async` when they block: on this Tauri version a
 // plain synchronous command runs on the macOS main thread, so any file I/O,
 // subprocess spawn (git, pgrep/ps, pmset, open), PTY teardown, or sleep inside
@@ -1189,6 +1196,10 @@ async fn create_research_tree(
 ) -> Result<ResearchTreeDetail, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // Probe before inserting a tree or reserving an agent. The frontend
+        // performs the same preflight before creating a default workspace, but
+        // this backend guard also covers stale UI state and direct IPC callers.
+        adapters::ensure_adapter_ready_for_research(state.config(), &request.adapter)?;
         // Admission holds the workspace-mutation guard so a concurrent folder
         // removal can't slip between validation and the node insert —
         // the spawn itself runs unguarded (it's slow, and the Queued node
@@ -3289,6 +3300,7 @@ fn main() {
             app_window_ready,
             acknowledge_interface_health_probe,
             get_runtime_config,
+            probe_agent_adapters,
             launcher_adapter_preference_get,
             launcher_adapter_preference_set,
             openrouter_key_get,

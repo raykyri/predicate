@@ -34,9 +34,22 @@ export interface AgentAdapterMetadata {
   supportsForkAtMessage: boolean;
   configuredBinary: string;
   resolvedBinary: string | null;
-  readiness: "ready" | "missing";
+  readiness: AgentReadiness;
+  researchReadiness: AgentReadiness;
   message: string | null;
+  version: string | null;
+  auth: "authenticated" | "unauthenticated" | "unknown";
+  checkedAt: number | null;
+  loginCommand: string | null;
+  installUrl: string | null;
 }
+
+export type AgentReadiness =
+  | "ready"
+  | "missing"
+  | "needsAuth"
+  | "unsupportedVersion"
+  | "error";
 
 export interface ClaudeSkill {
   id: string;

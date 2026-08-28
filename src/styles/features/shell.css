@@ -1807,6 +1807,10 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   padding: 16px 16px 20px;
 }
 
+.settings-panel.is-agents {
+  width: min(620px, 100%);
+}
+
 .settings-header {
   display: flex;
   align-items: center;
@@ -1840,7 +1844,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 .settings-tabs {
   display: grid;
   flex: 0 0 auto;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
@@ -1879,6 +1883,127 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   gap: 14px;
   overflow-y: auto;
   padding-right: 2px;
+}
+
+.settings-agents {
+  gap: 12px;
+}
+
+.settings-agents-heading,
+.settings-agent-card-header,
+.settings-agent-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-agents-heading h3 {
+  margin: 0 0 4px;
+  color: var(--text-heading);
+  font-size: var(--fs-base);
+}
+
+.settings-agent-refresh,
+.settings-agent-actions .control-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 27px;
+  gap: 6px;
+  padding: 0 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  color: var(--control-fg-muted);
+  background: var(--control-bg);
+  font-size: var(--fs-sm);
+}
+
+.settings-agent-refresh .is-spinning {
+  animation: spin 0.9s linear infinite;
+}
+
+.settings-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-agent-card {
+  padding: 11px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--surface-fill-subtle);
+}
+
+.settings-agent-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+  font-size: var(--fs-base);
+}
+
+.settings-agent-icon {
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.settings-agent-icon.is-mono-light {
+  filter: brightness(0) invert(1);
+}
+
+.settings-agent-status {
+  color: var(--status-success-fg);
+  font-size: var(--fs-sm);
+}
+
+.settings-agent-status.is-missing,
+.settings-agent-status.is-needsAuth,
+.settings-agent-status.is-unsupportedVersion,
+.settings-agent-status.is-error {
+  color: var(--status-attention-fg);
+}
+
+.settings-agent-details {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 10px 0 0;
+}
+
+.settings-agent-details div {
+  min-width: 0;
+}
+
+.settings-agent-details dt {
+  margin-bottom: 2px;
+  color: var(--placeholder-color);
+  font-size: var(--fs-xs);
+}
+
+.settings-agent-details dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--control-fg-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-agent-message,
+.settings-agent-error {
+  margin: 9px 0 0;
+  color: var(--status-attention-fg);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+
+.settings-agent-actions {
+  justify-content: flex-end;
+  margin-top: 9px;
 }
 
 .settings-row {

@@ -70,6 +70,10 @@ export function getRuntimeConfig() {
   return invoke<RuntimeConfig>("get_runtime_config");
 }
 
+export function probeAgentAdapters() {
+  return invoke<RuntimeConfig["adapters"]>("probe_agent_adapters");
+}
+
 /** Plays one catalogued completion sound through the native AppKit bridge. */
 export function playCompletionSound(soundId: CompletionSoundId) {
   return invoke<void>("completion_sound_play", { soundId });

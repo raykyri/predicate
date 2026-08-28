@@ -24,11 +24,11 @@ import {
 } from "../../lib/launcherModels";
 import { launcherTabAction } from "../../lib/launcherKeyboard";
 import {
-  adapterIsReady,
-  adapterReadinessLabel,
+  adapterCanLaunchResearch,
   adapterReadinessMessage,
-  preferredReadyAdapter,
-  readyAdaptersFirst,
+  preferredResearchAdapter,
+  researchReadyAdaptersFirst,
+  researchReadinessLabel,
 } from "../../lib/adapterReadiness";
 
 // GPT-5.4 stops at extra high; every other Codex preset (and a custom model,
@@ -64,6 +64,7 @@ interface NewResearchDialogProps {
   adapters: AgentAdapterMetadata[];
   requireCmdEnterToSend: boolean;
   workspaceId: string | null;
+  onOpenAgentSettings: () => void;
   onClose: () => void;
   onCreate: (input: {
     prompt: string;
@@ -81,6 +82,7 @@ export default function NewResearchDialog({
   adapters: allAdapters,
   requireCmdEnterToSend,
   workspaceId,
+  onOpenAgentSettings,
   onClose,
   onCreate,
 }: NewResearchDialogProps) {
@@ -103,11 +105,14 @@ export default function NewResearchDialog({
   // General terminal-session fork support is intentionally wider than the
   // runtimes supported by research.
   const adapters = useMemo(
-    () => readyAdaptersFirst(allAdapters.filter((candidate) => candidate.supportsResearch)),
+    () =>
+      researchReadyAdaptersFirst(
+        allAdapters.filter((candidate) => candidate.supportsResearch),
+      ),
     [allAdapters],
   );
   const selectedAdapter = adapters.find((candidate) => candidate.id === adapter) ?? null;
-  const adapterReady = adapterIsReady(selectedAdapter);
+  const adapterReady = adapterCanLaunchResearch(selectedAdapter);
 
   useEffect(() => {
     if (!open) {
@@ -127,7 +132,7 @@ export default function NewResearchDialog({
     setEffortChoice("");
     setError(null);
     setAdapter(
-      preferredReadyAdapter(adapters, restored?.adapter)?.id ??
+      preferredResearchAdapter(adapters, restored?.adapter)?.id ??
         adapters.find((candidate) => candidate.default)?.id ??
         adapters[0]?.id ??
         "",
@@ -178,10 +183,17 @@ export default function NewResearchDialog({
   ]);
 
   useEffect(() => {
-    if (!open || adapterIsReady(adapters.find((candidate) => candidate.id === adapter))) {
+    if (
+      !open ||
+      adapterCanLaunchResearch(adapters.find((candidate) => candidate.id === adapter))
+    ) {
       return;
     }
-    setAdapter(preferredReadyAdapter(adapters)?.id ?? adapters[0]?.id ?? "");
+    setAdapter(
+      preferredResearchAdapter(adapters)?.id ??
+        adapters[0]?.id ??
+        "",
+    );
   }, [adapter, adapters, open]);
 
   // Grow the textarea to fit the committed prompt value. Measuring directly in
@@ -274,10 +286,12 @@ export default function NewResearchDialog({
     label: candidate.label,
     iconSrc: ADAPTER_ICON_BY_ID[candidate.id],
     iconClassName: adapterIconClassName(candidate.id),
-    detail: adapterReadinessLabel(candidate),
-    disabled: !adapterIsReady(candidate),
+    detail: researchReadinessLabel(candidate),
+    disabled: !adapterCanLaunchResearch(candidate),
     dividerBefore:
-      !adapterIsReady(candidate) && index > 0 && adapterIsReady(adapters[index - 1]),
+      !adapterCanLaunchResearch(candidate) &&
+      index > 0 &&
+      adapterCanLaunchResearch(adapters[index - 1]),
   }));
 
   function cycleAdapter() {
@@ -412,9 +426,9 @@ export default function NewResearchDialog({
           </div>
         </div>
       </div>
-      {!adapters.some(adapterIsReady) || error ? (
+      {!adapters.some(adapterCanLaunchResearch) || error ? (
         <div className="new-research-footer">
-          {!adapters.some(adapterIsReady) ? (
+          {!adapters.some(adapterCanLaunchResearch) ? (
             <p className="new-research-unavailable" role="alert">
               {selectedAdapter
                 ? adapterReadinessMessage(selectedAdapter)
@@ -425,6 +439,15 @@ export default function NewResearchDialog({
             <p className="new-research-error" role="alert">
               {error}
             </p>
+          ) : null}
+          {!adapters.some(adapterCanLaunchResearch) ? (
+            <button
+              type="button"
+              className="control-button new-research-setup-button"
+              onClick={onOpenAgentSettings}
+            >
+              Review agents
+            </button>
           ) : null}
         </div>
       ) : null}

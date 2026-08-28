@@ -32,7 +32,10 @@ use opencode::OpencodeAdapter;
 use pi::PiAdapter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use claude::{PrepareShellClaudeLaunchRequest, SpawnClaudeRequest};
 
@@ -1000,6 +1003,7 @@ impl AdapterRegistry {
                 let resolved_binary =
                     ensure_on_path(&configured_binary).map(|path| path.display().to_string());
                 let installed = resolved_binary.is_some();
+                let login_command = adapter_login_command(adapter.id(), &configured_binary);
                 AdapterMetadata {
                     id: adapter.id().to_string(),
                     label: adapter.display_name().to_string(),
@@ -1020,6 +1024,16 @@ impl AdapterRegistry {
                             adapter.display_name()
                         )
                     }),
+                    research_readiness: if installed {
+                        AdapterReadiness::Ready
+                    } else {
+                        AdapterReadiness::Missing
+                    },
+                    version: None,
+                    auth: AdapterAuthState::Unknown,
+                    checked_at: None,
+                    login_command,
+                    install_url: adapter_install_url(adapter.id()).map(str::to_string),
                 }
             })
             .collect()
@@ -1031,6 +1045,17 @@ impl AdapterRegistry {
 pub enum AdapterReadiness {
     Ready,
     Missing,
+    NeedsAuth,
+    UnsupportedVersion,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AdapterAuthState {
+    Authenticated,
+    Unauthenticated,
+    Unknown,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1054,6 +1079,254 @@ pub struct AdapterMetadata {
     pub resolved_binary: Option<String>,
     pub readiness: AdapterReadiness,
     pub message: Option<String>,
+    /// Headless Research can have stricter version/auth requirements than an
+    /// interactive terminal session.
+    pub research_readiness: AdapterReadiness,
+    pub version: Option<String>,
+    pub auth: AdapterAuthState,
+    pub checked_at: Option<u64>,
+    pub login_command: Option<String>,
+    pub install_url: Option<String>,
+}
+
+struct ProbeOutput {
+    success: bool,
+    text: String,
+}
+
+fn adapter_version_args(adapter_id: &str) -> &'static [&'static str] {
+    match adapter_id {
+        "claude" => &["-v"],
+        _ => &["--version"],
+    }
+}
+
+fn adapter_auth_args(adapter_id: &str) -> Option<&'static [&'static str]> {
+    match adapter_id {
+        "claude" => Some(&["auth", "status", "--json"]),
+        "codex" => Some(&["login", "status"]),
+        "grok" => Some(&["auth", "status"]),
+        _ => None,
+    }
+}
+
+fn adapter_login_command(adapter_id: &str, binary: &str) -> Option<String> {
+    let binary = shell_quote_arg(binary);
+    match adapter_id {
+        "claude" => Some(format!("{binary} auth login")),
+        "codex" | "grok" => Some(format!("{binary} login")),
+        "opencode" => Some(format!("{binary} auth login")),
+        "cursor" => Some(format!("{binary} login")),
+        "devin" => Some(format!("{binary} auth login")),
+        _ => None,
+    }
+}
+
+fn adapter_install_url(adapter_id: &str) -> Option<&'static str> {
+    match adapter_id {
+        "claude" => Some("https://docs.anthropic.com/en/docs/claude-code/setup"),
+        "codex" => Some("https://developers.openai.com/codex/cli"),
+        "opencode" => Some("https://opencode.ai/docs/"),
+        "grok" => Some("https://docs.x.ai/docs/grok-code-fast-1"),
+        "pi" => Some("https://github.com/badlogic/pi-mono"),
+        "cursor" => Some("https://cursor.com/docs/cli/overview"),
+        "devin" => Some("https://docs.devin.ai/work-with-devin/devin-cli"),
+        _ => None,
+    }
+}
+
+fn run_adapter_probe(binary: &str, args: &[&str]) -> Result<ProbeOutput, String> {
+    let command = format!("{binary} {}", args.join(" "));
+    let mut child = Command::new(binary)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to run `{command}`: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("`{command}` stdout was not piped"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("`{command}` stderr was not piped"))?;
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.take(64 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.take(64 * 1024).read_to_end(&mut bytes);
+        bytes
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("`{command}` timed out"));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("failed to wait for `{command}`: {err}"));
+            }
+        }
+    };
+    let mut bytes = stdout_reader.join().unwrap_or_default();
+    bytes.extend(stderr_reader.join().unwrap_or_default());
+    Ok(ProbeOutput {
+        success: status.success(),
+        text: String::from_utf8_lossy(&bytes).trim().to_string(),
+    })
+}
+
+fn first_probe_line(output: &str) -> Option<String> {
+    output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            line.chars()
+                .filter(|character| !character.is_control())
+                .take(160)
+                .collect()
+        })
+}
+
+fn classify_auth(adapter_id: &str, output: &ProbeOutput) -> AdapterAuthState {
+    if adapter_id == "claude"
+        && let Ok(value) = serde_json::from_str::<Value>(&output.text)
+        && let Some(authenticated) = value
+            .get("loggedIn")
+            .or_else(|| value.get("authenticated"))
+            .and_then(Value::as_bool)
+    {
+        return if authenticated {
+            AdapterAuthState::Authenticated
+        } else {
+            AdapterAuthState::Unauthenticated
+        };
+    }
+    let text = output.text.to_ascii_lowercase();
+    if text.contains("not logged in")
+        || text.contains("not authenticated")
+        || text.contains("unauthenticated")
+        || text.contains("login required")
+        || text.contains("no credentials")
+    {
+        return AdapterAuthState::Unauthenticated;
+    }
+    if output.success
+        && (text.contains("logged in")
+            || text.contains("authenticated")
+            || text.contains("authentication: valid"))
+    {
+        return AdapterAuthState::Authenticated;
+    }
+    AdapterAuthState::Unknown
+}
+
+fn probe_adapter_metadata(mut metadata: AdapterMetadata) -> AdapterMetadata {
+    metadata.checked_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    let Some(binary) = metadata.resolved_binary.clone() else {
+        return metadata;
+    };
+    let version_output = match run_adapter_probe(&binary, adapter_version_args(&metadata.id)) {
+        Ok(output) if output.success => output,
+        Ok(output) => {
+            metadata.readiness = AdapterReadiness::Error;
+            metadata.research_readiness = AdapterReadiness::Error;
+            metadata.message = Some(
+                first_probe_line(&output.text)
+                    .unwrap_or_else(|| format!("{} version check failed", metadata.label)),
+            );
+            return metadata;
+        }
+        Err(err) => {
+            metadata.readiness = AdapterReadiness::Error;
+            metadata.research_readiness = AdapterReadiness::Error;
+            metadata.message = Some(err);
+            return metadata;
+        }
+    };
+    metadata.version = first_probe_line(&version_output.text);
+    metadata.message = None;
+
+    if metadata.id == "claude"
+        && let Some(version) = crate::claude_sdk::parse_claude_version(&version_output.text)
+        && !version.meets_floor()
+    {
+        metadata.research_readiness = AdapterReadiness::UnsupportedVersion;
+        metadata.message = Some(format!(
+            "Claude Code {} can open a terminal, but Research requires 2.1.0 or newer.",
+            version.display()
+        ));
+    }
+
+    if let Some(args) = adapter_auth_args(&metadata.id)
+        && let Ok(output) = run_adapter_probe(&binary, args)
+    {
+        metadata.auth = classify_auth(&metadata.id, &output);
+        if metadata.auth == AdapterAuthState::Unauthenticated {
+            metadata.readiness = AdapterReadiness::NeedsAuth;
+            metadata.research_readiness = AdapterReadiness::NeedsAuth;
+            metadata.message = metadata.login_command.as_ref().map(|command| {
+                format!(
+                    "{} is not signed in. Run `{command}` and check again.",
+                    metadata.label
+                )
+            });
+        }
+    }
+    metadata
+}
+
+/// Runs provider probes concurrently so one slow CLI consumes only its own
+/// timeout rather than serially delaying every status card and launcher.
+pub fn probe_adapter_metadata_for_config(config: &QmuxConfig) -> Vec<AdapterMetadata> {
+    let handles = adapter_registry(config)
+        .metadata()
+        .into_iter()
+        .map(|metadata| std::thread::spawn(move || probe_adapter_metadata(metadata)))
+        .collect::<Vec<_>>();
+    handles
+        .into_iter()
+        .filter_map(|handle| handle.join().ok())
+        .collect()
+}
+
+pub fn ensure_adapter_ready_for_research(
+    config: &QmuxConfig,
+    adapter_id: &str,
+) -> Result<AdapterMetadata, String> {
+    let metadata = adapter_registry(config)
+        .metadata()
+        .into_iter()
+        .find(|metadata| metadata.id == adapter_id)
+        .ok_or_else(|| format!("unknown agent adapter '{adapter_id}'"))?;
+    let metadata = probe_adapter_metadata(metadata);
+    if metadata.research_readiness == AdapterReadiness::Ready {
+        Ok(metadata)
+    } else {
+        Err(metadata
+            .message
+            .clone()
+            .unwrap_or_else(|| format!("{} is not ready to run Research.", metadata.label)))
+    }
 }
 
 pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
@@ -1347,11 +1620,11 @@ pub fn default_fork_adapter(config: &QmuxConfig) -> Result<String, String> {
         .find(|adapter| {
             adapter.default
                 && adapter.supports_research
-                && adapter.readiness == AdapterReadiness::Ready
+                && adapter.research_readiness == AdapterReadiness::Ready
         })
         .or_else(|| {
             metadata.iter().find(|adapter| {
-                adapter.supports_research && adapter.readiness == AdapterReadiness::Ready
+                adapter.supports_research && adapter.research_readiness == AdapterReadiness::Ready
             })
         })
         .map(|adapter| adapter.id.clone())
@@ -1739,6 +2012,43 @@ mod tests {
                 .message
                 .as_deref()
                 .is_some_and(|message| { message.contains("Claude was not found") })
+        );
+    }
+
+    #[test]
+    fn auth_probe_requires_definitive_status_evidence() {
+        assert_eq!(
+            classify_auth(
+                "claude",
+                &ProbeOutput {
+                    success: true,
+                    text: r#"{"loggedIn":true}"#.to_string(),
+                },
+            ),
+            AdapterAuthState::Authenticated
+        );
+        assert_eq!(
+            classify_auth(
+                "codex",
+                &ProbeOutput {
+                    success: false,
+                    text: "Not logged in".to_string(),
+                },
+            ),
+            AdapterAuthState::Unauthenticated
+        );
+        // Custom providers and older CLIs can reject the probe command even
+        // while their environment credentials work. Do not turn ambiguity
+        // into a false sign-out gate.
+        assert_eq!(
+            classify_auth(
+                "grok",
+                &ProbeOutput {
+                    success: false,
+                    text: "unknown command: auth".to_string(),
+                },
+            ),
+            AdapterAuthState::Unknown
         );
     }
 
