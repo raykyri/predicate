@@ -23,9 +23,12 @@ exists*, not a new subsystem. Four things are genuinely missing:
 4. Terminal *content* for a remote screen — the webview never sees
    terminal bytes today, so there is no existing stream to forward.
 
-Recommended shape: **LAN-direct with Bonjour discovery first, an opt-in
-relay second, both behind one master toggle, both carrying the same
-mutually-pinned TLS session so the relay is a dumb pipe.**
+Recommended shape: **one iroh endpoint behind one master toggle, with
+"reachable from anywhere" as a second switch rather than a second
+implementation.** See the iroh section below — it collapses options A,
+B, and C into a single dependency. Hand-building it (LAN-direct with
+Bonjour first, an opt-in relay later) is the fallback if that
+dependency is unacceptable.
 
 ## Four facts that constrain the design
 
@@ -200,6 +203,132 @@ home, with three changes:
 
 Cheapest credible alternative: don't. Recommend Tailscale in the docs and
 spend the effort on the LAN path and the client instead.
+
+## Would iroh replace most of this?
+
+Largely, yes — and it collapses the transport question from "pick one of
+five, stage the second one later" to "one dependency, two modes".
+
+[iroh](https://github.com/n0-computer/iroh) is a QUIC-based peer-to-peer
+library. An `Endpoint` is identified by a `NodeId` — an ed25519 public
+key — and dialing a `NodeId` is what proves the peer's identity, because
+the QUIC/TLS handshake is bound to that key. It attempts direct UDP
+paths, hole-punches through NATs, falls back to relaying when it can't,
+and *upgrades relay to direct mid-connection* when a path opens.
+
+### What it replaces
+
+| Hand-built above | With iroh |
+| --- | --- |
+| `rustls` listener + `rcgen` cert generation | An ed25519 keypair. No certificate plumbing. |
+| SPKI pinning in both directions | Dialing a `NodeId` *is* the pinning |
+| Bonjour advertise + `NWBrowser` on iOS | Local mDNS discovery, built in |
+| A relay on Fly: registry, keepalives, byte budgets | n0's public relays, or self-hosted `iroh-relay` |
+| LAN-first / relay-fallback racing on the client | Built in, including the mid-connection upgrade |
+| `tungstenite` framing over one socket | QUIC streams |
+
+Options A, B, and C from the table above stop being separate options.
+That also deletes most of stage 2, stage 5, and all of stage 7.
+
+### The stream multiplexing is a real win, not a detail
+
+The WebSocket design has one socket carrying control RPC, the event
+stream, and every subscribed pane's output. That is head-of-line
+blocking by construction: a pane dumping a build log delays the response
+to a permission approval. QUIC gives each its own stream, independently
+flow-controlled. Control on one stream, events on another, one stream per
+subscribed pane — which is exactly the shape this workload wants, and is
+the difference between remote control that feels immediate and remote
+control that feels laggy whenever anything is compiling.
+
+### What it does not give you
+
+**Authorization.** iroh tells you *which key* connected. It does not
+decide whether that key may drive your terminals. Everything on the
+accept side is still yours: check `remote_node_id()` against the paired
+list, close otherwise; the approve-on-first-pair dialog; revocation; the
+per-device read-only flag. "End-to-end encrypted and authenticated" is
+not "authorized", and that gap is where this kind of feature usually goes
+wrong.
+
+Also untouched: the `Remote` principal, the fan-out from
+`AppState::emit`, the PTY tap, moving the composer policy into Rust, the
+toggle and its UI, and the client itself. iroh is transport. Every
+qmux-shaped problem in this document survives it.
+
+### It maps onto the off-switch requirement better than the hand-built plan
+
+iroh's defaults run *against* "disconnected unless I turn it on": the
+default relay mode holds an open connection to n0's servers so the node
+stays reachable, and the default discovery can publish the node's record
+to public infrastructure (DNS, or the Mainline DHT via pkarr). Neither is
+acceptable as a default here.
+
+Configured deliberately, though, the three states fall out cleanly:
+
+| Toggle | Configuration | Reach |
+| --- | --- | --- |
+| **Off** | no `Endpoint` bound at all | nothing; no socket, no record, no relay |
+| **On · local** | relays disabled, mDNS discovery only, no publishing | this network only |
+| **On · anywhere** | relay enabled, discovery publishing on | anywhere |
+
+One code path, one dependency, and "reachable from anywhere" is a second
+switch rather than a second implementation. That is better than the
+LAN-now/relay-later staging above, where the second half was always the
+part most likely never to get built.
+
+### The costs, honestly
+
+1. **It is a posture change.** `connection_limit.rs` says it is
+   hand-rolled "to keep the backend's no-new-dependencies posture (cf.
+   the hand-rolled HTTP in file_server.rs)". iroh brings quinn and a
+   substantial tree. That deserves a deliberate decision rather than a
+   shrug — though note the distinction: hand-rolling a GET/Range server
+   is a weekend and then it's finished; hand-rolling NAT traversal is
+   never finished.
+
+2. **Async, but not from zero.** iroh is tokio-based. The backend is
+   synchronous threads and mutexes — but tokio is *already* in the tree
+   via reqwest/hyper, Tauri commands are already `async fn`, and
+   `tauri::async_runtime::spawn_blocking` appears in about thirty places.
+   So the runtime exists; what's new is the first long-lived async task.
+   The rule that matters: never hold a `std::sync::Mutex` guard across an
+   `.await`. Bridge with channels — async task on one side, the existing
+   synchronous fan-out registry on the other.
+
+3. **Version churn.** iroh's 0.x line has broken APIs regularly. Pin it
+   exactly and budget for upgrades. There's precedent: `tauri` is already
+   pinned to `~2.11.3` with a comment explaining why.
+
+4. **Binary size and build time.** quinn, tokio's net stack, DNS. The
+   release profile is tuned with thin LTO and stripped symbols
+   specifically for launch time, and every in-shell `qmux` CLI fork pages
+   this binary in.
+
+5. **The iOS side needs verifying.** `iroh-ffi` publishes bindings
+   including Swift via UniFFI, but check its current state before
+   committing — that's the load-bearing assumption. Then the ordinary
+   mobile problems: iOS suspends the app and kills the QUIC connection,
+   so reconnect-on-foreground is required, and mDNS still needs the Local
+   Network permission.
+
+6. **Networks that block UDP** break the direct path. The relay transport
+   is HTTPS-based and survives; LAN-only mode on such a network would
+   not. Rare on a home network, common on corporate guest Wi-Fi.
+
+### Verdict
+
+Take it, if the dependency posture change is acceptable — and the
+question to settle first is whether off-LAN access is ever wanted.
+Wanting to check on agents from a phone rather strongly implies "from
+anywhere", and off-LAN is precisely the part iroh gives you for free and
+the hand-built plan pays for forever. If the honest answer is "LAN only,
+always", then mDNS plus pinned TLS is a few hundred lines and iroh is a
+large dependency earning little.
+
+Note that these are API and ecosystem claims about a fast-moving
+library, made from memory. Check the current docs before designing
+against specific type names.
 
 ## The handshake
 
@@ -402,9 +531,12 @@ native iOS with SwiftTerm.
    (needs a client emulator)?
 2. Client shape: native iOS, or web client reusing the React app through
    a rewritten `api.ts`?
-3. Off-LAN: your own relay, Tailscale, or nothing?
-4. Do the per-adapter composer policy and permission-action tables move
+3. Off-LAN: iroh, your own relay, Tailscale, or nothing? Settle this
+   first — it is the decision the others hang off.
+4. Is a dependency the size of iroh/quinn acceptable in a backend that
+   hand-rolls HTTP and base64 on purpose?
+5. Do the per-adapter composer policy and permission-action tables move
    into Rust? Right-pane parity on any non-webview client depends on it.
-5. Should a paired device be able to *start* agents and create
+6. Should a paired device be able to *start* agents and create
    workspaces, or only drive existing ones? (Read-only, drive-only, and
    full are three defensible defaults; drive-only is the one I'd pick.)
