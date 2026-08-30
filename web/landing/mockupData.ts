@@ -1466,3 +1466,349 @@ export const SESSION_LABELS: Record<string, string> = {
 export const SESSION_LABEL = SESSION_LABELS[DEFAULT_SESSION_ID];
 export const COMPOSER_PLACEHOLDER = "What should we investigate next?";
 export const ARTIFACT_COUNT = 11;
+
+// ------------------------------------------------------------------ research
+//
+// The Research sidebar mode's fixture: the same landing-page iteration seen
+// from the other half of the window. The questions are ones this work actually
+// raised — how scrollback survives a resize, which test262 failures went stale,
+// what the replica has to keep honest — so the research replica reads as the
+// terminal replica's other half rather than as a separate demo.
+//
+// The Journal's tweet is a fabricated post from an invented account. Nothing
+// here quotes a real person or reproduces a real post; the handles exist only
+// so the embed has a shape to render.
+
+export interface MockResearchRun {
+  text: string;
+  /** Renders the transcript's inline-code style. */
+  code?: boolean;
+  /**
+   * A saved highlight ("saved"), or the passage a targeted follow-up was asked
+   * about ("anchor"). The app paints both with the Custom Highlight API, which
+   * needs live ranges; the replica marks the runs in the markup instead.
+   */
+  mark?: "saved" | "anchor";
+}
+
+export type MockResearchBlock =
+  | { type: "paragraph"; runs: MockResearchRun[] }
+  | { type: "list"; items: string[] };
+
+export interface MockResearchFollowup {
+  prompt: string;
+  preview?: string;
+  status?: "running" | "queued";
+  /** An answer that settled while the reader was elsewhere. */
+  unread?: boolean;
+  /**
+   * Anchored cards sit beside the passage they were asked about. The app
+   * resolves that offset from the live range; the replica does no layout, so
+   * the settled position is part of the fixture.
+   */
+  anchorTop?: number;
+}
+
+export interface MockResearchDoc {
+  /** Sidebar title, breadcrumb, and the document's identity in the markup. */
+  title: string;
+  /** Drives the row's icon, exactly as the app's tree kinds do. */
+  kind: "run" | "document" | "conversation";
+  /** A run still streaming: spinner in the sidebar, Cancel in the header. */
+  running?: boolean;
+  /** Answers that landed unseen carry the sidebar's "New" tag. */
+  unseen?: boolean;
+  /** Documents have no question bubble; runs and conversations do. */
+  question?: string;
+  /** The passage a targeted follow-up was asked about, above its question. */
+  quote?: string;
+  answer: MockResearchBlock[];
+  /** The answer meta line: word count, then the run's wall time. */
+  words?: string;
+  duration?: string;
+  /** Header count: "4 in thread · 1 branch". */
+  thread?: string;
+  followups?: MockResearchFollowup[];
+}
+
+const run = (...runs: (string | MockResearchRun)[]): MockResearchBlock => ({
+  type: "paragraph",
+  runs: runs.map((item) => (typeof item === "string" ? { text: item } : item)),
+});
+
+const bullets = (...items: string[]): MockResearchBlock => ({ type: "list", items });
+
+export const MOCK_RESEARCH_DOCS: Record<string, MockResearchDoc> = {
+  "scrollback-reflow": {
+    title: "How libghostty reflows scrollback when a pane is resized",
+    kind: "run",
+    question:
+      "When a qmux pane is resized, how does libghostty reflow its scrollback without losing the cursor or an active selection — and what does a reflow cost on a 50k-line buffer?",
+    answer: [
+      run(
+        "Reflow happens on the terminal's own page list rather than on a flat line array. Each page holds a fixed-capacity block of rows, so a width change rewrites pages in place and only reallocates when a page can no longer hold its rewrapped rows. ",
+        {
+          text: "The cursor is tracked as an offset into the row it sits on, not as a column, which is why it survives a rewrap that moves it onto a different visual line.",
+          mark: "anchor",
+        },
+      ),
+      run(
+        "Soft-wrapped rows carry a continuation flag. Widening joins a run of continuations back into one logical row and re-splits it at the new width; narrowing does the reverse. Rows that were hard-wrapped by the program — anything that ended in a newline — are never joined, which is what keeps command output from collapsing into a paragraph when you drag the divider.",
+      ),
+      bullets(
+        "Pages are rewritten in place; only an overflowing page allocates.",
+        "Cursor and viewport are pins into a row, so both follow the rewrap.",
+        "Hard-wrapped rows are boundaries and never merge.",
+      ),
+      run(
+        {
+          text: "A 50k-line buffer reflows in roughly 8–11ms on an M-series machine, which is under one frame at 60Hz and well under the drag's own coalescing window.",
+          mark: "saved",
+        },
+        " The cost is dominated by the memcpy per page rather than by the rewrap arithmetic, so it scales with scrollback size and not with the width delta.",
+      ),
+      run(
+        "Practically: resizing is cheap enough that qmux does not need to debounce it, and the split-drag can stay live rather than snapping at the end of the gesture.",
+      ),
+    ],
+    words: "1,184 words",
+    duration: "3m 12s",
+    thread: "4 in thread · 1 branch",
+    followups: [
+      {
+        prompt: "What happens to a selection that spans a row the rewrap moved?",
+        preview:
+          "Selections are stored as pins too, so the anchor and head follow their rows. A selection that spanned a soft wrap comes back as one range at the new width.",
+        anchorTop: 96,
+      },
+      {
+        prompt: "Does the same page list back the search index, or is that separate?",
+        preview: "Separate. The search walks pages directly and holds no index of its own…",
+        unread: true,
+      },
+    ],
+  },
+  "test262-stale": {
+    title: "Which test262 failures went stale after the replaceAll fix",
+    kind: "run",
+    unseen: true,
+    question:
+      "After the empty-search advance landed, which built-ins/String failures in the last test262 run are stale results rather than real regressions?",
+    answer: [
+      run(
+        "Eleven of the fourteen reported failures were recorded before the guard moved above the loop and never re-ran. Re-running ",
+        { text: "built-ins/String/prototype/replaceAll", code: true },
+        " alone clears all eleven; the harness keeps the previous result file when a directory is filtered, which is why they persisted in the summary.",
+      ),
+      run(
+        "The remaining three are real and share one cause: a non-callable replacer is coerced before the search argument is validated, so the thrown error is the wrong type.",
+      ),
+    ],
+    words: "612 words",
+    duration: "1m 40s",
+    followups: [
+      {
+        prompt: "Write the smallest repro for the coercion-order failure.",
+        preview: "Two lines — a Symbol search with a non-callable replacer is enough.",
+      },
+    ],
+  },
+  "codex-export": {
+    title: "replaceAll: empty search advances a code unit (exported)",
+    kind: "conversation",
+    question: "Exported from the porffor pane after the fix landed.",
+    answer: [
+      run(
+        "This conversation was exported from a terminal session, so it is a point-in-time copy: the turns are the pane's own, and nothing in it re-runs.",
+      ),
+      run(
+        "The final state of the pane was a passing ",
+        { text: "./porf /tmp/replaceall-smoke.js", code: true },
+        " and a clean run of the filtered directory.",
+      ),
+    ],
+    words: "2,940 words",
+  },
+  "muon-ramp-sweep": {
+    title: "Which Muon momentum ramps survive the five-minute budget",
+    kind: "run",
+    running: true,
+    question:
+      "Sweep the Muon momentum ramp between 0.85 and 0.98 under the five-minute budget and keep only the settings where val_bpb actually drops.",
+    answer: [
+      run(
+        "Six of the nine configurations have reported. The ramp that ends at 0.95 is ahead on val_bpb at every checkpoint so far, but the gap is inside the seed-to-seed spread and three runs are still going.",
+      ),
+    ],
+    words: "318 words",
+  },
+  "qk-norm-eval": {
+    title: "QK norm: keep it only if val_bpb drops",
+    kind: "run",
+    question:
+      "Does QK norm earn its place in the five-minute budget, or is the win inside the seed noise?",
+    answer: [
+      run(
+        "Across five seeds the mean val_bpb difference is smaller than the standard deviation of either arm, so on this budget QK norm is not distinguishable from the baseline.",
+      ),
+      run(
+        "It does make the loss curve visibly smoother in the first 400 steps, which is worth keeping only if the ramp sweep above ends up depending on early-step stability.",
+      ),
+    ],
+    words: "744 words",
+    duration: "2m 05s",
+  },
+  "landing-replica-notes": {
+    title: "Landing replica: what the mock has to keep honest",
+    kind: "document",
+    answer: [
+      run(
+        "The replica is not a screenshot, so every claim it makes is a claim the app has to be able to keep. Three rules have held up so far:",
+      ),
+      bullets(
+        "Nothing in the markup is required. With the script gone the page is still the finished state of a real session.",
+        "A control is either inert or real. A span that looks like a button and does nothing is worse than no button.",
+        "Copy is either true or clearly a fixture. No invented benchmarks, no quotes from anyone.",
+      ),
+      run(
+        "The third one is the one that keeps needing enforcement, because a plausible number is always easier to write than a real one.",
+      ),
+    ],
+    words: "480 words",
+  },
+  "terminal-map-layout": {
+    title: "Terminal map: one column per pane, or one per group?",
+    kind: "run",
+    question:
+      "The Home board can lay out one rail per pane or one per group. Which reads better when fourteen agents are open?",
+    answer: [
+      run(
+        "One rail per pane. Grouping collapses exactly the information the board exists to show — which agent is waiting on you — and the group is already recoverable from the chip row above the rails.",
+      ),
+      run(
+        "The cost is horizontal scroll at fourteen panes, which the chips make cheap to narrow: hiding a stream is one click and the rails re-flow immediately.",
+      ),
+    ],
+    words: "521 words",
+    duration: "58s",
+  },
+  "mockup-fonts": {
+    title: "Which webfont subsets does the replica actually need?",
+    kind: "run",
+    question: "Which glyphs does the replica's terminal pane actually use?",
+    answer: [
+      run(
+        "Latin plus the box-drawing and bullet glyphs the agent's output uses. Subsetting to that range takes the monospace file under 40KB, which is small enough to preload without competing with the page's own type.",
+      ),
+    ],
+    words: "295 words",
+    duration: "41s",
+  },
+};
+
+export type MockResearchUnit =
+  | { kind: "doc"; id: string }
+  | { kind: "folder"; name: string; collapsed: boolean; ids: string[] };
+
+/** Starred research sits above the rest of the list as its own group. */
+export const MOCK_RESEARCH_STARRED = ["scrollback-reflow"];
+
+export const MOCK_RESEARCH_UNITS: MockResearchUnit[] = [
+  { kind: "folder", name: "porffor", collapsed: false, ids: ["test262-stale", "codex-export"] },
+  {
+    kind: "folder",
+    name: "autoresearch",
+    collapsed: true,
+    ids: ["muon-ramp-sweep", "qk-norm-eval"],
+  },
+  { kind: "doc", id: "landing-replica-notes" },
+  { kind: "doc", id: "terminal-map-layout" },
+];
+
+export const MOCK_RESEARCH_ARCHIVED = ["mockup-fonts"];
+
+export const DEFAULT_RESEARCH_DOC_ID = "scrollback-reflow";
+
+/** The Journal tab's own view id, alongside the document ids above. */
+export const JOURNAL_VIEW_ID = "journal";
+
+export const RESEARCH_COMPOSER_PLACEHOLDER = "Ask a follow-up…";
+export const JOURNAL_COMPOSER_PLACEHOLDER = "Add a note or paste a URL…";
+
+export interface MockTweetRun {
+  text: string;
+  /** Set on the runs X renders as links: mentions, hashtags, expanded URLs. */
+  link?: boolean;
+}
+
+export interface MockJournalTweet {
+  name: string;
+  handle: string;
+  verified?: boolean;
+  runs: MockTweetRun[];
+  /** Media is bundled with the site; the page loads nothing from elsewhere. */
+  media?: { src: string; alt: string; width: number; height: number };
+  quoted?: {
+    name: string;
+    handle: string;
+    verified?: boolean;
+    runs: MockTweetRun[];
+  };
+  /** The timeline's age stamp, frozen rather than computed off the clock. */
+  age: string;
+  /** Engagement as captured. The card renders these as metadata, never as
+      controls: nothing in the replica reaches X. */
+  replies: string;
+  likes: string;
+}
+
+export type MockJournalEntry =
+  | { id: string; kind: "note"; text: string }
+  | { id: string; kind: "link"; url: string }
+  | { id: string; kind: "tweet"; url: string; tweet: MockJournalTweet };
+
+// Oldest first, matching the app's storage order; the feed renders newest first.
+export const MOCK_JOURNAL_ENTRIES: MockJournalEntry[] = [
+  {
+    id: "journal-reflow-note",
+    kind: "note",
+    text: "Reflow only shows up in a profile above ~50k scrollback lines. Measure before touching the page allocator — the drag already feels live.",
+  },
+  {
+    id: "journal-page-list-link",
+    kind: "link",
+    url: "https://github.com/ghostty-org/ghostty/blob/main/src/terminal/PageList.zig",
+  },
+  {
+    id: "journal-embed-tweet",
+    kind: "tweet",
+    url: "https://x.com/terminalnotes/status/1892740155039820000",
+    tweet: {
+      name: "Terminal Notes",
+      handle: "terminalnotes",
+      verified: true,
+      runs: [
+        {
+          text: "the thing nobody tells you about scrollback is that the hard part isn't storing it, it's keeping the cursor and the selection pinned to the right row after a resize rewraps everything under them",
+        },
+      ],
+      media: {
+        src: "/qmux.png",
+        alt: "A terminal window with its scrollback reflowed after a resize",
+        width: 2704,
+        height: 1704,
+      },
+      quoted: {
+        name: "Scrollback Weekly",
+        handle: "scrollbackweekly",
+        runs: [
+          { text: "new issue: page lists, soft wraps, and why your selection survives a drag " },
+          { text: "scrollbackweekly.example/12", link: true },
+        ],
+      },
+      age: "Aug 24",
+      replies: "37",
+      likes: "1,204",
+    },
+  },
+];

@@ -17,23 +17,34 @@
 //     feature stays off while the rest keep working.
 import React from "react";
 import {
+  ArchiveIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
   BookMarkedIcon,
   BookOpenIcon,
   CheckIcon,
   ChevronDownIcon,
+  ChevronRightIcon,
   ChevronsDownUpIcon,
   ChevronsUpDownIcon,
   Columns2Icon,
+  CopyIcon,
   EllipsisIcon,
   EllipsisVerticalIcon,
   ExpandIcon,
+  ExternalLinkIcon,
+  FileTextIcon,
   FolderGit2Icon,
   FolderIcon,
+  FolderMinusIcon,
+  FolderPlusIcon,
   GitBranchIcon,
   GlobeIcon,
   LayoutDashboardIcon,
+  LoaderCircleIcon,
   MessageSquareTextIcon,
   Minimize2Icon,
+  NotebookPenIcon,
   PanelBottomCloseIcon,
   PanelBottomOpenIcon,
   PanelLeftCloseIcon,
@@ -43,28 +54,49 @@ import {
   PaperclipIcon,
   PencilIcon,
   PlusIcon,
+  RotateCwIcon,
   SettingsIcon,
   SquareCenterlineDashedVerticalIcon,
   SquareTerminalIcon,
+  StarIcon,
+  TerminalIcon,
+  Trash2Icon,
+  Undo2Icon,
   XIcon,
+  TweetLikeIcon,
+  TweetReplyIcon,
+  VerifiedBadgeIcon,
 } from "./icons";
 import {
   ARTIFACTS,
   ARTIFACT_COUNT,
   BROWSER_URL,
   COMPOSER_PLACEHOLDER,
+  DEFAULT_RESEARCH_DOC_ID,
   DEFAULT_SESSION_ID,
+  JOURNAL_COMPOSER_PLACEHOLDER,
+  JOURNAL_VIEW_ID,
   MOCK_GROUPS,
   MOCK_HOME_DRAFTS,
   MOCK_HOME_RAILS,
+  MOCK_JOURNAL_ENTRIES,
+  MOCK_RESEARCH_ARCHIVED,
+  MOCK_RESEARCH_DOCS,
+  MOCK_RESEARCH_STARRED,
+  MOCK_RESEARCH_UNITS,
   MOCK_SESSIONS,
   MOCK_TAB_DETAILS,
+  RESEARCH_COMPOSER_PLACEHOLDER,
   SAVED_PROMPTS,
   SESSION_LABEL,
   SESSION_LABELS,
   type MockGroup,
+  type MockJournalEntry,
   type MockPane,
+  type MockResearchBlock,
+  type MockResearchDoc,
   type MockSession,
+  type MockTweetRun,
   type TerminalLine,
 } from "./mockupData";
 
@@ -72,6 +104,11 @@ const MOCKUP_LABEL =
   "The qmux desktop window: a sidebar of open-source projects and their agents on the left, " +
   "a live Codex terminal in the middle, and the agent's rendered transcript with a turn " +
   "queue on the right.";
+
+const RESEARCH_MOCKUP_LABEL =
+  "The qmux desktop window in research mode: a sidebar of starred research, folders, and a " +
+  "Journal tab on the left, and an open research document — its question, answer, and an " +
+  "anchored follow-up card — filling the rest of the window.";
 
 // The blocking replay bootstrap activates these hints before the mockup's body
 // is parsed. Without that bootstrap they are inert data attributes, so a failed
@@ -158,9 +195,663 @@ function PaneGroup({ group }: { group: MockGroup }) {
   );
 }
 
-function Sidebar() {
+// ------------------------------------------------------------------ research
+//
+// Research mode is the sidebar's other list and the stage it opens. Both halves
+// ship inside the same window as the terminal ones, so switching modes is a
+// class on the shell and a `hidden` flip — nothing is fetched or rebuilt, and
+// with no script the replica is simply whichever mode the server rendered.
+export type SidebarMode = "terminal" | "research";
+
+// Documents and exported conversations are marked apart from research runs in
+// the shared list, exactly as the app's tree kinds are.
+function ResearchRowIcon({ kind }: { kind: MockResearchDoc["kind"] }) {
+  if (kind === "document") {
+    return <FileTextIcon className="lucide research-sidebar-doc-icon" size={12} />;
+  }
+  if (kind === "conversation") {
+    return <TerminalIcon className="lucide research-sidebar-doc-icon" size={12} />;
+  }
+  return null;
+}
+
+// The app's ⌘-number jump hints appear only while ⌘ is held, so the replica
+// shows none: a still frame of a held modifier reads as permanent chrome.
+
+function ResearchRow({
+  id,
+  selected,
+  archived = false,
+  member = false,
+}: {
+  id: string;
+  selected: boolean;
+  archived?: boolean;
+  member?: boolean;
+}) {
+  const doc = MOCK_RESEARCH_DOCS[id];
   return (
-    <aside className="sidebar is-code-mode">
+    <div
+      className={`research-sidebar-row${archived ? " is-archived" : ""}${
+        member ? " is-folder-member" : ""
+      }${selected ? " is-selected" : ""}`}
+      data-mock-research-row={id}
+      data-mock-research-title={doc.title}
+      data-mock-research-thread={doc.thread ?? ""}
+      data-mock-research-archived={archived ? "true" : undefined}
+    >
+      <span
+        className="control-button research-sidebar-select"
+        aria-current={selected ? "page" : undefined}
+      >
+        <span className="research-sidebar-copy">
+          <span className="research-sidebar-title">
+            <ResearchRowIcon kind={doc.kind} />
+            <span className="research-sidebar-title-text">{doc.title}</span>
+          </span>
+        </span>
+        {!archived && doc.running ? (
+          <span className="research-sidebar-spinner">
+            <LoaderCircleIcon size={14} />
+          </span>
+        ) : !archived && doc.unseen ? (
+          <span className="research-sidebar-unseen">New</span>
+        ) : null}
+      </span>
+      <span className="control-button research-sidebar-menu-trigger" data-mock-research-menu-trigger>
+        <EllipsisIcon size={14} />
+      </span>
+    </div>
+  );
+}
+
+// A folder always ships its members; collapsing only hides them, so the script
+// can open one without fetching anything — the same contract the terminal
+// sidebar's groups keep.
+function ResearchFolder({
+  name,
+  collapsed,
+  ids,
+  selectedId,
+}: {
+  name: string;
+  collapsed: boolean;
+  ids: string[];
+  selectedId: string;
+}) {
+  return (
+    <div
+      className={`research-sidebar-folder${collapsed ? " is-collapsed" : ""}`}
+      role="group"
+      aria-label={`${name} (${ids.length})`}
+      data-mock-research-folder={name}
+    >
+      <div className="research-sidebar-row research-sidebar-folder-row">
+        <span className="control-button research-sidebar-folder-collapse">
+          <ChevronRightIcon size={12} />
+        </span>
+        <span className="research-sidebar-select research-sidebar-folder-heading">
+          <span className="research-sidebar-copy">
+            <span className="research-sidebar-title">
+              <FolderIcon className="lucide research-sidebar-folder-icon" size={12} />
+              <span className="research-sidebar-title-text">{name}</span>
+              <span className="research-sidebar-folder-count">{ids.length}</span>
+            </span>
+          </span>
+        </span>
+      </div>
+      {ids.map((id) => (
+        <ResearchRow key={id} id={id} selected={id === selectedId} member />
+      ))}
+    </div>
+  );
+}
+
+function ResearchSidebarList({ selectedId = DEFAULT_RESEARCH_DOC_ID }: { selectedId?: string }) {
+  return (
+    <>
+      {/* The tab uses the row/select/copy nesting every research row uses, so
+          it inherits the list's metrics rather than restating them. */}
+      <div
+        className="research-sidebar-row journal-sidebar-row"
+        data-mock-research-row={JOURNAL_VIEW_ID}
+        data-mock-research-title="Journal"
+        data-mock-research-thread=""
+      >
+        <span className="control-button research-sidebar-select">
+          <span className="research-sidebar-copy">
+            <span className="research-sidebar-title">
+              <NotebookPenIcon size={12} className="research-sidebar-doc-icon" />
+              <span className="research-sidebar-title-text">Journal</span>
+            </span>
+          </span>
+        </span>
+      </div>
+      <section className="research-sidebar-section" aria-label="Research">
+        <div className="research-sidebar-heading">
+          <span>Research</span>
+          <span className="control-button">
+            <FolderPlusIcon size={13} />
+          </span>
+        </div>
+        <div className="research-sidebar-starred" role="group" aria-label="Starred research">
+          {MOCK_RESEARCH_STARRED.map((id) => (
+            <ResearchRow key={id} id={id} selected={id === selectedId} />
+          ))}
+        </div>
+        {MOCK_RESEARCH_UNITS.map((unit) =>
+          unit.kind === "doc" ? (
+            <ResearchRow key={unit.id} id={unit.id} selected={unit.id === selectedId} />
+          ) : (
+            <ResearchFolder
+              key={unit.name}
+              name={unit.name}
+              collapsed={unit.collapsed}
+              ids={unit.ids}
+              selectedId={selectedId}
+            />
+          ),
+        )}
+        {MOCK_RESEARCH_ARCHIVED.map((id) => (
+          <ResearchRow key={id} id={id} selected={id === selectedId} archived />
+        ))}
+      </section>
+    </>
+  );
+}
+
+// The answer column. Saved highlights and the passage a targeted follow-up was
+// asked about are painted with the Custom Highlight API in the app, which needs
+// live ranges; the replica marks the runs in the markup and paints them with
+// the same two gold washes.
+function ResearchAnswer({ blocks }: { blocks: MockResearchBlock[] }) {
+  return (
+    <div className="research-response-content-root">
+      <div className="research-response-item role-assistant">
+        <div className="research-response-message">
+          <div className="turn-markdown">
+            {blocks.map((block, blockIndex) =>
+              block.type === "list" ? (
+                <ul key={blockIndex}>
+                  {block.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p key={blockIndex}>
+                  {block.runs.map((item, runIndex) =>
+                    item.code ? (
+                      <code key={runIndex}>{item.text}</code>
+                    ) : item.mark ? (
+                      <span key={runIndex} className={`mock-research-mark is-${item.mark}`}>
+                        {item.text}
+                      </span>
+                    ) : (
+                      <span key={runIndex}>{item.text}</span>
+                    ),
+                  )}
+                </p>
+              ),
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ResearchFollowupCard({
+  card,
+}: {
+  card: NonNullable<MockResearchDoc["followups"]>[number];
+}) {
+  return (
+    <span
+      className={`control-button research-followup-card${
+        card.anchorTop === undefined ? "" : " is-anchored"
+      }${card.unread ? " has-unread" : ""}`}
+      style={card.anchorTop === undefined ? undefined : { top: card.anchorTop }}
+    >
+      {card.unread ? <span className="research-followup-unread" /> : null}
+      <strong>{card.prompt}</strong>
+      {card.preview ? <span className="research-followup-preview">{card.preview}</span> : null}
+      {card.status ? (
+        <small className={`is-${card.status}`}>
+          {card.status === "running" ? (
+            <LoaderCircleIcon className="lucide research-followup-status-spinner" size={11} />
+          ) : null}
+          {card.status === "running" ? "Running" : "Queued"}
+        </small>
+      ) : null}
+    </span>
+  );
+}
+
+function ResearchDocumentView({ id, selected }: { id: string; selected: boolean }) {
+  const doc = MOCK_RESEARCH_DOCS[id];
+  const followups = doc.followups ?? [];
+  return (
+    <article className="research-document-scroll" data-mock-research-doc={id} hidden={!selected}>
+      <div className="research-document-content">
+        <div className="research-thread-segment is-selected">
+          {doc.question ? (
+            <div className="research-prompt">
+              {doc.quote ? (
+                <blockquote className="research-prompt-quote">{doc.quote}</blockquote>
+              ) : null}
+              <div className="turn-markdown">
+                <p>{doc.question}</p>
+              </div>
+            </div>
+          ) : null}
+          <div className="research-response-grid">
+            <section className="research-response" aria-label="Research response">
+              <ResearchAnswer blocks={doc.answer} />
+              <footer className="research-answer-meta">
+                {doc.words ? <span>{doc.words}</span> : null}
+                {doc.duration ? <span>{doc.duration}</span> : null}
+                <span className="control-button research-answer-menu-trigger">
+                  <EllipsisIcon size={15} />
+                </span>
+                {/* A run still streaming carries its own terminal and cancel
+                    controls on the segment, where the app puts them. */}
+                {doc.running ? (
+                  <span className="research-segment-actions">
+                    <span className="control-button research-segment-action">Open terminal</span>
+                    <span className="control-button research-segment-action">Cancel</span>
+                  </span>
+                ) : null}
+              </footer>
+            </section>
+            <aside className="research-followups" aria-label="Follow-ups">
+              <div className="research-followup-cards">
+                {followups
+                  .filter((card) => card.anchorTop === undefined)
+                  .map((card) => (
+                    <ResearchFollowupCard key={card.prompt} card={card} />
+                  ))}
+              </div>
+              {followups
+                .filter((card) => card.anchorTop !== undefined)
+                .map((card) => (
+                  <ResearchFollowupCard key={card.prompt} card={card} />
+                ))}
+            </aside>
+          </div>
+        </div>
+        <div className="research-response-grid research-thread-composer-row">
+          <div className="research-thread-composer-cell">
+            <div className="research-followup-composer is-thread">
+              <div
+                className="sidebar-mode-toggle research-followup-mode-toggle"
+                aria-label="Follow-up mode"
+              >
+                <span className="is-selected">
+                  <span>Continue thread</span>
+                </span>
+                <span>
+                  <span>New branch</span>
+                </span>
+              </div>
+              <div className="mock-textarea">{RESEARCH_COMPOSER_PLACEHOLDER}</div>
+              <div className="research-followup-footer">
+                <div className="research-followup-hint-row">
+                  <small>Continues the thread under this answer</small>
+                </div>
+                <div className="native-input-submit-actions">
+                  <span className="control-button">
+                    <span>Send</span>
+                    <span className="shortcut-hint">⌘↵</span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div aria-hidden="true" />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+// The tweet card is the entry's whole content — an X-embed look with no wrapper
+// chrome of its own, so the feed reads as tweets rather than tweets framed
+// inside content items. Its author's avatar is the initial disc the app falls
+// back to, which keeps the page loading nothing from anyone else's servers.
+function TweetText({ runs, className }: { runs: MockTweetRun[]; className: string }) {
+  return (
+    <p className={className}>
+      {runs.map((run, index) => (
+        <span key={index} className={run.link ? "journal-tweet-link" : undefined}>
+          {run.text}
+        </span>
+      ))}
+    </p>
+  );
+}
+
+function TweetAvatar({ name, size }: { name: string; size: number }) {
+  return (
+    <span
+      className="journal-tweet-avatar journal-tweet-avatar-fallback"
+      style={{ width: size, height: size }}
+    >
+      {[...name][0]}
+    </span>
+  );
+}
+
+function JournalEntryBody({ entry }: { entry: MockJournalEntry }) {
+  if (entry.kind === "note") {
+    return <p className="journal-note-text">{entry.text}</p>;
+  }
+  if (entry.kind === "link") {
+    return <span className="journal-link-url">{entry.url}</span>;
+  }
+  const { tweet } = entry;
+  return (
+    // A timeline post, not an embed: the avatar takes its own column and the
+    // header is one line — name, badge, handle, age.
+    <article className="journal-tweet" aria-label={`Tweet by @${tweet.handle}`}>
+      <span className="journal-tweet-avatar-link">
+        <TweetAvatar name={tweet.name} size={40} />
+      </span>
+      <div className="journal-tweet-main">
+        <div className="journal-tweet-head">
+          <span className="journal-tweet-who">
+            <span className="journal-tweet-author">{tweet.name}</span>
+            {tweet.verified ? <VerifiedBadgeIcon /> : null}
+            <span className="journal-tweet-handle">@{tweet.handle}</span>
+          </span>
+          <span className="journal-tweet-dot">·</span>
+          <span className="journal-tweet-age">{tweet.age}</span>
+        </div>
+        <TweetText runs={tweet.runs} className="journal-tweet-text" />
+        {tweet.media ? (
+          <div className="journal-tweet-media">
+            <span className="journal-tweet-media-item">
+              <img
+                src={tweet.media.src}
+                alt={tweet.media.alt}
+                width={tweet.media.width}
+                height={tweet.media.height}
+                loading="lazy"
+                decoding="async"
+              />
+            </span>
+          </div>
+        ) : null}
+        {tweet.quoted ? (
+          <div className="journal-tweet-quote">
+            <div className="journal-tweet-quote-head">
+              <TweetAvatar name={tweet.quoted.name} size={18} />
+              <span className="journal-tweet-author">{tweet.quoted.name}</span>
+              {tweet.quoted.verified ? <VerifiedBadgeIcon /> : null}
+              <span className="journal-tweet-handle">@{tweet.quoted.handle}</span>
+            </div>
+            <TweetText runs={tweet.quoted.runs} className="journal-tweet-text is-quote" />
+          </div>
+        ) : null}
+        <div className="journal-tweet-stats">
+          <span className="journal-tweet-stat">
+            <TweetReplyIcon />
+            {tweet.replies}
+          </span>
+          <span className="journal-tweet-stat">
+            <TweetLikeIcon />
+            {tweet.likes}
+          </span>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function JournalView({ selected }: { selected: boolean }) {
+  const feed = [...MOCK_JOURNAL_ENTRIES].reverse();
+  return (
+    <article
+      className="research-document-scroll journal-scroll"
+      data-mock-research-doc={JOURNAL_VIEW_ID}
+      hidden={!selected}
+    >
+      <div className="journal-column">
+        <div className="journal-composer">
+          <div className="mock-textarea journal-composer-input" data-mock-journal-input>
+            {JOURNAL_COMPOSER_PLACEHOLDER}
+          </div>
+        </div>
+        {/* The undo bar only exists after a removal, so it ships closed and the
+            journal enhancement raises it when an entry is deleted. */}
+        <div className="journal-undo" role="status" data-mock-journal-undo hidden>
+          <span className="journal-undo-label" data-mock-journal-undo-label>
+            Entry removed
+          </span>
+          <span className="control-button journal-undo-restore" data-mock-journal-undo-restore>
+            <Undo2Icon size={12} />
+            <span>Undo</span>
+            <kbd className="context-menu-shortcut is-keycap">⌘Z</kbd>
+          </span>
+          <span className="control-button journal-undo-dismiss" data-mock-journal-undo-dismiss>
+            <XIcon size={12} />
+          </span>
+        </div>
+        <div className="journal-feed" role="feed" aria-label="Journal entries">
+          {feed.map((entry) => (
+            <article
+              key={entry.id}
+              className={`journal-entry is-${entry.kind}`}
+              data-mock-journal-entry={entry.id}
+            >
+              <JournalEntryBody entry={entry} />
+              <span
+                className="control-button journal-entry-menu-trigger"
+                data-mock-journal-menu-trigger
+              >
+                <EllipsisIcon size={13} />
+              </span>
+            </article>
+          ))}
+        </div>
+      </div>
+    </article>
+  );
+}
+
+// One header for every view rather than one per document: the chrome is
+// identical across them in the app, and the script rewrites the breadcrumb and
+// the thread count from the selected row, the way it rewrites the session
+// label when a terminal tab changes.
+function ResearchStage({ selectedId }: { selectedId: string }) {
+  const selectedDoc = MOCK_RESEARCH_DOCS[selectedId];
+  return (
+    <div className="research-workspace">
+      <main className="research-document">
+        <header className="research-document-header">
+          <div className="research-history-nav" aria-label="Research history">
+            <span className="control-button research-history-button is-disabled">
+              <ArrowLeftIcon size={16} />
+            </span>
+            <span className="control-button research-history-button is-disabled">
+              <ArrowRightIcon size={16} />
+            </span>
+          </div>
+          <div className="research-breadcrumb" aria-label="Research path">
+            <span>
+              <span className="control-button" data-mock-research-crumb>
+                {selectedDoc ? selectedDoc.title : "Journal"}
+              </span>
+            </span>
+          </div>
+          <span className="research-document-followup-count" data-mock-research-thread-count>
+            {selectedDoc?.thread ?? ""}
+          </span>
+        </header>
+        {Object.keys(MOCK_RESEARCH_DOCS).map((id) => (
+          <ResearchDocumentView key={id} id={id} selected={id === selectedId} />
+        ))}
+        <JournalView selected={selectedId === JOURNAL_VIEW_ID} />
+      </main>
+    </div>
+  );
+}
+
+// The research sidebar's right-click menus, one per row, shipped closed at the
+// window's root so the script positions them against the replica. Only the
+// keycaps are load-bearing: every item dismisses, like the sidebar's own.
+function ResearchRowMenu({ id }: { id: string }) {
+  const doc = MOCK_RESEARCH_DOCS[id];
+  const archived = MOCK_RESEARCH_ARCHIVED.includes(id);
+  const starred = MOCK_RESEARCH_STARRED.includes(id);
+  const inFolder = MOCK_RESEARCH_UNITS.some(
+    (unit) => unit.kind === "folder" && unit.ids.includes(id),
+  );
+  return (
+    <div
+      className="popover-surface popover-surface--context pane-context-menu research-sidebar-menu"
+      role="menu"
+      aria-label={`Actions for ${doc.title}`}
+      data-mock-research-menu={id}
+      hidden
+    >
+      <div className="group-context-actions">
+        {archived ? (
+          <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+            <ArchiveIcon size={13} />
+            <span>Unarchive research</span>
+          </button>
+        ) : (
+          <>
+            <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+              <StarIcon size={13} />
+              <span>{starred ? "Unstar" : "Star"}</span>
+            </button>
+            <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+              <PencilIcon size={13} />
+              <span>Rename</span>
+            </button>
+            {doc.kind === "run" ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="control-button"
+                data-mock-context-item
+              >
+                <RotateCwIcon size={13} />
+                <span>Regenerate title</span>
+              </button>
+            ) : null}
+            {inFolder ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="control-button"
+                data-mock-context-item
+              >
+                <FolderMinusIcon size={13} />
+                <span>Remove from folder</span>
+              </button>
+            ) : null}
+            <button type="button" role="menuitem" className="control-button" data-mock-context-item>
+              <FolderPlusIcon size={13} />
+              <span>New folder with item</span>
+            </button>
+            <div className="context-menu-divider" role="separator" />
+            <button
+              type="button"
+              role="menuitem"
+              className="control-button context-menu-has-shortcut"
+              data-mock-context-item
+            >
+              <ArchiveIcon size={13} />
+              <span>Archive</span>
+              <kbd className="context-menu-shortcut is-keycap">A</kbd>
+            </button>
+          </>
+        )}
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-danger context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <Trash2Icon size={13} />
+          <span>Delete</span>
+          <kbd className="context-menu-shortcut is-keycap">D</kbd>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// A journal entry's menu, whose items depend on what the entry stands for: a
+// note has no link to open, and only a tweet can be refetched. Delete is the
+// one item that works here — the undo bar it raises is the point.
+function JournalEntryMenu({ entry }: { entry: MockJournalEntry }) {
+  return (
+    <div
+      className="popover-surface popover-surface--context pane-context-menu journal-entry-menu"
+      role="menu"
+      aria-label="Journal entry actions"
+      data-mock-journal-menu={entry.id}
+      hidden
+    >
+      <div className="group-context-actions">
+        {entry.kind !== "note" ? (
+          <button
+            type="button"
+            role="menuitem"
+            className="control-button context-menu-has-shortcut"
+            data-mock-context-item
+          >
+            <ExternalLinkIcon size={13} />
+            <span>{entry.kind === "tweet" ? "Open on X" : "Open link"}</span>
+            <kbd className="context-menu-shortcut is-keycap">O</kbd>
+          </button>
+        ) : null}
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-has-shortcut"
+          data-mock-context-item
+        >
+          <CopyIcon size={13} />
+          <span>{entry.kind === "note" ? "Copy text" : "Copy link"}</span>
+          <kbd className="context-menu-shortcut is-keycap">C</kbd>
+        </button>
+        {entry.kind === "tweet" ? (
+          <button
+            type="button"
+            role="menuitem"
+            className="control-button context-menu-has-shortcut"
+            data-mock-context-item
+          >
+            <RotateCwIcon size={13} />
+            <span>Refresh tweet</span>
+            <kbd className="context-menu-shortcut is-keycap">R</kbd>
+          </button>
+        ) : null}
+        <div className="context-menu-divider" role="separator" />
+        <button
+          type="button"
+          role="menuitem"
+          className="control-button context-menu-danger context-menu-has-shortcut"
+          data-mock-journal-delete
+          data-mock-context-item
+        >
+          <Trash2Icon size={13} />
+          <span>Delete</span>
+          <kbd className="context-menu-shortcut is-keycap">D</kbd>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Sidebar({ research, mode }: { research: boolean; mode: SidebarMode }) {
+  const researchMode = mode === "research";
+  return (
+    <aside className={`sidebar is-code-mode${researchMode ? " is-research-mode" : ""}`}>
       <span className="sidebar-header-controls is-grouped">
         <span className="sidebar-header-button" data-mock-action="open-terminal-map">
           <LayoutDashboardIcon size={14} />
@@ -169,22 +860,39 @@ function Sidebar() {
           <PanelLeftCloseIcon size={14} />
         </span>
       </span>
-      <div className="sidebar-mode-toggle">
-        <span className="is-selected">
+      <div className="sidebar-mode-toggle" data-mock-mode-toggle>
+        <span className={researchMode ? undefined : "is-selected"} data-mock-mode="terminal">
           <SquareTerminalIcon size={13} />
           <span>Terminal</span>
         </span>
-        <span>
+        <span className={researchMode ? "is-selected" : undefined} data-mock-mode="research">
           <BookOpenIcon size={13} />
           <span>Research</span>
         </span>
       </div>
       <nav className="pane-list">
-        {MOCK_GROUPS.map((group, index) => (
-          <PaneGroup key={index} group={group} />
-        ))}
+        {research ? (
+          <>
+            <div className="mock-sidebar-list" data-mock-sidebar-list="terminal" hidden={researchMode}>
+              {MOCK_GROUPS.map((group, index) => (
+                <PaneGroup key={index} group={group} />
+              ))}
+            </div>
+            <div
+              className="mock-sidebar-list"
+              data-mock-sidebar-list="research"
+              hidden={!researchMode}
+            >
+              <ResearchSidebarList />
+            </div>
+          </>
+        ) : (
+          MOCK_GROUPS.map((group, index) => <PaneGroup key={index} group={group} />)
+        )}
       </nav>
-      <div className="sidebar-actions">
+      {/* The two modes keep different launchers, so each set ships and the
+          mode class picks one — the same swap the app performs on state. */}
+      <div className="sidebar-actions" data-mock-actions-for="terminal">
         <div className="sidebar-action-with-hint">
           <span className="control-button">
             <SquareTerminalIcon size={14} />
@@ -203,6 +911,27 @@ function Sidebar() {
           </span>
         </div>
       </div>
+      {research ? (
+        <div className="sidebar-actions" data-mock-actions-for="research">
+          <div className="sidebar-action-with-hint">
+            <span className="control-button">
+              <PlusIcon size={14} />
+              <span>New query</span>
+            </span>
+          </div>
+          <div className="sidebar-action-with-hint">
+            <span className="control-button">
+              <FileTextIcon size={14} />
+              <span>New doc</span>
+            </span>
+          </div>
+          <div className="sidebar-action-with-hint">
+            <span className="control-button sidebar-settings-button">
+              <SettingsIcon size={14} />
+            </span>
+          </div>
+        </div>
+      ) : null}
     </aside>
   );
 }
@@ -254,10 +983,24 @@ function TerminalSession({
   );
 }
 
-function TerminalPane({ stageReplay }: { stageReplay: boolean }) {
+// `sessionIds` narrows which terminal/transcript pairs a replica carries. The
+// sidebar still lists every tab; a replica that is not demonstrating session
+// switching has no reason to serialize fourteen scrollbacks to prove it.
+function mockSessions(sessionIds?: readonly string[]) {
+  const wanted = sessionIds ? new Set(sessionIds) : null;
+  return Object.entries(MOCK_SESSIONS).filter(([sessionId]) => !wanted || wanted.has(sessionId));
+}
+
+function TerminalPane({
+  stageReplay,
+  sessionIds,
+}: {
+  stageReplay: boolean;
+  sessionIds?: readonly string[];
+}) {
   return (
     <div className="mock-terminal">
-      {Object.entries(MOCK_SESSIONS).map(([sessionId, session]) => (
+      {mockSessions(sessionIds).map(([sessionId, session]) => (
         <TerminalSession
           key={sessionId}
           sessionId={sessionId}
@@ -1066,10 +1809,16 @@ function TranscriptSession({
   );
 }
 
-function Transcript({ stageReplay }: { stageReplay: boolean }) {
+function Transcript({
+  stageReplay,
+  sessionIds,
+}: {
+  stageReplay: boolean;
+  sessionIds?: readonly string[];
+}) {
   return (
     <>
-      {Object.entries(MOCK_SESSIONS).map(([sessionId, session]) => (
+      {mockSessions(sessionIds).map(([sessionId, session]) => (
         <TranscriptSession
           key={sessionId}
           sessionId={sessionId}
@@ -1141,23 +1890,40 @@ export const MOCKUP_FEATURES = [
   "images",
 ] as const;
 
+// The research replica's own set. Research mode has its own list, stage, and
+// composer, so it enhances none of the terminal surfaces — and the terminal
+// half it keeps behind the mode toggle stays the inert finished state.
+export const RESEARCH_MOCKUP_FEATURES = ["research", "journal", "research-menus"] as const;
+
 export default function AppMockup({
   labelledBy,
   features = MOCKUP_FEATURES,
   initialSidebarCollapsed = false,
   initialTranscriptExpanded = false,
+  initialSidebarMode = "terminal",
+  sessionIds,
 }: {
   labelledBy?: string;
   features?: readonly string[];
   initialSidebarCollapsed?: boolean;
   initialTranscriptExpanded?: boolean;
+  initialSidebarMode?: SidebarMode;
+  /** Which sessions ship a terminal/transcript pair; every tab is listed. */
+  sessionIds?: readonly string[];
 }) {
   const stageReplay = features.includes("replay");
+  // Research mode's markup follows either the feature or the rendered mode: a
+  // replica that opens in it is complete whether or not the script ever runs.
+  // The gates further down work the other way round — a surface that only ever
+  // exists to be opened (a menu, a modal, the lightbox) ships only where
+  // something can open it. What is visible is never conditional.
+  const research = features.includes("research") || initialSidebarMode === "research";
   const shellClassName = [
     "app-shell",
     "has-turn-sidebar",
     initialSidebarCollapsed ? "is-sidebar-collapsed" : "",
     initialTranscriptExpanded ? "is-transcript-expanded" : "",
+    initialSidebarMode === "research" ? "is-research-mode" : "",
   ]
     .filter(Boolean)
     .join(" ");
@@ -1167,33 +1933,52 @@ export default function AppMockup({
         className="app-mockup"
         role="img"
         aria-labelledby={labelledBy}
-        aria-label={labelledBy ? undefined : MOCKUP_LABEL}
+        aria-label={
+          labelledBy
+            ? undefined
+            : initialSidebarMode === "research"
+              ? RESEARCH_MOCKUP_LABEL
+              : MOCKUP_LABEL
+        }
         data-mock-features={features.join(" ")}
       >
         <TrafficLights />
         <FloatingRestoreControls />
         <div className={shellClassName}>
-          <Sidebar />
-          <TerminalPane stageReplay={stageReplay} />
-          <BrowserOverlay />
+          <Sidebar research={research} mode={initialSidebarMode} />
+          <TerminalPane stageReplay={stageReplay} sessionIds={sessionIds} />
+          {features.includes("panels") ? <BrowserOverlay /> : null}
           <div className="turn-pane">
             <div className="turn-sidebar has-header">
               <TurnPaneHeader />
-              <PromptLibrary />
+              {features.includes("panels") ? <PromptLibrary /> : null}
               <ArtifactTray />
-              <Transcript stageReplay={stageReplay} />
+              <Transcript stageReplay={stageReplay} sessionIds={sessionIds} />
               <Composer />
             </div>
           </div>
+          {research ? <ResearchStage selectedId={DEFAULT_RESEARCH_DOC_ID} /> : null}
         </div>
-        <MockImageLightbox />
-        {MOCK_GROUPS.map((group) => (
-          <PaneGroupMenu key={group.name} group={group} />
-        ))}
-        {MOCK_GROUPS.flatMap((group) =>
-          group.panes.map((pane) => <PaneTabMenu key={pane.sessionId} pane={pane} />),
-        )}
-        <TerminalMap />
+        {features.includes("images") ? <MockImageLightbox /> : null}
+        {features.includes("sidebar-menus")
+          ? MOCK_GROUPS.map((group) => <PaneGroupMenu key={group.name} group={group} />)
+          : null}
+        {features.includes("sidebar-menus")
+          ? MOCK_GROUPS.flatMap((group) =>
+              group.panes.map((pane) => <PaneTabMenu key={pane.sessionId} pane={pane} />),
+            )
+          : null}
+        {features.includes("terminal-map") ? <TerminalMap /> : null}
+        {features.includes("research-menus")
+          ? Object.keys(MOCK_RESEARCH_DOCS).map((id) => <ResearchRowMenu key={id} id={id} />)
+          : null}
+        {/* An entry's menu belongs to the journal feature, which owns the one
+            item here that acts: the removal, and the undo bar it raises. */}
+        {features.includes("journal")
+          ? MOCK_JOURNAL_ENTRIES.map((entry) => (
+              <JournalEntryMenu key={entry.id} entry={entry} />
+            ))
+          : null}
       </div>
       <span className="mock-demo-status" role="status" aria-live="polite" />
     </div>

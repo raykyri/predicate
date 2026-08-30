@@ -360,6 +360,7 @@ code {
 
 .product-thesis,
 .secondary-product-heading,
+.research-product-heading,
 .feature-product-heading {
   max-width: 820px;
   font-size: clamp(1.5rem, 2.35vw, 2rem);
@@ -382,16 +383,19 @@ code {
   text-wrap: balance;
 }
 
-.secondary-product-shot {
+.secondary-product-shot,
+.research-product-shot {
   margin-top: 48px;
 }
 
 .secondary-product-intro,
+.research-product-intro,
 .feature-product-intro {
   margin-top: 52px;
 }
 
 .secondary-product-heading,
+.research-product-heading,
 .feature-product-heading {
   margin: 0 auto;
 }
