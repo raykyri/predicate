@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; display: flex; flex-direction: column; background: #171b1d; color: #e7e7e2; box-sizing: border-box; overflow: hidden;">
+
+  <div style="height: 56px; flex-shrink: 0;"></div>
+
+  <div style="display: flex; align-items: center; gap: 10px; height: 48px; flex-shrink: 0; padding: 0 12px 0 8px; border-bottom: 1px solid #2a2d2f; background: #14171a;">
+    <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg>
+    </div>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;">
+      <span style="font-size: 15px; font-weight: 500; color: #f1f0e8;">pairing flow</span>
+      <span style="font-size: 11.5px; color: #8a938e;">claude &middot; sonnet</span>
+    </div>
+    <div style="display: flex; gap: 2px;">
+      <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#c4cbc6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
+      </div>
+      <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#c4cbc6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" x2="21" y1="6" y2="6"></line><line x1="8" x2="21" y1="12" y2="12"></line><line x1="8" x2="21" y1="18" y2="18"></line><line x1="3" x2="3.01" y1="6" y2="6"></line><line x1="3" x2="3.01" y1="12" y2="12"></line><line x1="3" x2="3.01" y1="18" y2="18"></line></svg>
+      </div>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 16px; padding: 16px 16px 12px; overflow: hidden;">
+
+    <div style="align-self: flex-end; max-width: 84%; padding: 11px 14px; border-radius: 14px 14px 4px 14px; background: #24282b;">
+      <span style="font-size: 14.5px; line-height: 1.5; color: #f1f0e8;">Write the pairing test for a burned secret</span>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <p style="margin: 0; font-size: 14.5px; line-height: 1.56; color: #e7e7e2;">
+        Added a test that pairs once, then replays the same secret on a second connection.
+      </p>
+      <div style="border: 1px solid rgba(255,255,255,0.065); border-radius: 9px; background: #111416; overflow: hidden;">
+        <div style="display: flex; align-items: center; justify-content: space-between; padding: 7px 11px; background: #0d1012;">
+          <span style="font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #7f8884;">pairing.rs</span>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6f7773" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>
+        </div>
+        <div style="padding: 10px 11px; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; line-height: 1.66; color: #b9c0bc;">
+          <div><span style="color: #8fd6c7;">assert!</span>(window.consume(&amp;psk).is_ok());</div>
+          <div><span style="color: #8fd6c7;">assert!</span>(window.consume(&amp;psk).is_err());</div>
+        </div>
+      </div>
+      <div style="display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid rgba(255,255,255,0.065); border-radius: 9px; background: #15191b;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#81c784" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M20 6 9 17l-5-5"></path></svg>
+        <span style="font-size: 13px; color: #b9c0bc;">6 passed, 0 failed</span>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 9px; padding-top: 2px;">
+      <span style="width: 7px; height: 7px; border-radius: 999px; background: #d7a84f;"></span>
+      <span style="font-size: 13.5px; color: #d7a84f;">Working&hellip;</span>
+    </div>
+
+  </div>
+
+  <div style="flex-shrink: 0; padding: 10px 12px 34px; border-top: 1px solid #2a2d2f; background: #14171a;">
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 9px; padding: 8px 12px; border: 1px solid rgba(109,167,236,0.25); border-radius: 10px; background: rgba(109,167,236,0.08);">
+      <span style="font-size: 12.5px; color: #6da7ec;">2 turns queued</span>
+      <span style="font-size: 12.5px; color: #6da7ec;">Manage</span>
+    </div>
+    <div style="display: flex; align-items: flex-end; gap: 9px;">
+      <div style="flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; padding: 11px 14px; border: 1px solid #3a3d3f; border-radius: 12px; background: #111315;">
+        <span style="font-size: 15px; color: #6b726d;">Follow up&hellip;</span>
+      </div>
+      <div style="width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: #24282b; border: 1px solid #3a3d3f;">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#8a938e" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg>
+      </div>
+    </div>
+    <div style="display: flex; justify-content: center; gap: 18px; margin-top: 11px;">
+      <span style="font-size: 12.5px; color: #8a938e;">Queue</span>
+      <span style="font-size: 12.5px; color: #8fd6c7;">Steer</span>
+      <span style="font-size: 12.5px; color: #8a938e;">Fork</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

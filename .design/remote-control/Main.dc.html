@@ -1,0 +1,125 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 560px; height: 760px; display: flex; background: #111315; color: #e7e7e2; font-size: 13px; overflow: hidden;">
+
+  <!-- LEFT SIDEBAR (268px, matching --sidebar-width) -->
+  <div style="position: relative; width: 268px; flex-shrink: 0; display: flex; flex-direction: column; gap: 14px; padding: 32px 6px 12px; background: #0f1112; border-right: 1px solid #2a2d2f; box-sizing: border-box;">
+
+    <!-- traffic lights sit over this cleared strip -->
+    <div style="position: absolute; top: 11px; left: 13px; display: flex; gap: 8px;">
+      <div style="width: 12px; height: 12px; border-radius: 999px; background: #2f3639;"></div>
+      <div style="width: 12px; height: 12px; border-radius: 999px; background: #2f3639;"></div>
+      <div style="width: 12px; height: 12px; border-radius: 999px; background: #2f3639;"></div>
+    </div>
+
+    <!-- .sidebar-header-controls.is-grouped -->
+    <div style="position: absolute; top: 3px; right: 10px; display: flex;">
+      <div style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px 0 0 6px; color: #8a938e;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></svg>
+      </div>
+      <div style="width: 24px; height: 24px; margin-left: -1px; display: flex; align-items: center; justify-content: center; border-radius: 0; color: #8a938e;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2"></rect><path d="M12 18h.01"></path></svg>
+      </div>
+      <div style="width: 24px; height: 24px; margin-left: -1px; display: flex; align-items: center; justify-content: center; border-radius: 0 6px 6px 0; color: #8a938e;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path></svg>
+      </div>
+    </div>
+
+    <!-- .sidebar-mode-toggle -->
+    <div style="display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 2px; margin: 0 4px; padding: 3px 3px 2.5px; border: 1px solid rgba(255,255,255,0.075); border-radius: 8px; background: rgba(0,0,0,0.18);">
+      <div style="display: flex; align-items: center; justify-content: center; min-height: 22px; border-radius: 6px; background: #2c3134; color: #f1f0e8; font-size: 12px; font-weight: 500;">Terminals</div>
+      <div style="display: flex; align-items: center; justify-content: center; min-height: 22px; border-radius: 6px; color: #8a938e; font-size: 12px; font-weight: 500;">Research</div>
+    </div>
+
+    <!-- .pane-list -->
+    <div style="display: flex; flex-direction: column; gap: 3px; min-width: 0;">
+
+      <div style="display: flex; flex-direction: column; padding: 3.5px 6px; border: 1px solid rgba(255,255,255,0.075); border-radius: 7px; background: rgba(255,255,255,0.013);">
+        <div style="display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 4px; min-height: 25px; padding: 2px 4px 2px 5px;">
+          <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #7f8884;">qmux</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6f7773" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 8px minmax(0,1fr); align-items: center; column-gap: 6px; min-height: 30px; padding: 5px 9px 5px 6px; border: 1px solid #3a3d3f; border-left: 3px solid rgba(255,220,143,0.78); border-radius: 4px; background: #2c3134; color: #ffffff;">
+          <div style="width: 7px; height: 7px; border-radius: 999px; background: #d7a84f;"></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0;">
+            <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">remote transport</span>
+            <span style="display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: rgba(44,49,52,0.7); font-size: 11px; color: #d7a84f;">running</span>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 8px minmax(0,1fr); align-items: center; column-gap: 6px; min-height: 30px; padding: 5px 9px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; color: #b9c0bc;">
+          <div style="width: 7px; height: 7px; border-radius: 999px; background: #81c784;"></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0;">
+            <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">pairing flow</span>
+            <span style="display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: rgba(14,16,17,0.7); font-size: 11px; color: #8a938e;">idle</span>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 8px minmax(0,1fr); align-items: center; column-gap: 6px; min-height: 30px; padding: 5px 9px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; color: #b9c0bc;">
+          <div style="width: 7px; height: 7px; border-radius: 999px; background: #6da7ec;"></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0;">
+            <span style="font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">scrollback replay</span>
+            <span style="display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: rgba(14,16,17,0.7); font-size: 11px; color: #6da7ec;">queued 2</span>
+          </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 8px minmax(0,1fr); align-items: center; column-gap: 6px; min-height: 30px; padding: 5px 9px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; color: #b9c0bc;">
+          <div style="width: 7px; height: 7px; border-radius: 999px; background: #3a4245;"></div>
+          <span style="font-size: 13px;">zsh</span>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; padding: 3.5px 6px; border: 1px solid rgba(255,255,255,0.075); border-radius: 7px; background: rgba(255,255,255,0.013);">
+        <div style="display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: 4px; min-height: 25px; padding: 2px 4px 2px 5px;">
+          <span style="font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #7f8884;">qmux-ios</span>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#6f7773" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"></path><path d="M12 5v14"></path></svg>
+        </div>
+        <div style="display: grid; grid-template-columns: 8px minmax(0,1fr); align-items: center; column-gap: 6px; min-height: 30px; padding: 5px 9px 5px 6px; border: 1px solid transparent; border-left: 3px solid transparent; border-radius: 4px; color: #b9c0bc;">
+          <div style="width: 7px; height: 7px; border-radius: 999px; background: #e0796d;"></div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 6px; min-width: 0;">
+            <span style="font-size: 13px;">SwiftTerm bridge</span>
+            <span style="display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; background: rgba(14,16,17,0.7); font-size: 11px; color: #e0796d;">needs input</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- TERMINAL PANE -->
+  <div style="flex: 1; min-width: 0; padding: 14px 16px; background: #111315; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.72; color: #b9c0bc; overflow: hidden;">
+    <div style="color: #6cae9d;">~/qmux <span style="color: #6f7773;">on</span> <span style="color: #d7a84f;">remote-ios</span></div>
+    <div style="color: #8a938e;">$ cargo test -p qmux --lib remote::</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div>running 24 tests</div>
+    <div style="color: #81c784;">test remote::frames::length_prefix_round_trips ... ok</div>
+    <div style="color: #81c784;">test remote::frames::rejects_oversize_frame ... ok</div>
+    <div style="color: #81c784;">test remote::fanout::pane_ring_marks_gap ... ok</div>
+    <div style="color: #81c784;">test remote::fanout::event_overflow_sends_one_resync ... ok</div>
+    <div style="color: #81c784;">test remote::pairing::burned_secret_cannot_replay ... ok</div>
+    <div style="color: #81c784;">test remote::pairing::unpaired_node_closed ... ok</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div><span style="color: #81c784;">test result: ok.</span> 24 passed; 0 failed</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div style="color: #8a938e;">$ <span style="display: inline-block; width: 7px; height: 14px; vertical-align: -2px; background: #8fd6c7;"></span></div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

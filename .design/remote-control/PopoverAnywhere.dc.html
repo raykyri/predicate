@@ -1,0 +1,83 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 420px; height: 430px; padding: 18px; box-sizing: border-box; background: #0f1112; color: #e7e7e2; font-size: 13px;">
+
+  <div style="display: flex; justify-content: flex-end; margin-bottom: 8px;">
+    <div style="display: flex;">
+      <div style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px 0 0 6px; color: #8a938e;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></svg>
+      </div>
+      <div style="width: 24px; height: 24px; margin-left: -1px; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.045); color: #d7a84f;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2"></rect><path d="M12 18h.01"></path></svg>
+      </div>
+      <div style="width: 24px; height: 24px; margin-left: -1px; display: flex; align-items: center; justify-content: center; border-radius: 0 6px 6px 0; color: #8a938e;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18"></path><path d="m16 15-3-3 3-3"></path></svg>
+      </div>
+    </div>
+  </div>
+
+  <div style="display: flex; flex-direction: column; width: 344px; margin-left: auto; border: 1px solid #2a2d2f; border-radius: 8px; background: #1d2224; box-shadow: 0 10px 28px rgba(0,0,0,0.5); overflow: hidden;">
+
+    <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 14px;">
+      <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0;">
+        <span style="font-size: 13px; font-weight: 700; color: #f4f3ec;">Remote control</span>
+        <span style="font-size: 11px; color: #8a938e;">On &middot; this network only</span>
+      </div>
+      <div style="width: 34px; height: 20px; flex-shrink: 0; display: flex; justify-content: flex-end; padding: 2px; border-radius: 999px; background: #243430; border: 1px solid #6cae9d; box-sizing: border-box;">
+        <div style="width: 14px; height: 14px; border-radius: 999px; background: #8fd6c7;"></div>
+      </div>
+    </div>
+
+    <div style="height: 1px; background: #2a2d2f;"></div>
+
+    <div style="display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 2px; margin: 12px 14px 14px; padding: 3px; border: 1px solid rgba(255,255,255,0.075); border-radius: 8px; background: rgba(0,0,0,0.18);">
+      <div style="display: flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 6px; color: #8a938e; font-size: 12px; font-weight: 500;">This network</div>
+      <div style="display: flex; align-items: center; justify-content: center; min-height: 24px; border-radius: 6px; background: #2c3134; border: 1px solid rgba(215,168,79,0.42); box-sizing: border-box; color: #d7a84f; font-size: 12px; font-weight: 500;">Anywhere</div>
+    </div>
+
+    <div style="margin: 0 14px 14px; padding: 13px; border: 1px solid rgba(215,168,79,0.42); border-radius: 6px; background: rgba(215,168,79,0.08);">
+      <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 9px;">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#d7a84f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path><path d="M2 12h20"></path></svg>
+        <span style="font-size: 12.5px; font-weight: 700; color: #d8b878;">Reachable from any network</span>
+      </div>
+      <p style="margin: 0 0 9px; font-size: 11.5px; line-height: 1.55; color: #c4cbc6;">
+        qmux will hold a connection to n0&rsquo;s relay servers and publish this Mac&rsquo;s address so paired devices can find it.
+      </p>
+      <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div style="display: flex; gap: 7px; align-items: flex-start;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#81c784" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 3px;"><path d="M20 6 9 17l-5-5"></path></svg>
+          <span style="font-size: 11.5px; line-height: 1.45; color: #b9c0bc;">Relays forward encrypted packets and cannot read your terminals.</span>
+        </div>
+        <div style="display: flex; gap: 7px; align-items: flex-start;">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#e0796d" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0; margin-top: 3px;"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg>
+          <span style="font-size: 11.5px; line-height: 1.45; color: #b9c0bc;">They can see that this Mac is online, and roughly how much it sends.</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height: 1px; background: #2a2d2f;"></div>
+
+    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 14px;">
+      <div style="display: flex; align-items: center; padding: 0 13px; height: 30px; border: 1px solid #3a3d3f; border-radius: 6px; background: #24282b; font-size: 13px; color: #f1f0e8;">Keep local</div>
+      <div style="display: flex; align-items: center; padding: 0 13px; height: 30px; border: 1px solid rgba(215,168,79,0.62); border-radius: 6px; background: rgba(215,168,79,0.13); font-size: 13px; font-weight: 500; color: #d7a84f;">Enable</div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

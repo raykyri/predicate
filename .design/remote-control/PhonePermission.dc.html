@@ -1,0 +1,75 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; position: relative; display: flex; flex-direction: column; background: #171b1d; color: #e7e7e2; box-sizing: border-box; overflow: hidden;">
+
+  <div style="height: 56px; flex-shrink: 0;"></div>
+
+  <div style="display: flex; align-items: center; gap: 10px; height: 48px; flex-shrink: 0; padding: 0 12px 0 8px; border-bottom: 1px solid #2a2d2f; background: #14171a; opacity: 0.55;">
+    <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg>
+    </div>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;">
+      <span style="font-size: 15px; font-weight: 500; color: #f1f0e8;">SwiftTerm bridge</span>
+      <span style="font-size: 11.5px; color: #e0796d;">Awaiting input</span>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; padding: 16px; opacity: 0.35;">
+    <p style="margin: 0 0 14px; font-size: 14.5px; line-height: 1.56; color: #e7e7e2;">
+      I need to remove the stale worktree before the branch can be recreated.
+    </p>
+    <div style="padding: 10px 12px; border: 1px solid rgba(255,255,255,0.065); border-radius: 9px; background: #111416; font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: #b9c0bc;">
+      git worktree remove --force&hellip;
+    </div>
+  </div>
+
+  <div style="position: absolute; inset: 0; background: rgba(8,10,11,0.72);"></div>
+
+  <div style="position: absolute; left: 0; right: 0; bottom: 0; display: flex; flex-direction: column; gap: 18px; padding: 22px 20px 40px; border-top: 1px solid #3b4447; border-radius: 20px 20px 0 0; background: #1b2022; box-shadow: 0 -22px 70px rgba(0,0,0,0.5);">
+
+    <div style="width: 38px; height: 4px; align-self: center; border-radius: 999px; background: #3a4245;"></div>
+
+    <div style="display: flex; gap: 13px;">
+      <div style="width: 38px; height: 38px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 10px; background: rgba(224,121,109,0.14);">
+        <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#e0796d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.7 9a1 1 0 0 1-.6 0C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.2-2.7a1 1 0 0 1 1.6 0C14.5 3.8 17 5 19 5a1 1 0 0 1 1 1z"></path></svg>
+      </div>
+      <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px;">
+        <span style="font-size: 18px; font-weight: 700; letter-spacing: -0.01em; color: #f4f3ec;">Claude wants to run a command</span>
+        <span style="font-size: 13.5px; color: #8a938e;">in <span style="color: #c4cbc6;">qmux-ios</span> &middot; SwiftTerm bridge</span>
+      </div>
+    </div>
+
+    <div style="padding: 13px 14px; border: 1px solid rgba(255,255,255,0.075); border-radius: 10px; background: #111416; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12.5px; line-height: 1.6; color: #e7e7e2; overflow-x: auto;">
+      git worktree remove --force \<br>&nbsp;&nbsp;.qmux/wt/swiftterm-bridge
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <div style="display: flex; align-items: center; justify-content: center; height: 52px; border: 1px solid #6cae9d; border-radius: 13px; background: #243430;">
+        <span style="font-size: 16.5px; font-weight: 500; color: #8fd6c7;">Approve</span>
+      </div>
+      <div style="display: flex; align-items: center; justify-content: center; height: 52px; border: 1px solid #7a3b34; border-radius: 13px; background: #2c1a17;">
+        <span style="font-size: 16.5px; font-weight: 500; color: #ffd3c7;">Deny</span>
+      </div>
+    </div>
+
+    <span style="text-align: center; font-size: 12px; color: #6f7773;">Sends the adapter&rsquo;s own approve key, exactly as the right pane does.</span>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

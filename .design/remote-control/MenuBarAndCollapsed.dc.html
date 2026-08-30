@@ -1,0 +1,59 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 620px; height: 420px; display: flex; flex-direction: column; gap: 20px; padding: 20px; box-sizing: border-box; background: #0d0f10; color: #e7e7e2; font-size: 13px;">
+
+  <div style="display: flex; flex-direction: column; gap: 9px;">
+    <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: #6f7773;">Menu bar &mdash; a live session is never invisible</span>
+    <div style="display: flex; align-items: center; justify-content: flex-end; gap: 16px; height: 26px; padding: 0 14px; border: 1px solid #2a2d2f; border-radius: 6px; background: #1b2022;">
+      <span style="font-size: 12px; color: #8a938e;">100%</span>
+      <div style="display: flex; align-items: center; gap: 4px;">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="20" x="5" y="2" rx="2"></rect><path d="M12 18h.01"></path></svg>
+        <span style="width: 5px; height: 5px; border-radius: 999px; background: #8fd6c7;"></span>
+      </div>
+      <span style="font-size: 12px; color: #c4cbc6;">Fri 14:22</span>
+    </div>
+    <span style="font-size: 11.5px; color: #8a938e;">The dot is present only while a device is actually connected, not merely while the toggle is on.</span>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 9px; flex: 1; min-height: 0;">
+    <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: #6f7773;">Sidebar collapsed &mdash; the button goes with it</span>
+    <div style="flex: 1; min-height: 0; display: flex; border: 1px solid #2a2d2f; border-radius: 6px; overflow: hidden;">
+      <div style="width: 10px; background: #0f1112;"></div>
+      <div style="flex: 1; min-width: 0; padding: 12px 14px; background: #111315; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; line-height: 1.7; color: #8a938e;">
+        <div style="color: #6cae9d;">~/qmux</div>
+        <div>$ npm run test:remote</div>
+      </div>
+      <div style="width: 190px; flex-shrink: 0; display: flex; flex-direction: column; background: #171b1d; border-left: 1px solid #2a2d2f;">
+        <div style="display: flex; align-items: center; justify-content: flex-end; gap: 0; height: 30px; padding: 0 8px; border-bottom: 1px solid #2a2d2f;">
+          <div style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px; color: #8a938e;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18"></path><path d="m14 9 3 3-3 3"></path></svg>
+          </div>
+          <div style="width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px; color: #8a938e;">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></svg>
+          </div>
+        </div>
+        <div style="padding: 10px 12px; font-size: 11.5px; line-height: 1.5; color: #6f7773;">
+          Restore and terminal map relocate here. The remote-control button deliberately does not.
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

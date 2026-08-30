@@ -1,0 +1,57 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 720px; height: 500px; padding: 20px; box-sizing: border-box; background: #0d0f10;">
+  <div style="height: 100%; display: flex; flex-direction: column; border: 1px solid #2a2d2f; border-radius: 8px; background: #111315; overflow: hidden;">
+
+    <div style="display: flex; align-items: center; gap: 9px; height: 30px; padding: 0 12px; background: #14171a; border-bottom: 1px solid #2a2d2f;">
+      <div style="display: flex; gap: 7px;">
+        <div style="width: 11px; height: 11px; border-radius: 999px; background: #2f3639;"></div>
+        <div style="width: 11px; height: 11px; border-radius: 999px; background: #2f3639;"></div>
+        <div style="width: 11px; height: 11px; border-radius: 999px; background: #2f3639;"></div>
+      </div>
+      <span style="margin-left: 6px; font-size: 11.5px; color: #7f8884;">qmux remote-probe &mdash; milestone 1</span>
+    </div>
+
+    <div style="flex: 1; min-height: 0; padding: 14px 16px; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.78; color: #b9c0bc;">
+      <div><span style="color: #6cae9d;">$</span> qmux remote-probe --node k51qzi5u&hellip;9wfvzqd2 --no-relay</div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #8a938e;">connect</span>  alpn=qmux/remote/1 &middot; direct 192.168.1.31:41822 &middot; <span style="color: #81c784;">89ms</span></div>
+      <div><span style="color: #8a938e;">ready</span>    qmux/0.3.1 apiVersion=1 principal=remote readOnly=false</div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #6cae9d;">&gt;</span> pane.list</div>
+      <div style="color: #c4cbc6;">  pane-1762  qmux        remote transport   <span style="color: #d7a84f;">running</span></div>
+      <div style="color: #c4cbc6;">  pane-1763  qmux        pairing flow       <span style="color: #8a938e;">idle</span></div>
+      <div style="color: #c4cbc6;">  pane-1771  qmux-ios    SwiftTerm bridge   <span style="color: #e0796d;">awaitingInput</span></div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #6cae9d;">&gt;</span> subscribe --events 'agent.*,turn.*' --pane pane-1762</div>
+      <div><span style="color: #8a938e;">stream</span>   opened uni:events, uni:pane-1762 (primed 41.2 KB)</div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #8fd6c7;">event</span>    turn.updated       agent-88  blocks=3</div>
+      <div><span style="color: #8fd6c7;">output</span>   pane-1762          2.1 KB</div>
+      <div><span style="color: #8fd6c7;">event</span>    agent.status       agent-88  running &rarr; awaitingInput</div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #d7a84f;">warn</span>     pane-1762 ring overflow &mdash; 312 KB dropped, gap set</div>
+      <div><span style="color: #8a938e;">reset</span>    pane-1762 &mdash; re-prime from pane.snapshot</div>
+      <div style="color: #6f7773;">&nbsp;</div>
+      <div><span style="color: #6cae9d;">&gt;</span> <span style="display: inline-block; width: 7px; height: 14px; vertical-align: -2px; background: #8fd6c7;"></span></div>
+    </div>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>

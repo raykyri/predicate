@@ -1,0 +1,81 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; display: flex; flex-direction: column; background: #111315; color: #e7e7e2; box-sizing: border-box; overflow: hidden;">
+
+  <div style="height: 56px; flex-shrink: 0;"></div>
+
+  <div style="display: flex; align-items: center; gap: 10px; height: 48px; flex-shrink: 0; padding: 0 12px 0 8px; border-bottom: 1px solid #2a2d2f; background: #14171a;">
+    <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+      <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg>
+    </div>
+    <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px;">
+      <span style="font-size: 15px; font-weight: 500; color: #f1f0e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">remote transport</span>
+      <span style="font-size: 11.5px; color: #d7a84f;">Running &middot; 120&times;34</span>
+    </div>
+    <div style="width: 40px; height: 40px; display: flex; align-items: center; justify-content: center;">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#c4cbc6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 8V4H8"></path><rect width="16" height="12" x="4" y="8" rx="2"></rect><path d="M2 14h2"></path><path d="M20 14h2"></path><path d="M15 13v2"></path><path d="M9 13v2"></path></svg>
+    </div>
+  </div>
+
+  <div style="flex: 1; min-height: 0; padding: 12px 12px 10px; font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.62; color: #b9c0bc; overflow: hidden;">
+    <div style="color: #8a938e;">&gt; add the ring buffer and the gap marker</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div style="color: #c4cbc6;">&#9679; Read <span style="color: #8fd6c7;">src/remote/fanout.rs</span></div>
+    <div style="color: #6f7773;">  &#9492; 212 lines</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div style="color: #c4cbc6;">&#9679; Update <span style="color: #8fd6c7;">src/remote/fanout.rs</span></div>
+    <div style="color: #81c784;">  + pub struct PaneRing {</div>
+    <div style="color: #81c784;">  +     cap: usize,</div>
+    <div style="color: #81c784;">  +     buf: VecDeque&lt;u8&gt;,</div>
+    <div style="color: #81c784;">  +     gap: bool,</div>
+    <div style="color: #81c784;">  + }</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div style="color: #c4cbc6;">&#9679; Bash <span style="color: #8a938e;">cargo test remote::fanout</span></div>
+    <div style="color: #6f7773;">  &#9492; 6 passed</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div>The ring drops oldest bytes on overflow and</div>
+    <div>sets <span style="color: #d7a84f;">gap</span>, so the reader thread never</div>
+    <div>blocks on a slow subscriber.</div>
+    <div style="color: #6f7773;">&nbsp;</div>
+    <div><span style="color: #8fd6c7;">&#9646;</span></div>
+  </div>
+
+  <div style="display: flex; gap: 6px; flex-shrink: 0; padding: 8px 12px; border-top: 1px solid #2a2d2f; background: #14171a; overflow: hidden;">
+    <div style="display: flex; align-items: center; justify-content: center; min-width: 46px; height: 44px; padding: 0 11px; border: 1px solid #3a3d3f; border-radius: 9px; background: #24282b; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #c4cbc6;">esc</div>
+    <div style="display: flex; align-items: center; justify-content: center; min-width: 46px; height: 44px; padding: 0 11px; border: 1px solid #3a3d3f; border-radius: 9px; background: #24282b; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #c4cbc6;">tab</div>
+    <div style="display: flex; align-items: center; justify-content: center; min-width: 46px; height: 44px; padding: 0 11px; border: 1px solid #3a3d3f; border-radius: 9px; background: #24282b; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: #c4cbc6;">^C</div>
+    <div style="display: flex; align-items: center; justify-content: center; min-width: 46px; height: 44px; padding: 0 11px; border: 1px solid #3a3d3f; border-radius: 9px; background: #24282b; color: #c4cbc6;">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 7-7 7 7"></path><path d="M12 19V5"></path></svg>
+    </div>
+    <div style="display: flex; align-items: center; justify-content: center; min-width: 46px; height: 44px; padding: 0 11px; border: 1px solid #3a3d3f; border-radius: 9px; background: #24282b; color: #c4cbc6;">
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m19 12-7 7-7-7"></path><path d="M12 5v14"></path></svg>
+    </div>
+  </div>
+
+  <div style="display: flex; align-items: flex-end; gap: 9px; flex-shrink: 0; padding: 10px 12px 34px; background: #14171a;">
+    <div style="flex: 1; min-width: 0; min-height: 44px; display: flex; align-items: center; padding: 11px 14px; border: 1px solid #3a3d3f; border-radius: 12px; background: #111315;">
+      <span style="font-size: 15px; color: #6b726d;">Type into the terminal&hellip;</span>
+    </div>
+    <div style="width: 44px; height: 44px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 12px; background: #243430; border: 1px solid #6cae9d;">
+      <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 10 4 15 9 20"></polyline><path d="M20 4v7a4 4 0 0 1-4 4H4"></path></svg>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>

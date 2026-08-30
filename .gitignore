@@ -17,3 +17,6 @@ src-tauri/gen/
 # accidentally committed.
 .qmux/
 src-tauri/swift-terminal/.build/
+
+# Seeded design canvases; the .dc.html sources beside them are the real input.
+.design/**/qmux-remote-control-screens.html

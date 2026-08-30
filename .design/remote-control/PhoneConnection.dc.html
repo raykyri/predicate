@@ -1,0 +1,93 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500;700&display=swap">
+  <style>
+    body { margin: 0; font-family: "DM Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+           font-synthesis: none; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    a { color: #8fd6c7; } a:hover { color: #6cae9d; }
+  </style>
+</helmet>
+<div style="width: 390px; height: 844px; display: flex; flex-direction: column; background: #0d0f10; color: #e7e7e2; box-sizing: border-box; overflow: hidden;">
+
+  <div style="height: 56px; flex-shrink: 0;"></div>
+
+  <div style="padding: 4px 20px 18px;">
+    <h1 style="margin: 0; font-size: 27px; font-weight: 700; letter-spacing: -0.022em; color: #f4f3ec;">Connection</h1>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 24px; padding: 0 20px;">
+
+    <div style="display: flex; flex-direction: column; gap: 9px;">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #6f7773;">Paired Mac</span>
+      <div style="padding: 16px; border: 1px solid rgba(255,255,255,0.075); border-radius: 13px; background: #171b1d;">
+        <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 14px;">
+          <div style="width: 40px; height: 40px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; border-radius: 11px; background: #243430;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8fd6c7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="14" x="2" y="3" rx="2"></rect><path d="M8 21h8"></path><path d="M12 17v4"></path></svg>
+          </div>
+          <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px;">
+            <span style="font-size: 16px; color: #f1f0e8;">Ray&rsquo;s MacBook Pro</span>
+            <span style="font-size: 13px; color: #8a938e;">Paired 12 Aug</span>
+          </div>
+        </div>
+        <div style="height: 1px; margin-bottom: 13px; background: #2a2d2f;"></div>
+        <div style="display: flex; flex-direction: column; gap: 11px;">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <span style="font-size: 14px; color: #8a938e;">Path</span>
+            <span style="display: flex; align-items: center; gap: 7px; font-size: 14px; color: #81c784;">
+              <span style="width: 7px; height: 7px; border-radius: 999px; background: #81c784;"></span>Direct
+            </span>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <span style="font-size: 14px; color: #8a938e;">Round trip</span>
+            <span style="font-family: 'JetBrains Mono', monospace; font-size: 13.5px; color: #c4cbc6;">4 ms</span>
+          </div>
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+            <span style="font-size: 14px; color: #8a938e;">Access</span>
+            <span style="font-size: 14px; color: #c4cbc6;">Full control</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 9px;">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #6f7773;">If direct fails</span>
+      <div style="display: flex; align-items: center; gap: 13px; min-height: 62px; padding: 13px 15px; border: 1px solid rgba(255,255,255,0.075); border-radius: 13px; background: #171b1d;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8a938e" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"></path><path d="M2 12h20"></path></svg>
+        <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px;">
+          <span style="font-size: 15.5px; color: #f1f0e8;">Use a relay</span>
+          <span style="font-size: 12.5px; line-height: 1.4; color: #8a938e;">Encrypted end to end; the relay forwards without reading</span>
+        </div>
+        <div style="width: 46px; height: 28px; flex-shrink: 0; display: flex; justify-content: flex-end; align-items: center; padding: 2px; border-radius: 999px; background: #243430; border: 1px solid #6cae9d; box-sizing: border-box;">
+          <div style="width: 22px; height: 22px; border-radius: 999px; background: #8fd6c7;"></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 9px;">
+      <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 11px; font-weight: 500; letter-spacing: 0.09em; text-transform: uppercase; color: #6f7773;">Reconnect</span>
+      <div style="padding: 14px 15px; border: 1px solid rgba(255,255,255,0.075); border-radius: 13px; background: #171b1d;">
+        <p style="margin: 0; font-size: 13px; line-height: 1.55; color: #8a938e;">
+          iOS closes the connection when qmux is backgrounded. It reconnects when you open the app; nothing queues while it is closed.
+        </p>
+      </div>
+    </div>
+
+  </div>
+
+  <div style="padding: 20px 20px 40px;">
+    <div style="display: flex; align-items: center; justify-content: center; height: 52px; border: 1px solid #7a3b34; border-radius: 13px; background: #2c1a17;">
+      <span style="font-size: 16px; font-weight: 500; color: #ffd3c7;">Forget this Mac</span>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+</body>
+</html>
