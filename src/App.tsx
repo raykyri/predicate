@@ -113,6 +113,9 @@ import HomeGroupSelector from "./components/HomeGroupSelector";
 import type { HomeGroup } from "./components/HomeGroupSelector";
 import HomeRails from "./components/HomeRails";
 import TerminalMapButton from "./components/TerminalMapButton";
+import RemoteControlButton from "./components/RemoteControlButton";
+import RemoteControlPopover from "./components/RemoteControlPopover";
+import RemotePairDialog from "./components/RemotePairDialog";
 import type {
   HomeRailPastTurn,
   HomeRailScrollPosition,
@@ -303,6 +306,7 @@ import { createTranscriptPublicationDraft } from "./lib/publicationDrafts";
 import type { PublicationBinding } from "./lib/publication";
 import { useNativeWebOverlayRegion } from "./hooks/useNativeWebOverlayRegion";
 import { useQmuxEvents } from "./hooks/useQmuxEvents";
+import { useRemoteControl } from "./hooks/useRemoteControl";
 import type {
   BrowserOverlayMode,
   BrowserOverlaySize,
@@ -2425,6 +2429,18 @@ function MainApp() {
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const [newAgentError, setNewAgentError] = useState<string | null>(null);
   const [terminalMapOpen, setTerminalMapOpen] = useState(false);
+  const [remoteControlOpen, setRemoteControlOpen] = useState(false);
+  const remoteControlButtonRef = useRef<HTMLButtonElement | null>(null);
+  // Status and the remote.* listener live above the popover: a pairing request
+  // must raise its approval dialog whether or not the popover is open.
+  const remoteControl = useRemoteControl();
+  // The button is deliberately absent while the sidebar is collapsed (it is
+  // sidebar chrome, not floating chrome), so its popover must not outlive it.
+  useEffect(() => {
+    if (leftSidebarCollapsed) {
+      setRemoteControlOpen(false);
+    }
+  }, [leftSidebarCollapsed]);
   const newAgentOpenRef = useRef(newAgentOpen);
   newAgentOpenRef.current = newAgentOpen;
   const terminalMapOpenRef = useRef(terminalMapOpen);
@@ -14875,6 +14891,13 @@ function MainApp() {
               pressed={terminalMapOpen}
               onClick={toggleTerminalMap}
             />
+            <RemoteControlButton
+              className="icon-button sidebar-header-button"
+              pressed={remoteControlOpen}
+              status={remoteControl.status}
+              buttonRef={remoteControlButtonRef}
+              onClick={() => setRemoteControlOpen((open) => !open)}
+            />
             <button
               type="button"
               className="icon-button sidebar-header-button"
@@ -17957,6 +17980,21 @@ function MainApp() {
           }}
         />
       ) : null}
+
+      {remoteControlOpen ? (
+        <RemoteControlPopover
+          status={remoteControl.status}
+          anchorRef={remoteControlButtonRef}
+          onStatus={remoteControl.applyStatus}
+          onClose={() => setRemoteControlOpen(false)}
+        />
+      ) : null}
+
+      <RemotePairDialog
+        request={remoteControl.pendingPair}
+        onStatus={remoteControl.applyStatus}
+        onDismiss={remoteControl.dismissPendingPair}
+      />
 
       <PublishDialog
         target={publicationTarget}

@@ -17,4 +17,5 @@ pub mod fanout;
 pub mod frames;
 pub mod pairing;
 pub mod probe;
+pub mod service;
 pub mod session;

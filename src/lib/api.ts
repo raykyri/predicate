@@ -5,6 +5,8 @@ import type { PaneLayoutItem } from "./paneTree";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
 import type { CompletionSoundId } from "./completionSounds";
+import { REMOTE_EVENT_PREFIX } from "./remoteControl";
+import type { RemotePairingPanel, RemoteReach, RemoteStatus } from "./remoteControl";
 import {
   HumanBrowserLifecycleQueue,
   retryHumanBrowserLifecycle,
@@ -1668,4 +1670,87 @@ export function markEventsListenerReady() {
 /** Acknowledges the native post-wake document event-loop health probe. */
 export function acknowledgeInterfaceHealthProbe(generation: number) {
   return invoke<void>("acknowledge_interface_health_probe", { generation });
+}
+
+/* Remote control (stage 5). The types live in remoteControl.ts beside the pure
+   display helpers; re-exported here so a component can take the whole feature
+   from one import, like the publication types above. */
+export type {
+  RemoteDevice,
+  RemotePairingPanel,
+  RemotePendingPair,
+  RemoteReach,
+  RemoteSession,
+  RemoteStatus,
+} from "./remoteControl";
+
+/* The popover reads `remote_status_get` once on open and then applies the
+   RemoteStatus every mutation returns, so a command's result and the
+   status_changed event it emits are the same snapshot. */
+
+export function remoteStatusGet() {
+  return invoke<RemoteStatus>("remote_status_get");
+}
+
+/** The master switch. On binds the endpoint; off unbinds and drops every session. */
+export function setRemoteEnabled(enabled: boolean) {
+  return invoke<RemoteStatus>("remote_set_enabled", { enabled });
+}
+
+/**
+ * Reach is a separate consent from the master switch: "anywhere" publishes this
+ * Mac's address and holds a relay connection, so the popover confirms it before
+ * calling this.
+ */
+export function setRemoteReach(reach: RemoteReach) {
+  return invoke<RemoteStatus>("remote_set_reach", { reach });
+}
+
+/** Persists whether remote control comes back up with the app. */
+export function setRemoteLaunchEnabled(enabled: boolean) {
+  return invoke<RemoteStatus>("remote_set_launch_enabled", { enabled });
+}
+
+/** Opens a single-use pairing window and renders its QR. Errors while off. */
+export function beginRemotePairing() {
+  return invoke<RemotePairingPanel>("remote_pairing_begin");
+}
+
+export function cancelRemotePairing() {
+  return invoke<RemoteStatus>("remote_pairing_cancel");
+}
+
+/** Answers the approval prompt for one waiting pairing request. */
+export function respondToRemotePairRequest(
+  requestId: string,
+  approved: boolean,
+  readOnly: boolean,
+) {
+  return invoke<RemoteStatus>("remote_pair_respond", { requestId, approved, readOnly });
+}
+
+/** Drops a paired device; its next handshake fails. */
+export function revokeRemoteDevice(endpointId: string) {
+  return invoke<RemoteStatus>("remote_device_revoke", { endpointId });
+}
+
+/** Read-only applies from the device's next connection, not to a live session. */
+export function setRemoteDeviceReadOnly(endpointId: string, readOnly: boolean) {
+  return invoke<RemoteStatus>("remote_device_set_read_only", { endpointId, readOnly });
+}
+
+/**
+ * The `remote.*` slice of the qmux-event channel, for the popover and the
+ * pair-approval dialog. They mount and unmount independently of the app-wide
+ * useQmuxEvents subscription, so they take their own filtered listener rather
+ * than threading remote state through the whole event reducer.
+ */
+export function listenToRemoteEvents(
+  onEvent: (event: QmuxEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<QmuxEvent>("qmux-event", (event) => {
+    if (event.payload.type.startsWith(REMOTE_EVENT_PREFIX)) {
+      onEvent(event.payload);
+    }
+  });
 }

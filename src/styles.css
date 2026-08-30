@@ -16,4 +16,5 @@
 @import "./styles/features/history.css" layer(features);
 @import "./styles/features/publishing.css" layer(features);
 @import "./styles/features/notifications.css" layer(features);
+@import "./styles/features/remote-control.css" layer(features);
 @import "./styles/reduced-motion.css" layer(features);

@@ -226,6 +226,10 @@ pub struct AppPreferences {
     /// the OpenRouter key is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_devices: Option<Vec<crate::remote::devices::RemotePairedDevice>>,
+    /// Remote control's durable toggle state: whether to come up at launch,
+    /// and how far the endpoint reaches when on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_control: Option<crate::remote::service::RemoteControlPrefs>,
 }
 
 fn default_research_sdk_harness() -> bool {

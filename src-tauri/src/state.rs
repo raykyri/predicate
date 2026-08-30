@@ -191,6 +191,9 @@ struct AppStateInner {
     /// Fan-out to connected remote-control sessions. Dormant (one atomic
     /// load per publish) until a device subscribes.
     remote_fanout: crate::remote::fanout::RemoteFanout,
+    /// The live remote-control runtime while the toggle is on; None is what
+    /// "off" means (no endpoint bound anywhere).
+    remote_runtime: Mutex<Option<Arc<crate::remote::endpoint::RemoteControlRuntime>>>,
     pane_tokens: Mutex<HashMap<String, String>>,
     // Credentials injected only into interactive shell panes. Agent launches
     // strip them before exec, keeping cross-pane user control distinct from
@@ -1688,6 +1691,7 @@ impl AppState {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
                 remote_fanout: Default::default(),
+                remote_runtime: Mutex::new(None),
                 user_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
@@ -2972,6 +2976,28 @@ impl AppState {
 
     pub fn remote_fanout(&self) -> &crate::remote::fanout::RemoteFanout {
         &self.inner.remote_fanout
+    }
+
+    pub fn remote_runtime(&self) -> Option<Arc<crate::remote::endpoint::RemoteControlRuntime>> {
+        self.inner
+            .remote_runtime
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    /// Swaps the live runtime, returning the previous one so the caller can
+    /// shut it down outside the lock.
+    pub fn set_remote_runtime(
+        &self,
+        runtime: Option<Arc<crate::remote::endpoint::RemoteControlRuntime>>,
+    ) -> Option<Arc<crate::remote::endpoint::RemoteControlRuntime>> {
+        self.inner
+            .remote_runtime
+            .lock()
+            .ok()
+            .map(|mut slot| std::mem::replace(&mut *slot, runtime))
+            .unwrap_or_default()
     }
 
     pub fn emit(&self, event: QmuxEvent) {

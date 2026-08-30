@@ -25,9 +25,6 @@ mod prompt_library;
 mod pty;
 mod publishing;
 mod recovery;
-// Dead-code allowed until stage 5 wires the runtime to the UI toggle: the
-// remote chain is currently constructed only by its tests.
-#[cfg_attr(not(test), allow(dead_code))]
 mod remote;
 mod research;
 mod research_runtime;
@@ -3278,6 +3275,16 @@ fn main() {
                 }
                 app.manage(show_hide_shortcut::ShowHideShortcutState::default());
                 show_hide_shortcut::init(app.handle(), &state.config().workspace_root);
+                // Remote control comes up at launch only when its durable
+                // toggle says so; a failure to bind must not stall startup.
+                if persistence::load_preferences(&state.config().workspace_root)
+                    .ok()
+                    .and_then(|prefs| prefs.remote_control)
+                    .is_some_and(|prefs| prefs.launch_enabled)
+                    && let Err(err) = remote::service::start(&state)
+                {
+                    eprintln!("qmux: failed to start remote control at launch: {err}");
+                }
                 app.manage(global_task_launcher::GlobalTaskLauncherState::default());
                 global_task_launcher::create_window(app)?;
                 global_task_launcher::init(app.handle(), &state.config().workspace_root);
@@ -3597,6 +3604,15 @@ fn main() {
             show_hide_shortcut_get,
             show_hide_shortcut_set,
             show_hide_shortcut_capture_set,
+            remote::service::remote_status_get,
+            remote::service::remote_set_enabled,
+            remote::service::remote_set_reach,
+            remote::service::remote_set_launch_enabled,
+            remote::service::remote_pairing_begin,
+            remote::service::remote_pairing_cancel,
+            remote::service::remote_pair_respond,
+            remote::service::remote_device_revoke,
+            remote::service::remote_device_set_read_only,
             global_task_launcher::global_task_launcher_hotkey_get,
             global_task_launcher::global_task_launcher_hotkey_set,
             global_task_launcher::global_task_launcher_open,
@@ -3621,6 +3637,9 @@ fn main() {
                 // process death would save the session with its tabs deleted.
                 exit_state.finalize_persistence_for_exit();
                 research_runtime::kill_all_sessions();
+                // Take the remote endpoint down before the panes: connected
+                // devices get closes instead of dead streams.
+                remote::service::stop(&exit_state);
                 pty::kill_all_panes(&exit_state);
                 native_terminal::shutdown();
                 // Stop the supervisor before touching the pathname. If we unlink

@@ -74,8 +74,6 @@ pub fn handle_call(
 /// Entry point for calls arriving over the remote transport. The session's
 /// pairing already authenticated the device; this derives its context and
 /// dispatches with the Remote principal.
-// Reachable only through the remote module until stage 5 wires its runtime.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn handle_remote_call(
     state: &AppState,
     session: &crate::remote::session::RemoteSession,
@@ -1672,6 +1670,22 @@ mod tests {
             ("agent.start", json!({})),
             ("agent.prompt", json!({ "id": "agent-1", "text": "hi" })),
             ("agent.release", json!({ "id": "agent-1" })),
+            ("agent.submit", json!({ "id": "agent-1", "text": "hi" })),
+            (
+                "agent.permission",
+                json!({ "id": "agent-1", "action": "approve" }),
+            ),
+            ("agent.queue.remove", json!({ "id": "agent-1", "index": 0 })),
+            (
+                "agent.queue.reorder",
+                json!({ "id": "agent-1", "fromIndex": 0, "toIndex": 1 }),
+            ),
+            ("agent.queue.sendNext", json!({ "id": "agent-1" })),
+            (
+                "agent.queue.pause",
+                json!({ "id": "agent-1", "index": 0, "pauseAfter": true }),
+            ),
+            ("agent.queue.unpause", json!({ "id": "agent-1" })),
         ] {
             let response = call(&state, &session, operation, arguments);
             assert_eq!(response["ok"], false, "{operation} must be denied");

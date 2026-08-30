@@ -1,0 +1,401 @@
+/* Remote control: the sidebar header button, its popover, and the pair-approval
+   dialog. The popover follows the app's control density — 13px base, 30px
+   controls — and borrows the sidebar's segmented switch for the reach toggle. */
+
+/* The button sits in .sidebar-header-controls, so its geometry is already set
+   there; this only anchors the session dot. */
+.remote-control-button {
+  position: relative;
+}
+
+/* A live session is the one remote-control state worth reading from across the
+   room, so it gets an accent dot on the collapsed chrome. */
+.remote-control-button-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--accent-color);
+}
+
+.remote-control-popover {
+  gap: 12px;
+  max-height: calc(100vh - 24px);
+  padding: 12px;
+  overflow-y: auto;
+  font-size: var(--fs-base);
+}
+
+.remote-control-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.remote-control-heading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.remote-control-title {
+  color: var(--text-heading);
+  font-size: var(--fs-base);
+  font-weight: 500;
+}
+
+.remote-control-subtitle {
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+/* Master switch: a pill toggle rather than a checkbox, because it is the one
+   control in the panel that binds or unbinds the endpoint. */
+.remote-control-switch {
+  position: relative;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--control-border);
+  border-radius: 999px;
+  background: var(--control-bg);
+  transition:
+    background-color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.remote-control-switch:hover {
+  border-color: var(--control-border-hover);
+}
+
+.remote-control-switch.is-on {
+  border-color: var(--accent-strong);
+  background: var(--accent-strong);
+}
+
+.remote-control-switch:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
+.remote-control-switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--control-fg-muted);
+  transition: transform var(--transition-fast), background-color var(--transition-fast);
+}
+
+.remote-control-switch.is-on .remote-control-switch-knob {
+  background: var(--text-heading);
+  transform: translateX(14px);
+}
+
+.remote-control-explainer,
+.remote-control-empty {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.remote-control-error {
+  margin: 0;
+  color: var(--danger-fg-message);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+/* Reach toggle: the sidebar's segmented control, unmargined for the panel. */
+.remote-control-mode-toggle {
+  margin: 0;
+}
+
+.remote-control-mode-toggle button {
+  min-height: var(--control-h-sm);
+  font-size: var(--fs-base);
+}
+
+/* "Anywhere" is armed but not applied while its confirm block is open. */
+.remote-control-mode-toggle button.is-pending {
+  color: var(--status-active-fg);
+  box-shadow: inset 0 0 0 1px var(--status-active-border);
+}
+
+/* The separate consent for publishing this Mac's address, in the same amber the
+   app uses for "this is waiting on you". */
+.remote-control-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--status-active-border);
+  border-radius: var(--radius-md);
+  background: var(--surface-fill-subtle);
+}
+
+.remote-control-confirm p {
+  margin: 0;
+  color: var(--text-body-soft);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.remote-control-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.remote-control-confirm-actions .control-button {
+  min-height: var(--control-h-sm);
+  padding: 0 10px;
+}
+
+.remote-control-confirm-accept {
+  border-color: var(--status-active-border-strong);
+  color: var(--status-active-fg);
+}
+
+.remote-control-pair-button {
+  gap: 8px;
+  width: 100%;
+}
+
+.remote-control-pairing {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--surface-divider);
+  border-radius: var(--radius-md);
+  background: var(--content-inset-bg);
+}
+
+/* The QR paints its own quiet zone, so the frame only has to clip it. */
+.remote-control-qr {
+  width: 168px;
+  max-width: 100%;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.remote-control-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.remote-control-code {
+  color: var(--text-strong);
+  font-family: var(--font-mono);
+  font-size: var(--fs-base);
+  letter-spacing: 0.08em;
+}
+
+.remote-control-pairing-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  text-align: center;
+}
+
+.remote-control-countdown {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.remote-control-pairing .control-button {
+  min-height: var(--control-h-sm);
+  padding: 0 12px;
+}
+
+.remote-control-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--surface-divider);
+}
+
+.remote-control-section-title {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.remote-control-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.remote-control-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--control-h-md);
+  padding: 4px 6px;
+  border-radius: var(--radius-md);
+}
+
+.remote-control-device:hover {
+  background: var(--popover-item-hover-bg);
+}
+
+.remote-control-device-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.remote-control-device-name {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+}
+
+.remote-control-device-label {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-control-badge {
+  flex: none;
+  padding: 1px 5px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-subtle);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+}
+
+.remote-control-device-status {
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.remote-control-device-status.is-connected {
+  color: var(--status-success-fg);
+}
+
+/* Row actions stay quiet until the row is hovered or one of them is focused,
+   so a list of devices reads as names rather than as a wall of buttons. */
+.remote-control-device-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.remote-control-device:hover .remote-control-device-actions,
+.remote-control-device:focus-within .remote-control-device-actions {
+  opacity: 1;
+}
+
+.remote-control-device-action {
+  color: var(--text-muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+
+.remote-control-device-action:hover {
+  color: var(--text-strong);
+}
+
+.remote-control-device-action.is-danger:hover {
+  color: var(--danger-fg-strong);
+}
+
+.remote-control-device-action:focus-visible {
+  outline: none;
+  border-radius: var(--radius-sm);
+  box-shadow: 0 0 0 2px var(--accent-shadow);
+}
+
+.remote-control-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--control-h-sm);
+  padding: 0 6px;
+}
+
+.remote-control-session-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--accent-color);
+}
+
+.remote-control-session-status {
+  margin-left: auto;
+  flex: none;
+  color: var(--text-faint);
+  font-size: var(--fs-xs);
+}
+
+.remote-control-launch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--surface-divider);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  user-select: none;
+}
+
+/* The pair-approval dialog reuses the app's confirm-dialog surface; only the
+   device key and the read-only row are its own. */
+.remote-pair-key {
+  padding: 6px 8px;
+  border: 1px solid var(--surface-divider);
+  border-radius: var(--radius-md);
+  background: var(--content-inset-bg);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.remote-pair-readonly {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+  font-size: var(--fs-base);
+  cursor: pointer;
+  user-select: none;
+}
+
+.remote-pair-dialog .remote-pair-accept {
+  border-color: var(--control-border-hover-accent);
+}

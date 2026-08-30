@@ -83,7 +83,8 @@ pub enum ConsumeOutcome {
 }
 
 /// What the UI shows while a request waits for approval.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PendingPairInfo {
     pub request_id: String,
     pub device_name: String,
