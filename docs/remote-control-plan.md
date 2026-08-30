@@ -11,7 +11,11 @@ same actions the right pane offers: send, queue, steer, reorder, approve
 or deny a permission prompt. The Mac is unreachable until a button at
 the top of the left sidebar turns it on.
 
-Ten stages, four milestones. Each stage lands something you can run.
+Nine stages, four milestones. Each stage lands something you can run.
+
+Three things are settled and this plan assumes them: a paired device gets
+**every workspace, read-write**; **stage 6 lands before stage 7**; and
+**push notifications are out of scope** (see "Not in scope" at the end).
 
 ---
 
@@ -115,10 +119,14 @@ immediately shuts down, under test.
 - A remote session carries a *focus pane* (defaulting to the app's active
   pane) so the ~15 existing `context.pane_id` readers keep working
   untouched; `session.focus` sets it.
-- `allowed_pane_ids` and `workspace_list` learn the remote scope: the
-  workspaces the device is allowed, default all.
+- `allowed_pane_ids` and `workspace_list` return **everything** for a
+  Remote principal. There is no per-workspace allowlist: a paired device
+  sees the whole app, which is what makes the phone useful and what keeps
+  this stage small. Add scoping when a second device actually wants a
+  different answer, not before.
 - `require_user` becomes `require_write`, honouring the per-device
-  read-only flag.
+  read-only flag — the one axis that *is* built, because an iPad left on
+  the counter is a real case and the flag costs one boolean.
 
 **Done when:** every existing operation behaves correctly for a Remote
 principal, tested end-to-end over the existing Unix socket. No network
@@ -156,8 +164,9 @@ produces a gap and a clean resync rather than backing up the PTY.
 
 - Node secret key in the macOS Keychain under `app.qmux.remote-control`,
   mirroring the `app.qmux.github-oauth` pattern in `publishing.rs`.
-- `PairedDevice { node_id, name, paired_at, last_seen, read_only,
-  workspaces }` persisted in `persistence::AppPreferences`.
+- `PairedDevice { node_id, name, paired_at, last_seen, read_only }`
+  persisted in `persistence::AppPreferences`. Pairing defaults to
+  read-write; the approval prompt offers read-only as a deliberate choice.
 - The pairing window: a 128-bit one-time secret, three-minute TTL,
   single use, burned on presentation.
 - QR payload:
@@ -183,7 +192,11 @@ connection at the handshake.
 **Done when:** the feature is reachable, visible, and revocable without
 a terminal.
 
-### S6 · Right-pane parity
+### S6 · Right-pane parity — before S7, deliberately
+
+Building this after the iOS client would mean shipping a composer built
+against a duplicated policy table and then correcting it. Doing it first
+means the phone's buttons are right on their first build.
 
 - Move `ComposerPolicy` and `permissionActions` out of
   `src/adapters/*.tsx` and into the Rust `AgentAdapter` trait; serve them
@@ -210,31 +223,13 @@ Screens are mocked separately.
   letterbox.
 - Transcript and composer; queue view; permission prompts.
 - Reconnect on foreground: iOS suspension kills the connection, so this
-  is required, not polish.
+  is required, not polish. The connection screen says so in plain words,
+  since it is the whole reason nothing notifies you.
 
 **Done when:** an agent can be driven from the phone from start to
 finish without touching the Mac.
 
-### S8 · Notifications — the honest gap
-
-iOS suspends the app and the connection dies with it, so "your agent
-needs permission" cannot arrive over iroh while backgrounded. Real push
-needs APNs, and APNs needs a server holding a token. That is the one
-place where "no infrastructure" genuinely breaks down.
-
-Two options, both deferrable:
-
-- **Live-only.** Local notifications while the app is foregrounded or in
-  its brief background window. Costs nothing, helps less.
-- **A push sender.** A small service the Mac tells "device D wants to
-  know", which forwards through APNs. Reintroduces a server — but a far
-  smaller one than a relay, holding only device tokens and never
-  terminal content.
-
-Decide this after living with S7. It is genuinely optional, and shipping
-without it is honest as long as the limitation is documented.
-
-### S9 · Hardening and release
+### S8 · Hardening and release
 
 - Per-device session cap, connection rate limit, byte budget.
 - Network-change handling: rebind and re-advertise when the Mac moves
@@ -252,7 +247,7 @@ without it is honest as long as the limitation is documented.
 | **M1** | S0–S3 | Two processes on my Mac talk over iroh, with live output |
 | **M2** | S4–S5 | My phone drives it from the couch, and I can turn it off |
 | **M3** | S6–S7 | It's the right pane, on a phone, from anywhere |
-| **M4** | S8–S9 | I'd let someone else use it |
+| **M4** | S8 | I'd let someone else use it |
 
 M1 is entirely headless and entirely testable — no UI, no phone, no
 network. That is deliberate: it is the part where the design can still
@@ -271,6 +266,14 @@ traffic, and how much and when, but not what.
 It does not decide whether that key may drive your terminals. Every
 authorization decision is local: the paired list, the approval prompt,
 revocation, the read-only flag.
+
+**What a paired device gets.** Everything: every workspace, every pane,
+read-write, including starting agents and creating workspaces. This is a
+deliberate choice rather than an omission — a scope nobody understands
+gets widened blindly the first time it blocks something, and a
+half-enforced boundary is worse than a stated absence. The boundary that
+matters is the paired list, and it is binary: a device is trusted with
+the app or it is not on it.
 
 **Metadata.** In "anywhere" mode the node record is published to
 discovery infrastructure. That is a real disclosure — your NodeId
@@ -307,14 +310,25 @@ Hermetic, no network, following the repo's existing conventions.
 
 ---
 
-## Open questions inside the plan
+## Not in scope
 
-1. **Does the phone get its own workspace scope, or all of them?** The
-   `PairedDevice` record has the field either way; the question is what
-   the pairing flow defaults to. Suggest: all workspaces, read-write,
-   because a scoped default that nobody understands gets widened blindly.
-2. **Does S6 land before or after S7?** Before means the iOS composer is
-   correct from its first build. After means you see the phone sooner.
-   Suggest: before, because the drift it prevents is expensive later.
-3. **Is S8 in scope at all for v1?** It is the only stage that
-   reintroduces a server.
+**Push notifications.** iOS suspends the app and the connection dies with
+it, so "your agent needs permission" cannot arrive while qmux is
+backgrounded. Delivering it would need APNs, and APNs needs a server
+holding device tokens — the one thing this design otherwise avoids
+entirely.
+
+So v1 does not notify. The phone shows what is waiting when you open it,
+and the connection screen says plainly that nothing queues while the app
+is closed. That is an honest limitation to document, not a bug to
+apologise for; revisit it only if living with S7 makes it intolerable.
+
+**Per-workspace device scoping.** See the access note above.
+
+## Decisions on the record
+
+| Question | Decision |
+| --- | --- |
+| What does a paired device see? | Every workspace, read-write |
+| Where does right-pane parity land? | Stage 6, before the iOS client |
+| Are notifications in v1? | No — documented limitation |

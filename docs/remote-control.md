@@ -525,18 +525,21 @@ native iOS with SwiftTerm.
 
 **Stage 7 — relay,** if you still want it after living on the LAN.
 
-## Open decisions
+## Decisions, settled
 
-1. Terminal fidelity: text snapshots (free, today) or real byte streaming
-   (needs a client emulator)?
-2. Client shape: native iOS, or web client reusing the React app through
-   a rewritten `api.ts`?
-3. Off-LAN: iroh, your own relay, Tailscale, or nothing? Settle this
-   first — it is the decision the others hang off.
-4. Is a dependency the size of iroh/quinn acceptable in a backend that
-   hand-rolls HTTP and base64 on purpose?
-5. Do the per-adapter composer policy and permission-action tables move
-   into Rust? Right-pane parity on any non-webview client depends on it.
-6. Should a paired device be able to *start* agents and create
-   workspaces, or only drive existing ones? (Read-only, drive-only, and
-   full are three defensible defaults; drive-only is the one I'd pick.)
+| Question | Decision |
+| --- | --- |
+| Terminal fidelity | Stream real PTY bytes; the phone brings SwiftTerm |
+| Client shape | Native iOS |
+| Off-LAN | iroh, n0's relays to start, behind a second switch |
+| Composer policy in Rust? | Yes, in stage 6, before the iOS client |
+| What a paired device may do | Every workspace, read-write |
+| Push notifications | Out of scope for v1 |
+
+Still genuinely open: whether a dependency the size of iroh is acceptable
+in a backend that hand-rolls HTTP and base64 on purpose. That is a values
+question about the codebase, and the answer shapes nothing else in the
+plan — the stages are the same either way, only the contents of stage 2
+change.
+
+The build plan that follows from these is in `remote-control-plan.md`.

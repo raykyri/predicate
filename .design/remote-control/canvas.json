@@ -1,29 +1,159 @@
 {
   "pages": [
-    { "id": "page-1", "name": "Mac" },
-    { "id": "page-2", "name": "iPhone" }
+    {
+      "id": "page-1",
+      "name": "Mac"
+    },
+    {
+      "id": "page-2",
+      "name": "iPhone"
+    }
   ],
   "artboards": [
-    { "file": "ProbeCli.dc.html", "page": "page-1", "x": 0, "y": 0, "w": 720, "h": 500, "title": "S2–S3 · dev probe" },
-    { "file": "Main.dc.html", "page": "page-1", "x": 800, "y": 0, "w": 560, "h": 760, "title": "S5 · sidebar, off" },
-
-    { "file": "PopoverOff.dc.html", "page": "page-1", "x": 0, "y": 960, "w": 420, "h": 360, "title": "S5 · popover, off" },
-    { "file": "PopoverPairing.dc.html", "page": "page-1", "x": 500, "y": 960, "w": 420, "h": 610, "title": "S4 · pairing code" },
-    { "file": "PairApproval.dc.html", "page": "page-1", "x": 1000, "y": 960, "w": 520, "h": 360, "title": "S4 · approval" },
-    { "file": "PopoverPaired.dc.html", "page": "page-1", "x": 1600, "y": 960, "w": 420, "h": 540, "title": "S5 · paired devices" },
-
-    { "file": "PopoverAnywhere.dc.html", "page": "page-1", "x": 0, "y": 1770, "w": 420, "h": 430, "title": "S5 · second switch" },
-    { "file": "MenuBarAndCollapsed.dc.html", "page": "page-1", "x": 500, "y": 1770, "w": 620, "h": 420, "title": "S5 · visibility rules" },
-
-    { "file": "PhoneScan.dc.html", "page": "page-2", "x": 0, "y": 0, "w": 390, "h": 844, "title": "Scan" },
-    { "file": "PhoneWaiting.dc.html", "page": "page-2", "x": 470, "y": 0, "w": 390, "h": 844, "title": "Awaiting approval" },
-    { "file": "PhoneTerminals.dc.html", "page": "page-2", "x": 940, "y": 0, "w": 390, "h": 844, "title": "Terminals" },
-    { "file": "PhoneTerminal.dc.html", "page": "page-2", "x": 1410, "y": 0, "w": 390, "h": 844, "title": "Terminal" },
-
-    { "file": "PhoneTranscript.dc.html", "page": "page-2", "x": 0, "y": 1044, "w": 390, "h": 844, "title": "Transcript" },
-    { "file": "PhoneQueue.dc.html", "page": "page-2", "x": 470, "y": 1044, "w": 390, "h": 844, "title": "Queue" },
-    { "file": "PhonePermission.dc.html", "page": "page-2", "x": 940, "y": 1044, "w": 390, "h": 844, "title": "Permission" },
-    { "file": "PhoneConnection.dc.html", "page": "page-2", "x": 1410, "y": 1044, "w": 390, "h": 844, "title": "Connection" }
+    {
+      "file": "ProbeCli.dc.html",
+      "page": "page-1",
+      "x": 0,
+      "y": 0,
+      "w": 720,
+      "h": 500,
+      "title": "S2\u2013S3 \u00b7 dev probe"
+    },
+    {
+      "file": "Main.dc.html",
+      "page": "page-1",
+      "x": 800,
+      "y": 0,
+      "w": 560,
+      "h": 760,
+      "title": "S5 \u00b7 sidebar, off"
+    },
+    {
+      "file": "PopoverOff.dc.html",
+      "page": "page-1",
+      "x": 0,
+      "y": 960,
+      "w": 420,
+      "h": 360,
+      "title": "S5 \u00b7 popover, off"
+    },
+    {
+      "file": "PopoverPairing.dc.html",
+      "page": "page-1",
+      "x": 500,
+      "y": 960,
+      "w": 420,
+      "h": 610,
+      "title": "S4 \u00b7 pairing code"
+    },
+    {
+      "file": "PairApproval.dc.html",
+      "page": "page-1",
+      "x": 1000,
+      "y": 960,
+      "w": 520,
+      "h": 360,
+      "title": "S4 \u00b7 approval"
+    },
+    {
+      "file": "PopoverPaired.dc.html",
+      "page": "page-1",
+      "x": 1600,
+      "y": 960,
+      "w": 420,
+      "h": 540,
+      "title": "S5 \u00b7 paired devices"
+    },
+    {
+      "file": "PopoverAnywhere.dc.html",
+      "page": "page-1",
+      "x": 0,
+      "y": 1770,
+      "w": 420,
+      "h": 430,
+      "title": "S5 \u00b7 second switch"
+    },
+    {
+      "file": "MenuBarAndCollapsed.dc.html",
+      "page": "page-1",
+      "x": 500,
+      "y": 1770,
+      "w": 620,
+      "h": 420,
+      "title": "S5 \u00b7 visibility rules"
+    },
+    {
+      "file": "PhoneScan.dc.html",
+      "page": "page-2",
+      "x": 0,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "title": "Scan"
+    },
+    {
+      "file": "PhoneWaiting.dc.html",
+      "page": "page-2",
+      "x": 470,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "title": "Awaiting approval"
+    },
+    {
+      "file": "PhoneTerminals.dc.html",
+      "page": "page-2",
+      "x": 940,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "title": "Terminals"
+    },
+    {
+      "file": "PhoneTerminal.dc.html",
+      "page": "page-2",
+      "x": 1410,
+      "y": 0,
+      "w": 390,
+      "h": 844,
+      "title": "Terminal"
+    },
+    {
+      "file": "PhoneTranscript.dc.html",
+      "page": "page-2",
+      "x": 0,
+      "y": 1044,
+      "w": 390,
+      "h": 844,
+      "title": "Transcript"
+    },
+    {
+      "file": "PhoneQueue.dc.html",
+      "page": "page-2",
+      "x": 470,
+      "y": 1044,
+      "w": 390,
+      "h": 844,
+      "title": "Queue"
+    },
+    {
+      "file": "PhonePermission.dc.html",
+      "page": "page-2",
+      "x": 940,
+      "y": 1044,
+      "w": 390,
+      "h": 844,
+      "title": "Permission"
+    },
+    {
+      "file": "PhoneConnection.dc.html",
+      "page": "page-2",
+      "x": 1410,
+      "y": 1044,
+      "w": 390,
+      "h": 844,
+      "title": "Connection"
+    }
   ],
   "annotations": [
     {
@@ -32,7 +162,7 @@
       "x": 0,
       "y": -170,
       "w": 720,
-      "text": "MILESTONE 1 — stages 0-3\n\nNo UI, by design. Groundwork, the Remote principal, the iroh endpoint, then events and PTY bytes. The dev probe is the only surface: two processes on one Mac, real transport, relays off.\n\nThis is the part where the design can still be wrong cheaply."
+      "text": "MILESTONE 1 \u2014 stages 0-3\n\nNo UI, by design. Groundwork, the Remote principal, the iroh endpoint, then events and PTY bytes. The dev probe is the only surface: two processes on one Mac, real transport, relays off.\n\nThis is the part where the design can still be wrong cheaply."
     },
     {
       "id": "note-button",
@@ -40,7 +170,7 @@
       "x": 800,
       "y": -170,
       "w": 560,
-      "text": "STAGE 5 — the button\n\nSits in the grouped sidebar header beside the terminal map and collapse controls. Hidden when the sidebar collapses comes free: the whole <aside> is unrendered."
+      "text": "STAGE 5 \u2014 the button\n\nSits in the grouped sidebar header beside the terminal map and collapse controls. Hidden when the sidebar collapses comes free: the whole <aside> is unrendered."
     },
     {
       "id": "note-pairing",
@@ -48,7 +178,7 @@
       "x": 0,
       "y": 800,
       "w": 900,
-      "text": "STAGE 4 — pairing and authorization\n\nThe QR carries the Mac's NodeId and a one-time secret; scanning proves the phone was shown this screen. The Mac still asks before trusting it, because a photographed code should not be enough."
+      "text": "STAGE 4 \u2014 pairing and authorization\n\nThe QR carries the Mac's NodeId and a one-time secret; scanning proves the phone was shown this screen. The Mac still asks before trusting it, because a photographed code should not be enough."
     },
     {
       "id": "note-devices",
@@ -56,7 +186,7 @@
       "x": 1600,
       "y": 800,
       "w": 420,
-      "text": "Revocation lives here. Removing a device breaks its next handshake — there is no token to expire."
+      "text": "Revocation lives here. Removing a device breaks its next handshake \u2014 there is no token to expire.\n\nA paired device gets every workspace, read-write. Read-only is the one axis that narrows it, and it is a deliberate choice at pairing time, not the default."
     },
     {
       "id": "note-consent",
@@ -64,7 +194,7 @@
       "x": 0,
       "y": 1610,
       "w": 1120,
-      "text": "STAGE 5 — two things the toggle owes you\n\n\"Anywhere\" is a separate switch because it is a different consent: relays and discovery publishing turn on with it, and it says so. And a live session is never invisible — the menu-bar dot appears when a device is actually connected, not merely when the toggle is on."
+      "text": "STAGE 5 \u2014 two things the toggle owes you\n\n\"Anywhere\" is a separate switch because it is a different consent: relays and discovery publishing turn on with it, and it says so. And a live session is never invisible \u2014 the menu-bar dot appears when a device is actually connected, not merely when the toggle is on."
     },
     {
       "id": "note-phone-pair",
@@ -72,7 +202,7 @@
       "x": 0,
       "y": -170,
       "w": 860,
-      "text": "STAGE 7 — first run\n\nScan, then wait. The phone shows the path it got (direct or relayed) and the Mac's key before anything is trusted."
+      "text": "STAGE 7 \u2014 first run\n\nScan, then wait. The phone shows the path it got (direct or relayed) and the Mac's key before anything is trusted."
     },
     {
       "id": "note-phone-drive",
@@ -80,7 +210,7 @@
       "x": 940,
       "y": -170,
       "w": 860,
-      "text": "STAGE 7 — seeing the terminals\n\nStatus comes from the same events the sidebar uses. The terminal is SwiftTerm over the raw PTY stream — and it never resizes the pane, or the Mac's layout would reflow to fit a phone."
+      "text": "STAGE 7 \u2014 seeing the terminals\n\nStatus comes from the same events the sidebar uses. The terminal is SwiftTerm over the raw PTY stream \u2014 and it never resizes the pane, or the Mac's layout would reflow to fit a phone."
     },
     {
       "id": "note-phone-right",
@@ -88,7 +218,7 @@
       "x": 0,
       "y": 884,
       "w": 1330,
-      "text": "STAGE 6-7 — the right pane, on a phone\n\nSend, queue, steer, reorder, approve. These are the same turn_queue calls the desktop composer makes; the approve button sends the adapter's own keystroke. Stage 6 moves those adapter tables into Rust first, so the two clients cannot drift."
+      "text": "STAGE 6, THEN 7 \u2014 the right pane, on a phone\n\nSend, queue, steer, reorder, approve. These are the same turn_queue calls the desktop composer makes; the approve button sends the adapter's own keystroke.\n\nStage 6 moves those adapter tables into Rust before the iOS client exists, so the phone's buttons are right on their first build rather than corrected later."
     },
     {
       "id": "note-phone-conn",
@@ -96,8 +226,11 @@
       "x": 1410,
       "y": 884,
       "w": 390,
-      "text": "STAGE 8 is the honest gap: iOS suspends the app and the connection dies, so nothing can notify you while it is closed. Real push needs APNs and a server."
+      "text": "NOT IN SCOPE \u2014 push notifications\n\niOS suspends the app and the connection dies with it, so nothing can reach you while qmux is closed. Delivering it would need APNs, and APNs needs a server \u2014 the one thing this design otherwise avoids.\n\nSo v1 says so on this screen instead of pretending otherwise."
     }
   ],
-  "launch": { "view": "canvas", "page": "page-1" }
+  "launch": {
+    "view": "canvas",
+    "page": "page-1"
+  }
 }
