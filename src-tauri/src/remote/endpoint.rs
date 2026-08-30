@@ -14,6 +14,7 @@ use crate::state::AppState;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
 use qmux_proto::remote::{PAIR_ALPN, REMOTE_ALPN};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// How far the endpoint reaches; `Local` is the default when the toggle
@@ -80,6 +81,29 @@ pub struct RemoteAccess {
 /// the persisted device list; tests seed it directly.
 pub type DeviceGate = Arc<dyn Fn(&EndpointId) -> Option<RemoteAccess> + Send + Sync>;
 
+/// What the pairing panel displays.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingInvite {
+    /// Full QR payload: `qmux-pair:v1?node=…&psk=…&name=…&addr=…`.
+    pub payload: String,
+    /// The typeable short code (the psk).
+    pub code: String,
+    pub expires_in_ms: u128,
+}
+
+/// Minimal percent-encoding for QR payload values (name, addresses).
+fn percent_encode(raw: &str) -> String {
+    raw.bytes()
+        .map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b':' => {
+                (byte as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
 /// Application close codes, visible to the peer.
 pub const CLOSE_NOT_PAIRED: u32 = 1;
 pub const CLOSE_PROTOCOL_ERROR: u32 = 2;
@@ -101,6 +125,19 @@ pub struct RemoteControlRuntime {
     runtime: std::sync::Mutex<Option<tokio::runtime::Runtime>>,
     state: AppState,
     gate: DeviceGate,
+    pairing: std::sync::Mutex<Option<crate::remote::pairing::PairingWindow>>,
+    pending_pair: std::sync::Mutex<Option<crate::remote::pairing::PendingPair>>,
+    sessions: std::sync::Mutex<HashMap<u64, RemoteSessionEntry>>,
+    next_session_id: std::sync::atomic::AtomicU64,
+}
+
+/// One live session, for the UI's list and for revocation.
+#[derive(Clone)]
+pub struct RemoteSessionEntry {
+    pub endpoint_id: EndpointId,
+    pub device_name: String,
+    pub connected_at: u128,
+    connection: iroh::endpoint::Connection,
 }
 
 impl RemoteControlRuntime {
@@ -123,6 +160,10 @@ impl RemoteControlRuntime {
             runtime: std::sync::Mutex::new(None),
             state,
             gate,
+            pairing: std::sync::Mutex::new(None),
+            pending_pair: std::sync::Mutex::new(None),
+            sessions: std::sync::Mutex::new(HashMap::new()),
+            next_session_id: std::sync::atomic::AtomicU64::new(1),
         });
         runtime.spawn(accept_loop(this.clone()));
         *this
@@ -138,6 +179,214 @@ impl RemoteControlRuntime {
 
     pub fn endpoint_id(&self) -> EndpointId {
         self.endpoint.id()
+    }
+
+    pub fn state(&self) -> &AppState {
+        &self.state
+    }
+
+    /// Opens (or replaces) the pairing window and returns what the UI shows:
+    /// the QR payload, the typeable code, and how long they live.
+    pub fn begin_pairing(&self) -> Result<PairingInvite, String> {
+        let window = crate::remote::pairing::PairingWindow::open()?;
+        let code = window.secret().to_string();
+        let ttl = window
+            .expires_at()
+            .saturating_duration_since(std::time::Instant::now());
+        let addrs: Vec<String> = self
+            .endpoint
+            .bound_sockets()
+            .into_iter()
+            .map(|sock| sock.to_string())
+            .collect();
+        let mac_name = crate::remote::session::hostname();
+        let payload = format!(
+            "qmux-pair:v1?node={}&psk={}&name={}{}",
+            self.endpoint.id(),
+            code,
+            percent_encode(&mac_name),
+            addrs
+                .iter()
+                .map(|addr| format!("&addr={}", percent_encode(addr)))
+                .collect::<String>(),
+        );
+        *self
+            .pairing
+            .lock()
+            .map_err(|_| "pairing lock poisoned".to_string())? = Some(window);
+        Ok(PairingInvite {
+            payload,
+            code,
+            expires_in_ms: ttl.as_millis(),
+        })
+    }
+
+    pub fn cancel_pairing(&self) {
+        if let Ok(mut window) = self.pairing.lock() {
+            *window = None;
+        }
+    }
+
+    /// Checks a presented secret against the open window, burning it on a
+    /// match and closing the window on exhaustion or expiry.
+    pub(crate) fn consume_pairing_secret(
+        &self,
+        presented: &str,
+    ) -> crate::remote::pairing::ConsumeOutcome {
+        use crate::remote::pairing::ConsumeOutcome;
+        let Ok(mut slot) = self.pairing.lock() else {
+            return ConsumeOutcome::Expired;
+        };
+        let Some(window) = slot.as_mut() else {
+            return ConsumeOutcome::Expired;
+        };
+        let outcome = window.consume(presented);
+        if !matches!(outcome, ConsumeOutcome::Wrong) {
+            // Matched (single use), exhausted, and expired all end the window.
+            *slot = None;
+        }
+        outcome
+    }
+
+    pub(crate) fn put_pending_pair(&self, pending: crate::remote::pairing::PendingPair) -> bool {
+        match self.pending_pair.lock() {
+            Ok(mut slot) if slot.is_none() => {
+                *slot = Some(pending);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn clear_pending_pair(&self, request_id: &str) {
+        if let Ok(mut slot) = self.pending_pair.lock()
+            && slot
+                .as_ref()
+                .is_some_and(|pending| pending.info.request_id == request_id)
+        {
+            *slot = None;
+        }
+    }
+
+    pub fn pending_pair(&self) -> Option<crate::remote::pairing::PendingPairInfo> {
+        self.pending_pair
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|pending| pending.info.clone()))
+    }
+
+    /// Relays the person's answer to the waiting pairing connection.
+    pub fn respond_pair(
+        &self,
+        request_id: &str,
+        approved: bool,
+        read_only: bool,
+    ) -> Result<(), String> {
+        let pending = self
+            .pending_pair
+            .lock()
+            .map_err(|_| "pairing lock poisoned".to_string())?
+            .take_if(|pending| pending.info.request_id == request_id)
+            .ok_or_else(|| "that pairing request is no longer waiting".to_string())?;
+        let _ = pending
+            .responder
+            .send(crate::remote::pairing::PairDecision {
+                approved,
+                read_only,
+            });
+        Ok(())
+    }
+
+    pub(crate) fn emit_pair_request(&self, info: &crate::remote::pairing::PendingPairInfo) {
+        self.state.emit(crate::events::QmuxEvent::new(
+            "remote.pair_request",
+            None,
+            None,
+            serde_json::json!({
+                "requestId": info.request_id,
+                "deviceName": info.device_name,
+                "endpointId": info.endpoint_id,
+            }),
+        ));
+    }
+
+    pub(crate) fn emit_pair_resolved(
+        &self,
+        info: &crate::remote::pairing::PendingPairInfo,
+        approved: bool,
+    ) {
+        self.state.emit(crate::events::QmuxEvent::new(
+            "remote.pair_resolved",
+            None,
+            None,
+            serde_json::json!({
+                "requestId": info.request_id,
+                "deviceName": info.device_name,
+                "endpointId": info.endpoint_id,
+                "approved": approved,
+            }),
+        ));
+    }
+
+    pub fn sessions(&self) -> Vec<RemoteSessionEntry> {
+        self.sessions
+            .lock()
+            .map(|sessions| sessions.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Closes every live session for one endpoint id. Pairs with
+    /// `devices::revoke`, which removes the durable record; together they
+    /// are complete revocation.
+    pub fn disconnect_device(&self, endpoint_id: &str) {
+        let Ok(sessions) = self.sessions.lock() else {
+            return;
+        };
+        for entry in sessions.values() {
+            if entry.endpoint_id.to_string() == endpoint_id {
+                entry
+                    .connection
+                    .close(CLOSE_GOING_AWAY.into(), b"device revoked");
+            }
+        }
+    }
+
+    fn register_session(&self, entry: RemoteSessionEntry) -> u64 {
+        let id = self
+            .next_session_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.insert(id, entry.clone());
+        }
+        self.state.emit(crate::events::QmuxEvent::new(
+            "remote.session_connected",
+            None,
+            None,
+            serde_json::json!({
+                "deviceName": entry.device_name,
+                "endpointId": entry.endpoint_id.to_string(),
+            }),
+        ));
+        id
+    }
+
+    fn unregister_session(&self, id: u64) {
+        let removed = self
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(&id));
+        if let Some(entry) = removed {
+            self.state.emit(crate::events::QmuxEvent::new(
+                "remote.session_disconnected",
+                None,
+                None,
+                serde_json::json!({
+                    "deviceName": entry.device_name,
+                    "endpointId": entry.endpoint_id.to_string(),
+                }),
+            ));
+        }
     }
 
     /// Closes every session and releases the port and the runtime. After
@@ -174,12 +423,19 @@ async fn accept_loop(this: Arc<RemoteControlRuntime>) {
                 let remote = connection.remote_id();
                 match (this.gate)(&remote) {
                     Some(access) => {
+                        let session_id = this.register_session(RemoteSessionEntry {
+                            endpoint_id: remote,
+                            device_name: access.device_name.clone(),
+                            connected_at: crate::remote::devices::now_millis(),
+                            connection: connection.clone(),
+                        });
                         crate::remote::session::serve_remote_connection(
                             this.state.clone(),
                             access,
                             connection,
                         )
                         .await;
+                        this.unregister_session(session_id);
                     }
                     None => {
                         // Closed before any frame is read: an unpaired node
@@ -188,8 +444,7 @@ async fn accept_loop(this: Arc<RemoteControlRuntime>) {
                     }
                 }
             } else if alpn == PAIR_ALPN {
-                // Stage 4 opens this surface while a pairing window exists.
-                connection.close(CLOSE_NO_PAIRING_WINDOW.into(), b"no pairing window");
+                crate::remote::pairing::serve_pair_connection(this.clone(), connection).await;
             } else {
                 connection.close(CLOSE_PROTOCOL_ERROR.into(), b"unknown protocol");
             }

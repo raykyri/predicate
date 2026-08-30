@@ -220,6 +220,12 @@ pub struct AppPreferences {
         skip_serializing_if = "is_true"
     )]
     pub research_sdk_harness: bool,
+    /// Devices paired for remote control (docs/remote-control-plan.md). The
+    /// records here are the entire authorization model: deleting one is
+    /// complete revocation. Kept in this owner-only file for the same reason
+    /// the OpenRouter key is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_devices: Option<Vec<crate::remote::devices::RemotePairedDevice>>,
 }
 
 fn default_research_sdk_harness() -> bool {
@@ -241,6 +247,7 @@ impl Default for AppPreferences {
             open_router_key: None,
             research_launch_instruction: None,
             research_sdk_harness: true,
+            remote_devices: None,
         }
     }
 }

@@ -401,7 +401,7 @@ fn frame_name(frame: &RemoteFrame) -> &'static str {
     }
 }
 
-fn hostname() -> String {
+pub(crate) fn hostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()
