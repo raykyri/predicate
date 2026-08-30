@@ -3150,6 +3150,17 @@ fn main() {
         eprintln!("{err}");
         std::process::exit(1);
     });
+    // Hidden dev client for the remote-control transport; kept out of the
+    // CLI crate so iroh never enters the standalone qmux-cli binary.
+    if std::env::args().nth(1).as_deref() == Some("remote-probe") {
+        match remote::probe::run(std::env::args().skip(2).collect()) {
+            Ok(()) => std::process::exit(0),
+            Err(err) => {
+                eprintln!("qmux remote-probe: {err}");
+                std::process::exit(1);
+            }
+        }
+    }
     match qmux_cli::run_cli_if_requested() {
         Ok(true) => return,
         Ok(false) => {}

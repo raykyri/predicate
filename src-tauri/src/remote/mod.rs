@@ -16,4 +16,5 @@ pub mod endpoint;
 pub mod fanout;
 pub mod frames;
 pub mod pairing;
+pub mod probe;
 pub mod session;
