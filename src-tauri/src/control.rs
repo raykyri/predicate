@@ -243,6 +243,15 @@ fn dispatch(
         "agent.start" => agent_start(state, context, arguments),
         "agent.fork" => agent_fork(state, context, arguments),
         "agent.prompt" => agent_prompt(state, context, arguments),
+        "agent.submit" => agent_submit(state, context, arguments),
+        "agent.permission" => agent_permission(state, context, arguments),
+        "agent.queue.list" => agent_queue_list(state, context, arguments),
+        "agent.queue.remove" => agent_queue_remove(state, context, arguments),
+        "agent.queue.reorder" => agent_queue_reorder(state, context, arguments),
+        "agent.queue.sendNext" => agent_queue_send_next(state, context, arguments),
+        "agent.queue.pause" => agent_queue_pause(state, context, arguments),
+        "agent.queue.unpause" => agent_queue_unpause(state, context, arguments),
+        "adapter.policy" => adapter_policy(state, context, arguments),
         "agent.wait" => agent_wait(state, context, arguments),
         "agent.focus" => agent_focus(state, context, arguments),
         "agent.release" => agent_release(state, context, arguments),
@@ -378,6 +387,66 @@ struct AgentForkArgs {
 struct AgentPromptArgs {
     id: String,
     text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentSubmitArgs {
+    id: String,
+    text: String,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentPermissionArgs {
+    id: String,
+    action: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueueIndexArgs {
+    id: String,
+    index: usize,
+    #[serde(default)]
+    expected_id: Option<String>,
+    #[serde(default)]
+    expected_data: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueueReorderArgs {
+    id: String,
+    from_index: usize,
+    to_index: usize,
+    #[serde(default)]
+    expected_id: Option<String>,
+    #[serde(default)]
+    expected_data: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QueuePauseArgs {
+    id: String,
+    index: usize,
+    pause_after: bool,
+    #[serde(default)]
+    expected_id: Option<String>,
+    #[serde(default)]
+    expected_data: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AdapterPolicyArgs {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    adapter: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -866,6 +935,243 @@ fn agent_prompt(state: &AppState, context: &ControlContext, arguments: Value) ->
     )
     .map_err(internal)?;
     serde_json::to_value(delivery).map_err(|error| internal(error.to_string()))
+}
+
+/// `agent.prompt` with an explicit delivery mode — the composer's own
+/// send/queue/steer verbs, for clients that render those buttons.
+fn agent_submit(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentSubmitArgs = parse(arguments, "agent.submit")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let mode = match args.mode.as_deref().unwrap_or("auto") {
+        "auto" => crate::turn_queue::SubmitAgentTurnMode::Auto,
+        "send" => crate::turn_queue::SubmitAgentTurnMode::Send,
+        "queue" => crate::turn_queue::SubmitAgentTurnMode::Queue,
+        "steer" => crate::turn_queue::SubmitAgentTurnMode::Steer,
+        other => {
+            return Err(ControlFailure::new(
+                "invalid_argument",
+                format!("agent.submit mode must be auto, send, queue, or steer (got '{other}')"),
+            ));
+        }
+    };
+    let delivery = crate::turn_queue::submit_agent_turn(
+        state,
+        crate::turn_queue::SubmitAgentTurnRequest {
+            agent_id: args.id,
+            data: args.text,
+            mode: Some(mode),
+        },
+    )
+    .map_err(internal)?;
+    serde_json::to_value(delivery).map_err(|error| internal(error.to_string()))
+}
+
+/// Answers a permission prompt with the adapter's own keystroke — exactly
+/// the raw pane write the desktop buttons make, bypassing the turn queue.
+fn agent_permission(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AgentPermissionArgs = parse(arguments, "agent.permission")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let agent = state
+        .agent(&args.id)
+        .map_err(internal)?
+        .ok_or_else(|| not_found("agent", &args.id))?;
+    if agent.status != crate::workspace::AgentStatus::AwaitingPermission {
+        return Err(ControlFailure::new(
+            "not_awaiting_permission",
+            "the agent is not waiting on a permission prompt",
+        ));
+    }
+    let policy = crate::adapters::agent_composer_policy(state, &agent).map_err(internal)?;
+    let action = policy
+        .permission_actions
+        .iter()
+        .find(|action| action.id == args.action)
+        .ok_or_else(|| {
+            let valid = policy
+                .permission_actions
+                .iter()
+                .map(|action| action.id)
+                .collect::<Vec<_>>()
+                .join(", ");
+            ControlFailure::new(
+                "invalid_argument",
+                if valid.is_empty() {
+                    format!(
+                        "the {} adapter has no composer permission actions",
+                        agent.adapter
+                    )
+                } else {
+                    format!(
+                        "unknown permission action '{}' (valid: {valid})",
+                        args.action
+                    )
+                },
+            )
+        })?;
+    let pane_id = agent
+        .pane_id
+        .clone()
+        .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
+    crate::pty::write_pane(
+        state,
+        crate::pty::PaneWriteOptions {
+            pane_id: pane_id.clone(),
+            data: action.input.to_string(),
+            paste: true,
+            submit: true,
+        },
+    )
+    .map_err(internal)?;
+    Ok(json!({
+        "agentId": args.id,
+        "paneId": pane_id,
+        "action": action.id,
+        "answered": true
+    }))
+}
+
+fn agent_queue_list(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: IdArgs = parse(arguments, "agent.queue.list")?;
+    ensure_agent_read(state, context, &args.id)?;
+    let turns = state.agent_queued_turns(&args.id).map_err(internal)?;
+    Ok(json!({ "agentId": args.id, "count": turns.len(), "queuedTurns": turns }))
+}
+
+fn agent_queue_remove(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+) -> ControlResult {
+    let args: QueueIndexArgs = parse(arguments, "agent.queue.remove")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let result = crate::turn_queue::remove_queued_agent_turn(
+        state,
+        crate::turn_queue::RemoveQueuedAgentTurnRequest {
+            agent_id: args.id,
+            index: args.index,
+            expected_data: args.expected_data,
+            expected_id: args.expected_id,
+        },
+    )
+    .map_err(invalid_argument)?;
+    serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+}
+
+fn agent_queue_reorder(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+) -> ControlResult {
+    let args: QueueReorderArgs = parse(arguments, "agent.queue.reorder")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let result = crate::turn_queue::reorder_queued_agent_turn(
+        state,
+        crate::turn_queue::ReorderQueuedAgentTurnRequest {
+            agent_id: args.id,
+            from_index: args.from_index,
+            to_index: args.to_index,
+            expected_data: args.expected_data,
+            expected_id: args.expected_id,
+        },
+    )
+    .map_err(invalid_argument)?;
+    serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+}
+
+fn agent_queue_send_next(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+) -> ControlResult {
+    let args: IdArgs = parse(arguments, "agent.queue.sendNext")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let result =
+        crate::turn_queue::send_next_queued_agent_turn(state, &args.id).map_err(internal)?;
+    serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+}
+
+fn agent_queue_pause(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+) -> ControlResult {
+    let args: QueuePauseArgs = parse(arguments, "agent.queue.pause")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let queued_turns = crate::turn_queue::set_queued_turn_pause(
+        state,
+        &args.id,
+        args.index,
+        args.pause_after,
+        args.expected_data.as_deref(),
+        args.expected_id.as_deref(),
+    )
+    .map_err(invalid_argument)?;
+    Ok(json!({
+        "agentId": args.id,
+        "pendingTurns": queued_turns.len(),
+        "queuedTurns": queued_turns
+    }))
+}
+
+fn agent_queue_unpause(
+    state: &AppState,
+    context: &ControlContext,
+    arguments: Value,
+) -> ControlResult {
+    let args: IdArgs = parse(arguments, "agent.queue.unpause")?;
+    require_write(context)?;
+    ensure_agent_read(state, context, &args.id)?;
+    let result = crate::turn_queue::unpause_agent(state, &args.id).map_err(internal)?;
+    serde_json::to_value(result).map_err(|error| internal(error.to_string()))
+}
+
+/// The adapter's composer gating and permission actions — served so a client
+/// renders exactly the buttons the backend will honor, instead of guessing.
+fn adapter_policy(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: AdapterPolicyArgs = parse(arguments, "adapter.policy")?;
+    let registry = crate::adapters::adapter_registry(state.config());
+    match (args.agent, args.adapter) {
+        (Some(agent_id), None) => {
+            ensure_agent_read(state, context, &agent_id)?;
+            let agent = state
+                .agent(&agent_id)
+                .map_err(internal)?
+                .ok_or_else(|| not_found("agent", &agent_id))?;
+            let adapter = registry.get(&agent.adapter).map_err(internal)?;
+            let can_fork = agent.session_id.is_some()
+                && adapter.supports_fork()
+                && adapter.can_fork_agent(&agent);
+            Ok(json!({
+                "adapterId": adapter.id(),
+                "policy": adapter.composer_policy(),
+                "supportsFork": adapter.supports_fork(),
+                "supportsForkAtMessage": adapter.supports_fork_at_message(),
+                "canFork": can_fork,
+                "agentStatus": agent.status,
+            }))
+        }
+        (None, Some(adapter_id)) => {
+            let adapter = registry
+                .get(&adapter_id)
+                .map_err(|_| not_found("adapter", &adapter_id))?;
+            Ok(json!({
+                "adapterId": adapter.id(),
+                "policy": adapter.composer_policy(),
+                "supportsFork": adapter.supports_fork(),
+                "supportsForkAtMessage": adapter.supports_fork_at_message(),
+            }))
+        }
+        _ => Err(ControlFailure::new(
+            "invalid_argument",
+            "adapter.policy takes exactly one of agent or adapter",
+        )),
+    }
 }
 
 fn agent_wait(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
@@ -1523,6 +1829,7 @@ fn format_code(kind: &str) -> &'static str {
         "workspace" => "workspace_not_found",
         "artifact" => "artifact_not_found",
         "split" => "split_not_found",
+        "adapter" => "adapter_not_found",
         _ => "not_found",
     }
 }
@@ -1540,6 +1847,7 @@ mod tests {
     use super::*;
     use crate::remote::session::RemoteSession;
     use crate::state::test_support;
+    use crate::workspace::AgentStatus;
 
     /// Two workspaces, one pane each, so scope differences are observable.
     fn remote_fixture(name: &str) -> AppState {
@@ -1701,6 +2009,242 @@ mod tests {
                 "{operation}: {response}"
             );
         }
+    }
+
+    fn agent_fixture(id: &str, adapter: &str, pane_id: &str, status: AgentStatus) -> AgentInfo {
+        AgentInfo {
+            id: id.to_string(),
+            group_id: "group-1".to_string(),
+            adapter: adapter.to_string(),
+            worktree_dir: "/tmp/work".to_string(),
+            branch: None,
+            active_workspace: None,
+            pane_id: Some(pane_id.to_string()),
+            orphaned_queue_pane_id: None,
+            session_id: Some("session-abc".to_string()),
+            transcript_path: None,
+            status,
+            model: None,
+            effort: None,
+            approval_mode: None,
+            parent_id: None,
+            fork_point: None,
+            root_session_id: None,
+            thread_id: None,
+            branch_id: None,
+            native_leaf_id: None,
+            paused: false,
+            created_at: 1,
+        }
+    }
+
+    #[test]
+    fn adapter_policy_serves_the_one_true_table_and_fork_gates() {
+        let state = remote_fixture("adapter-policy");
+        state
+            .insert_agent(agent_fixture(
+                "agent-1",
+                "claude",
+                "pane-1",
+                AgentStatus::Running,
+            ))
+            .unwrap();
+        let mut pi_agent = agent_fixture("agent-2", "pi", "pane-2", AgentStatus::Idle);
+        pi_agent.group_id = "group-2".to_string();
+        state.insert_agent(pi_agent).unwrap();
+        let session = RemoteSession::new("iphone", false);
+
+        let policy = call(
+            &state,
+            &session,
+            "adapter.policy",
+            json!({ "agent": "agent-1" }),
+        );
+        assert_eq!(policy["ok"], true, "adapter.policy failed: {policy}");
+        let result = &policy["result"];
+        assert_eq!(result["adapterId"], "claude");
+        assert_eq!(result["policy"]["readyStatuses"][0], "awaitingInput");
+        assert_eq!(result["policy"]["permissionActions"][0]["input"], "y");
+        assert_eq!(result["policy"]["permissionActions"][1]["id"], "deny");
+        assert_eq!(result["canFork"], true);
+        assert_eq!(result["agentStatus"], "running");
+
+        // Pi's fork predicate is agent-dependent: no transcript or native
+        // leaf id means no fork, even with supports_fork true.
+        let pi = call(
+            &state,
+            &session,
+            "adapter.policy",
+            json!({ "agent": "agent-2" }),
+        );
+        assert_eq!(pi["result"]["supportsFork"], true);
+        assert_eq!(pi["result"]["canFork"], false);
+
+        let by_adapter = call(
+            &state,
+            &session,
+            "adapter.policy",
+            json!({ "adapter": "codex" }),
+        );
+        assert_eq!(
+            by_adapter["result"]["policy"]["permissionActions"],
+            json!([])
+        );
+        let missing = call(
+            &state,
+            &session,
+            "adapter.policy",
+            json!({ "adapter": "nope" }),
+        );
+        assert_eq!(missing["error"]["code"], "adapter_not_found");
+        let both = call(
+            &state,
+            &session,
+            "adapter.policy",
+            json!({ "agent": "agent-1", "adapter": "claude" }),
+        );
+        assert_eq!(both["error"]["code"], "invalid_argument");
+    }
+
+    #[test]
+    fn the_queue_ops_wrap_the_composers_own_paths() {
+        let state = remote_fixture("queue-ops");
+        state
+            .insert_agent(agent_fixture(
+                "agent-1",
+                "claude",
+                "pane-1",
+                AgentStatus::Running,
+            ))
+            .unwrap();
+        let session = RemoteSession::new("iphone", false);
+
+        // A running claude queues per its own policy.
+        for text in ["first", "second"] {
+            let queued = call(
+                &state,
+                &session,
+                "agent.submit",
+                json!({ "id": "agent-1", "text": text, "mode": "queue" }),
+            );
+            assert_eq!(queued["ok"], true, "queue submit failed: {queued}");
+            assert_eq!(queued["result"]["queued"], true);
+        }
+        let listed = call(
+            &state,
+            &session,
+            "agent.queue.list",
+            json!({ "id": "agent-1" }),
+        );
+        assert_eq!(listed["result"]["count"], 2);
+        let first_id = listed["result"]["queuedTurns"][0]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let reordered = call(
+            &state,
+            &session,
+            "agent.queue.reorder",
+            json!({ "id": "agent-1", "fromIndex": 0, "toIndex": 1, "expectedId": first_id }),
+        );
+        assert_eq!(reordered["ok"], true, "reorder failed: {reordered}");
+        let listed = call(
+            &state,
+            &session,
+            "agent.queue.list",
+            json!({ "id": "agent-1" }),
+        );
+        assert_eq!(listed["result"]["queuedTurns"][1]["text"], "first");
+
+        let paused = call(
+            &state,
+            &session,
+            "agent.queue.pause",
+            json!({ "id": "agent-1", "index": 0, "pauseAfter": true }),
+        );
+        assert_eq!(paused["ok"], true, "pause failed: {paused}");
+        assert_eq!(paused["result"]["queuedTurns"][0]["pauseAfter"], true);
+
+        let removed = call(
+            &state,
+            &session,
+            "agent.queue.remove",
+            json!({ "id": "agent-1", "index": 1 }),
+        );
+        assert_eq!(removed["ok"], true, "remove failed: {removed}");
+        assert_eq!(removed["result"]["removedTurn"], "first");
+        assert_eq!(removed["result"]["pendingTurns"], 1);
+
+        // A stale expectation is refused rather than acting on the wrong turn.
+        let stale = call(
+            &state,
+            &session,
+            "agent.queue.remove",
+            json!({ "id": "agent-1", "index": 0, "expectedData": "not this" }),
+        );
+        assert_eq!(stale["ok"], false);
+        assert_eq!(stale["error"]["code"], "invalid_argument");
+
+        let mode_error = call(
+            &state,
+            &session,
+            "agent.submit",
+            json!({ "id": "agent-1", "text": "x", "mode": "yeet" }),
+        );
+        assert_eq!(mode_error["error"]["code"], "invalid_argument");
+    }
+
+    #[test]
+    fn permission_answers_use_the_adapters_own_keystrokes() {
+        let state = remote_fixture("permission");
+        state
+            .insert_agent(agent_fixture(
+                "agent-1",
+                "claude",
+                "pane-1",
+                AgentStatus::AwaitingPermission,
+            ))
+            .unwrap();
+        let mut running = agent_fixture("agent-2", "claude", "pane-2", AgentStatus::Running);
+        running.group_id = "group-2".to_string();
+        state.insert_agent(running).unwrap();
+        let session = RemoteSession::new("iphone", false);
+
+        let approved = call(
+            &state,
+            &session,
+            "agent.permission",
+            json!({ "id": "agent-1", "action": "approve" }),
+        );
+        assert_eq!(approved["ok"], true, "approve failed: {approved}");
+        assert_eq!(approved["result"]["answered"], true);
+        assert_eq!(approved["result"]["paneId"], "pane-1");
+
+        // Only a prompt that is actually waiting may be answered: anything
+        // else would type stray keys into a working agent.
+        let not_waiting = call(
+            &state,
+            &session,
+            "agent.permission",
+            json!({ "id": "agent-2", "action": "approve" }),
+        );
+        assert_eq!(not_waiting["error"]["code"], "not_awaiting_permission");
+
+        let unknown = call(
+            &state,
+            &session,
+            "agent.permission",
+            json!({ "id": "agent-1", "action": "maybe" }),
+        );
+        assert_eq!(unknown["error"]["code"], "invalid_argument");
+        assert!(
+            unknown["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("approve"),
+            "the error should name the valid actions: {unknown}"
+        );
     }
 
     #[test]

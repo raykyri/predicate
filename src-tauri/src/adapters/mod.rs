@@ -732,13 +732,14 @@ pub struct ShellCommandIntegration {
     pub adapter_id: &'static str,
 }
 
-#[derive(Clone, Debug)]
+/// One composer permission button: the label the UI shows and the exact
+/// keystroke the adapter's TUI expects. Serialized to every client (webview
+/// and remote) so the tables cannot drift per client.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PermissionAction {
-    #[allow(dead_code)]
     pub id: &'static str,
-    #[allow(dead_code)]
     pub label: &'static str,
-    #[allow(dead_code)]
     pub input: &'static str,
 }
 
@@ -772,12 +773,12 @@ impl TranscriptLifecycleEvent {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ComposerPolicy {
     pub ready_statuses: Vec<AgentStatus>,
     pub queue_statuses: Vec<AgentStatus>,
     pub steer_statuses: Vec<AgentStatus>,
-    #[allow(dead_code)]
     pub permission_actions: Vec<PermissionAction>,
 }
 
@@ -971,6 +972,15 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     fn composer_policy(&self) -> ComposerPolicy;
+
+    /// Whether this specific agent can fork right now, beyond the static
+    /// `supports_fork` capability. Only Pi needs the hook: its fork seeds
+    /// from the native session tree, so it needs a bound transcript and a
+    /// native leaf id. Callers still gate on a live session id and
+    /// `supports_fork`.
+    fn can_fork_agent(&self, _agent: &AgentInfo) -> bool {
+        true
+    }
 }
 
 pub struct AdapterRegistry {
@@ -1043,6 +1053,7 @@ impl AdapterRegistry {
                     ),
                     instance_id: format!("local:{}", adapter.id()),
                     target: AdapterTargetMetadata::local(),
+                    composer_policy: adapter.composer_policy(),
                 }
             })
             .collect()
@@ -1103,6 +1114,10 @@ pub struct AdapterMetadata {
     /// to change when account/home profiles are added later.
     pub instance_id: String,
     pub target: AdapterTargetMetadata,
+    /// The adapter's composer gating and permission actions, served so every
+    /// client (webview, remote) reads the one table in this crate instead of
+    /// carrying a copy that can drift.
+    pub composer_policy: ComposerPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]

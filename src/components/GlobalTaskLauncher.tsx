@@ -1,7 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ChevronDown } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { getAgentUiAdapter } from "../adapters";
+import { composerPolicyFor, getAgentUiAdapter, hydrateAdapterPolicies } from "../adapters";
 import {
   dismissGlobalTaskLauncher,
   forkAgent,
@@ -294,6 +294,11 @@ export default function GlobalTaskLauncher() {
         runtimeConfigRef.current = await getRuntimeConfig().catch(
           (): RuntimeConfig | null => null,
         );
+        // The launcher runs in its own webview: hydrate the composer tables
+        // here too so its buttons match the backend from the first render.
+        if (runtimeConfigRef.current) {
+          hydrateAdapterPolicies(runtimeConfigRef.current.adapters);
+        }
       }
       const [panes, agents, groups, shellJobs] = await Promise.all([
         listPanes(),
@@ -475,7 +480,7 @@ export default function GlobalTaskLauncher() {
       });
   }, [exchangeAgentId, exchangeAdapter, exchangeEpoch]);
   const policy = selected
-    ? getAgentUiAdapter(selected.agent.adapter).composerPolicy(selected.agent)
+    ? composerPolicyFor(selected.agent.adapter)
     : null;
   const {
     canSend,

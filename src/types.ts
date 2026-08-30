@@ -20,6 +20,22 @@ export interface TabTitleGenerationRuntimeConfig {
   appleFoundationModelsAvailable: boolean;
 }
 
+export interface AgentPermissionAction {
+  id: string;
+  label: string;
+  /** The exact keystroke the adapter's TUI expects for this action. */
+  input: string;
+}
+
+/** The adapter's composer gating tables, served by the backend so every
+ * client (this webview, remote devices) reads the one table in Rust. */
+export interface AgentComposerPolicy {
+  readyStatuses: AgentInfo["status"][];
+  queueStatuses: AgentInfo["status"][];
+  steerStatuses: AgentInfo["status"][];
+  permissionActions: AgentPermissionAction[];
+}
+
 export interface AgentAdapterMetadata {
   id: string;
   label: string;
@@ -50,6 +66,8 @@ export interface AgentAdapterMetadata {
     id: string | null;
     label: string;
   };
+  /** See AgentComposerPolicy. */
+  composerPolicy: AgentComposerPolicy;
 }
 
 export type AgentReadiness =

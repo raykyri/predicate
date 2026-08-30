@@ -1,7 +1,7 @@
 import { Bug, LoaderCircle, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import { getAgentUiAdapter } from "../adapters";
+import { composerPolicyFor, getAgentUiAdapter } from "../adapters";
 import { agentTabStatusDotClass } from "../lib/composerActions";
 import {
   getAgentDeliveryDebug,
@@ -229,7 +229,7 @@ export default function AgentDebugPanel({
     });
   }
 
-  const policy = getAgentUiAdapter(targetAgent.adapter).composerPolicy(targetAgent);
+  const policy = composerPolicyFor(targetAgent.adapter);
   const queuedTurns = snapshot?.queuedTurns ?? [];
   const queueHead = queuedTurns[0];
   const flags = queueHead ? turnFlags(queueHead) : [];

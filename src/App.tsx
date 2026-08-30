@@ -53,7 +53,13 @@ import {
   X,
 } from "lucide-react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { agentUiAdapters, findAgentUiAdapter, getAgentUiAdapter } from "./adapters";
+import {
+  agentUiAdapters,
+  composerPolicyFor,
+  findAgentUiAdapter,
+  getAgentUiAdapter,
+  hydrateAdapterPolicies,
+} from "./adapters";
 import { CLAUDE_ADAPTER_ID } from "./adapters/claude";
 import { CODEX_ADAPTER_ID } from "./adapters/codex";
 import { ADAPTER_ICON_BY_ID, adapterIconClassName } from "./lib/adapterIcons";
@@ -7427,6 +7433,9 @@ function MainApp() {
           return;
         }
 
+        // Hydrate the composer gating tables before the first agent panel
+        // renders, so buttons come up wired to the backend's own tables.
+        hydrateAdapterPolicies(runtimeConfig.adapters);
         setConfig(runtimeConfig);
         setGroups(existingGroups);
         setPaneSplitsState(normalizePaneSplitsForPanes(existingPaneSplits, existingPanes));
@@ -14648,7 +14657,7 @@ function MainApp() {
                       }),
                   });
                 }}
-                composerPolicy={getAgentUiAdapter(agent.adapter).composerPolicy(agent)}
+                composerPolicy={composerPolicyFor(agent.adapter)}
                 shortcutLabelForPane={shortcutLabelForPaneId}
                 onQueueChange={setAgentQueuedTurns}
                 onQueueDropTargetChange={setQueueDropTargetAgentId}
@@ -14670,7 +14679,7 @@ function MainApp() {
                   // and an already-running agent is marked by its live status
                   // events instead. Send Now keeps the live indicator lit with a
                   // more precise label until the transcript catches the new turn.
-                  const policy = getAgentUiAdapter(agent.adapter).composerPolicy(agent);
+                  const policy = composerPolicyFor(agent.adapter);
                   const shouldShowWorking =
                     mode === "steer" ||
                     (mode === "send" && policy.readyStatuses.includes(agent.status));

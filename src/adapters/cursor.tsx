@@ -1,6 +1,6 @@
 import { LauncherSelect } from "../components/LauncherSelect";
 import type { LauncherSelectOption } from "../components/LauncherSelect";
-import type { AgentUiAdapter, ComposerPolicy, LauncherOptionsProps } from ".";
+import type { AgentUiAdapter, LauncherOptionsProps } from ".";
 
 export const CURSOR_ADAPTER_ID = "cursor";
 
@@ -12,21 +12,10 @@ const CURSOR_MODE_OPTIONS: LauncherSelectOption[] = [
   { value: "ask", label: "Ask mode" },
 ];
 
-// Mirrors CursorAdapter::composer_policy. Cursor owns authentication, model
-// selection, and shell approvals inside its native TUI, so the qmux composer
-// does not surface permission actions.
-const cursorComposerPolicy: ComposerPolicy = {
-  readyStatuses: ["awaitingInput", "done", "idle"],
-  queueStatuses: ["starting", "running", "awaitingPermission"],
-  steerStatuses: ["starting", "running"],
-  permissionActions: [],
-};
-
 export const cursorUiAdapter: AgentUiAdapter = {
   id: CURSOR_ADAPTER_ID,
   label: "Cursor",
   LauncherOptions: CursorLauncherOptions,
-  composerPolicy: () => cursorComposerPolicy,
   supportsFork: false,
 };
 

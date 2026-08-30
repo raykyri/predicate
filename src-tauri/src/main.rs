@@ -2733,25 +2733,14 @@ fn agent_set_queued_turn_pause(
     expected_data: Option<String>,
     expected_id: Option<String>,
 ) -> Result<Vec<QueuedTurn>, String> {
-    let queued_turns = state.set_queued_turn_pause(
+    turn_queue::set_queued_turn_pause(
+        &state,
         &agent_id,
         index,
         pause_after,
         expected_data.as_deref(),
         expected_id.as_deref(),
-    )?;
-    if let Some(agent) = state.agent(&agent_id)? {
-        state.emit(events::QmuxEvent::new(
-            "agent.queued_turn_reordered",
-            agent.pane_id.clone(),
-            Some(agent.id),
-            serde_json::json!({
-                "pendingTurns": queued_turns.len(),
-                "queuedTurns": queued_turns.clone(),
-            }),
-        ));
-    }
-    Ok(queued_turns)
+    )
 }
 
 #[tauri::command(async)]

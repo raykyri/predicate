@@ -1,6 +1,6 @@
 import { LauncherSelect } from "../components/LauncherSelect";
 import type { LauncherSelectOption } from "../components/LauncherSelect";
-import type { AgentUiAdapter, ComposerPolicy, LauncherOptionsProps } from ".";
+import type { AgentUiAdapter, LauncherOptionsProps } from ".";
 
 export const CODEX_ADAPTER_ID = "codex";
 
@@ -35,18 +35,10 @@ const CODEX_APPROVAL_OPTIONS: LauncherSelectOption[] = [
   { value: "never", label: "Block approval requests" },
 ];
 
-const codexComposerPolicy: ComposerPolicy = {
-  readyStatuses: ["awaitingInput", "done", "idle"],
-  queueStatuses: ["starting", "running", "awaitingPermission"],
-  steerStatuses: ["starting", "running"],
-  permissionActions: [],
-};
-
 export const codexUiAdapter: AgentUiAdapter = {
   id: CODEX_ADAPTER_ID,
   label: "Codex",
   LauncherOptions: CodexLauncherOptions,
-  composerPolicy: () => codexComposerPolicy,
   supportsFork: true,
   supportsForkAtMessage: true,
 };

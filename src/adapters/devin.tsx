@@ -1,6 +1,6 @@
 import { LauncherSelect } from "../components/LauncherSelect";
 import type { LauncherSelectOption } from "../components/LauncherSelect";
-import type { AgentUiAdapter, ComposerPolicy, LauncherOptionsProps } from ".";
+import type { AgentUiAdapter, LauncherOptionsProps } from ".";
 
 export const DEVIN_ADAPTER_ID = "devin";
 
@@ -14,18 +14,10 @@ const DEVIN_PERMISSION_OPTIONS: LauncherSelectOption[] = [
   { value: "dangerous", label: "Bypass permissions", tone: "danger" },
 ];
 
-const devinComposerPolicy: ComposerPolicy = {
-  readyStatuses: ["awaitingInput", "done", "idle"],
-  queueStatuses: ["starting", "running", "awaitingPermission"],
-  steerStatuses: ["starting", "running"],
-  permissionActions: [],
-};
-
 export const devinUiAdapter: AgentUiAdapter = {
   id: DEVIN_ADAPTER_ID,
   label: "Devin",
   LauncherOptions: DevinLauncherOptions,
-  composerPolicy: () => devinComposerPolicy,
   supportsFork: false,
 };
 

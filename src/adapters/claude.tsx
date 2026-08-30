@@ -1,6 +1,6 @@
 import { LauncherSelect } from "../components/LauncherSelect";
 import type { LauncherSelectOption } from "../components/LauncherSelect";
-import type { AgentUiAdapter, ComposerPolicy, LauncherOptionsProps } from ".";
+import type { AgentUiAdapter, LauncherOptionsProps } from ".";
 import { normalizeClaudeTurns } from "./claudeTurns";
 
 const CLAUDE_PERMISSION_OPTIONS: LauncherSelectOption[] = [
@@ -26,22 +26,11 @@ export const CLAUDE_EFFORT_OPTIONS: LauncherSelectOption[] = [
 
 export const CLAUDE_ADAPTER_ID = "claude";
 
-const claudeComposerPolicy: ComposerPolicy = {
-  readyStatuses: ["awaitingInput", "done", "idle"],
-  queueStatuses: ["starting", "running", "awaitingPermission"],
-  steerStatuses: ["starting", "running"],
-  permissionActions: [
-    { id: "approve", label: "Approve", input: "y" },
-    { id: "deny", label: "Deny", input: "n" },
-  ],
-};
-
 export const claudeUiAdapter: AgentUiAdapter = {
   id: CLAUDE_ADAPTER_ID,
   label: "Claude",
   LauncherOptions: ClaudeLauncherOptions,
   normalizeTurns: normalizeClaudeTurns,
-  composerPolicy: () => claudeComposerPolicy,
   supportsFork: true,
   supportsForkAtMessage: true,
 };

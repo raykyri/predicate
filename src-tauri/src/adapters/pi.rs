@@ -791,6 +791,12 @@ impl AgentAdapter for PiAdapter {
             .map(|session| session.session_file)
     }
 
+    fn can_fork_agent(&self, agent: &AgentInfo) -> bool {
+        // Pi forks seed from the native session tree: they need the bound
+        // transcript and a native leaf id (mirror of the frontend's gate).
+        agent.transcript_path.is_some() && agent.native_leaf_id.is_some()
+    }
+
     fn supports_fork(&self) -> bool {
         true
     }

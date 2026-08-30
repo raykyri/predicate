@@ -1,6 +1,6 @@
 import { LauncherSelect } from "../components/LauncherSelect";
 import type { LauncherSelectOption } from "../components/LauncherSelect";
-import type { AgentUiAdapter, ComposerPolicy, LauncherOptionsProps } from ".";
+import type { AgentUiAdapter, LauncherOptionsProps } from ".";
 
 export const MUSE_ADAPTER_ID = "muse";
 
@@ -30,20 +30,10 @@ const MUSE_APPROVAL_OPTIONS: LauncherSelectOption[] = [
   { value: "never", label: "Block approval requests" },
 ];
 
-// Mirrors the Rust MuseAdapter::composer_policy so the composer enables/queues/
-// steers turns identically to the backend.
-const museComposerPolicy: ComposerPolicy = {
-  readyStatuses: ["awaitingInput", "done", "idle"],
-  queueStatuses: ["starting", "running", "awaitingPermission"],
-  steerStatuses: ["starting", "running"],
-  permissionActions: [],
-};
-
 export const museUiAdapter: AgentUiAdapter = {
   id: MUSE_ADAPTER_ID,
   label: "Muse",
   LauncherOptions: MuseLauncherOptions,
-  composerPolicy: () => museComposerPolicy,
 };
 
 function MuseLauncherOptions({ value, onChange }: LauncherOptionsProps) {

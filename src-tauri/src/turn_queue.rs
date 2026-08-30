@@ -1154,6 +1154,33 @@ fn resume_source_after_fork_barrier(
 /// Clears an agent's paused state. If the agent is in a ready (idle) state, the next
 /// queued turn is sent immediately; otherwise normal draining resumes once its
 /// current work finishes. Emits so the UI reflects the cleared pause and any send.
+/// Toggles a queued turn's pause-after-send flag and emits the queue event
+/// both UIs listen for. Shared by the Tauri command and the remote control
+/// surface so the emit cannot be forgotten on one path.
+pub fn set_queued_turn_pause(
+    state: &AppState,
+    agent_id: &str,
+    index: usize,
+    pause_after: bool,
+    expected_data: Option<&str>,
+    expected_id: Option<&str>,
+) -> Result<Vec<QueuedTurn>, String> {
+    let queued_turns =
+        state.set_queued_turn_pause(agent_id, index, pause_after, expected_data, expected_id)?;
+    if let Some(agent) = state.agent(agent_id)? {
+        state.emit(QmuxEvent::new(
+            "agent.queued_turn_reordered",
+            agent.pane_id.clone(),
+            Some(agent.id),
+            serde_json::json!({
+                "pendingTurns": queued_turns.len(),
+                "queuedTurns": queued_turns.clone(),
+            }),
+        ));
+    }
+    Ok(queued_turns)
+}
+
 pub fn unpause_agent(
     state: &AppState,
     agent_id: &str,

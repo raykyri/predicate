@@ -7,21 +7,55 @@ import { grokUiAdapter } from "./grok";
 import { museUiAdapter } from "./muse";
 import { opencodeUiAdapter } from "./opencode";
 import { piUiAdapter } from "./pi";
-import type { AgentInfo, PaneInfo, RuntimeConfig, Turn, TurnBlock } from "../types";
+import type {
+  AgentAdapterMetadata,
+  AgentComposerPolicy,
+  AgentInfo,
+  AgentPermissionAction,
+  PaneInfo,
+  RuntimeConfig,
+  Turn,
+  TurnBlock,
+} from "../types";
 
 export type AgentStatus = AgentInfo["status"];
 
-export interface PermissionAction {
-  id: string;
-  label: string;
-  input: string;
+export type PermissionAction = AgentPermissionAction;
+export type ComposerPolicy = AgentComposerPolicy;
+
+/**
+ * Composer gating tables, hydrated from the backend's adapter metadata at
+ * startup. The Rust adapters are the single source (each AgentAdapter's
+ * composer_policy); the per-adapter copies this file's adapters used to carry
+ * are gone so the two sides cannot drift.
+ */
+const adapterPolicies = new Map<string, ComposerPolicy>();
+
+/**
+ * Used only for the frames before the runtime config resolves. Matches the
+ * shape every adapter shares, with no permission actions: a button that
+ * appears a frame late beats one wired to the wrong keystroke.
+ */
+const PRE_HYDRATION_POLICY: ComposerPolicy = {
+  readyStatuses: ["awaitingInput", "done", "idle"],
+  queueStatuses: ["starting", "running", "awaitingPermission"],
+  steerStatuses: ["starting", "running"],
+  permissionActions: [],
+};
+
+export function hydrateAdapterPolicies(adapters: AgentAdapterMetadata[]): void {
+  for (const adapter of adapters) {
+    adapterPolicies.set(adapter.id, adapter.composerPolicy);
+  }
 }
 
-export interface ComposerPolicy {
-  readyStatuses: AgentStatus[];
-  queueStatuses: AgentStatus[];
-  steerStatuses: AgentStatus[];
-  permissionActions: PermissionAction[];
+/** Mirrors getAgentUiAdapter's unknown-id fallback to Claude. */
+export function composerPolicyFor(adapterId: string | null | undefined): ComposerPolicy {
+  return (
+    adapterPolicies.get(adapterId ?? "") ??
+    adapterPolicies.get("claude") ??
+    PRE_HYDRATION_POLICY
+  );
 }
 
 export interface LauncherOptionsProps {
@@ -37,7 +71,6 @@ export interface AgentUiAdapter {
   LauncherOptions?: ComponentType<LauncherOptionsProps>;
   normalizeTurns?: (turns: Turn[]) => Turn[];
   renderBlock?: (block: TurnBlock, role: string) => ReactNode | null;
-  composerPolicy: (agent: AgentInfo) => ComposerPolicy;
   supportsFork?: boolean;
   supportsForkAtMessage?: boolean;
   canFork?: (agent: AgentInfo) => boolean;
