@@ -10,12 +10,18 @@
 //! `pane.waitOutput` therefore never blocks a concurrent `ping`.
 
 use crate::remote::endpoint::{CLOSE_GOING_AWAY, CLOSE_PROTOCOL_ERROR, RemoteAccess};
+use crate::remote::fanout::{PaneChannel, SessionChannels};
 use crate::remote::frames;
 use crate::state::AppState;
-use iroh::endpoint::Connection;
-use qmux_proto::remote::{REMOTE_PROTOCOL_VERSION, RemoteFrame};
+use iroh::endpoint::{Connection, SendStream};
+use qmux_proto::remote::{
+    FRAME_TAG_PANE_BYTES, FRAME_TAG_PANE_RESET, MAX_PANE_FRAME_BYTES, REMOTE_PROTOCOL_VERSION,
+    RemoteFrame,
+};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 
 /// How long the client has to send `Hello` before the connection is dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
@@ -133,6 +139,17 @@ async fn run_control_stream(
         .await
         .map_err(|_| "writer task ended before ready".to_string())?;
 
+    // Register with the fan-out for the life of the session. Dormant until
+    // the first Subscribe: no events queue and no pane has a ring.
+    let (fanout_id, channels) = state.remote_fanout().register_session();
+    let mut pumps = Pumps {
+        state: state.clone(),
+        connection: connection.clone(),
+        channels: channels.clone(),
+        events: None,
+        panes: HashMap::new(),
+    };
+
     let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CALLS));
     let result = loop {
         match frames::read_json(&mut recv).await {
@@ -157,7 +174,9 @@ async fn run_control_stream(
                     let _ = writer_tx.blocking_send(RemoteFrame::CallResult { seq, response });
                 });
             }
-            // Subscriptions and pane streams land in stage 3.
+            Ok(Some(RemoteFrame::Subscribe { events, panes })) => {
+                pumps.apply(events, panes).await;
+            }
             Ok(Some(other)) => {
                 break Err(format!(
                     "unexpected frame on the control stream: {}",
@@ -168,9 +187,201 @@ async fn run_control_stream(
         }
     };
 
+    state.remote_fanout().unregister_session(fanout_id);
+    pumps.stop();
     drop(writer_tx);
     let _ = writer.await;
     result
+}
+
+/// The pump tasks one session owns: at most one event stream, one byte
+/// stream per subscribed pane. `Subscribe` frames are declarative — the set
+/// named in the latest frame is the set that runs.
+struct Pumps {
+    state: AppState,
+    connection: Connection,
+    channels: Arc<SessionChannels>,
+    events: Option<JoinHandle<()>>,
+    panes: HashMap<String, JoinHandle<()>>,
+}
+
+impl Pumps {
+    async fn apply(&mut self, events: bool, panes: Vec<String>) {
+        self.channels.set_events_on(events);
+        if events && self.events.is_none() {
+            self.events = Some(tokio::spawn(event_pump(
+                self.connection.clone(),
+                self.channels.clone(),
+            )));
+        } else if !events && let Some(task) = self.events.take() {
+            task.abort();
+        }
+
+        let live_panes: std::collections::HashSet<String> = self
+            .state
+            .list_panes()
+            .map(|list| list.into_iter().map(|pane| pane.id).collect())
+            .unwrap_or_default();
+        let desired: std::collections::HashSet<String> = panes
+            .into_iter()
+            // A pane that raced pane.removed is skipped, not an error: the
+            // client learns from the event stream and re-subscribes.
+            .filter(|id| live_panes.contains(id))
+            .collect();
+        let current: Vec<String> = self.panes.keys().cloned().collect();
+        for pane_id in current {
+            if !desired.contains(&pane_id) {
+                self.channels.unregister_pane(&pane_id);
+                if let Some(task) = self.panes.remove(&pane_id) {
+                    task.abort();
+                }
+            }
+        }
+        for pane_id in desired {
+            if self.panes.contains_key(&pane_id) {
+                continue;
+            }
+            let channel = self.channels.register_pane(&pane_id);
+            self.panes.insert(
+                pane_id.clone(),
+                tokio::spawn(pane_pump(
+                    self.state.clone(),
+                    self.connection.clone(),
+                    pane_id,
+                    channel,
+                )),
+            );
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(task) = self.events.take() {
+            task.abort();
+        }
+        for (_, task) in self.panes.drain() {
+            task.abort();
+        }
+    }
+}
+
+async fn event_pump(connection: Connection, channels: Arc<SessionChannels>) {
+    let Ok(mut send) = connection.open_uni().await else {
+        return;
+    };
+    if frames::write_json(&mut send, &RemoteFrame::EventStreamHeader {})
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        let (events, resync) = channels.drain_events();
+        if resync
+            && frames::write_json(&mut send, &RemoteFrame::Resync {})
+                .await
+                .is_err()
+        {
+            return;
+        }
+        for event in events {
+            if frames::write_json(&mut send, &RemoteFrame::Event { event })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+        channels.events_notify.notified().await;
+    }
+}
+
+async fn pane_pump(
+    state: AppState,
+    connection: Connection,
+    pane_id: String,
+    channel: Arc<PaneChannel>,
+) {
+    let Ok(mut send) = connection.open_uni().await else {
+        return;
+    };
+    let (rows, cols) = state
+        .list_panes()
+        .ok()
+        .and_then(|panes| panes.into_iter().find(|pane| pane.id == pane_id))
+        .map(|pane| (Some(pane.rows), Some(pane.cols)))
+        .unwrap_or((None, None));
+    if frames::write_json(
+        &mut send,
+        &RemoteFrame::PaneHeader {
+            id: pane_id.clone(),
+            rows,
+            cols,
+        },
+    )
+    .await
+    .is_err()
+    {
+        return;
+    }
+    // Prime with the full sanitized replay before any live bytes.
+    if prime_from_journal(&state, &pane_id, &mut send, &channel)
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        let (data, gapped) = channel.drain();
+        if gapped {
+            // The ring overflowed: the buffered fragment is incomplete, so
+            // reset the client and re-prime from the durable journal instead
+            // of forwarding it.
+            if frames::write_frame(&mut send, FRAME_TAG_PANE_RESET, &[])
+                .await
+                .is_err()
+                || prime_from_journal(&state, &pane_id, &mut send, &channel)
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            continue;
+        }
+        if !data.is_empty() && write_pane_bytes(&mut send, &data).await.is_err() {
+            return;
+        }
+        channel.notify.notified().await;
+    }
+}
+
+/// Reads and sanitizes the pane's journal off the async threads, discards
+/// whatever accumulated in the ring while reading (the journal supersedes
+/// it; a chunk recorded during the read can be duplicated across the seam,
+/// which a terminal renders through harmlessly), then sends the replay.
+async fn prime_from_journal(
+    state: &AppState,
+    pane_id: &str,
+    send: &mut SendStream,
+    channel: &Arc<PaneChannel>,
+) -> Result<(), String> {
+    let root = state.config().workspace_root.clone();
+    let pane = pane_id.to_string();
+    let replay = tokio::task::spawn_blocking(move || {
+        crate::scrollback::read_pane_scrollback(&root, &pane)
+            .map(|raw| crate::scrollback::sanitize_scrollback_replay(&raw))
+    })
+    .await
+    .map_err(|err| format!("journal read task failed: {err}"))?
+    .unwrap_or_default();
+    channel.discard();
+    write_pane_bytes(send, &replay).await
+}
+
+async fn write_pane_bytes(send: &mut SendStream, data: &[u8]) -> Result<(), String> {
+    for chunk in data.chunks(MAX_PANE_FRAME_BYTES as usize) {
+        frames::write_frame(send, FRAME_TAG_PANE_BYTES, chunk).await?;
+    }
+    Ok(())
 }
 
 fn frame_name(frame: &RemoteFrame) -> &'static str {
@@ -499,6 +710,178 @@ mod tests {
             assert_eq!(denied["error"]["code"], "permission_denied");
         });
         server.shutdown();
+    }
+
+    #[test]
+    fn subscribing_streams_events_and_primed_pane_bytes() {
+        let _serial = test_support::net_serial_guard();
+        let state = fixture_state("streams");
+        // Durable output that predates the subscription: the stream must be
+        // primed with it before any live bytes.
+        crate::scrollback::append_pane_scrollback(
+            &state.config().workspace_root,
+            "pane-1",
+            b"seed-output\r\n",
+        )
+        .unwrap();
+        let client_secret = SecretKey::generate();
+        let server = RemoteControlRuntime::start(
+            state.clone(),
+            SecretKey::generate(),
+            RemoteReach::Local,
+            false,
+            gate_for(client_secret.public(), false),
+        )
+        .expect("start runtime");
+
+        runtime().block_on(async {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .secret_key(client_secret.clone())
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind client");
+            let connection = endpoint
+                .connect(loopback_addr(server.endpoint()), REMOTE_ALPN)
+                .await
+                .expect("connect");
+            let (mut send, mut recv) = connection.open_bi().await.expect("open control stream");
+            frames::write_json(
+                &mut send,
+                &RemoteFrame::Hello {
+                    api_version: REMOTE_PROTOCOL_VERSION,
+                    client: "qmux-test/0".to_string(),
+                    device_name: None,
+                },
+            )
+            .await
+            .expect("send hello");
+            let _ready = frames::read_json(&mut recv)
+                .await
+                .expect("ready")
+                .expect("frame");
+
+            frames::write_json(
+                &mut send,
+                &RemoteFrame::Subscribe {
+                    events: true,
+                    panes: vec!["pane-1".to_string(), "pane-gone".to_string()],
+                },
+            )
+            .await
+            .expect("send subscribe");
+
+            // Two server-opened uni streams arrive in either order; the
+            // header frame identifies each.
+            let mut event_stream = None;
+            let mut pane_stream = None;
+            for _ in 0..2 {
+                let mut uni =
+                    tokio::time::timeout(Duration::from_secs(10), connection.accept_uni())
+                        .await
+                        .expect("timed out waiting for a stream")
+                        .expect("accept uni");
+                let header = frames::read_json(&mut uni)
+                    .await
+                    .expect("read header")
+                    .expect("header frame");
+                match header {
+                    RemoteFrame::EventStreamHeader {} => event_stream = Some(uni),
+                    RemoteFrame::PaneHeader { id, rows, cols } => {
+                        assert_eq!(id, "pane-1");
+                        assert_eq!(rows, Some(24));
+                        assert_eq!(cols, Some(80));
+                        pane_stream = Some(uni);
+                    }
+                    other => panic!("unexpected header: {other:?}"),
+                }
+            }
+            let mut event_stream = event_stream.expect("event stream");
+            let mut pane_stream = pane_stream.expect("pane stream");
+
+            // Prime: the journal's seed output arrives first.
+            let mut primed = Vec::new();
+            while !contains(&primed, b"seed-output") {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    frames::read_frame(&mut pane_stream, MAX_PANE_FRAME_BYTES),
+                )
+                .await
+                .expect("timed out waiting for prime")
+                .expect("read prime")
+                .expect("prime frame");
+                assert_eq!(frame.tag, FRAME_TAG_PANE_BYTES);
+                primed.extend(frame.payload);
+            }
+
+            // Live bytes flow after the prime.
+            state
+                .remote_fanout()
+                .publish_pane_bytes("pane-1", b"live-bytes");
+            let mut live = Vec::new();
+            while !contains(&live, b"live-bytes") {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    frames::read_frame(&mut pane_stream, MAX_PANE_FRAME_BYTES),
+                )
+                .await
+                .expect("timed out waiting for live bytes")
+                .expect("read live")
+                .expect("live frame");
+                assert_eq!(frame.tag, FRAME_TAG_PANE_BYTES);
+                live.extend(frame.payload);
+            }
+
+            // Events mirror AppState::emit.
+            state.emit(crate::events::QmuxEvent::new(
+                "agent.status",
+                Some("pane-1".to_string()),
+                None,
+                json!({ "status": "running" }),
+            ));
+            let frame = tokio::time::timeout(
+                Duration::from_secs(10),
+                frames::read_json(&mut event_stream),
+            )
+            .await
+            .expect("timed out waiting for event")
+            .expect("read event")
+            .expect("event frame");
+            let RemoteFrame::Event { event } = frame else {
+                panic!("expected event, got {frame:?}");
+            };
+            assert_eq!(event["type"], "agent.status");
+
+            // Unsubscribing tears the streams down.
+            frames::write_json(
+                &mut send,
+                &RemoteFrame::Subscribe {
+                    events: false,
+                    panes: vec![],
+                },
+            )
+            .await
+            .expect("send unsubscribe");
+            let ended = tokio::time::timeout(
+                Duration::from_secs(10),
+                frames::read_frame(&mut pane_stream, MAX_PANE_FRAME_BYTES),
+            )
+            .await
+            .expect("timed out waiting for stream end");
+            assert!(
+                !matches!(ended, Ok(Some(_))),
+                "the pane stream must end after unsubscribe, got {ended:?}"
+            );
+
+            connection.close(0u32.into(), b"done");
+        });
+        server.shutdown();
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
     }
 
     #[test]

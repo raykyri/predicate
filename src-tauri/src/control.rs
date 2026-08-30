@@ -74,6 +74,8 @@ pub fn handle_call(
 /// Entry point for calls arriving over the remote transport. The session's
 /// pairing already authenticated the device; this derives its context and
 /// dispatches with the Remote principal.
+// Reachable only through the remote module until stage 5 wires its runtime.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn handle_remote_call(
     state: &AppState,
     session: &crate::remote::session::RemoteSession,
@@ -223,6 +225,7 @@ fn dispatch(
             pane_get_by_id(state, context, &args.id)
         }
         "pane.read" => pane_read(state, context, arguments),
+        "pane.snapshot" => pane_snapshot(state, context, arguments),
         "pane.create" => pane_create(state, context, arguments),
         "pane.send" => pane_send(state, context, arguments, false),
         "pane.run" => pane_send(state, context, arguments, true),
@@ -541,6 +544,24 @@ fn pane_read(state: &AppState, context: &ControlContext, arguments: Value) -> Co
         }
     };
     Ok(json!({ "paneId": args.id, "source": source, "lines": lines, "output": output }))
+}
+
+/// Full sanitized terminal replay plus dimensions — what a remote client
+/// primes its emulator from before (or after a gap in) the live stream.
+fn pane_snapshot(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    let args: IdArgs = parse(arguments, "pane.snapshot")?;
+    ensure_pane_read(state, context, &args.id)?;
+    let pane = find_pane(state, &args.id)?;
+    let raw = crate::scrollback::read_pane_scrollback(&state.config().workspace_root, &args.id)
+        .map_err(internal)?;
+    let replay = crate::scrollback::sanitize_scrollback_replay(&raw);
+    use base64::Engine as _;
+    Ok(json!({
+        "paneId": args.id,
+        "rows": pane.rows,
+        "cols": pane.cols,
+        "bytesBase64": base64::engine::general_purpose::STANDARD.encode(replay),
+    }))
 }
 
 fn pane_create(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {

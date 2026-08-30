@@ -2432,6 +2432,10 @@ fn start_reader_thread(
                                 "qmux: failed to render output for native pane {pane_id}: {err}"
                             );
                         }
+                        // Remote sessions tap the same live bytes. Non-blocking:
+                        // an atomic load with no session, a bounded ring push
+                        // with one — a slow phone can never stall this thread.
+                        state.remote_fanout().publish_pane_bytes(&pane_id, chunk);
                         record_scrollback(&state, &pane_id, chunk);
                     }
                 }

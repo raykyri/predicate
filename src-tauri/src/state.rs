@@ -188,6 +188,9 @@ pub struct AppState {
 
 struct AppStateInner {
     config: QmuxConfig,
+    /// Fan-out to connected remote-control sessions. Dormant (one atomic
+    /// load per publish) until a device subscribes.
+    remote_fanout: crate::remote::fanout::RemoteFanout,
     pane_tokens: Mutex<HashMap<String, String>>,
     // Credentials injected only into interactive shell panes. Agent launches
     // strip them before exec, keeping cross-pane user control distinct from
@@ -1684,6 +1687,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
+                remote_fanout: Default::default(),
                 user_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
@@ -2966,7 +2970,16 @@ impl AppState {
         format!("{prefix}-{millis}-{seq}")
     }
 
+    pub fn remote_fanout(&self) -> &crate::remote::fanout::RemoteFanout {
+        &self.inner.remote_fanout
+    }
+
     pub fn emit(&self, event: QmuxEvent) {
+        // Remote sessions mirror the same stream the webview sees. The
+        // publish is non-blocking and a single atomic load when no device
+        // is connected.
+        self.inner.remote_fanout.publish_event(&event);
+
         let completion_sound_id = self
             .inner
             .completion_sound

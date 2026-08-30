@@ -25,6 +25,9 @@ mod prompt_library;
 mod pty;
 mod publishing;
 mod recovery;
+// Dead-code allowed until stage 5 wires the runtime to the UI toggle: the
+// remote chain is currently constructed only by its tests.
+#[cfg_attr(not(test), allow(dead_code))]
 mod remote;
 mod research;
 mod research_runtime;
