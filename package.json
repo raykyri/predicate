@@ -37,6 +37,7 @@
     "test:research-events": "node --import tsx --test tests/researchEvents.test.ts",
     "test:research-history": "node --import tsx --test tests/researchHistory.test.ts",
     "test:research-folders": "node --import tsx --test tests/researchFolders.test.ts",
+    "test:journal": "node --import tsx --test tests/journal.test.ts",
     "test:research-documents": "node --import tsx --test tests/researchDocuments.test.ts",
     "test:research-conversations": "node --import tsx --test tests/researchConversations.test.ts",
     "test:research-threads": "node --import tsx --test tests/researchThreads.test.ts",

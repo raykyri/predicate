@@ -1,0 +1,555 @@
+/* The Journal: a research-surface page holding a narrow, left-aligned feed
+   of notes, links, and embedded tweets. Note/link cards borrow the research
+   question card recipe (--content-card-bg on a 10px radius); tweet entries
+   drop the padding so the tweet card IS the entry — a feed of tweets, not
+   tweets framed inside content items. */
+
+.journal-scroll {
+  padding: 28px clamp(20px, 4vw, 48px) 48px;
+}
+
+/* "300–400px" column, left aligned. */
+.journal-column {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: min(100%, 380px);
+}
+
+.journal-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.journal-composer-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 10px;
+  color: inherit;
+  font: inherit;
+  font-size: 13.5px;
+  line-height: 1.45;
+  background: var(--content-card-bg);
+  resize: none;
+  transition: border-color var(--transition-fast);
+}
+
+.journal-composer-input:focus {
+  outline: none;
+  border-color: var(--accent-color);
+}
+
+.journal-composer-input::placeholder {
+  color: var(--text-subtle);
+}
+
+.journal-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.journal-empty {
+  margin: 6px 0 0;
+  color: var(--text-subtle);
+  font-size: 13px;
+}
+
+/* Same surface as .research-prompt (the question bubble). */
+.journal-entry {
+  position: relative;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: var(--content-card-bg);
+}
+
+.journal-entry.is-tweet {
+  padding: 12px 14px;
+}
+
+.journal-entry-menu-trigger {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+  background: var(--content-card-bg);
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.journal-entry:hover .journal-entry-menu-trigger,
+.journal-entry:focus-within .journal-entry-menu-trigger,
+.journal-entry.has-open-menu .journal-entry-menu-trigger {
+  opacity: 1;
+}
+
+.journal-entry-menu-trigger:hover {
+  color: var(--text-interactive);
+  background: var(--surface-fill-hover);
+}
+
+.journal-entry.has-open-menu {
+  outline: 1px solid var(--surface-border-default);
+}
+
+.journal-entry-menu {
+  width: 180px;
+}
+
+/* Undo bar for the last removal: sits between the composer and the feed so
+   it never covers the entry that would replace it. */
+.journal-undo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  border: 1px dashed var(--surface-border-default);
+  border-radius: 10px;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+}
+
+.journal-undo-label {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.journal-undo-restore {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.journal-undo-restore .context-menu-shortcut {
+  margin-left: 2px;
+}
+
+.journal-undo-dismiss {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+}
+
+.journal-undo-dismiss:hover {
+  color: var(--text-interactive);
+  background: var(--surface-fill-hover);
+}
+
+.journal-note-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.journal-link-url {
+  color: var(--accent-color);
+  font-size: 13.5px;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.journal-link-url:hover {
+  text-decoration: underline;
+}
+
+.journal-tweet-placeholder {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.journal-tweet-loading {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+}
+
+.journal-tweet-loading svg {
+  animation: journal-spin 1s linear infinite;
+}
+
+@keyframes journal-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.journal-tweet-error {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.journal-tweet-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  padding: 3px 8px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+/* — Tweet card: a timeline post, not an embed. Avatar in its own column,
+     one-line header (name · handle · age), everything else in the content
+     column beside it. — */
+
+.journal-tweet {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+}
+
+.journal-tweet-avatar-link {
+  display: block;
+  line-height: 0;
+}
+
+.journal-tweet-main {
+  min-width: 0;
+}
+
+.journal-tweet-head {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  margin-bottom: 2px;
+  /* Clear the entry's hover menu trigger in the card's top-right corner. */
+  padding-right: 22px;
+}
+
+.journal-tweet-who {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
+  color: inherit;
+  text-decoration: none;
+}
+
+.journal-tweet-avatar {
+  flex: none;
+  border-radius: 50%;
+  user-select: none;
+  object-fit: cover;
+}
+
+.journal-tweet-avatar-fallback {
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.journal-tweet-quote-head .journal-tweet-avatar-fallback {
+  font-size: 9px;
+}
+
+.journal-tweet-author {
+  /* The display name gives way first: a truncated name still reads, while a
+     truncated handle stops identifying anyone. */
+  flex: 0 8 auto;
+  min-width: 3ch;
+  font-size: 14px;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.journal-tweet-who:hover .journal-tweet-author {
+  text-decoration: underline;
+}
+
+.journal-tweet-verified {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  align-self: center;
+  color: #1d9bf0;
+}
+
+.journal-tweet-handle {
+  flex: 0 1 auto;
+  color: var(--text-subtle);
+  font-size: 13.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.journal-tweet-dot,
+.journal-tweet-age {
+  flex: none;
+  color: var(--text-subtle);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+
+.journal-tweet-age:hover {
+  text-decoration: underline;
+}
+
+.journal-tweet-reply {
+  margin: 0 0 3px;
+  color: var(--text-subtle);
+  font-size: 13px;
+}
+
+.journal-tweet-reply span {
+  color: var(--accent-color);
+}
+
+.journal-tweet-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.journal-tweet-text.is-quote {
+  font-size: 13.5px;
+}
+
+.journal-tweet-text a {
+  color: var(--accent-color);
+  text-decoration: none;
+}
+
+.journal-tweet-text a:hover {
+  text-decoration: underline;
+}
+
+/* The timeline's own affordance for a post that runs past its preview. */
+.journal-tweet-more {
+  display: inline-block;
+  margin-top: 2px;
+  color: var(--accent-color);
+  font-size: 13.5px;
+  text-decoration: none;
+}
+
+a.journal-tweet-more:hover {
+  text-decoration: underline;
+}
+
+/* Link preview: a bordered card under the text. The large variant stacks its
+   image over the copy; the small one sets a square thumbnail beside it. */
+.journal-tweet-card {
+  display: flex;
+  flex-direction: row;
+  margin-top: 8px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 12px;
+  color: inherit;
+  text-decoration: none;
+  overflow: hidden;
+}
+
+.journal-tweet-card.is-large {
+  flex-direction: column;
+}
+
+.journal-tweet-card:hover {
+  background: var(--surface-fill-hover);
+}
+
+.journal-tweet-card-media {
+  flex: none;
+  display: block;
+  width: 84px;
+  align-self: stretch;
+  border-right: 1px solid var(--surface-border-default);
+  background: var(--surface-fill-hover);
+}
+
+.journal-tweet-card.is-large .journal-tweet-card-media {
+  width: auto;
+  aspect-ratio: 1.91 / 1;
+  border-right: 0;
+  border-bottom: 1px solid var(--surface-border-default);
+}
+
+.journal-tweet-card-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.journal-tweet-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 8px 11px;
+}
+
+.journal-tweet-card-domain {
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.journal-tweet-card-title,
+.journal-tweet-card-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13.5px;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.journal-tweet-card-desc {
+  color: var(--text-subtle);
+  font-size: 13px;
+}
+
+/* Captured engagement, rendered as metadata: no hover, no target, nothing
+   here reaches X. */
+.journal-tweet-stats {
+  display: flex;
+  gap: 18px;
+  margin-top: 8px;
+  color: var(--text-subtle);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.journal-tweet-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.journal-tweet-stat svg {
+  width: 14px;
+  height: 14px;
+}
+
+.journal-tweet-media {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.journal-tweet-media.is-multi {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.journal-tweet-media-item {
+  display: block;
+  min-width: 0;
+}
+
+.journal-tweet-media img {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  overflow: hidden;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: 10px;
+  color: transparent; /* hide alt text while the image loads or if it fails */
+  background: var(--surface-fill-hover);
+  object-fit: cover;
+}
+
+.journal-tweet-media.is-multi img,
+.journal-tweet-media.is-compact img {
+  max-height: 180px;
+}
+
+.journal-tweet-video {
+  position: relative;
+}
+
+.journal-tweet-play {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.6);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.journal-tweet-quote {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.journal-tweet-quote:hover {
+  background: var(--surface-fill-hover);
+}
+
+.journal-tweet-quote-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-bottom: 3px;
+}
+
+.journal-tweet-quote-head .journal-tweet-author {
+  font-size: 13px;
+}
+
+.journal-tweet-quote-head .journal-tweet-handle {
+  font-size: 12.5px;
+}
+
+.journal-tweet-quote-head .journal-tweet-verified {
+  width: 13px;
+  height: 13px;
+}
+
+/* — Sidebar tab above the Research heading — */
+
+/* The tab is an ordinary research row (same nesting, same metrics); it only
+   needs the gap that separates it from the Research heading below. */
+.journal-sidebar-row {
+  margin-bottom: 8px;
+}

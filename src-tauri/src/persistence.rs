@@ -1,3 +1,4 @@
+use crate::journal::JournalState;
 use crate::research::{ResearchFolderState, ResearchNode, ResearchTree};
 use crate::state::{
     ArtifactInfo, GlobalDraft, PaneInfo, PaneSplitInfo, QueuedTurn, RecentSessionInfo,
@@ -123,6 +124,10 @@ pub struct PersistedState {
     /// files from builds that predate folders round-trip byte-identically.
     #[serde(default, skip_serializing_if = "ResearchFolderState::is_empty")]
     pub research_folders: ResearchFolderState,
+    /// Client-authored journal feed. Like the folder grouping: optional and
+    /// dropped-if-empty so older state files round-trip byte-identically.
+    #[serde(default, skip_serializing_if = "JournalState::is_empty")]
+    pub journal: JournalState,
 }
 
 impl Default for PersistedState {
@@ -148,6 +153,7 @@ impl Default for PersistedState {
             research_tree_order: Vec::new(),
             research_nodes: HashMap::new(),
             research_folders: ResearchFolderState::default(),
+            journal: JournalState::default(),
         }
     }
 }
@@ -754,6 +760,18 @@ fn deserialize_lenient(value: Value) -> (PersistedState, Vec<String>) {
             }
         },
         None => ResearchFolderState::default(),
+    };
+    // Same one-blob recovery stance as the folder grouping: a malformed
+    // journal drops the journal, not the session.
+    state.journal = match map.remove("journal") {
+        Some(value) => match serde_json::from_value(value) {
+            Ok(journal) => journal,
+            Err(err) => {
+                dropped.push(format!("journal: {err}"));
+                JournalState::default()
+            }
+        },
+        None => JournalState::default(),
     };
     state.active_tab_id = map
         .get("activeTabId")

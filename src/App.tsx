@@ -36,6 +36,7 @@ import {
   Minimize2,
   Minus,
   MoreHorizontal,
+  NotebookPen,
   PanelBottomClose,
   PanelBottomOpen,
   PanelLeftClose,
@@ -142,6 +143,21 @@ import {
 } from "./lib/researchScope";
 import ResearchDocument from "./components/research/ResearchDocument";
 import ExportToResearchDialog from "./components/research/ExportToResearchDialog";
+import JournalPane from "./components/research/JournalPane";
+import {
+  appendJournalEntry,
+  classifyJournalInput,
+  createJournalEntry,
+  emptyJournalState,
+  insertJournalEntryAt,
+  newJournalEntryId,
+  normalizeJournalState,
+  removeJournalEntry as removeEntryFromJournal,
+  setJournalTweetHydration,
+  type JournalEntry,
+  type JournalState,
+} from "./lib/journal";
+import { syndicationToken, tweetSnapshotFromSyndication } from "./lib/journalTweets";
 import NewDocumentPane from "./components/research/NewDocumentPane";
 import NewResearchDialog from "./components/research/NewResearchDialog";
 import { isMarkdownDocumentPath } from "./lib/researchDocuments";
@@ -501,6 +517,9 @@ import {
   listResearchFolders,
   listResearchTrees,
   setResearchFolders,
+  getJournalState,
+  setJournalState as persistJournalState,
+  fetchJournalTweet,
   getResearchTree,
   markAppWindowReady,
   moveQueuedAgentTurn,
@@ -662,6 +681,9 @@ const RESEARCH_VISIBILITY_FILTER_OPTIONS: ReadonlyArray<{
 ];
 const ACTIVE_RESEARCH_PANE_KEY = "qmux.active-research-pane.v1";
 const RESEARCH_FOLDER_SCOPE_KEY = "qmux.research-folder-scope.v1";
+// Whether the Journal page is forward on the research surface. Selection-level
+// UI state, like the active tree id — the journal's contents live backend-side.
+const JOURNAL_OPEN_KEY = "qmux.journal-open.v1";
 // Agent ids whose Home rail the user has hidden via the group selector. Persisted
 // as a JSON array; a terminal's absence means it's shown (new terminals default
 // visible).
@@ -2011,6 +2033,36 @@ function MainApp() {
         console.error("failed to persist research folders", err);
       });
   }, []);
+  // The journal feed, mirroring the research-folder ownership model: the
+  // durable copy is backend-owned (state.json), edits are optimistic locally
+  // and persisted through a serialized last-write-wins chain.
+  const [journal, setJournal] = useState<JournalState>(emptyJournalState);
+  const journalRef = useRef(journal);
+  journalRef.current = journal;
+  const journalPersistChainRef = useRef<Promise<unknown>>(Promise.resolve());
+  const commitJournal = useCallback((next: JournalState) => {
+    if (next === journalRef.current) {
+      return;
+    }
+    journalRef.current = next;
+    setJournal(next);
+    journalPersistChainRef.current = journalPersistChainRef.current
+      .catch(() => undefined)
+      .then(() => persistJournalState(next))
+      .catch((err) => {
+        console.error("failed to persist journal", err);
+      });
+  }, []);
+  const [journalOpen, setJournalOpenState] = useState(
+    () => localStorage.getItem(JOURNAL_OPEN_KEY) === "true",
+  );
+  const journalOpenRef = useRef(journalOpen);
+  journalOpenRef.current = journalOpen;
+  const setJournalOpen = useCallback((open: boolean) => {
+    journalOpenRef.current = open;
+    setJournalOpenState(open);
+    localStorage.setItem(JOURNAL_OPEN_KEY, open ? "true" : "false");
+  }, []);
   const [researchVisibilityFilter, setResearchVisibilityFilter] =
     useState<ResearchVisibilityFilter>(() => {
       const stored = localStorage.getItem(RESEARCH_VISIBILITY_FILTER_KEY);
@@ -3222,9 +3274,11 @@ function MainApp() {
       ? ("composer" as const)
       : researchMultiSelection.length > 1
         ? ("multi-select" as const)
-        : activeResearchTreeId
-          ? ("document" as const)
-          : ("home" as const);
+        : journalOpen
+          ? ("journal" as const)
+          : activeResearchTreeId
+            ? ("document" as const)
+            : ("home" as const);
   // Menu badges and the folder-replace dialog both count every tree that keeps
   // a folder alive, so archived trees are included (removal is blocked on them).
   const researchFolderTreeCounts = useMemo(() => {
@@ -7146,6 +7200,7 @@ function MainApp() {
           existingResearchFolders,
           existingPublications,
           existingArtifacts,
+          existingJournal,
         ] = await Promise.all([
           getRuntimeConfig(),
           getLauncherAdapterPreference().catch(() => null),
@@ -7159,6 +7214,7 @@ function MainApp() {
           listResearchFolders().catch(emptyResearchFolderState),
           listPublications().catch((): PublicationBinding[] => []),
           artifactList().catch((): ArtifactInfo[] => []),
+          getJournalState().catch((): unknown => null),
         ]);
         if (cancelled) {
           return;
@@ -7206,6 +7262,9 @@ function MainApp() {
             localStorage.removeItem(RESEARCH_FOLDERS_STORAGE_KEY);
           }
         }
+        const bootJournal = normalizeJournalState(existingJournal);
+        journalRef.current = bootJournal;
+        setJournal(bootJournal);
         setPublicationBindings(existingPublications);
         void hydrateSecondaryFast(existingAgents);
         const savedResearchTreeId = localStorage.getItem(ACTIVE_RESEARCH_TREE_KEY);
@@ -7999,6 +8058,7 @@ function MainApp() {
     dismissPristineNewDocumentComposer();
     setSidebarMode("research");
     setActiveSurface("research");
+    setJournalOpen(false);
     // A single selection always dissolves a sidebar multi-selection; leaving
     // it standing would keep the placeholder covering the opened document.
     setResearchMultiSelectIds([]);
@@ -8043,6 +8103,7 @@ function MainApp() {
     changeResearchFolderScope,
     dismissPristineNewDocumentComposer,
     markVisibleResearchTreeViewed,
+    setJournalOpen,
     setSidebarMode,
   ]);
   const retryActiveResearchDetail = useCallback(() => {
@@ -8058,6 +8119,7 @@ function MainApp() {
     dismissPristineNewDocumentComposer();
     setSidebarMode("research");
     setActiveSurface("research");
+    setJournalOpen(false);
     setResearchMultiSelectIds([]);
     activeResearchPaneIdRef.current = null;
     setActiveResearchPaneId(null);
@@ -8067,7 +8129,169 @@ function MainApp() {
     setActiveResearchDetail(null);
     setActiveResearchDetailError(null);
     localStorage.removeItem(ACTIVE_RESEARCH_TREE_KEY);
-  }, [dismissPristineNewDocumentComposer, setActiveSurface, setSidebarMode]);
+  }, [dismissPristineNewDocumentComposer, setActiveSurface, setJournalOpen, setSidebarMode]);
+  // Brings the Journal page forward on the research surface. Tree selection is
+  // left standing (the journal outranks the document in the stage selector),
+  // so closing the journal by picking a tree is a plain selection.
+  const openJournal = useCallback(() => {
+    // The Journal is a peer page of a research document, not an overlay on one:
+    // opening it drops the tree selection the way Home does, so the sidebar
+    // never shows a selected row behind the tab that is actually forward.
+    researchDetailRequestSeqRef.current += 1;
+    dismissPristineNewDocumentComposer();
+    setSidebarMode("research");
+    setActiveSurface("research");
+    setResearchMultiSelectIds([]);
+    activeResearchPaneIdRef.current = null;
+    setActiveResearchPaneId(null);
+    localStorage.removeItem(ACTIVE_RESEARCH_PANE_KEY);
+    activeResearchTreeIdRef.current = null;
+    setActiveResearchTreeId(null);
+    setActiveResearchDetail(null);
+    setActiveResearchDetailError(null);
+    localStorage.removeItem(ACTIVE_RESEARCH_TREE_KEY);
+    setJournalOpen(true);
+  }, [dismissPristineNewDocumentComposer, setActiveSurface, setJournalOpen, setSidebarMode]);
+  // In-flight tweet hydrations by entry id, so a re-render or a second
+  // journal open can't double-fetch the same entry.
+  const journalHydrationsRef = useRef(new Set<string>());
+  const hydrateJournalTweet = useCallback(
+    (entryId: string, tweetId: string) => {
+      if (journalHydrationsRef.current.has(entryId)) {
+        return;
+      }
+      journalHydrationsRef.current.add(entryId);
+      void (async () => {
+        let result:
+          | { hydration: "ok"; tweet: NonNullable<ReturnType<typeof tweetSnapshotFromSyndication>> }
+          | { hydration: "failed"; error: string };
+        try {
+          const body = await fetchJournalTweet(tweetId, syndicationToken(tweetId));
+          let payload: unknown = null;
+          try {
+            payload = JSON.parse(body);
+          } catch {
+            payload = null;
+          }
+          const snapshot = payload ? tweetSnapshotFromSyndication(tweetId, payload) : null;
+          result = snapshot
+            ? { hydration: "ok", tweet: snapshot }
+            : {
+                hydration: "failed",
+                error: "tweet unavailable (deleted, protected, or the endpoint changed)",
+              };
+        } catch (err) {
+          result = {
+            hydration: "failed",
+            error: err instanceof Error ? err.message : String(err),
+          };
+        } finally {
+          journalHydrationsRef.current.delete(entryId);
+        }
+        commitJournal(setJournalTweetHydration(journalRef.current, entryId, result));
+      })();
+    },
+    [commitJournal],
+  );
+  const addJournalEntry = useCallback(
+    (input: string) => {
+      const classified = classifyJournalInput(input);
+      if (!classified) {
+        return;
+      }
+      const entry = createJournalEntry(
+        classified,
+        newJournalEntryId(),
+        new Date().toISOString(),
+      );
+      commitJournal(appendJournalEntry(journalRef.current, entry));
+      if (entry.kind === "tweet") {
+        hydrateJournalTweet(entry.id, entry.tweetId);
+      }
+    },
+    [commitJournal, hydrateJournalTweet],
+  );
+  // The last journal removal, restorable for a grace window. Single-slot: a
+  // second removal replaces the first (the feed is a stream of small items,
+  // not a document worth a real history).
+  const [journalUndo, setJournalUndo] = useState<{
+    entry: JournalEntry;
+    index: number;
+  } | null>(null);
+  const journalUndoRef = useRef(journalUndo);
+  journalUndoRef.current = journalUndo;
+  const journalUndoTimerRef = useRef<number | null>(null);
+  const dismissJournalUndo = useCallback(() => {
+    if (journalUndoTimerRef.current !== null) {
+      window.clearTimeout(journalUndoTimerRef.current);
+      journalUndoTimerRef.current = null;
+    }
+    journalUndoRef.current = null;
+    setJournalUndo(null);
+  }, []);
+  const removeJournalEntry = useCallback(
+    (entryId: string) => {
+      const state = journalRef.current;
+      const index = state.entries.findIndex((entry) => entry.id === entryId);
+      if (index < 0) {
+        return;
+      }
+      const entry = state.entries[index];
+      commitJournal(removeEntryFromJournal(state, entryId));
+      if (journalUndoTimerRef.current !== null) {
+        window.clearTimeout(journalUndoTimerRef.current);
+      }
+      const undo = { entry, index };
+      journalUndoRef.current = undo;
+      setJournalUndo(undo);
+      journalUndoTimerRef.current = window.setTimeout(() => {
+        journalUndoTimerRef.current = null;
+        journalUndoRef.current = null;
+        setJournalUndo(null);
+      }, 10_000);
+    },
+    [commitJournal],
+  );
+  const undoJournalRemove = useCallback(() => {
+    const undo = journalUndoRef.current;
+    if (!undo) {
+      return;
+    }
+    dismissJournalUndo();
+    commitJournal(insertJournalEntryAt(journalRef.current, undo.entry, undo.index));
+    // A restored tweet that never finished hydrating re-enters the fetch.
+    if (undo.entry.kind === "tweet" && undo.entry.hydration === "pending") {
+      hydrateJournalTweet(undo.entry.id, undo.entry.tweetId);
+    }
+  }, [commitJournal, dismissJournalUndo, hydrateJournalTweet]);
+  const retryJournalTweet = useCallback(
+    (entryId: string) => {
+      const entry = journalRef.current.entries.find(
+        (candidate) => candidate.id === entryId,
+      );
+      if (entry?.kind !== "tweet") {
+        return;
+      }
+      commitJournal(
+        setJournalTweetHydration(journalRef.current, entryId, { hydration: "pending" }),
+      );
+      hydrateJournalTweet(entryId, entry.tweetId);
+    },
+    [commitJournal, hydrateJournalTweet],
+  );
+  // Entries stranded mid-hydration (the app quit before the fetch landed, or
+  // the persist raced the result) re-enter hydration whenever the journal is
+  // forward. The in-flight set keeps this idempotent across re-renders.
+  useEffect(() => {
+    if (!journalOpen) {
+      return;
+    }
+    for (const entry of journal.entries) {
+      if (entry.kind === "tweet" && entry.hydration === "pending") {
+        hydrateJournalTweet(entry.id, entry.tweetId);
+      }
+    }
+  }, [hydrateJournalTweet, journal, journalOpen]);
   const changeSidebarMode = useCallback(
     (mode: SidebarMode) => {
       setPaneContextMenu(null);
@@ -8089,6 +8313,12 @@ function MainApp() {
       }
 
       setSidebarMode("research");
+      // A journal left forward survives the round trip through terminal mode,
+      // like a remembered research pane or tree.
+      if (journalOpenRef.current) {
+        setActiveSurface("research");
+        return;
+      }
       const researchPaneId = activeResearchPaneIdRef.current;
       const researchPane = panesRef.current.find((pane) => pane.id === researchPaneId);
       if (
@@ -14318,6 +14548,35 @@ function MainApp() {
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
           aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
         >
+          {/* The Journal tab uses the same row/select/copy nesting every
+              research row uses, so it inherits the list's metrics rather than
+              restating them. */}
+          {sidebarMode === "research" ? (
+            <div
+              className={`research-sidebar-row journal-sidebar-row${
+                researchStageView === "journal" ? " is-selected" : ""
+              }`}
+            >
+              <button
+                type="button"
+                className="control-button research-sidebar-select"
+                aria-current={researchStageView === "journal" ? "page" : undefined}
+                title="Journal"
+                onClick={openJournal}
+              >
+                <span className="research-sidebar-copy">
+                  <span className="research-sidebar-title">
+                    <NotebookPen
+                      className="research-sidebar-doc-icon"
+                      size={12}
+                      aria-hidden="true"
+                    />
+                    <span className="research-sidebar-title-text">Journal</span>
+                  </span>
+                </span>
+              </button>
+            </div>
+          ) : null}
           {sidebarMode === "research" ? (
             <ResearchSidebarSection
               trees={scopedResearchTrees}
@@ -16582,6 +16841,17 @@ function MainApp() {
               <Layers size={48} aria-hidden="true" />
               <span>{researchMultiSelection.length} research items selected</span>
             </div>
+          ) : null}
+          {researchStageView === "journal" ? (
+            <JournalPane
+              entries={journal.entries}
+              pendingUndo={journalUndo ? { entry: journalUndo.entry } : null}
+              onAddEntry={addJournalEntry}
+              onRemoveEntry={removeJournalEntry}
+              onRetryTweet={retryJournalTweet}
+              onUndoRemove={undoJournalRemove}
+              onDismissUndo={dismissJournalUndo}
+            />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to
               narrow the id to non-null for the props below. */}

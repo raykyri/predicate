@@ -1174,7 +1174,7 @@ function ResearchSidebarSection({
                   aria-hidden="true"
                 />
                 <span className="research-sidebar-title-text">{folder.name}</span>
-                <span className="research-sidebar-folder-count">({unit.trees.length})</span>
+                <span className="research-sidebar-folder-count">{unit.trees.length}</span>
               </span>
             </span>
           </span>

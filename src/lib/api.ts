@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { JournalState } from "./journal";
 import type { PaneLayoutItem } from "./paneTree";
 import type { ResearchFolderState } from "./researchFolders";
 import type { WorktreeLocation } from "./settings";
@@ -482,6 +483,24 @@ export function setResearchFolders(folders: ResearchFolderState) {
 
 export function listResearchActivity() {
   return invoke<ResearchNode[]>("list_research_activity");
+}
+
+/** The stored journal, as an untyped blob: callers normalize it through
+ * normalizeJournalState — the frontend owns the entry format (journal.ts). */
+export function getJournalState() {
+  return invoke<unknown>("journal_get");
+}
+
+/** Persists the journal and returns the backend-normalized state (also
+ * untyped; normalize on adoption). */
+export function setJournalState(journal: JournalState) {
+  return invoke<unknown>("journal_set", { journal });
+}
+
+/** Fetches a tweet's raw syndication JSON through the backend (the webview
+ * cannot reach X directly). `token` comes from syndicationToken(id). */
+export function fetchJournalTweet(id: string, token: string) {
+  return invoke<string>("journal_fetch_tweet", { id, token });
 }
 
 export function getResearchTree(treeId: string) {

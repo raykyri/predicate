@@ -15,6 +15,7 @@ mod history;
 mod host;
 mod human_browser;
 mod image_files;
+mod journal;
 mod launch_path;
 mod mcp;
 mod menu_bar;
@@ -1108,6 +1109,24 @@ fn reorder_research_trees(
 #[tauri::command]
 fn list_research_folders(state: tauri::State<'_, AppState>) -> Result<ResearchFolderState, String> {
     state.research_folders()
+}
+
+#[tauri::command]
+fn journal_get(state: tauri::State<'_, AppState>) -> Result<journal::JournalState, String> {
+    state.journal()
+}
+
+#[tauri::command]
+fn journal_set(
+    state: tauri::State<'_, AppState>,
+    journal: journal::JournalState,
+) -> Result<journal::JournalState, String> {
+    state.set_journal(journal)
+}
+
+#[tauri::command]
+async fn journal_fetch_tweet(id: String, token: String) -> Result<String, String> {
+    journal::fetch_tweet_json(&id, &token).await
 }
 
 #[tauri::command]
@@ -3342,6 +3361,9 @@ fn main() {
             reorder_research_trees,
             list_research_folders,
             set_research_folders,
+            journal_get,
+            journal_set,
+            journal_fetch_tweet,
             list_research_activity,
             get_research_tree,
             create_research_tree,
