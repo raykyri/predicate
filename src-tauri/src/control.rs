@@ -24,6 +24,10 @@ static ACTIVE_PUBLIC_WAITS: AtomicUsize = AtomicUsize::new(0);
 pub enum ControlPrincipal {
     User,
     Agent,
+    /// A paired device over the remote transport. Reads everything —
+    /// every workspace, pane, and agent — and writes everywhere unless the
+    /// device was paired read-only (docs/remote-control-plan.md).
+    Remote,
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +36,8 @@ pub struct ControlContext {
     pub pane_id: String,
     pub workspace_id: String,
     pub agent: Option<AgentInfo>,
+    /// True only for a Remote principal whose device was paired read-only.
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -61,7 +67,25 @@ pub fn handle_call(
     arguments: Value,
 ) -> Value {
     let result = context_for(state, pane_id, user_credential)
-        .and_then(|context| dispatch(state, &context, operation, arguments));
+        .and_then(|context| dispatch(state, &context, None, operation, arguments));
+    encode_response(result)
+}
+
+/// Entry point for calls arriving over the remote transport. The session's
+/// pairing already authenticated the device; this derives its context and
+/// dispatches with the Remote principal.
+pub fn handle_remote_call(
+    state: &AppState,
+    session: &crate::remote::session::RemoteSession,
+    operation: &str,
+    arguments: Value,
+) -> Value {
+    let result = remote_context_for(state, session)
+        .and_then(|context| dispatch(state, &context, Some(session), operation, arguments));
+    encode_response(result)
+}
+
+fn encode_response(result: ControlResult) -> Value {
     match result {
         Ok(result) => serde_json::to_value(PublicControlResponse {
             ok: true,
@@ -82,6 +106,53 @@ pub fn handle_call(
         })
         .unwrap_or_else(|_| json!({ "ok": false, "apiVersion": PUBLIC_API_VERSION })),
     }
+}
+
+/// Derives a remote session's context. The focus pane names "the current
+/// pane" for operations that need one: the session's own choice when it
+/// still exists, else the app's active pane, else the most recently active
+/// pane. A qmux with no panes at all still gets a context (anchored to the
+/// first workspace) so listing operations work; pane-anchored ones then
+/// fail closed with not-found.
+fn remote_context_for(
+    state: &AppState,
+    session: &crate::remote::session::RemoteSession,
+) -> Result<ControlContext, ControlFailure> {
+    let panes = state.list_panes().map_err(internal)?;
+    let focus = session
+        .focus_pane()
+        .and_then(|id| panes.iter().find(|pane| pane.id == id))
+        .or_else(|| {
+            state
+                .active_tab_id()
+                .ok()
+                .flatten()
+                .and_then(|id| panes.iter().find(|pane| pane.id == id))
+        })
+        .or_else(|| panes.iter().max_by_key(|pane| pane.last_active_at));
+    let (pane_id, workspace_id, agent) = match focus {
+        Some(pane) => (
+            pane.id.clone(),
+            pane.group_id.clone(),
+            state.agent_by_pane(&pane.id).map_err(internal)?,
+        ),
+        None => {
+            let workspace_id = state
+                .list_groups()
+                .map_err(internal)?
+                .first()
+                .map(|group| group.id.clone())
+                .ok_or_else(|| ControlFailure::new("no_workspace", "qmux has no workspaces yet"))?;
+            (String::new(), workspace_id, None)
+        }
+    };
+    Ok(ControlContext {
+        principal: ControlPrincipal::Remote,
+        pane_id,
+        workspace_id,
+        agent,
+        read_only: session.read_only,
+    })
 }
 
 fn context_for(
@@ -111,16 +182,19 @@ fn context_for(
         pane_id: pane_id.to_string(),
         workspace_id,
         agent,
+        read_only: false,
     })
 }
 
 fn dispatch(
     state: &AppState,
     context: &ControlContext,
+    session: Option<&crate::remote::session::RemoteSession>,
     operation: &str,
     arguments: Value,
 ) -> ControlResult {
     match operation {
+        "session.focus" => session_focus(state, session, arguments),
         "ping" => {
             ensure_no_arguments(arguments, "ping")?;
             Ok(json!({ "status": "ok", "principal": context.principal }))
@@ -323,8 +397,31 @@ fn default_wait_timeout_ms() -> u64 {
     30_000
 }
 
+/// Points a remote session's context at a pane. Deliberately allowed for
+/// read-only devices: it is session-local navigation, not app state.
+fn session_focus(
+    state: &AppState,
+    session: Option<&crate::remote::session::RemoteSession>,
+    arguments: Value,
+) -> ControlResult {
+    let Some(session) = session else {
+        return Err(ControlFailure::new(
+            "invalid_operation",
+            "session.focus is available only to remote sessions",
+        ));
+    };
+    let args: IdArgs = parse(arguments, "session.focus")?;
+    let pane = find_pane(state, &args.id)?;
+    session.set_focus_pane(pane.id.clone());
+    Ok(json!({ "focusPane": pane.id }))
+}
+
 fn context_snapshot(state: &AppState, context: &ControlContext) -> ControlResult {
-    let pane = find_pane(state, &context.pane_id)?;
+    let pane = if context.pane_id.is_empty() {
+        None
+    } else {
+        Some(find_pane(state, &context.pane_id)?)
+    };
     let workspace = state
         .group(&context.workspace_id)
         .map_err(internal)?
@@ -342,6 +439,14 @@ fn context_snapshot(state: &AppState, context: &ControlContext) -> ControlResult
             ControlPrincipal::Agent => json!({
                 "read": "self and live descendants in this workspace",
                 "write": "direct parent and direct children only"
+            }),
+            ControlPrincipal::Remote => json!({
+                "read": "every workspace, pane, and agent",
+                "write": if context.read_only {
+                    "none: this device is paired read-only"
+                } else {
+                    "every workspace"
+                }
             }),
         }
     }))
@@ -368,7 +473,7 @@ fn workspace_get(state: &AppState, context: &ControlContext, arguments: Value) -
 }
 
 fn workspace_create(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: WorkspaceCreateArgs = parse(arguments, "workspace.create")?;
     let workspace = create_group(
         state,
@@ -387,9 +492,9 @@ fn workspace_create(state: &AppState, context: &ControlContext, arguments: Value
 }
 
 fn workspace_rename(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: RenameArgs = parse(arguments, "workspace.rename")?;
-    if args.id != context.workspace_id {
+    if context.principal == ControlPrincipal::User && args.id != context.workspace_id {
         return Err(denied(
             "the interactive credential may rename only its current workspace",
         ));
@@ -439,21 +544,22 @@ fn pane_read(state: &AppState, context: &ControlContext, arguments: Value) -> Co
 }
 
 fn pane_create(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: PaneCreateArgs = parse(arguments, "pane.create")?;
     let workspace_id = args
         .workspace_id
         .as_deref()
         .unwrap_or(&context.workspace_id);
-    if workspace_id != context.workspace_id {
+    if context.principal == ControlPrincipal::User && workspace_id != context.workspace_id {
         return Err(denied(
             "the interactive credential may create panes only in its current workspace",
         ));
     }
+    let after_pane = (!context.pane_id.is_empty()).then_some(context.pane_id.as_str());
     let pane = crate::pty::spawn_shell_pane_at(
         state,
         None,
-        Some(&context.pane_id),
+        after_pane,
         Some(workspace_id),
         args.cwd.as_deref(),
     )
@@ -473,7 +579,7 @@ fn pane_send(
     arguments: Value,
     run: bool,
 ) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: PaneSendArgs = parse(arguments, if run { "pane.run" } else { "pane.send" })?;
     ensure_pane_read(state, context, &args.id)?;
     let submit = if run {
@@ -546,7 +652,7 @@ fn pane_wait_output(state: &AppState, context: &ControlContext, arguments: Value
 }
 
 fn pane_rename(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: RenameArgs = parse(arguments, "pane.rename")?;
     ensure_pane_read(state, context, &args.id)?;
     let pane = state.rename_pane(&args.id, args.name).map_err(internal)?;
@@ -560,7 +666,7 @@ fn pane_rename(state: &AppState, context: &ControlContext, arguments: Value) -> 
 }
 
 fn pane_focus(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: IdArgs = parse(arguments, "pane.focus")?;
     ensure_pane_read(state, context, &args.id)?;
     request_pane_focus(state, &args.id);
@@ -568,7 +674,7 @@ fn pane_focus(state: &AppState, context: &ControlContext, arguments: Value) -> C
 }
 
 fn pane_close(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: IdArgs = parse(arguments, "pane.close")?;
     ensure_pane_read(state, context, &args.id)?;
     state.close_pane_for_user(&args.id).map_err(internal)?;
@@ -653,6 +759,7 @@ fn agent_start(state: &AppState, context: &ControlContext, arguments: Value) -> 
         )
         .map_err(internal);
     }
+    require_write(context)?;
     let adapter = args.adapter.unwrap_or_else(|| "claude".to_string());
     let options = match (adapter.as_str(), args.effort.as_deref()) {
         ("claude", Some(effort)) => json!({ "effort": effort }),
@@ -699,6 +806,9 @@ fn agent_fork(state: &AppState, context: &ControlContext, arguments: Value) -> C
     {
         return Err(denied("agent principals may fork only themselves"));
     }
+    if context.principal == ControlPrincipal::Remote {
+        require_write(context)?;
+    }
     let target = state
         .agent(&args.id)
         .map_err(internal)?
@@ -725,6 +835,7 @@ fn agent_prompt(state: &AppState, context: &ControlContext, arguments: Value) ->
         )
         .map_err(internal);
     }
+    require_write(context)?;
     ensure_agent_read(state, context, &args.id)?;
     let delivery = crate::turn_queue::submit_agent_turn(
         state,
@@ -789,7 +900,7 @@ fn agent_wait(state: &AppState, context: &ControlContext, arguments: Value) -> C
 }
 
 fn agent_focus(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: IdArgs = parse(arguments, "agent.focus")?;
     ensure_agent_read(state, context, &args.id)?;
     let agent = state
@@ -814,6 +925,7 @@ fn agent_release(state: &AppState, context: &ControlContext, arguments: Value) -
         )
         .map_err(internal);
     }
+    require_write(context)?;
     ensure_agent_read(state, context, &args.id)?;
     let agents = state.list_agents().map_err(internal)?;
     let mut pending = VecDeque::from([args.id.clone()]);
@@ -869,6 +981,11 @@ fn artifact_list(state: &AppState, context: &ControlContext) -> ControlResult {
 }
 
 fn artifact_open(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
+    if context.principal == ControlPrincipal::Remote {
+        // Opening an artifact drives the Mac's own browser panel; that is a
+        // write to the interactive surface, not a read.
+        require_write(context)?;
+    }
     let args: IdArgs = parse(arguments, "artifact.open")?;
     let artifact = state
         .list_artifacts()
@@ -904,7 +1021,7 @@ fn artifact_open(state: &AppState, context: &ControlContext, arguments: Value) -
 }
 
 fn split_list(state: &AppState, context: &ControlContext) -> ControlResult {
-    require_user(context)?;
+    require_interactive(context)?;
     let allowed = allowed_pane_ids(state, context)?;
     let splits = state
         .pane_splits()
@@ -921,7 +1038,7 @@ fn split_list(state: &AppState, context: &ControlContext) -> ControlResult {
 }
 
 fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: SplitJoinArgs = parse(arguments, "split.join")?;
     if args.id == args.other {
         return Err(ControlFailure::new(
@@ -1017,7 +1134,7 @@ fn split_join(state: &AppState, context: &ControlContext, arguments: Value) -> C
 }
 
 fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: IdArgs = parse(arguments, "split.leave")?;
     ensure_pane_read(state, context, &args.id)?;
     let mut found = false;
@@ -1059,7 +1176,7 @@ fn split_leave(state: &AppState, context: &ControlContext, arguments: Value) -> 
 }
 
 fn split_resize(state: &AppState, context: &ControlContext, arguments: Value) -> ControlResult {
-    require_user(context)?;
+    require_write(context)?;
     let args: SplitResizeArgs = parse(arguments, "split.resize")?;
     if !args.fraction.is_finite() {
         return Err(ControlFailure::new(
@@ -1220,6 +1337,11 @@ fn allowed_agent_ids(
     context: &ControlContext,
 ) -> Result<HashSet<String>, ControlFailure> {
     let mut agents = state.list_agents().map_err(internal)?;
+    if context.principal == ControlPrincipal::Remote {
+        // A paired device is trusted with the whole app or it is not on the
+        // list at all; there is no per-workspace scope to enforce.
+        return Ok(agents.into_iter().map(|agent| agent.id).collect());
+    }
     if context.principal == ControlPrincipal::User {
         return Ok(agents
             .into_iter()
@@ -1258,6 +1380,14 @@ fn allowed_pane_ids(
     state: &AppState,
     context: &ControlContext,
 ) -> Result<HashSet<String>, ControlFailure> {
+    if context.principal == ControlPrincipal::Remote {
+        return Ok(state
+            .list_panes()
+            .map_err(internal)?
+            .into_iter()
+            .map(|pane| pane.id)
+            .collect());
+    }
     if context.principal == ControlPrincipal::User {
         return Ok(state
             .list_panes()
@@ -1334,13 +1464,32 @@ fn denied(message: impl Into<String>) -> ControlFailure {
     ControlFailure::new("permission_denied", message)
 }
 
-fn require_user(context: &ControlContext) -> Result<(), ControlFailure> {
-    if context.principal == ControlPrincipal::User {
-        Ok(())
-    } else {
-        Err(denied(
+/// Gate for operations that change state. Agents never pass (their writes go
+/// through the scoped MCP paths); a read-only remote device never passes.
+fn require_write(context: &ControlContext) -> Result<(), ControlFailure> {
+    match context.principal {
+        ControlPrincipal::User => Ok(()),
+        ControlPrincipal::Remote => {
+            if context.read_only {
+                Err(denied("this device is paired read-only"))
+            } else {
+                Ok(())
+            }
+        }
+        ControlPrincipal::Agent => Err(denied(
             "this operation requires an interactive user credential",
-        ))
+        )),
+    }
+}
+
+/// Gate for reads that are interactive-surface concerns (split layout):
+/// people and paired devices see them, agents do not.
+fn require_interactive(context: &ControlContext) -> Result<(), ControlFailure> {
+    match context.principal {
+        ControlPrincipal::User | ControlPrincipal::Remote => Ok(()),
+        ControlPrincipal::Agent => Err(denied(
+            "this operation requires an interactive user credential",
+        )),
     }
 }
 
@@ -1370,6 +1519,182 @@ fn internal(message: String) -> ControlFailure {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::session::RemoteSession;
+    use crate::state::test_support;
+
+    /// Two workspaces, one pane each, so scope differences are observable.
+    fn remote_fixture(name: &str) -> AppState {
+        let state = AppState::new(test_support::config(std::path::PathBuf::from(format!(
+            "/tmp/qmux-control-remote-{name}"
+        ))));
+        state
+            .insert_group_after(test_support::group("group-1"), None)
+            .unwrap();
+        state
+            .insert_group_after(test_support::group("group-2"), Some("group-1"))
+            .unwrap();
+        state
+            .insert_pane(test_support::pane_runtime("pane-1", "group-1"))
+            .unwrap();
+        state
+            .insert_pane(test_support::pane_runtime("pane-2", "group-2"))
+            .unwrap();
+        state
+    }
+
+    fn call(state: &AppState, session: &RemoteSession, operation: &str, arguments: Value) -> Value {
+        handle_remote_call(state, session, operation, arguments)
+    }
+
+    #[test]
+    fn remote_principal_reads_every_workspace_and_pane() {
+        let state = remote_fixture("read-scope");
+        let session = RemoteSession::new("iphone", false);
+
+        let workspaces = call(&state, &session, "workspace.list", Value::Null);
+        assert_eq!(
+            workspaces["ok"], true,
+            "workspace.list failed: {workspaces}"
+        );
+        assert_eq!(workspaces["result"]["count"], 2);
+
+        let panes = call(&state, &session, "pane.list", Value::Null);
+        assert_eq!(panes["ok"], true);
+        assert_eq!(
+            panes["result"]["count"], 2,
+            "a paired device sees panes across workspaces: {panes}"
+        );
+
+        let snapshot = call(&state, &session, "context", Value::Null);
+        assert_eq!(snapshot["ok"], true);
+        assert_eq!(snapshot["result"]["principal"], "remote");
+        assert_eq!(
+            snapshot["result"]["capabilities"]["read"],
+            "every workspace, pane, and agent"
+        );
+    }
+
+    #[test]
+    fn session_focus_moves_the_current_pane_across_workspaces() {
+        let state = remote_fixture("focus");
+        let session = RemoteSession::new("iphone", false);
+
+        // Unset focus falls back deterministically to a live pane.
+        let current = call(&state, &session, "pane.current", Value::Null);
+        assert_eq!(current["ok"], true, "pane.current failed: {current}");
+
+        let focus = call(&state, &session, "session.focus", json!({ "id": "pane-2" }));
+        assert_eq!(focus["ok"], true, "session.focus failed: {focus}");
+        assert_eq!(focus["result"]["focusPane"], "pane-2");
+
+        let current = call(&state, &session, "pane.current", Value::Null);
+        assert_eq!(current["result"]["pane"]["id"], "pane-2");
+        // The context's workspace follows the focus pane, so creation and
+        // placement default to where the device is looking.
+        let snapshot = call(&state, &session, "context", Value::Null);
+        assert_eq!(snapshot["result"]["workspace"]["id"], "group-2");
+
+        let missing = call(&state, &session, "session.focus", json!({ "id": "pane-9" }));
+        assert_eq!(missing["ok"], false);
+        assert_eq!(missing["error"]["code"], "pane_not_found");
+
+        // The socket principals never see the op.
+        let via_socket = handle_call(
+            &state,
+            "pane-1",
+            true,
+            "session.focus",
+            json!({"id": "pane-1"}),
+        );
+        assert_eq!(via_socket["ok"], false);
+        assert_eq!(via_socket["error"]["code"], "invalid_operation");
+    }
+
+    #[test]
+    fn a_stale_focus_falls_back_to_a_live_pane() {
+        let state = remote_fixture("stale-focus");
+        let session = RemoteSession::new("iphone", false);
+        session.set_focus_pane("pane-2".to_string());
+        state.remove_pane("pane-2").unwrap();
+
+        let current = call(&state, &session, "pane.current", Value::Null);
+        assert_eq!(current["ok"], true, "stale focus must fall back: {current}");
+        assert_eq!(current["result"]["pane"]["id"], "pane-1");
+    }
+
+    #[test]
+    fn read_only_devices_read_everything_and_write_nothing() {
+        let state = remote_fixture("read-only");
+        let session = RemoteSession::new("ipad", true);
+
+        let panes = call(&state, &session, "pane.list", Value::Null);
+        assert_eq!(panes["result"]["count"], 2);
+        let read = call(
+            &state,
+            &session,
+            "pane.read",
+            json!({ "id": "pane-1", "lines": 5 }),
+        );
+        assert_eq!(read["ok"], true, "reads must pass: {read}");
+        // Splits are interactive-surface reads: visible to devices.
+        let splits = call(&state, &session, "split.list", Value::Null);
+        assert_eq!(splits["ok"], true, "split.list is a read: {splits}");
+
+        for (operation, arguments) in [
+            ("pane.send", json!({ "id": "pane-1", "text": "rm -rf /" })),
+            ("pane.run", json!({ "id": "pane-1", "text": "ls" })),
+            ("pane.rename", json!({ "id": "pane-1", "name": "x" })),
+            ("pane.close", json!({ "id": "pane-1" })),
+            ("pane.create", json!({})),
+            ("workspace.create", json!({})),
+            ("workspace.rename", json!({ "id": "group-1", "name": "x" })),
+            ("agent.start", json!({})),
+            ("agent.prompt", json!({ "id": "agent-1", "text": "hi" })),
+            ("agent.release", json!({ "id": "agent-1" })),
+        ] {
+            let response = call(&state, &session, operation, arguments);
+            assert_eq!(response["ok"], false, "{operation} must be denied");
+            assert_eq!(
+                response["error"]["code"], "permission_denied",
+                "{operation} must be denied read-only, got: {response}"
+            );
+            assert!(
+                response["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("read-only"),
+                "{operation}: {response}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_writable_device_reaches_other_workspaces() {
+        let state = remote_fixture("write-scope");
+        let session = RemoteSession::new("iphone", false);
+
+        // Renaming a workspace the focus is NOT in: allowed for a device,
+        // still refused for the interactive pane credential.
+        session.set_focus_pane("pane-1".to_string());
+        let renamed = call(
+            &state,
+            &session,
+            "workspace.rename",
+            json!({ "id": "group-2", "name": "renamed" }),
+        );
+        assert_eq!(renamed["ok"], true, "remote rename failed: {renamed}");
+        // rename_group records the user's name as an override; the base name
+        // stays the id.
+        assert_eq!(renamed["result"]["workspace"]["nameOverride"], "renamed");
+
+        let sent = call(
+            &state,
+            &session,
+            "pane.send",
+            json!({ "id": "pane-2", "text": "echo hi" }),
+        );
+        assert_eq!(sent["ok"], true, "cross-workspace send failed: {sent}");
+    }
 
     #[test]
     fn failures_have_stable_codes_and_details() {
