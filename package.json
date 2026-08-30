@@ -19,6 +19,7 @@
     "test:integration": "node --import tsx --test web/server.test.ts web/comments.test.ts",
     "test:plugins": "npm run test:opencode-plugin && npm run test:pi-extension && npm run test:cursor-plugin",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:remote": "cargo test --manifest-path src-tauri/Cargo.toml remote",
     "test:app-shortcuts": "node --import tsx --test tests/appShortcuts.test.ts",
     "test:terminal-attention": "node --import tsx --test tests/terminalAttention.test.ts",
     "test:completion-sounds": "node --import tsx --test tests/completionSounds.test.ts",

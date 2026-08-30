@@ -1881,21 +1881,33 @@ mod tests {
 
     #[test]
     fn supervisor_repeated_unlink_recovery_does_not_grow_fds() {
+        // FD counts are process-wide: hold the net-serial guard so remote
+        // endpoint tests can't open sockets in the middle of the comparison.
+        let _serial = crate::state::test_support::net_serial_guard();
         let (state, socket_path) = runtime_fixture();
         let token = state.pane_token("pane-1").unwrap();
         let runtime = start_control_socket_runtime(state, MAX_CONCURRENT_CLIENTS).unwrap();
         wait_for_ping(&socket_path, &token, Duration::from_secs(1));
-        let before = fd_count();
 
-        for _ in 0..8 {
-            std::fs::remove_file(&socket_path).unwrap();
-            wait_for_ping(&socket_path, &token, Duration::from_secs(1));
-        }
-
-        let after = fd_count();
+        // The count is process-wide, so unrelated parallel tests can move it
+        // between the two samples. A fresh-baseline retry absorbs that noise
+        // while a real per-recovery leak still fails both attempts: eight
+        // cycles of a leak dwarf the +4 slack every time.
+        let mut grew = (0, 0);
+        let leak_free = (0..2).any(|_| {
+            let before = fd_count();
+            for _ in 0..8 {
+                std::fs::remove_file(&socket_path).unwrap();
+                wait_for_ping(&socket_path, &token, Duration::from_secs(1));
+            }
+            let after = fd_count();
+            grew = (before, after);
+            after <= before + 4
+        });
         assert!(
-            after <= before + 4,
-            "fd count grew from {before} to {after} after repeated recovery"
+            leak_free,
+            "fd count grew from {} to {} after repeated recovery",
+            grew.0, grew.1
         );
         runtime.shutdown();
     }

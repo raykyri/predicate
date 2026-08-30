@@ -25,6 +25,7 @@ mod prompt_library;
 mod pty;
 mod publishing;
 mod recovery;
+mod remote;
 mod research;
 mod research_runtime;
 mod scrollback;

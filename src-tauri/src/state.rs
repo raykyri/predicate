@@ -12055,6 +12055,148 @@ fn random_token() -> Result<String, String> {
     ))
 }
 
+/// Fixtures shared by control/remote tests in other modules. Kept separate
+/// from this file's private `tests` module so cross-module tests don't force
+/// its helpers public.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Serializes tests that open real sockets against tests that count the
+    /// process's file descriptors (control_socket's supervisor FD test).
+    /// Every test that binds an iroh endpoint must hold this guard, or its
+    /// transient sockets inflate a concurrent FD count.
+    static NET_SERIAL: Mutex<()> = Mutex::new(());
+
+    pub(crate) fn net_serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        NET_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+    use crate::config::{
+        AdapterConfigs, ClaudeAdapterConfig, CodexAdapterConfig, GrokAdapterConfig,
+        MuseAdapterConfig, OpencodeAdapterConfig,
+    };
+    use portable_pty::{ChildKiller, ExitStatus, PtySize, native_pty_system};
+    use std::io;
+    use std::path::PathBuf;
+
+    #[derive(Debug)]
+    struct StubChild;
+
+    impl ChildKiller for StubChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(StubChild)
+        }
+    }
+
+    impl Child for StubChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    pub(crate) fn config(workspace_root: PathBuf) -> QmuxConfig {
+        QmuxConfig {
+            remotes: Default::default(),
+            workspace_root,
+            socket_path: PathBuf::from("/tmp/qmux-test.sock"),
+            adapters: AdapterConfigs {
+                pi: Default::default(),
+                claude: ClaudeAdapterConfig {
+                    binary: Some("claude".to_string()),
+                },
+                codex: CodexAdapterConfig {
+                    binary: Some("codex".to_string()),
+                },
+                opencode: OpencodeAdapterConfig {
+                    binary: Some("opencode".to_string()),
+                },
+                grok: GrokAdapterConfig {
+                    binary: Some("grok".to_string()),
+                },
+                muse: MuseAdapterConfig {
+                    binary: Some("muse".to_string()),
+                },
+                cursor: Default::default(),
+                devin: Default::default(),
+            },
+            legacy_claude_binary: None,
+            claude_plugin_dir: PathBuf::new(),
+            opencode_plugin_dir: PathBuf::new(),
+            pi_extension_dir: PathBuf::new(),
+            cursor_plugin_dir: PathBuf::new(),
+        }
+    }
+
+    pub(crate) fn group(id: &str) -> GroupInfo {
+        GroupInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            name_override: None,
+            dir: "/tmp/work".to_string(),
+            managed_dir: format!("/tmp/qmux-workspaces/{id}"),
+            base_repo: None,
+            base_ref: None,
+            parent_id: None,
+            created_at: 1,
+            collapsed: false,
+            scope: WorkspaceScope::Terminal,
+            imported_research_archive_id: None,
+            remote: None,
+            agents: Vec::new(),
+        }
+    }
+
+    pub(crate) fn pane_runtime(id: &str, group_id: &str) -> PaneRuntime {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("open test pty");
+        drop(pair.slave);
+        PaneRuntime {
+            info: PaneInfo {
+                id: id.to_string(),
+                title: "Shell".to_string(),
+                last_osc_title: None,
+                kind: PaneKind::Shell,
+                agent_id: None,
+                group_id: group_id.to_string(),
+                cwd: "/tmp/work".to_string(),
+                cols: 80,
+                rows: 24,
+                status: PaneStatus::Running,
+                last_active_at: 0,
+                recovered: false,
+                depth: 0,
+            },
+            backend: PaneBackend::HostPty {
+                child: Arc::new(Mutex::new(Box::new(StubChild))),
+                master: Arc::new(Mutex::new(pair.master)),
+                writer: Arc::new(Mutex::new(Box::new(io::sink()))),
+                backlog: Default::default(),
+                native_surface: false,
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

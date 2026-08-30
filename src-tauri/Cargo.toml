@@ -44,6 +44,19 @@ regex = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 names = { version = "0.14", default-features = false }
 portable-pty = "0.9"
+# Remote control transport (docs/remote-control-plan.md). Pinned exactly: the
+# 0.x line broke APIs regularly and the 1.x line is young, so upgrades should
+# be deliberate, compile-checked events rather than lockfile drift.
+iroh = { version = "=1.1.0", default-features = false, features = ["tls-ring"] }
+# LAN peer discovery for the remote endpoint's local mode. Split out of iroh
+# core at 1.0; pinned exactly for the same reason iroh is.
+iroh-mdns-address-lookup = "=0.5.0"
+# iroh is tokio-based. Tokio is already in the tree transitively (reqwest,
+# hyper, tauri's async runtime); this direct dependency only names the features
+# the remote module itself uses. The backend stays synchronous: the async side
+# owns connections and meets AppState at channels, never holding a lock across
+# an await.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 qmux-cli = { path = "crates/qmux-cli" }
 qmux-proto = { path = "crates/qmux-proto" }
 sha2 = "0.10"
