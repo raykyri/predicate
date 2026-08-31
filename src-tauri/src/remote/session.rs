@@ -9,7 +9,9 @@
 //! `CallResult` is serialized back through one writer task. A long
 //! `pane.waitOutput` therefore never blocks a concurrent `ping`.
 
-use crate::remote::endpoint::{CLOSE_GOING_AWAY, CLOSE_PROTOCOL_ERROR, RemoteAccess};
+use crate::remote::endpoint::{
+    CLOSE_GOING_AWAY, CLOSE_PROTOCOL_ERROR, RemoteAccess, RemoteRequestSequence,
+};
 use crate::remote::fanout::{PaneChannel, SessionChannels};
 use crate::remote::frames;
 use crate::state::AppState;
@@ -25,11 +27,17 @@ use tokio::task::JoinHandle;
 
 /// How long the client has to send `Hello` before the connection is dropped.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
-/// In-flight calls per session. Covers a screen of pipelined reads plus a
-/// couple of long waits; at the cap further calls queue behind the stream.
-const MAX_CONCURRENT_CALLS: usize = 8;
+/// In-flight long waits per session. Ordinary calls are ordered; wait calls
+/// detach after all earlier calls complete so they cannot block later control.
+const MAX_CONCURRENT_WAITS: usize = 8;
 /// Outbound frames buffered for the writer task before call handlers block.
 const WRITER_QUEUE: usize = 64;
+
+struct QueuedCall {
+    seq: u64,
+    operation: String,
+    arguments: serde_json::Value,
+}
 
 /// State one connected device carries across calls.
 #[derive(Debug)]
@@ -70,9 +78,10 @@ pub(crate) async fn serve_remote_connection(
     state: AppState,
     access: RemoteAccess,
     connection: Connection,
+    request_sequence: Arc<RemoteRequestSequence>,
 ) {
     let device = access.device_name.clone();
-    match run_control_stream(state, access, &connection).await {
+    match run_control_stream(state, access, &connection, request_sequence).await {
         Ok(()) => {}
         Err(reason) => {
             eprintln!("qmux: remote session for {device} ended: {reason}");
@@ -85,6 +94,7 @@ async fn run_control_stream(
     state: AppState,
     access: RemoteAccess,
     connection: &Connection,
+    request_sequence: Arc<RemoteRequestSequence>,
 ) -> Result<(), String> {
     let (mut send, mut recv) = connection
         .accept_bi()
@@ -150,7 +160,59 @@ async fn run_control_stream(
         panes: HashMap::new(),
     };
 
-    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CALLS));
+    let (call_tx, mut call_rx) = tokio::sync::mpsc::channel::<QueuedCall>(WRITER_QUEUE);
+    let call_state = state.clone();
+    let call_session = session.clone();
+    let call_writer = writer_tx.clone();
+    let wait_limiter = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_WAITS));
+    let call_worker = tokio::spawn(async move {
+        while let Some(call) = call_rx.recv().await {
+            if is_long_wait(&call.operation) {
+                let state = call_state.clone();
+                let session = call_session.clone();
+                let writer = call_writer.clone();
+                let limiter = wait_limiter.clone();
+                tokio::spawn(async move {
+                    let Ok(_permit) = limiter.acquire_owned().await else {
+                        return;
+                    };
+                    let response =
+                        execute_call(state, session, call.operation, call.arguments).await;
+                    let _ = writer
+                        .send(RemoteFrame::CallResult {
+                            seq: call.seq,
+                            response,
+                        })
+                        .await;
+                });
+                continue;
+            }
+
+            let response =
+                if is_write_operation(&call.operation) && !request_sequence.claim_write(call.seq) {
+                    sequence_error("duplicate or stale mutating request sequence")
+                } else {
+                    execute_call(
+                        call_state.clone(),
+                        call_session.clone(),
+                        call.operation,
+                        call.arguments,
+                    )
+                    .await
+                };
+            if call_writer
+                .send(RemoteFrame::CallResult {
+                    seq: call.seq,
+                    response,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+    let mut last_seq = None;
     let result = loop {
         match frames::read_json(&mut recv).await {
             Ok(None) => break Ok(()),
@@ -159,20 +221,27 @@ async fn run_control_stream(
                 operation,
                 arguments,
             })) => {
-                let permit = limiter
-                    .clone()
-                    .acquire_owned()
+                if last_seq.is_some_and(|last| seq <= last) {
+                    writer_tx
+                        .send(RemoteFrame::CallResult {
+                            seq,
+                            response: sequence_error(
+                                "request sequences must increase within a connection",
+                            ),
+                        })
+                        .await
+                        .map_err(|_| "writer task ended while rejecting sequence".to_string())?;
+                    continue;
+                }
+                last_seq = Some(seq);
+                call_tx
+                    .send(QueuedCall {
+                        seq,
+                        operation,
+                        arguments,
+                    })
                     .await
-                    .map_err(|_| "session limiter closed".to_string())?;
-                let state = state.clone();
-                let session = session.clone();
-                let writer_tx = writer_tx.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    let response =
-                        crate::control::handle_remote_call(&state, &session, &operation, arguments);
-                    let _ = writer_tx.blocking_send(RemoteFrame::CallResult { seq, response });
-                });
+                    .map_err(|_| "ordered call worker ended".to_string())?;
             }
             Ok(Some(RemoteFrame::Subscribe { events, panes })) => {
                 pumps.apply(events, panes).await;
@@ -187,11 +256,74 @@ async fn run_control_stream(
         }
     };
 
+    drop(call_tx);
+    let _ = call_worker.await;
     state.remote_fanout().unregister_session(fanout_id);
     pumps.stop();
     drop(writer_tx);
     let _ = writer.await;
     result
+}
+
+async fn execute_call(
+    state: AppState,
+    session: Arc<RemoteSession>,
+    operation: String,
+    arguments: serde_json::Value,
+) -> serde_json::Value {
+    tokio::task::spawn_blocking(move || {
+        crate::control::handle_remote_call(&state, &session, &operation, arguments)
+    })
+    .await
+    .unwrap_or_else(|_| sequence_error("remote call worker panicked"))
+}
+
+fn is_long_wait(operation: &str) -> bool {
+    matches!(operation, "pane.waitOutput" | "agent.wait")
+}
+
+fn is_write_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "session.focus"
+            | "workspace.create"
+            | "workspace.rename"
+            | "pane.create"
+            | "pane.send"
+            | "pane.run"
+            | "pane.rename"
+            | "pane.focus"
+            | "pane.close"
+            | "agent.start"
+            | "agent.fork"
+            | "agent.prompt"
+            | "agent.submit"
+            | "agent.permission"
+            | "agent.queue.remove"
+            | "agent.queue.reorder"
+            | "agent.queue.sendNext"
+            | "agent.queue.pause"
+            | "agent.queue.unpause"
+            | "agent.focus"
+            | "agent.release"
+            | "artifact.open"
+            | "split.join"
+            | "split.leave"
+            | "split.resize"
+    )
+}
+
+fn sequence_error(message: &str) -> serde_json::Value {
+    serde_json::json!({
+        "ok": false,
+        "apiVersion": qmux_proto::PUBLIC_API_VERSION,
+        "result": null,
+        "error": {
+            "code": "stale_sequence",
+            "message": message,
+            "details": null,
+        }
+    })
 }
 
 /// The pump tasks one session owns: at most one event stream, one byte
@@ -527,6 +659,31 @@ mod tests {
         }
     }
 
+    async fn send_call(client: &mut Client, seq: u64, operation: &str, arguments: Value) {
+        frames::write_json(
+            &mut client.send,
+            &RemoteFrame::Call {
+                seq,
+                operation: operation.to_string(),
+                arguments,
+            },
+        )
+        .await
+        .expect("send call");
+    }
+
+    async fn read_call_result(client: &mut Client) -> (u64, Value) {
+        loop {
+            let frame = frames::read_json(&mut client.recv)
+                .await
+                .expect("read result")
+                .expect("result frame");
+            if let RemoteFrame::CallResult { seq, response } = frame {
+                return (seq, response);
+            }
+        }
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -597,6 +754,62 @@ mod tests {
             let current = call(&mut client, 3, "pane.current", Value::Null).await;
             assert_eq!(current["result"]["pane"]["id"], "pane-2");
 
+            client.connection.close(0u32.into(), b"done");
+        });
+        server.shutdown();
+    }
+
+    #[test]
+    fn pipelined_calls_preserve_order_and_duplicate_sequences_do_not_execute() {
+        let _serial = test_support::net_serial_guard();
+        let state = fixture_state("ordered-calls");
+        let server = RemoteControlRuntime::start(
+            state,
+            SecretKey::generate(),
+            RemoteReach::Local,
+            false,
+            Arc::new(|_| {
+                Some(RemoteAccess {
+                    device_name: "test iphone".to_string(),
+                    read_only: false,
+                })
+            }),
+        )
+        .expect("start runtime");
+
+        runtime().block_on(async {
+            let (mut client, ready) = connect_and_hello(&server).await;
+            assert!(matches!(ready, RemoteFrame::Ready { .. }));
+
+            send_call(&mut client, 1, "session.focus", json!({ "id": "pane-2" })).await;
+            send_call(&mut client, 2, "pane.current", Value::Null).await;
+            let (first_seq, first) = read_call_result(&mut client).await;
+            let (second_seq, second) = read_call_result(&mut client).await;
+            assert_eq!(first_seq, 1);
+            assert_eq!(first["ok"], true);
+            assert_eq!(second_seq, 2);
+            assert_eq!(second["result"]["pane"]["id"], "pane-2");
+
+            send_call(&mut client, 3, "session.focus", json!({ "id": "pane-1" })).await;
+            send_call(&mut client, 3, "session.focus", json!({ "id": "pane-2" })).await;
+            let duplicate_results = [
+                read_call_result(&mut client).await.1,
+                read_call_result(&mut client).await.1,
+            ];
+            assert_eq!(
+                duplicate_results
+                    .iter()
+                    .filter(|response| response["ok"] == true)
+                    .count(),
+                1
+            );
+            assert!(
+                duplicate_results
+                    .iter()
+                    .any(|response| { response["error"]["code"] == "stale_sequence" })
+            );
+            let current = call(&mut client, 4, "pane.current", Value::Null).await;
+            assert_eq!(current["result"]["pane"]["id"], "pane-1");
             client.connection.close(0u32.into(), b"done");
         });
         server.shutdown();

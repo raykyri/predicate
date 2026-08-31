@@ -129,6 +129,28 @@ pub struct RemoteControlRuntime {
     pending_pair: std::sync::Mutex<Option<crate::remote::pairing::PendingPair>>,
     sessions: std::sync::Mutex<HashMap<u64, RemoteSessionEntry>>,
     next_session_id: std::sync::atomic::AtomicU64,
+    request_sequences: std::sync::Mutex<HashMap<EndpointId, Arc<RemoteRequestSequence>>>,
+}
+
+/// Device-scoped high-water mark for mutating request ids. It survives QUIC
+/// reconnects for the life of the enabled endpoint, preventing a retry after a
+/// lost response from applying the same write twice.
+#[derive(Default)]
+pub struct RemoteRequestSequence {
+    last_write: std::sync::Mutex<Option<u64>>,
+}
+
+impl RemoteRequestSequence {
+    pub fn claim_write(&self, seq: u64) -> bool {
+        let Ok(mut last) = self.last_write.lock() else {
+            return false;
+        };
+        if last.is_some_and(|last| seq <= last) {
+            return false;
+        }
+        *last = Some(seq);
+        true
+    }
 }
 
 /// One live session, for the UI's list and for revocation.
@@ -181,6 +203,7 @@ impl RemoteControlRuntime {
             pending_pair: std::sync::Mutex::new(None),
             sessions: std::sync::Mutex::new(HashMap::new()),
             next_session_id: std::sync::atomic::AtomicU64::new(1),
+            request_sequences: std::sync::Mutex::new(HashMap::new()),
         });
         runtime.spawn(accept_loop(Arc::downgrade(&this), this.endpoint.clone()));
         *this
@@ -406,6 +429,18 @@ impl RemoteControlRuntime {
         }
     }
 
+    fn request_sequence(&self, endpoint_id: EndpointId) -> Arc<RemoteRequestSequence> {
+        self.request_sequences
+            .lock()
+            .map(|mut sequences| {
+                sequences
+                    .entry(endpoint_id)
+                    .or_insert_with(|| Arc::new(RemoteRequestSequence::default()))
+                    .clone()
+            })
+            .unwrap_or_else(|_| Arc::new(RemoteRequestSequence::default()))
+    }
+
     /// Closes every session and releases the port and the runtime. After
     /// this returns nothing remote-control is listening, running, or bound.
     pub fn shutdown(&self) {
@@ -462,6 +497,7 @@ async fn accept_loop(this: Weak<RemoteControlRuntime>, endpoint: Endpoint) {
                                 this.state.clone(),
                                 current_access,
                                 connection,
+                                this.request_sequence(remote),
                             )
                             .await;
                         } else {
@@ -562,5 +598,14 @@ pub(crate) mod tests {
                 "close must be complete when it returns"
             );
         });
+    }
+
+    #[test]
+    fn mutating_sequences_are_monotonic_across_sessions() {
+        let sequence = RemoteRequestSequence::default();
+        assert!(sequence.claim_write(7));
+        assert!(!sequence.claim_write(7));
+        assert!(!sequence.claim_write(6));
+        assert!(sequence.claim_write(8));
     }
 }
