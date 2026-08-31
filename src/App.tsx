@@ -4786,6 +4786,7 @@ function MainApp() {
           updateCommand: null,
           instanceId: `local:${adapter.id}`,
           target: { kind: "local" as const, id: null, label: "This Mac" },
+          composerPolicy: composerPolicyFor(adapter.id),
         }));
   }, [config, launcherRuntimeAdapters]);
   const launcherAdapterOptions = useMemo<LauncherSelectOption[]>(
