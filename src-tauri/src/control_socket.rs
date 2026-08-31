@@ -1290,17 +1290,68 @@ pub(crate) fn resolve_browser_target(
     };
 
     let roots = state.pane_file_roots(authed_pane);
-    let canonical = crate::file_server::resolve_under_roots(&requested, &roots)
-        .ok_or_else(|| format!("'{target}' was not found"))?;
+    // Transcript and research-document links commonly carry a grep-style
+    // `path:line` or `path:line:col` suffix (e.g. `src/session.rs:8`). The
+    // literal path is tried first so a file actually named that way still
+    // wins; only when it does not resolve is the suffix dropped, and the line
+    // number rides along as an `#L<n>` fragment — the file server renders
+    // source files with `L<n>` row anchors, so the overlay scrolls to and
+    // highlights that line.
+    let (canonical, target_line) = match crate::file_server::resolve_under_roots(&requested, &roots)
+    {
+        Some(canonical) => (canonical, None),
+        None => strip_line_column_suffix(&requested)
+            .and_then(|(stripped, line)| {
+                crate::file_server::resolve_under_roots(&stripped, &roots)
+                    .map(|canonical| (canonical, Some(line)))
+            })
+            .ok_or_else(|| format!("'{target}' was not found"))?,
+    };
     let port = state
         .file_server_port()
         .ok_or_else(|| "the file server is not running".to_string())?;
     let token = state.pane_file_token(authed_pane)?;
+    let mut url = crate::file_server::file_url(port, &token, &canonical);
+    if let Some(line) = target_line {
+        url.push_str(&format!("#L{line}"));
+    }
     Ok(ResolvedBrowserTarget {
-        url: crate::file_server::file_url(port, &token, &canonical),
+        url,
         sandbox: true,
         path: Some(canonical),
     })
+}
+
+/// `path:line` or `path:line:col` with all-digit trailing segments → the bare
+/// path and the line number. None when the path carries no such suffix (so
+/// callers can tell "nothing to strip" from a stripped candidate). Only the
+/// final component is inspected — rsplitting on ':' never reaches into parent
+/// directories because paths containing '/' after the colon fail the
+/// all-digits check.
+fn strip_line_column_suffix(path: &std::path::Path) -> Option<(std::path::PathBuf, u64)> {
+    let original = path.to_str()?;
+    let mut remaining = original;
+    let mut line = None;
+    // Strip at most two segments, column first: the last one stripped is the line.
+    for _ in 0..2 {
+        match remaining.rsplit_once(':') {
+            Some((head, tail))
+                if !head.is_empty()
+                    && !tail.is_empty()
+                    && tail.bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                // An unparseable digit run (u64 overflow) is not a real
+                // location; leave it as part of the name.
+                let Ok(parsed) = tail.parse::<u64>() else {
+                    break;
+                };
+                line = Some(parsed);
+                remaining = head;
+            }
+            _ => break,
+        }
+    }
+    Some((std::path::PathBuf::from(remaining), line?))
 }
 
 fn ensure_pane_scope(authed_pane: &str, requested_pane: &str) -> Result<(), String> {
@@ -1549,6 +1600,51 @@ mod tests {
         let state = test_state();
         let err = resolve_browser_target(&state, "pane-1", "report.html", None).unwrap_err();
         assert!(err.contains("working directory"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn line_column_suffixes_strip_only_trailing_digit_segments() {
+        let strip = |s: &str| {
+            strip_line_column_suffix(std::path::Path::new(s))
+                .map(|(p, line)| (p.to_string_lossy().into_owned(), line))
+        };
+        assert_eq!(
+            strip("/repo/src/session.rs:8"),
+            Some(("/repo/src/session.rs".to_string(), 8))
+        );
+        // `path:line:col` keeps the line, drops the column.
+        assert_eq!(
+            strip("/repo/src/session.rs:8:14"),
+            Some(("/repo/src/session.rs".to_string(), 8))
+        );
+        // No suffix → None, so callers can tell nothing was stripped.
+        assert_eq!(strip("/repo/src/session.rs"), None);
+        // Non-numeric colon segments are part of the name, not a location.
+        assert_eq!(strip("/repo/notes:draft.md"), None);
+        // A colon in a parent directory never triggers a strip.
+        assert_eq!(strip("/repo/a:8/c.rs"), None);
+        assert_eq!(
+            strip("/repo/backup:2/c.rs:12"),
+            Some(("/repo/backup:2/c.rs".to_string(), 12))
+        );
+    }
+
+    #[test]
+    fn browser_target_falls_back_past_a_line_suffix() {
+        let dir = temp_dir();
+        let file = dir.join("session.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+        let roots = vec![dir.clone()];
+        // The literal path with the suffix does not exist…
+        let suffixed = dir.join("session.rs:8");
+        assert!(crate::file_server::resolve_under_roots(&suffixed, &roots).is_none());
+        // …but the stripped candidate resolves to the real file, carrying the line.
+        let (stripped, line) = strip_line_column_suffix(&suffixed).unwrap();
+        assert_eq!(line, 8);
+        assert_eq!(
+            crate::file_server::resolve_under_roots(&stripped, &roots),
+            Some(std::fs::canonicalize(&file).unwrap())
+        );
     }
 
     #[test]

@@ -37,6 +37,26 @@ const DETACHED_RESEARCH_PENDING_DIR: &str = "research-v1.pending";
 const DETACHED_RESEARCH_MANIFEST: &str = "manifest.json";
 const MAX_DETACHED_RESEARCH_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
 
+/// Browser-overlay owner id prefix for a research tree's document view. The
+/// frontend keys the research document's browser overlay (and its link opens)
+/// by `__research_document__:<treeId>` — a synthetic owner that is not a pane
+/// but rides the same pane-keyed file-token plumbing. Must match
+/// RESEARCH_BROWSER_OWNER_PREFIX in App.tsx.
+pub const DOCUMENT_BROWSER_OWNER_PREFIX: &str = "__research_document__:";
+
+/// The research tree id behind a document browser-owner id, or None when the
+/// id is not a research-document owner.
+pub fn tree_id_from_browser_owner(owner_id: &str) -> Option<&str> {
+    owner_id
+        .strip_prefix(DOCUMENT_BROWSER_OWNER_PREFIX)
+        .filter(|tree_id| !tree_id.is_empty())
+}
+
+/// The document browser-owner id for a research tree.
+pub fn document_browser_owner_id(tree_id: &str) -> String {
+    format!("{DOCUMENT_BROWSER_OWNER_PREFIX}{tree_id}")
+}
+
 /// A client-authored organizational grouping of research trees, layered over
 /// the backend's flat per-workspace order. The backend stays the source of
 /// truth for which trees exist and their relative order; a folder only records
