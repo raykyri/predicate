@@ -56,7 +56,7 @@
     "test:transcript-scroll": "node --import tsx --test tests/transcriptScroll.test.ts",
     "test:handoff": "node --import tsx --test tests/handoff.test.ts",
     "test:publication": "node --import tsx --test tests/publication.test.ts tests/publicationComments.test.ts web/server.test.ts web/comments.test.ts",
-    "test:opencode-plugin": "node --experimental-default-type=module --test qmux-opencode-plugin/tests/*.test.mjs",
+    "test:opencode-plugin": "node --test qmux-opencode-plugin/tests/*.test.mjs",
     "test:pi-extension": "node --test qmux-pi-extension/tests/*.test.mjs",
     "test:cursor-plugin": "node --test qmux-cursor-plugin/tests/*.test.mjs",
     "tauri": "tauri"
