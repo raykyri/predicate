@@ -252,6 +252,7 @@ impl Default for AppPreferences {
             research_launch_instruction: None,
             research_sdk_harness: true,
             remote_devices: None,
+            remote_control: None,
         }
     }
 }
