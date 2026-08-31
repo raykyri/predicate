@@ -116,17 +116,17 @@ pub fn now_millis() -> u128 {
 /// tests, the future Linux port — it is an owner-only file beside the
 /// preferences, which is also what makes this testable off-macOS.
 pub fn load_or_create_identity(state: &AppState) -> Result<SecretKey, String> {
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     {
         keychain_identity()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(any(not(target_os = "macos"), test))]
     {
         file_identity(&state.config().workspace_root)
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", not(test)))]
 fn keychain_identity() -> Result<SecretKey, String> {
     const SERVICE: &str = "app.qmux.remote-control";
     const ACCOUNT: &str = "endpoint-key";
@@ -145,7 +145,7 @@ fn keychain_identity() -> Result<SecretKey, String> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(not(target_os = "macos"), test))]
 fn file_identity(workspace_root: &std::path::Path) -> Result<SecretKey, String> {
     use std::os::unix::fs::PermissionsExt;
     let path = workspace_root.join("remote-identity");
