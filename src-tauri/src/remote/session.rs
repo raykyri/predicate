@@ -486,27 +486,35 @@ async fn pane_pump(
     }
 }
 
-/// Reads and sanitizes the pane's journal off the async threads, discards
-/// whatever accumulated in the ring while reading (the journal supersedes
-/// it; a chunk recorded during the read can be duplicated across the seam,
-/// which a terminal renders through harmlessly), then sends the replay.
+/// Reads and sanitizes the pane's journal off the async threads, sends it, then
+/// drains live bytes accumulated across the snapshot seam. A chunk may appear
+/// in both sources, which terminals tolerate; dropping the ring would instead
+/// lose a chunk published just before its journal append. If the ring gapped
+/// while replaying, reset and repeat until one complete seam is obtained.
 async fn prime_from_journal(
     state: &AppState,
     pane_id: &str,
     send: &mut SendStream,
     channel: &Arc<PaneChannel>,
 ) -> Result<(), String> {
-    let root = state.config().workspace_root.clone();
-    let pane = pane_id.to_string();
-    let replay = tokio::task::spawn_blocking(move || {
-        crate::scrollback::read_pane_scrollback(&root, &pane)
-            .map(|raw| crate::scrollback::sanitize_scrollback_replay(&raw))
-    })
-    .await
-    .map_err(|err| format!("journal read task failed: {err}"))?
-    .unwrap_or_default();
-    channel.discard();
-    write_pane_bytes(send, &replay).await
+    loop {
+        let root = state.config().workspace_root.clone();
+        let pane = pane_id.to_string();
+        let replay = tokio::task::spawn_blocking(move || {
+            crate::scrollback::read_pane_scrollback(&root, &pane)
+                .map(|raw| crate::scrollback::sanitize_scrollback_replay(&raw))
+        })
+        .await
+        .map_err(|err| format!("journal read task failed: {err}"))?
+        .unwrap_or_default();
+        write_pane_bytes(send, &replay).await?;
+        let (pending, gapped) = channel.drain();
+        if gapped {
+            frames::write_frame(send, FRAME_TAG_PANE_RESET, &[]).await?;
+            continue;
+        }
+        return write_pane_bytes(send, &pending).await;
+    }
 }
 
 async fn write_pane_bytes(send: &mut SendStream, data: &[u8]) -> Result<(), String> {
@@ -547,7 +555,8 @@ pub(crate) fn hostname() -> String {
 mod tests {
     use super::*;
     use crate::remote::endpoint::{
-        DeviceGate, RemoteControlRuntime, RemoteReach, tests::loopback_addr,
+        DeviceGate, RemoteControlRuntime, RemoteReach,
+        tests::{connected_pair, loopback_addr},
     };
     use crate::state::test_support;
     use iroh::endpoint::presets;
@@ -1147,6 +1156,45 @@ mod tests {
             connection.close(0u32.into(), b"done");
         });
         server.shutdown();
+    }
+
+    #[test]
+    fn pane_prime_preserves_live_bytes_outside_the_journal_snapshot() {
+        let _serial = test_support::net_serial_guard();
+        let state = fixture_state("prime-seam");
+        crate::scrollback::append_pane_scrollback(
+            &state.config().workspace_root,
+            "pane-1",
+            b"journal-seed",
+        )
+        .unwrap();
+        let (fanout_id, channels) = state.remote_fanout().register_session();
+        let channel = channels.register_pane("pane-1");
+        state
+            .remote_fanout()
+            .publish_pane_bytes("pane-1", b"live-seam");
+
+        runtime().block_on(async {
+            let (client, server, _guard) = connected_pair().await;
+            let mut send = server.open_uni().await.expect("open stream");
+            let receive = client.accept_uni();
+            prime_from_journal(&state, "pane-1", &mut send, &channel)
+                .await
+                .expect("prime");
+            send.finish().expect("finish stream");
+            let mut recv = receive.await.expect("accept stream");
+            let mut bytes = Vec::new();
+            while let Some(frame) = frames::read_frame(&mut recv, MAX_PANE_FRAME_BYTES)
+                .await
+                .expect("read frame")
+            {
+                assert_eq!(frame.tag, FRAME_TAG_PANE_BYTES);
+                bytes.extend(frame.payload);
+            }
+            assert!(contains(&bytes, b"journal-seed"));
+            assert!(contains(&bytes, b"live-seam"));
+        });
+        state.remote_fanout().unregister_session(fanout_id);
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {

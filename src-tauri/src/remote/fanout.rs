@@ -65,10 +65,6 @@ impl PaneRing {
         let data = self.data.drain(..).collect();
         (data, gapped)
     }
-
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty() && !self.gap
-    }
 }
 
 /// One subscribed pane's ring plus its pump's wakeup. Each pane stream has
@@ -93,14 +89,6 @@ impl PaneChannel {
             .lock()
             .map(|mut ring| ring.drain())
             .unwrap_or_default()
-    }
-
-    /// Discards everything pending (used before a gap re-prime, where the
-    /// journal replay supersedes the buffered fragment).
-    pub fn discard(&self) {
-        if let Ok(mut ring) = self.ring.lock() {
-            let _ = ring.drain();
-        }
     }
 }
 
