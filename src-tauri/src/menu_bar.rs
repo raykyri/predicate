@@ -18,6 +18,10 @@ const GROUP_HEADER_STATUS_INDICATOR_INSET: f64 = 38.0;
 #[serde(rename_all = "camelCase")]
 pub struct MenuBarSnapshot {
     pub groups: Vec<MenuBarGroup>,
+    /// Live remote-control sessions force the status item visible and add a
+    /// persistent label beside its icon.
+    #[serde(default)]
+    pub remote_sessions: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -133,7 +137,8 @@ pub fn menu_bar_set_visible(app: AppHandle, visible: bool) -> Result<(), String>
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let (menu, tab_items) = build_menu(&app, latest.as_ref()).map_err(|err| err.to_string())?;
-        create_tray(&app, &menu).map_err(|err| err.to_string())?;
+        let tray = create_tray(&app, &menu).map_err(|err| err.to_string())?;
+        apply_remote_indicator(&tray, latest.as_ref()).map_err(|err| err.to_string())?;
         decorate_inline_menu(&app, latest.as_ref());
 
         let mut applied = APPLIED_MENU_BAR
@@ -227,6 +232,7 @@ fn update_menu(app: &AppHandle, snapshot: MenuBarSnapshot) -> tauri::Result<()> 
         *applied = None;
         return Ok(());
     };
+    apply_remote_indicator(&tray, Some(&snapshot))?;
     if let Some(current) = applied.as_mut()
         && same_menu_structure(&current.snapshot, &snapshot)
         && current.tab_items.len()
@@ -247,6 +253,23 @@ fn update_menu(app: &AppHandle, snapshot: MenuBarSnapshot) -> tauri::Result<()> 
         snapshot,
         tab_items,
     });
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_remote_indicator(
+    tray: &tauri::tray::TrayIcon<tauri::Wry>,
+    snapshot: Option<&MenuBarSnapshot>,
+) -> tauri::Result<()> {
+    let sessions = snapshot.map_or(0, |snapshot| snapshot.remote_sessions);
+    if sessions == 0 {
+        tray.set_title(None::<&str>)?;
+        tray.set_tooltip(Some("qmux"))?;
+    } else {
+        tray.set_title(Some("Remote"))?;
+        let noun = if sessions == 1 { "device" } else { "devices" };
+        tray.set_tooltip(Some(format!("qmux — {sessions} remote {noun} connected")))?;
+    }
     Ok(())
 }
 

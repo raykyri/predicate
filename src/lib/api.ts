@@ -284,6 +284,7 @@ export interface MenuBarGroup {
 
 export interface MenuBarSnapshot {
   groups: MenuBarGroup[];
+  remoteSessions: number;
 }
 
 export interface MenuBarSelectPaneEvent {

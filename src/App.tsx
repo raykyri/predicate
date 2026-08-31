@@ -5858,7 +5858,10 @@ function MainApp() {
         tabs: orphanTabs,
       });
     }
-    return { groups: snapshotGroups };
+    return {
+      groups: snapshotGroups,
+      remoteSessions: remoteControl.status.sessions.length,
+    };
   }, [
     activePane?.id,
     agentByPaneId,
@@ -5870,6 +5873,7 @@ function MainApp() {
     settings.codeMode,
     settings.showTabDirectories,
     terminalTitleByPane,
+    remoteControl.status.sessions.length,
   ]);
 
   // The snapshot memo recomputes whenever any input's identity changes (agents
@@ -5886,8 +5890,12 @@ function MainApp() {
   }, [menuBarSnapshot]);
 
   useEffect(() => {
-    void setMenuBarVisible(settings.showMenuBarIcon).catch(() => undefined);
-  }, [settings.showMenuBarIcon]);
+    // A live remote controller must remain visible even when the ordinary
+    // menu-bar preference is off, so the Mac always shows that it is being
+    // driven from another device.
+    const remoteActive = remoteControl.status.sessions.length > 0;
+    void setMenuBarVisible(settings.showMenuBarIcon || remoteActive).catch(() => undefined);
+  }, [remoteControl.status.sessions.length, settings.showMenuBarIcon]);
 
   useEffect(() => {
     agentsRef.current = agents;
