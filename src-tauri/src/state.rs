@@ -5814,6 +5814,57 @@ impl AppState {
         self.detach_research_pane_inner(pane_id, None)
     }
 
+    fn detach_research_pane_locked(
+        model: &mut Model,
+        pane_id: &str,
+        removed_agent: Option<(&str, AgentStatus, bool)>,
+    ) -> Option<ResearchNode> {
+        let node_id = model
+            .research_nodes
+            .values()
+            .find(|node| node.pane_id.as_deref() == Some(pane_id))
+            .map(|node| node.id.clone())?;
+        let now = now_millis();
+        // An adapter whose process exits the moment its turn ends can race its
+        // own Done notification. If the agent already reported end-of-turn,
+        // the run finished; otherwise pane loss is a failure.
+        let agent_finished = model
+            .research_nodes
+            .get(&node_id)
+            .and_then(|node| node.agent_id.as_deref())
+            .and_then(|agent_id| {
+                removed_agent
+                    .filter(|(removed_id, _, _)| *removed_id == agent_id)
+                    .map(|(_, status, active)| (status, active))
+                    .or_else(|| {
+                        model.agents.get(agent_id).map(|agent| {
+                            let active = model
+                                .agent_active_subagents
+                                .get(agent_id)
+                                .is_some_and(|active| !active.is_empty());
+                            (agent.status, active)
+                        })
+                    })
+            })
+            .is_some_and(|(status, active)| {
+                matches!(status, AgentStatus::Done | AgentStatus::Idle) && !active
+            });
+        let node = model.research_nodes.get_mut(&node_id)?;
+        node.pane_id = None;
+        if node.status.is_active() {
+            if agent_finished {
+                node.status = ResearchNodeStatus::Complete;
+            } else {
+                node.status = ResearchNodeStatus::Failed;
+                node.error = Some("Research process exited before completion".to_string());
+            }
+            node.completed_at = Some(now);
+        }
+        let node = node.clone();
+        touch_research_tree_locked(model, &node.tree_id, now);
+        Some(node)
+    }
+
     /// `removed_agent` carries the bound agent's id and status as captured by
     /// `remove_pane` before it pruned the record: by the time the detach runs
     /// on the teardown path the agent is already gone from the model (and on
@@ -5830,55 +5881,7 @@ impl AppState {
                 .model
                 .lock()
                 .map_err(|_| "model lock poisoned".to_string())?;
-            let node_id = model
-                .research_nodes
-                .values()
-                .find(|node| node.pane_id.as_deref() == Some(pane_id))
-                .map(|node| node.id.clone());
-            node_id.and_then(|node_id| {
-                let now = now_millis();
-                // An adapter whose process exits the moment its turn ends can
-                // race its own Done notification: the pane teardown lands here
-                // while the node is still nominally active. If the agent has
-                // already reported end-of-turn, the run *finished* — settling
-                // it Failed would brand a delivered answer, and monotonic
-                // terminal statuses would keep it branded forever.
-                let agent_finished = model
-                    .research_nodes
-                    .get(&node_id)
-                    .and_then(|node| node.agent_id.as_deref())
-                    .and_then(|agent_id| {
-                        removed_agent
-                            .filter(|(removed_id, _, _)| *removed_id == agent_id)
-                            .map(|(_, status, active)| (status, active))
-                            .or_else(|| {
-                                model.agents.get(agent_id).map(|agent| {
-                                    let active = model
-                                        .agent_active_subagents
-                                        .get(agent_id)
-                                        .is_some_and(|active| !active.is_empty());
-                                    (agent.status, active)
-                                })
-                            })
-                    })
-                    .is_some_and(|(status, active)| {
-                        matches!(status, AgentStatus::Done | AgentStatus::Idle) && !active
-                    });
-                let node = model.research_nodes.get_mut(&node_id)?;
-                node.pane_id = None;
-                if node.status.is_active() {
-                    if agent_finished {
-                        node.status = ResearchNodeStatus::Complete;
-                    } else {
-                        node.status = ResearchNodeStatus::Failed;
-                        node.error = Some("Research process exited before completion".to_string());
-                    }
-                    node.completed_at = Some(now);
-                }
-                let node = node.clone();
-                touch_research_tree_locked(&mut model, &node.tree_id, now);
-                Some(node)
-            })
+            Self::detach_research_pane_locked(&mut model, pane_id, removed_agent)
         };
         if let Some(node) = &updated {
             self.persist();
@@ -7509,7 +7512,7 @@ impl AppState {
         // tell a finished run (process exits at end of turn) from a crashed
         // one; reading the model there is too late.
         let mut departing_agent: Option<(String, AgentStatus, bool)> = None;
-        let removed_group_id = {
+        let (removed_group_id, detached_research_node) = {
             let mut model = self
                 .inner
                 .model
@@ -7621,10 +7624,21 @@ impl AppState {
                 }
             }
 
+            // Detach the research node before releasing the model lock. A
+            // concurrent snapshot must never observe a missing pane while its
+            // research run still points at that pane id.
+            let detached_research_node = Self::detach_research_pane_locked(
+                &mut model,
+                pane_id,
+                departing_agent
+                    .as_ref()
+                    .map(|(agent_id, status, active)| (agent_id.as_str(), *status, *active)),
+            );
             normalize_pane_splits_locked(&mut model);
-            removed_group_id.filter(|group_id| {
+            let removed_group_id = removed_group_id.filter(|group_id| {
                 remove_group_without_open_panes_locked(&mut model, group_id, true)
-            })
+            });
+            (removed_group_id, detached_research_node)
         };
         // The pane's control-socket token is captured by its in-pane process as
         // QMUX_TOKEN; once the pane is gone for good it can never legitimately be used
@@ -7650,13 +7664,13 @@ impl AppState {
         for info in self.unregister_shell_agent_jobs_for_pane(pane_id) {
             crate::shell_jobs::emit_job_removed(self, &info);
         }
-        if let Err(err) = self.detach_research_pane_inner(
-            pane_id,
-            departing_agent
-                .as_ref()
-                .map(|(agent_id, status, active)| (agent_id.as_str(), *status, *active)),
-        ) {
-            eprintln!("qmux: failed to detach research pane {pane_id}: {err}");
+        if let Some(node) = detached_research_node {
+            self.emit(QmuxEvent::new(
+                "research.node.updated",
+                None,
+                None,
+                json!({ "node": node }),
+            ));
         }
         if !self.inner.exit_teardown_started.load(Ordering::SeqCst)
             && let Err(err) = remove_pane_scrollback(&self.inner.config.workspace_root, pane_id)
