@@ -2,8 +2,8 @@ use crate::adapters::{ShellCommandIntegration, adapter_registry};
 use crate::events::QmuxEvent;
 use crate::scrollback::{append_pane_scrollback, read_pane_scrollback, sanitize_scrollback_replay};
 use crate::state::{
-    AppState, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus, SharedBacklog, SharedChild,
-    SharedWriter, ShellAgentResume,
+    AppState, HostPtyBackend, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus,
+    SharedBacklog, SharedChild, SharedWriter, ShellAgentResume,
 };
 use crate::turn_queue::{abort_fork_barrier_for_child, release_waiters_for_agent};
 use crate::workspace::{
@@ -1334,13 +1334,13 @@ fn spawn_portable_pty(
 
     let runtime = PaneRuntime {
         info: pane.clone(),
-        backend: PaneBackend::HostPty {
+        backend: PaneBackend::HostPty(HostPtyBackend {
             child: child.clone(),
             master,
             writer: writer.clone(),
             backlog: backlog.clone(),
             native_surface,
-        },
+        }),
         cwd_observation_seq: 0,
     };
 

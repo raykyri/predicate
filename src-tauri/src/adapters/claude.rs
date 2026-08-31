@@ -3114,7 +3114,7 @@ mod tests {
                     recovered: false,
                     depth: 0,
                 },
-                backend: crate::state::PaneBackend::HostPty {
+                backend: crate::state::PaneBackend::HostPty(crate::state::HostPtyBackend {
                     child: Arc::new(Mutex::new(Box::new(FakeChild))),
                     master: Arc::new(Mutex::new(pair.master)),
                     writer: Arc::new(Mutex::new(Box::new(RecordingWriter {
@@ -3122,7 +3122,7 @@ mod tests {
                     }))),
                     backlog: Default::default(),
                     native_surface: false,
-                },
+                }),
                 cwd_observation_seq: 0,
             })
             .unwrap();

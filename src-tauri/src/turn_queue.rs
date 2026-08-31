@@ -2042,13 +2042,13 @@ mod tests {
                 recovered: false,
                 depth: 0,
             },
-            backend: crate::state::PaneBackend::HostPty {
+            backend: crate::state::PaneBackend::HostPty(crate::state::HostPtyBackend {
                 child: Arc::new(Mutex::new(Box::new(FakeChild))),
                 master: Arc::new(Mutex::new(pair.master)),
                 writer: Arc::new(Mutex::new(Box::new(io::sink()))),
                 backlog: Arc::new(Mutex::new(PaneBacklog::default())),
                 native_surface: false,
-            },
+            }),
             cwd_observation_seq: 0,
         }
     }

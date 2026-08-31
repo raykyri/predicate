@@ -32,17 +32,55 @@ pub type SharedMaster = Arc<Mutex<Box<dyn MasterPty + Send>>>;
 pub type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 pub type SharedBacklog = Arc<Mutex<PaneBacklog>>;
 
+pub struct HostPtyBackend {
+    pub child: SharedChild,
+    pub master: SharedMaster,
+    pub writer: SharedWriter,
+    pub backlog: SharedBacklog,
+    /// The process/PTY is owned by qmux, but output is rendered by a native
+    /// Ghostty host-managed surface instead of the webview renderer.
+    pub native_surface: bool,
+}
+
 pub enum PaneBackend {
     #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
-    HostPty {
-        child: SharedChild,
-        master: SharedMaster,
-        writer: SharedWriter,
-        backlog: SharedBacklog,
-        /// The process/PTY is owned by qmux, but output is rendered by a native
-        /// Ghostty host-managed surface instead of the webview renderer.
-        native_surface: bool,
-    },
+    HostPty(HostPtyBackend),
+}
+
+impl PaneBackend {
+    fn writer(&self) -> Option<SharedWriter> {
+        match self {
+            Self::HostPty(backend) => Some(backend.writer.clone()),
+        }
+    }
+
+    fn host_master(&self) -> Option<SharedMaster> {
+        match self {
+            Self::HostPty(backend) => Some(backend.master.clone()),
+        }
+    }
+
+    fn host_child(&self) -> Option<SharedChild> {
+        match self {
+            Self::HostPty(backend) => Some(backend.child.clone()),
+        }
+    }
+
+    fn backlog(&self) -> SharedBacklog {
+        match self {
+            Self::HostPty(backend) => backend.backlog.clone(),
+        }
+    }
+
+    fn uses_native_surface(&self) -> bool {
+        match self {
+            Self::HostPty(backend) => backend.native_surface,
+        }
+    }
+
+    fn has_host_pty(&self) -> bool {
+        matches!(self, Self::HostPty(_))
+    }
 }
 
 /// Upper bound on a pane's reported working directory. Comfortably above any
@@ -10400,9 +10438,10 @@ impl AppState {
             .model
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model.panes.get(pane_id).map(|pane| match &pane.backend {
-            PaneBackend::HostPty { writer, .. } => writer.clone(),
-        }))
+        Ok(model
+            .panes
+            .get(pane_id)
+            .and_then(|pane| pane.backend.writer()))
     }
 
     pub fn pane_master(&self, pane_id: &str) -> Result<Option<SharedMaster>, String> {
@@ -10411,9 +10450,10 @@ impl AppState {
             .model
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model.panes.get(pane_id).map(|pane| match &pane.backend {
-            PaneBackend::HostPty { master, .. } => master.clone(),
-        }))
+        Ok(model
+            .panes
+            .get(pane_id)
+            .and_then(|pane| pane.backend.host_master()))
     }
 
     pub fn pane_child(&self, pane_id: &str) -> Result<Option<SharedChild>, String> {
@@ -10422,9 +10462,10 @@ impl AppState {
             .model
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model.panes.get(pane_id).map(|pane| match &pane.backend {
-            PaneBackend::HostPty { child, .. } => child.clone(),
-        }))
+        Ok(model
+            .panes
+            .get(pane_id)
+            .and_then(|pane| pane.backend.host_child()))
     }
 
     /// Snapshots every live pane's id and child handle. Used by the app-exit
@@ -10439,8 +10480,10 @@ impl AppState {
         Ok(model
             .panes
             .iter()
-            .map(|(pane_id, pane)| match &pane.backend {
-                PaneBackend::HostPty { child, .. } => (pane_id.clone(), child.clone()),
+            .filter_map(|(pane_id, pane)| {
+                pane.backend
+                    .host_child()
+                    .map(|child| (pane_id.clone(), child))
             })
             .collect())
     }
@@ -10463,9 +10506,7 @@ impl AppState {
             .model
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model.panes.get(pane_id).map(|pane| match &pane.backend {
-            PaneBackend::HostPty { backlog, .. } => backlog.clone(),
-        }))
+        Ok(model.panes.get(pane_id).map(|pane| pane.backend.backlog()))
     }
 
     pub fn pane_is_native(&self, pane_id: &str) -> Result<Option<bool>, String> {
@@ -10474,9 +10515,10 @@ impl AppState {
             .model
             .lock()
             .map_err(|_| "model lock poisoned".to_string())?;
-        Ok(model.panes.get(pane_id).map(|pane| match &pane.backend {
-            PaneBackend::HostPty { native_surface, .. } => *native_surface,
-        }))
+        Ok(model
+            .panes
+            .get(pane_id)
+            .map(|pane| pane.backend.uses_native_surface()))
     }
 
     pub fn pane_has_host_pty(&self, pane_id: &str) -> Result<Option<bool>, String> {
@@ -10488,7 +10530,7 @@ impl AppState {
         Ok(model
             .panes
             .get(pane_id)
-            .map(|pane| matches!(pane.backend, PaneBackend::HostPty { .. })))
+            .map(|pane| pane.backend.has_host_pty()))
     }
 
     pub fn research_pane_accepts_input(&self, pane_id: &str) -> Result<Option<bool>, String> {
@@ -16388,13 +16430,13 @@ mod tests {
 
         PaneRuntime {
             info: sample_pane(id, None),
-            backend: PaneBackend::HostPty {
+            backend: PaneBackend::HostPty(HostPtyBackend {
                 child: Arc::new(Mutex::new(Box::new(FakeChild))),
                 master: Arc::new(Mutex::new(pair.master)),
                 writer: Arc::new(Mutex::new(Box::new(io::sink()))),
                 backlog: Default::default(),
                 native_surface: false,
-            },
+            }),
             cwd_observation_seq: 0,
         }
     }
