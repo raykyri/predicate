@@ -1014,7 +1014,13 @@ fn agent_permission(state: &AppState, context: &ControlContext, arguments: Value
         .pane_id
         .clone()
         .ok_or_else(|| ControlFailure::new("agent_exited", "agent has no live pane"))?;
-    crate::pty::write_pane(
+    if !state.claim_agent_permission(&args.id).map_err(internal)? {
+        return Err(ControlFailure::new(
+            "not_awaiting_permission",
+            "the permission prompt was already answered or is no longer waiting",
+        ));
+    }
+    if let Err(error) = crate::pty::write_pane(
         state,
         crate::pty::PaneWriteOptions {
             pane_id: pane_id.clone(),
@@ -1022,8 +1028,10 @@ fn agent_permission(state: &AppState, context: &ControlContext, arguments: Value
             paste: true,
             submit: true,
         },
-    )
-    .map_err(internal)?;
+    ) {
+        state.release_agent_permission_claim(&args.id);
+        return Err(internal(error));
+    }
     Ok(json!({
         "agentId": args.id,
         "paneId": pane_id,
@@ -2221,6 +2229,16 @@ mod tests {
         assert_eq!(approved["result"]["answered"], true);
         assert_eq!(approved["result"]["paneId"], "pane-1");
 
+        // A second device observing the same status snapshot cannot type a
+        // conflicting answer before the adapter reports the first decision.
+        let duplicate = call(
+            &state,
+            &session,
+            "agent.permission",
+            json!({ "id": "agent-1", "action": "deny" }),
+        );
+        assert_eq!(duplicate["error"]["code"], "not_awaiting_permission");
+
         // Only a prompt that is actually waiting may be answered: anything
         // else would type stray keys into a working agent.
         let not_waiting = call(
@@ -2245,6 +2263,21 @@ mod tests {
                 .contains("approve"),
             "the error should name the valid actions: {unknown}"
         );
+
+        // Leaving and re-entering the permission state opens a new prompt.
+        state
+            .set_agent_status("agent-1", AgentStatus::Running)
+            .unwrap();
+        state
+            .set_agent_status("agent-1", AgentStatus::AwaitingPermission)
+            .unwrap();
+        let next_prompt = call(
+            &state,
+            &session,
+            "agent.permission",
+            json!({ "id": "agent-1", "action": "deny" }),
+        );
+        assert_eq!(next_prompt["ok"], true, "new prompt failed: {next_prompt}");
     }
 
     #[test]

@@ -422,6 +422,10 @@ struct Model {
     /// touch this, so a delayed idle resolver can distinguish a new lifecycle hook from
     /// late transcript tailing. Transient (not persisted).
     agent_status_activity: HashMap<String, u64>,
+    /// Permission prompts already answered through the remote-control API.
+    /// Held until the agent leaves AwaitingPermission so two devices cannot
+    /// both pass a snapshot check and type conflicting answers into one pane.
+    agent_permission_claims: HashSet<String>,
     /// Adapter-reported background subagents still working for each parent.
     /// A parent Stop ends only its foreground turn while this is non-zero.
     /// Transient: hooks rebuild it for each running process.
@@ -7555,6 +7559,7 @@ impl AppState {
                 model.agent_send_tracking.remove(&agent_id);
                 model.agent_activity.remove(&agent_id);
                 model.agent_status_activity.remove(&agent_id);
+                model.agent_permission_claims.remove(&agent_id);
                 model.agent_active_subagents.remove(&agent_id);
                 model
                     .agents_with_reported_background_tasks
@@ -7953,6 +7958,7 @@ impl AppState {
                 .map_err(|_| "model lock poisoned".to_string())?;
             ensure_agent_thread_metadata(self, &mut model, &mut agent);
             let agent_for_sessions = agent.clone();
+            model.agent_permission_claims.remove(&agent.id);
             model.agents.insert(agent.id.clone(), agent);
             agent_for_sessions
         };
@@ -8022,6 +8028,9 @@ impl AppState {
             ensure_agent_thread_metadata(self, &mut model, &mut agent);
             bump_agent_activity_locked(&mut model, &agent.id);
             let agent_for_sessions = agent.clone();
+            if agent.status != AgentStatus::AwaitingPermission {
+                model.agent_permission_claims.remove(&agent.id);
+            }
             model.agents.insert(agent.id.clone(), agent);
             agent_for_sessions
         };
@@ -8052,6 +8061,9 @@ impl AppState {
                 Some(agent) => {
                     f(agent);
                     let updated = agent.clone();
+                    if agent.status != AgentStatus::AwaitingPermission {
+                        model.agent_permission_claims.remove(agent_id);
+                    }
                     bump_agent_activity_locked(&mut model, agent_id);
                     Some(updated)
                 }
@@ -8288,6 +8300,9 @@ impl AppState {
                     let status_changed = agent.status != status;
                     agent.status = status;
                     let updated = agent.clone();
+                    if status != AgentStatus::AwaitingPermission {
+                        model.agent_permission_claims.remove(agent_id);
+                    }
                     bump_agent_activity_locked(&mut model, agent_id);
                     bump_agent_status_activity_locked(&mut model, agent_id);
                     (Some(updated), status_changed)
@@ -8308,6 +8323,32 @@ impl AppState {
             self.persist();
         }
         Ok(updated)
+    }
+
+    /// Atomically claims the current permission prompt for one remote answer.
+    /// The claim survives the PTY write and is released by the next lifecycle
+    /// transition, closing the check-then-write race across remote sessions.
+    pub fn claim_agent_permission(&self, agent_id: &str) -> Result<bool, String> {
+        let mut model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        if model
+            .agents
+            .get(agent_id)
+            .is_none_or(|agent| agent.status != AgentStatus::AwaitingPermission)
+        {
+            return Ok(false);
+        }
+        Ok(model.agent_permission_claims.insert(agent_id.to_string()))
+    }
+
+    /// A failed pane write did not answer the prompt, so permit a retry.
+    pub fn release_agent_permission_claim(&self, agent_id: &str) {
+        if let Ok(mut model) = self.inner.model.lock() {
+            model.agent_permission_claims.remove(agent_id);
+        }
     }
 
     /// Records a background subagent starting under `agent_id`. The lifecycle
@@ -11457,6 +11498,7 @@ fn prune_agent_locked(model: &mut Model, agent_id: &str) {
     model.agent_send_tracking.remove(agent_id);
     model.agent_activity.remove(agent_id);
     model.agent_status_activity.remove(agent_id);
+    model.agent_permission_claims.remove(agent_id);
     model.agent_active_subagents.remove(agent_id);
     model.agent_escape_watch.remove(agent_id);
     model
