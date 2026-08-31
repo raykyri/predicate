@@ -1,15 +1,14 @@
-import { useCallback, useEffect, useLayoutEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   claimNativeTerminalPointerForWebDrag,
   respondToRemotePairRequest,
 } from "../lib/api";
 import { middleTruncate } from "../lib/remoteControl";
-import type { RemotePendingPair, RemoteStatus } from "../lib/remoteControl";
+import type { RemotePendingPair } from "../lib/remoteControl";
 import ConfirmDialogActionButton from "./ConfirmDialogActionButton";
 
 interface RemotePairDialogProps {
   request: RemotePendingPair | null;
-  onStatus: (status: RemoteStatus) => void;
   onDismiss: (requestId: string) => void;
 }
 
@@ -21,12 +20,12 @@ interface RemotePairDialogProps {
  */
 export default function RemotePairDialog({
   request,
-  onStatus,
   onDismiss,
 }: RemotePairDialogProps) {
   const [readOnly, setReadOnly] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const respondingRef = useRef(false);
   const requestId = request?.requestId ?? null;
 
   // Each request answers for itself: never inherit the last one's read-only box.
@@ -34,6 +33,7 @@ export default function RemotePairDialog({
     setReadOnly(false);
     setBusy(false);
     setError(null);
+    respondingRef.current = false;
   }, [requestId]);
 
   // The backdrop can cover a native Ghostty surface, whose event monitor eats
@@ -47,20 +47,22 @@ export default function RemotePairDialog({
 
   const respond = useCallback(
     async (approved: boolean) => {
-      if (!request) {
+      if (!request || respondingRef.current) {
         return;
       }
+      respondingRef.current = true;
       setBusy(true);
       setError(null);
       try {
-        onStatus(await respondToRemotePairRequest(request.requestId, approved, readOnly));
+        await respondToRemotePairRequest(request.requestId, approved, readOnly);
         onDismiss(request.requestId);
       } catch (err) {
         setError(String(err));
         setBusy(false);
+        respondingRef.current = false;
       }
     },
-    [onDismiss, onStatus, readOnly, request],
+    [onDismiss, readOnly, request],
   );
 
   if (!request) {
@@ -86,8 +88,8 @@ export default function RemotePairDialog({
       >
         <h2>Pair “{request.deviceName}”?</h2>
         <p>
-          It will see every terminal in this workspace and be able to send input, queue
-          turns, and answer permission prompts.
+          It will see every terminal in qmux and be able to send input, queue turns, and
+          answer permission prompts.
         </p>
         <div className="remote-pair-key" title={request.endpointId}>
           {middleTruncate(request.endpointId)}

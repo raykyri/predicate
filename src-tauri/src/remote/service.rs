@@ -264,12 +264,13 @@ pub fn remote_pair_respond(
     request_id: String,
     approved: bool,
     read_only: bool,
-) -> Result<RemoteStatus, String> {
+) -> Result<(), String> {
     require_runtime(&state)?.respond_pair(&request_id, approved, read_only)?;
-    // The pairing task persists the record and emits pair_resolved; the
-    // status refresh below races it harmlessly (the UI also listens for
-    // pair_resolved).
-    Ok(status(&state))
+    // The pairing task still has to persist the device before its status is
+    // authoritative. It emits pair_resolved after doing so; returning a
+    // snapshot here would race that write and could erase the new device in
+    // the UI.
+    Ok(())
 }
 
 #[tauri::command(async)]

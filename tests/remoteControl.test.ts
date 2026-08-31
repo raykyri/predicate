@@ -111,7 +111,7 @@ test("formats relative times from the clock it is handed", () => {
 test("writes the device and session status lines", () => {
   assert.equal(
     remoteDeviceStatusLine(device({ connected: true, lastSeen: NOW - 600_000 }), NOW),
-    "Connected · direct",
+    "Connected",
   );
   assert.equal(
     remoteDeviceStatusLine(device({ lastSeen: NOW - 600_000 }), NOW),

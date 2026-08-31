@@ -197,10 +197,13 @@
 }
 
 .remote-control-code {
+  max-width: 100%;
   color: var(--text-strong);
   font-family: var(--font-mono);
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   letter-spacing: 0.08em;
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .remote-control-pairing-hint {

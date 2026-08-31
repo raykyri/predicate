@@ -41,30 +41,31 @@ const asPendingPair = (payload: Record<string, unknown>): RemotePendingPair | nu
 export function useRemoteControl(): RemoteControlState {
   const [status, setStatus] = useState<RemoteStatus>(EMPTY_REMOTE_STATUS);
   const [pendingPair, setPendingPair] = useState<RemotePendingPair | null>(null);
-  // Bumped by every applied snapshot so a slow refresh can't overwrite a newer
-  // one that a mutation or an event already delivered.
-  const revisionRef = useRef(0);
+  // Every refresh gets a unique request number. Starting another refresh or
+  // receiving an authoritative event invalidates older responses.
+  const requestRef = useRef(0);
   const mountedRef = useRef(true);
 
   const applyStatus = useCallback((next: RemoteStatus) => {
     if (!mountedRef.current) {
       return;
     }
-    revisionRef.current += 1;
+    requestRef.current += 1;
     setStatus(next);
-    setPendingPair((current) => next.pendingPair ?? current);
+    setPendingPair(next.pendingPair);
   }, []);
 
   const refresh = useCallback(() => {
-    const revision = revisionRef.current;
+    const request = ++requestRef.current;
     void remoteStatusGet()
       .then((next) => {
-        if (mountedRef.current && revisionRef.current === revision) {
-          applyStatus(next);
+        if (mountedRef.current && requestRef.current === request) {
+          setStatus(next);
+          setPendingPair(next.pendingPair);
         }
       })
       .catch(() => undefined);
-  }, [applyStatus]);
+  }, []);
 
   const dismissPendingPair = useCallback((requestId?: string) => {
     setPendingPair((current) =>
@@ -73,8 +74,8 @@ export function useRemoteControl(): RemoteControlState {
   }, []);
 
   useEffect(() => {
+    let active = true;
     mountedRef.current = true;
-    refresh();
     const unlisten = listenToRemoteEvents((event) => {
       switch (event.type) {
         case "remote.status_changed":
@@ -83,6 +84,7 @@ export function useRemoteControl(): RemoteControlState {
         case "remote.pair_request": {
           const request = asPendingPair(event.payload);
           if (request) {
+            requestRef.current += 1;
             setPendingPair(request);
           }
           break;
@@ -101,7 +103,17 @@ export function useRemoteControl(): RemoteControlState {
           break;
       }
     });
+    // Install the listener before taking the initial snapshot so no event can
+    // land in the gap between those two operations.
+    void unlisten
+      .then(() => {
+        if (active) {
+          refresh();
+        }
+      })
+      .catch(() => undefined);
     return () => {
+      active = false;
       mountedRef.current = false;
       void unlisten.then((off) => off()).catch(() => undefined);
     };

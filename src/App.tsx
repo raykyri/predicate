@@ -18002,7 +18002,6 @@ function MainApp() {
 
       <RemotePairDialog
         request={remoteControl.pendingPair}
-        onStatus={remoteControl.applyStatus}
         onDismiss={remoteControl.dismissPendingPair}
       />
 

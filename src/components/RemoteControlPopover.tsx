@@ -129,10 +129,18 @@ export default function RemoteControlPopover({
     }
   }, []);
 
-  const stopPairing = useCallback(() => {
-    setPairing(null);
-    void run(cancelRemotePairing);
-  }, [run]);
+  const stopPairing = useCallback(async () => {
+    setError(null);
+    setPairingBusy(true);
+    try {
+      onStatus(await cancelRemotePairing());
+      setPairing(null);
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setPairingBusy(false);
+    }
+  }, [onStatus]);
 
   // One clock for the whole panel: the pairing countdown needs a second, and the
   // "last seen" lines get to be fresh for free. It only runs while the popover
@@ -347,15 +355,20 @@ export default function RemoteControlPopover({
             </span>
             .
           </p>
-          <button type="button" className="control-button" onClick={stopPairing}>
-            Cancel
+          <button
+            type="button"
+            className="control-button"
+            disabled={pairingBusy}
+            onClick={() => void stopPairing()}
+          >
+            {pairingBusy ? "Canceling…" : "Cancel"}
           </button>
         </div>
       ) : null}
 
       {sections.devicesEmpty ? (
         <p className="remote-control-empty">
-          No devices paired yet. A paired device sees every terminal in this workspace.
+          No devices paired yet. A paired device sees every terminal in qmux.
         </p>
       ) : null}
 

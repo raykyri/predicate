@@ -136,7 +136,7 @@ export function formatRemoteRelativeTime(timestampMs: number, now: number): stri
  */
 export function remoteDeviceStatusLine(device: RemoteDevice, now: number): string {
   if (device.connected) {
-    return "Connected · direct";
+    return "Connected";
   }
   if (device.lastSeen == null) {
     return "Never connected";

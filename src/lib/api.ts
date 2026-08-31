@@ -1726,7 +1726,7 @@ export function respondToRemotePairRequest(
   approved: boolean,
   readOnly: boolean,
 ) {
-  return invoke<RemoteStatus>("remote_pair_respond", { requestId, approved, readOnly });
+  return invoke<void>("remote_pair_respond", { requestId, approved, readOnly });
 }
 
 /** Drops a paired device; its next handshake fails. */
