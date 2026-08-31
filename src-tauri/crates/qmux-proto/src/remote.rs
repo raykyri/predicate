@@ -41,9 +41,10 @@ pub const FRAME_TAG_PANE_BYTES: u8 = 1;
 /// should clear its screen; the next bytes frame is a fresh full replay.
 pub const FRAME_TAG_PANE_RESET: u8 = 2;
 
-/// Cap on one JSON frame. Control payloads are small; transcript turns in
-/// `CallResult` are the largest legitimate payload.
-pub const MAX_JSON_FRAME_BYTES: u32 = 4 * 1024 * 1024;
+/// Cap on one JSON frame. A pane snapshot base64-encodes the scrollback file,
+/// which can transiently reach 12 MiB before its amortized trim; 20 MiB covers
+/// that legitimate response plus envelope overhead while remaining bounded.
+pub const MAX_JSON_FRAME_BYTES: u32 = 20 * 1024 * 1024;
 /// Cap on one pane byte frame; the fan-out slices larger runs.
 pub const MAX_PANE_FRAME_BYTES: u32 = 256 * 1024;
 

@@ -68,6 +68,13 @@ pub async fn write_frame(send: &mut SendStream, tag: u8, payload: &[u8]) -> Resu
 pub async fn write_json(send: &mut SendStream, frame: &RemoteFrame) -> Result<(), String> {
     let payload =
         serde_json::to_vec(frame).map_err(|err| format!("failed to encode remote frame: {err}"))?;
+    let payload_len = u32::try_from(payload.len())
+        .map_err(|_| "JSON frame payload is too large to encode".to_string())?;
+    if payload_len > MAX_JSON_FRAME_BYTES {
+        return Err(format!(
+            "JSON frame of {payload_len} bytes exceeds the {MAX_JSON_FRAME_BYTES}-byte cap"
+        ));
+    }
     write_frame(send, FRAME_TAG_JSON, &payload).await
 }
 
@@ -188,6 +195,22 @@ mod tests {
                 .err()
                 .expect("truncated frames must fail closed");
             assert!(error.contains("payload"), "unexpected error: {error}");
+        });
+    }
+
+    #[test]
+    fn outbound_json_uses_the_same_cap_as_inbound_json() {
+        let oversized = RemoteFrame::GoingAway {
+            reason: "x".repeat(MAX_JSON_FRAME_BYTES as usize + 1),
+        };
+        let _serial = crate::state::test_support::net_serial_guard();
+        runtime().block_on(async {
+            let (client, _server, _guard) = connected_pair().await;
+            let (mut send, _recv) = client.open_bi().await.expect("open stream");
+            let error = write_json(&mut send, &oversized)
+                .await
+                .expect_err("oversized outbound JSON must fail before writing");
+            assert!(error.contains("cap"), "unexpected error: {error}");
         });
     }
 }

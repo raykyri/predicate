@@ -28,6 +28,15 @@ use std::sync::{Arc, Mutex};
 pub const PANE_RING_CAP: usize = 256 * 1024;
 /// Queued events per session before it is marked desynced.
 pub const EVENT_QUEUE_CAP: usize = 1024;
+/// Retained serialized event bytes per session. Full transcript events can be
+/// individually large, so a count-only limit is not a memory bound.
+pub const EVENT_QUEUE_BYTE_CAP: usize = 4 * 1024 * 1024;
+
+#[derive(Default)]
+struct EventBuffer {
+    items: VecDeque<Arc<Value>>,
+    bytes: usize,
+}
 
 /// One subscribed pane's pending bytes.
 #[derive(Default)]
@@ -95,7 +104,7 @@ impl PaneChannel {
 /// The queues one remote session drains.
 pub struct SessionChannels {
     events_on: AtomicBool,
-    events: Mutex<VecDeque<Value>>,
+    events: Mutex<EventBuffer>,
     /// Set when the event queue overflowed; cleared when the pump has sent
     /// its one `Resync`. While set, nothing queues.
     desynced: AtomicBool,
@@ -108,7 +117,7 @@ impl SessionChannels {
     fn new() -> Self {
         Self {
             events_on: AtomicBool::new(false),
-            events: Mutex::new(VecDeque::new()),
+            events: Mutex::new(EventBuffer::default()),
             desynced: AtomicBool::new(false),
             panes: Mutex::new(HashMap::new()),
             events_notify: tokio::sync::Notify::new(),
@@ -117,6 +126,13 @@ impl SessionChannels {
 
     pub fn set_events_on(&self, on: bool) {
         self.events_on.store(on, Ordering::SeqCst);
+        if !on {
+            if let Ok(mut events) = self.events.lock() {
+                events.items.clear();
+                events.bytes = 0;
+            }
+            self.desynced.store(false, Ordering::SeqCst);
+        }
     }
 
     /// Registers a pane's channel, returning it for the pump. Replaces any
@@ -145,18 +161,23 @@ impl SessionChannels {
             .unwrap_or_default()
     }
 
-    fn push_event(&self, event: &Value) {
+    fn push_event(&self, event: &Arc<Value>, serialized_len: usize) {
         if !self.events_on.load(Ordering::SeqCst) || self.desynced.load(Ordering::SeqCst) {
             return;
         }
         let Ok(mut events) = self.events.lock() else {
             return;
         };
-        if events.len() >= EVENT_QUEUE_CAP {
-            events.clear();
+        if serialized_len > EVENT_QUEUE_BYTE_CAP
+            || events.items.len() >= EVENT_QUEUE_CAP
+            || events.bytes.saturating_add(serialized_len) > EVENT_QUEUE_BYTE_CAP
+        {
+            events.items.clear();
+            events.bytes = 0;
             self.desynced.store(true, Ordering::SeqCst);
         } else {
-            events.push_back(event.clone());
+            events.items.push_back(event.clone());
+            events.bytes += serialized_len;
         }
     }
 
@@ -175,17 +196,21 @@ impl SessionChannels {
     /// overflowed since the last drain: the pump must send exactly one
     /// `Resync` (any drained events predate the loss and are returned
     /// empty), after which queueing resumes.
-    pub fn drain_events(&self) -> (Vec<Value>, bool) {
+    pub fn drain_events(&self) -> (Vec<Arc<Value>>, bool) {
         if self.desynced.swap(false, Ordering::SeqCst) {
             if let Ok(mut events) = self.events.lock() {
-                events.clear();
+                events.items.clear();
+                events.bytes = 0;
             }
             return (Vec::new(), true);
         }
         let events = self
             .events
             .lock()
-            .map(|mut events| events.drain(..).collect())
+            .map(|mut events| {
+                events.bytes = 0;
+                events.items.drain(..).collect()
+            })
             .unwrap_or_default();
         (events, false)
     }
@@ -241,11 +266,15 @@ impl RemoteFanout {
         let Ok(value) = serde_json::to_value(event) else {
             return;
         };
+        let serialized_len = serde_json::to_vec(&value)
+            .map(|bytes| bytes.len())
+            .unwrap_or(EVENT_QUEUE_BYTE_CAP.saturating_add(1));
+        let value = Arc::new(value);
         let Ok(sessions) = self.sessions.lock() else {
             return;
         };
         for channels in sessions.values() {
-            channels.push_event(&value);
+            channels.push_event(&value, serialized_len);
             channels.events_notify.notify_one();
         }
     }
@@ -300,11 +329,11 @@ mod tests {
         channels.set_events_on(true);
         let event = json!({ "type": "turn.updated" });
         for _ in 0..EVENT_QUEUE_CAP {
-            channels.push_event(&event);
+            channels.push_event(&Arc::new(event.clone()), 24);
         }
         // The push that overflows clears the queue and stops queueing.
-        channels.push_event(&event);
-        channels.push_event(&event);
+        channels.push_event(&Arc::new(event.clone()), 24);
+        channels.push_event(&Arc::new(event.clone()), 24);
         let (events, resync) = channels.drain_events();
         assert!(resync, "overflow must surface as a resync");
         assert!(
@@ -312,10 +341,28 @@ mod tests {
             "events from before the loss must not be replayed"
         );
         // After the resync drain, queueing resumes.
-        channels.push_event(&event);
+        channels.push_event(&Arc::new(event.clone()), 24);
         let (events, resync) = channels.drain_events();
         assert!(!resync);
         assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn event_bytes_are_bounded_and_unsubscribe_clears_stale_state() {
+        let channels = SessionChannels::new();
+        channels.set_events_on(true);
+        let event = Arc::new(json!({ "type": "turn.updated" }));
+        channels.push_event(&event, EVENT_QUEUE_BYTE_CAP + 1);
+        let (events, resync) = channels.drain_events();
+        assert!(events.is_empty());
+        assert!(resync, "an individually oversized event must resync");
+
+        channels.push_event(&event, 32);
+        channels.set_events_on(false);
+        channels.set_events_on(true);
+        let (events, resync) = channels.drain_events();
+        assert!(events.is_empty());
+        assert!(!resync, "resubscribe must not replay pre-unsubscribe state");
     }
 
     #[test]

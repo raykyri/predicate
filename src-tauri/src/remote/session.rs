@@ -416,9 +416,14 @@ async fn event_pump(connection: Connection, channels: Arc<SessionChannels>) {
             return;
         }
         for event in events {
-            if frames::write_json(&mut send, &RemoteFrame::Event { event })
-                .await
-                .is_err()
+            if frames::write_json(
+                &mut send,
+                &RemoteFrame::Event {
+                    event: (*event).clone(),
+                },
+            )
+            .await
+            .is_err()
             {
                 return;
             }
