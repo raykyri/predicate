@@ -16,6 +16,7 @@ import type {
 } from "react";
 import {
   Check,
+  ChevronDown,
   ChevronLeft,
   ChevronsDownUp,
   ChevronsUpDown,
@@ -1194,6 +1195,24 @@ function tabTitleProviderLabel(provider: AppSettings["tabTitleProvider"]): strin
   return (
     TAB_TITLE_PROVIDER_OPTIONS.find((option) => option.id === provider)?.label ?? "Tab titles"
   );
+}
+
+function settingsAgentResearchSummary(adapter: AgentAdapterMetadata): string | null {
+  if (!adapter.supportsResearch) {
+    return null;
+  }
+  switch (adapter.researchReadiness) {
+    case "ready":
+      return "Research ready";
+    case "missing":
+      return "Research unavailable";
+    case "needsAuth":
+      return "Research sign-in needed";
+    case "unsupportedVersion":
+      return "Research needs update";
+    case "error":
+      return "Research needs attention";
+  }
 }
 
 /** Catalog colors are bare RRGGBB hex; CSS needs the leading '#'. */
@@ -2564,6 +2583,10 @@ function MainApp() {
   const [settingsTab, setSettingsTab] = useState<
     "basic" | "agents" | "theme" | "mouseCursor"
   >("basic");
+  const [expandedSettingsAgentIds, setExpandedSettingsAgentIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const settingsAgentExpansionSeededRef = useRef(false);
   const [openRouterKeyVisible, setOpenRouterKeyVisible] = useState(false);
   const [showHideShortcutSetting, setShowHideShortcutSetting] =
     useState<ShowHideShortcutSetting>({
@@ -10275,6 +10298,28 @@ function MainApp() {
   }, [refreshAdapterReadiness, settingsOpen, settingsTab]);
 
   useEffect(() => {
+    if (!settingsOpen || settingsTab !== "agents") {
+      settingsAgentExpansionSeededRef.current = false;
+      return;
+    }
+    if (settingsAgentExpansionSeededRef.current) {
+      return;
+    }
+    const adapters = readyAdaptersFirst(config?.adapters ?? []);
+    const initialAdapter =
+      adapters.find(
+        (adapter) =>
+          adapter.readiness !== "ready" ||
+          (adapter.supportsResearch && adapter.researchReadiness !== "ready"),
+      ) ?? adapters[0];
+    if (!initialAdapter) {
+      return;
+    }
+    settingsAgentExpansionSeededRef.current = true;
+    setExpandedSettingsAgentIds(new Set([initialAdapter.instanceId]));
+  }, [config?.adapters, settingsOpen, settingsTab]);
+
+  useEffect(() => {
     const refreshStaleTargets = () => {
       if (document.visibilityState === "hidden") {
         return;
@@ -15792,7 +15837,7 @@ function MainApp() {
           }}
         >
           <div
-            className={`settings-panel${settingsTab === "agents" ? " is-agents" : ""}`}
+            className="settings-panel"
             role="dialog"
             aria-modal="true"
             aria-labelledby="settings-title"
@@ -15884,109 +15929,133 @@ function MainApp() {
                   </p>
                 ) : null}
                 <div className="settings-agent-list">
-                  {readyAdaptersFirst(config?.adapters ?? []).map((adapter) => (
-                    <section
-                      className="settings-agent-card"
-                      key={adapter.instanceId}
-                      title={`${adapter.target.label} · ${adapter.instanceId}`}
-                    >
-                      <div className="settings-agent-card-header">
-                        <div className="settings-agent-identity">
-                          {ADAPTER_ICON_BY_ID[adapter.id] ? (
-                            <img
-                              src={ADAPTER_ICON_BY_ID[adapter.id]}
-                              className={`settings-agent-icon ${adapterIconClassName(adapter.id)}`}
-                              alt=""
-                              aria-hidden="true"
-                            />
-                          ) : null}
-                          <strong>{adapter.label}</strong>
-                        </div>
-                        <span className={`settings-agent-status is-${adapter.readiness}`}>
-                          {adapterReadinessLabel(adapter)}
-                        </span>
-                      </div>
-                      <dl className="settings-agent-details">
-                        <div>
-                          <dt>Binary</dt>
-                          <dd title={adapter.resolvedBinary ?? adapter.configuredBinary}>
-                            {adapter.resolvedBinary ?? adapter.configuredBinary}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Version</dt>
-                          <dd>{adapter.version ?? (adapter.resolvedBinary ? "Checking…" : "—")}</dd>
-                        </div>
-                        <div>
-                          <dt>Research</dt>
-                          <dd>
-                            {adapter.supportsResearch
-                              ? adapter.researchReadiness === "ready"
-                                ? "Ready"
-                                : adapter.researchReadiness === "unsupportedVersion"
-                                  ? "Needs update"
-                                  : adapterReadinessLabel(adapter)
-                              : "Not supported"}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Checked</dt>
-                          <dd>
-                            {adapter.checkedAt
-                              ? new Date(adapter.checkedAt).toLocaleTimeString([], {
-                                  hour: "numeric",
-                                  minute: "2-digit",
-                                })
-                              : "Not yet"}
-                          </dd>
-                        </div>
-                      </dl>
-                      {adapter.message ? (
-                        <p className="settings-agent-message">{adapter.message}</p>
-                      ) : null}
-                      <div className="settings-agent-actions">
-                        {adapter.updateCommand &&
-                        (adapter.readiness === "unsupportedVersion" ||
-                          adapter.researchReadiness === "unsupportedVersion") ? (
-                          <button
-                            type="button"
-                            className="control-button"
-                            onClick={() => {
-                              void writeClipboardText(adapter.updateCommand ?? "");
-                              showAppToast("Update command copied");
-                            }}
+                  {readyAdaptersFirst(config?.adapters ?? []).map((adapter) => {
+                    const isExpanded = expandedSettingsAgentIds.has(adapter.instanceId);
+                    const researchSummary = settingsAgentResearchSummary(adapter);
+                    const safeInstanceId = encodeURIComponent(adapter.instanceId);
+                    const summaryId = `settings-agent-summary-${safeInstanceId}`;
+                    const detailsId = `settings-agent-details-${safeInstanceId}`;
+                    return (
+                      <section
+                        className="settings-agent-card"
+                        key={adapter.instanceId}
+                        title={`${adapter.target.label} · ${adapter.instanceId}`}
+                      >
+                        <button
+                          id={summaryId}
+                          type="button"
+                          className="settings-agent-summary"
+                          aria-expanded={isExpanded}
+                          aria-controls={detailsId}
+                          onClick={() => {
+                            setExpandedSettingsAgentIds((current) => {
+                              const next = new Set(current);
+                              if (next.has(adapter.instanceId)) {
+                                next.delete(adapter.instanceId);
+                              } else {
+                                next.add(adapter.instanceId);
+                              }
+                              return next;
+                            });
+                          }}
+                        >
+                          <img
+                            src={ADAPTER_ICON_BY_ID[adapter.id]}
+                            className={`settings-agent-icon ${adapterIconClassName(adapter.id)}`}
+                            alt=""
+                            aria-hidden="true"
+                          />
+                          <span className="settings-agent-identity">
+                            <strong>{adapter.label}</strong>
+                            <span className="settings-agent-summary-meta">
+                              {adapter.version ?? (adapter.resolvedBinary ? "Checking…" : "—")}
+                              {researchSummary ? ` · ${researchSummary}` : null}
+                            </span>
+                          </span>
+                          <span className={`settings-agent-status is-${adapter.readiness}`}>
+                            {adapterReadinessLabel(adapter)}
+                          </span>
+                          <ChevronDown
+                            size={13}
+                            className={`settings-agent-chevron${isExpanded ? " is-open" : ""}`}
+                            aria-hidden="true"
+                          />
+                        </button>
+                        {isExpanded ? (
+                          <div
+                            id={detailsId}
+                            className="settings-agent-detail"
+                            role="region"
+                            aria-labelledby={summaryId}
                           >
-                            Copy update command
-                          </button>
+                            <dl className="settings-agent-details">
+                              <div>
+                                <dt>Binary</dt>
+                                <dd title={adapter.resolvedBinary ?? adapter.configuredBinary}>
+                                  {adapter.resolvedBinary ?? adapter.configuredBinary}
+                                </dd>
+                              </div>
+                              <div>
+                                <dt>Checked</dt>
+                                <dd>
+                                  {adapter.checkedAt
+                                    ? new Date(adapter.checkedAt).toLocaleTimeString([], {
+                                        hour: "numeric",
+                                        minute: "2-digit",
+                                      })
+                                    : "Not yet"}
+                                </dd>
+                              </div>
+                            </dl>
+                            {adapter.message ? (
+                              <p className="settings-agent-message">{adapter.message}</p>
+                            ) : null}
+                            <div className="settings-agent-actions">
+                              {adapter.updateCommand &&
+                              (adapter.readiness === "unsupportedVersion" ||
+                                adapter.researchReadiness === "unsupportedVersion") ? (
+                                <button
+                                  type="button"
+                                  className="control-button"
+                                  onClick={() => {
+                                    void writeClipboardText(adapter.updateCommand ?? "");
+                                    showAppToast("Update command copied");
+                                  }}
+                                >
+                                  Copy update command
+                                </button>
+                              ) : null}
+                              {adapter.loginCommand && adapter.readiness === "needsAuth" ? (
+                                <button
+                                  type="button"
+                                  className="control-button"
+                                  onClick={() => {
+                                    void writeClipboardText(adapter.loginCommand ?? "");
+                                    showAppToast("Sign-in command copied");
+                                  }}
+                                >
+                                  Copy sign-in command
+                                </button>
+                              ) : null}
+                              {adapter.installUrl ? (
+                                <button
+                                  type="button"
+                                  className="control-button"
+                                  onClick={() => {
+                                    void openExternalUrl(adapter.installUrl ?? "").catch((err) => {
+                                      setAdapterProbeError(unknownErrorMessage(err));
+                                    });
+                                  }}
+                                >
+                                  {adapter.readiness === "missing" ? "Install guide" : "Docs"}
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
                         ) : null}
-                        {adapter.loginCommand && adapter.readiness === "needsAuth" ? (
-                          <button
-                            type="button"
-                            className="control-button"
-                            onClick={() => {
-                              void writeClipboardText(adapter.loginCommand ?? "");
-                              showAppToast("Sign-in command copied");
-                            }}
-                          >
-                            Copy sign-in command
-                          </button>
-                        ) : null}
-                        {adapter.installUrl ? (
-                          <button
-                            type="button"
-                            className="control-button"
-                            onClick={() => {
-                              void openExternalUrl(adapter.installUrl ?? "").catch((err) => {
-                                setAdapterProbeError(unknownErrorMessage(err));
-                              });
-                            }}
-                          >
-                            {adapter.readiness === "missing" ? "Install guide" : "Provider docs"}
-                          </button>
-                        ) : null}
-                      </div>
-                    </section>
-                  ))}
+                      </section>
+                    );
+                  })}
                 </div>
                 <p className="settings-hint">
                   Custom executable paths can be set under <code>adapters.*.binary</code> in
