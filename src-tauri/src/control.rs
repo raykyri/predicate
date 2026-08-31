@@ -394,8 +394,7 @@ struct AgentPromptArgs {
 struct AgentSubmitArgs {
     id: String,
     text: String,
-    #[serde(default)]
-    mode: Option<String>,
+    mode: String,
 }
 
 #[derive(Deserialize)]
@@ -943,15 +942,14 @@ fn agent_submit(state: &AppState, context: &ControlContext, arguments: Value) ->
     let args: AgentSubmitArgs = parse(arguments, "agent.submit")?;
     require_write(context)?;
     ensure_agent_read(state, context, &args.id)?;
-    let mode = match args.mode.as_deref().unwrap_or("auto") {
-        "auto" => crate::turn_queue::SubmitAgentTurnMode::Auto,
+    let mode = match args.mode.as_str() {
         "send" => crate::turn_queue::SubmitAgentTurnMode::Send,
         "queue" => crate::turn_queue::SubmitAgentTurnMode::Queue,
         "steer" => crate::turn_queue::SubmitAgentTurnMode::Steer,
         other => {
             return Err(ControlFailure::new(
                 "invalid_argument",
-                format!("agent.submit mode must be auto, send, queue, or steer (got '{other}')"),
+                format!("agent.submit mode must be send, queue, or steer (got '{other}')"),
             ));
         }
     };
@@ -1986,7 +1984,10 @@ mod tests {
             ("agent.start", json!({})),
             ("agent.prompt", json!({ "id": "agent-1", "text": "hi" })),
             ("agent.release", json!({ "id": "agent-1" })),
-            ("agent.submit", json!({ "id": "agent-1", "text": "hi" })),
+            (
+                "agent.submit",
+                json!({ "id": "agent-1", "text": "hi", "mode": "send" }),
+            ),
             (
                 "agent.permission",
                 json!({ "id": "agent-1", "action": "approve" }),
@@ -2201,6 +2202,22 @@ mod tests {
             json!({ "id": "agent-1", "text": "x", "mode": "yeet" }),
         );
         assert_eq!(mode_error["error"]["code"], "invalid_argument");
+
+        let auto_error = call(
+            &state,
+            &session,
+            "agent.submit",
+            json!({ "id": "agent-1", "text": "x", "mode": "auto" }),
+        );
+        assert_eq!(auto_error["error"]["code"], "invalid_argument");
+
+        let missing_mode = call(
+            &state,
+            &session,
+            "agent.submit",
+            json!({ "id": "agent-1", "text": "x" }),
+        );
+        assert_eq!(missing_mode["error"]["code"], "invalid_argument");
     }
 
     #[test]
