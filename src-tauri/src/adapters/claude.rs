@@ -10,9 +10,10 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
+use crate::host::Host;
 use crate::pty::{
-    CommandPlan, InitialPaneSize, PaneMeta, SupportFile, agent_pane_envs, plan_to_spec,
-    recoverable_dir, spawn_pty,
+    CommandPlan, InitialPaneSize, PaneMeta, SupportFile, agent_pane_envs,
+    materialize_in_pane_support_files, plan_to_spec, recoverable_dir, spawn_pty,
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{
@@ -91,8 +92,13 @@ impl ClaudeAdapter {
     /// actually exists, so a checkout without one launches cleanly. This is the
     /// sole skill-injection vector: it points at a qmux-owned directory and never
     /// touches the user's `~/.claude` or the project's `.claude`.
-    fn plugin_dir_args(&self) -> Vec<String> {
-        if self.plugin_dir.is_dir() {
+    fn plugin_dir_args(&self, host: &Host) -> Vec<String> {
+        // The bundled plugin lives beside the qmux app. It is not implicitly
+        // present on an SSH host, and passing its Mac path would make Claude
+        // reject an otherwise valid remote launch. Lifecycle hooks are shipped
+        // separately as a pane-owned settings file; remote plugin installation
+        // can be added later without coupling basic terminal support to it.
+        if host.is_local() && self.plugin_dir.is_dir() {
             vec![
                 "--plugin-dir".to_string(),
                 self.plugin_dir.display().to_string(),
@@ -112,6 +118,40 @@ impl ClaudeAdapter {
         Ok(binary.display().to_string())
     }
 
+    fn host_for_group(&self, state: &AppState, group_id: &str) -> Result<Host, String> {
+        let group = state.group(group_id)?;
+        Ok(crate::host::for_group(
+            group.as_ref().and_then(|group| group.remote.as_ref()),
+        ))
+    }
+
+    fn binary_for_host(&self, host: &Host) -> Result<String, String> {
+        if host.is_local() {
+            self.ensure_binary()
+        } else if self.binary.trim().is_empty() {
+            Err("Claude adapter binary cannot be empty for a remote launch".to_string())
+        } else {
+            // Resolve on the machine that will execute it. `spawn_pty` hands
+            // this name to tmux on the far side; checking the local PATH here
+            // would turn a valid Linux install into a false negative (or leak
+            // a Mac-only absolute path into the command plan).
+            Ok(self.binary.clone())
+        }
+    }
+
+    fn cwd_for_host(
+        &self,
+        host: &Host,
+        path: &str,
+        missing_message: impl FnOnce() -> String,
+    ) -> Result<PathBuf, String> {
+        if host.is_local() {
+            recoverable_dir(path).ok_or_else(missing_message)
+        } else {
+            Ok(PathBuf::from(path))
+        }
+    }
+
     pub fn ensure_binary_for_sdk(&self) -> Result<String, String> {
         self.ensure_binary()
     }
@@ -128,6 +168,10 @@ impl AgentAdapter for ClaudeAdapter {
 
     fn configured_binary(&self) -> &str {
         &self.binary
+    }
+
+    fn supports_remote(&self) -> bool {
+        true
     }
 
     fn launch(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
@@ -333,7 +377,6 @@ impl ClaudeAdapter {
     }
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
-        let binary = self.ensure_binary()?;
         let options = ClaudeLaunchOptions::from_value(request.options)?;
         let resume_session_id = request
             .resume_session_id
@@ -386,7 +429,9 @@ impl ClaudeAdapter {
             .cwd
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&agent.worktree_dir));
-        if !cwd.is_dir() {
+        let host = self.host_for_group(state, &agent.group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        if host.is_local() && !cwd.is_dir() {
             let _ = mark_agent_failed(state, &agent.id);
             return Err(format!(
                 "Claude working directory {} does not exist",
@@ -406,7 +451,7 @@ impl ClaudeAdapter {
             "--settings".to_string(),
             settings_path.display().to_string(),
         ];
-        args.extend(self.plugin_dir_args());
+        args.extend(self.plugin_dir_args(&host));
 
         if let Some(model) = request.model.filter(|model| !model.trim().is_empty()) {
             args.push("--model".to_string());
@@ -492,7 +537,6 @@ impl ClaudeAdapter {
         use_worktree: bool,
         prompt: Option<&str>,
     ) -> Result<(PaneInfo, AgentInfo), String> {
-        let binary = self.ensure_binary()?;
         let session_id = source
             .session_id
             .clone()
@@ -535,7 +579,9 @@ impl ClaudeAdapter {
         agent.status = AgentStatus::Idle;
         state.update_agent(agent.clone())?;
 
-        let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
+        let host = self.host_for_group(state, &agent.group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        let cwd = self.cwd_for_host(&host, &agent.worktree_dir, || {
             format!(
                 "fork working directory {} does not exist",
                 agent.worktree_dir
@@ -556,7 +602,7 @@ impl ClaudeAdapter {
             "--settings".to_string(),
             settings_path.display().to_string(),
         ];
-        args.extend(self.plugin_dir_args());
+        args.extend(self.plugin_dir_args(&host));
         if let Some(model) = agent.model.clone().filter(|model| !model.trim().is_empty()) {
             args.push("--model".to_string());
             args.push(model);
@@ -635,9 +681,9 @@ impl ClaudeAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
-        let binary = self.ensure_binary()?;
-
-        let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
+        let host = self.host_for_group(state, &agent.group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        let cwd = self.cwd_for_host(&host, &agent.worktree_dir, || {
             format!(
                 "agent worktree {} no longer exists; relaunch manually",
                 agent.worktree_dir
@@ -649,7 +695,7 @@ impl ClaudeAdapter {
             "--settings".to_string(),
             settings_path.display().to_string(),
         ];
-        args.extend(self.plugin_dir_args());
+        args.extend(self.plugin_dir_args(&host));
 
         if let Some(model) = agent.model.clone().filter(|model| !model.trim().is_empty()) {
             args.push("--model".to_string());
@@ -706,7 +752,13 @@ impl ClaudeAdapter {
         restored.status = AgentStatus::Idle;
         state.update_agent(restored.clone())?;
 
-        if let Some(transcript_path) = restored.transcript_path.clone() {
+        // Remote transcript paths belong to the SSH host. Lifecycle hooks still
+        // drive status/queue state, but a local filesystem tail would only emit
+        // a misleading permanent "Transcript unavailable" notice. A transport-
+        // aware transcript reader is a separate capability from terminal launch.
+        if host.is_local()
+            && let Some(transcript_path) = restored.transcript_path.clone()
+        {
             start_transcript_tail(
                 state.clone(),
                 restored.id.clone(),
@@ -730,28 +782,28 @@ impl ClaudeAdapter {
         state: &AppState,
         request: PrepareShellAgentLaunchRequest,
     ) -> Result<PreparedShellAgentLaunch, String> {
-        let binary = self.ensure_binary()?;
         validate_claude_shell_args(&request.args)?;
 
         if !state.pane_exists(&request.pane_id)? {
             return Err(format!("pane {} was not found", request.pane_id));
         }
 
+        // A restart-driven resume (`claude --resume <id>`) rebinds the original agent
+        // for that session instead of minting a duplicate; any other invocation starts
+        // a fresh agent in the current directory.
+        let pane_group_id = state
+            .pane_group_id(&request.pane_id)?
+            .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
+        let host = self.host_for_group(state, &pane_group_id)?;
+        let binary = self.binary_for_host(&host)?;
         let cwd = PathBuf::from(&request.cwd);
-        if !cwd.is_dir() {
+        if host.is_local() && !cwd.is_dir() {
             return Err(format!(
                 "Claude working directory {} does not exist",
                 cwd.display()
             ));
         }
-
-        // A restart-driven resume (`claude --resume <id>`) rebinds the original agent
-        // for that session instead of minting a duplicate; any other invocation starts
-        // a fresh agent in the current directory.
         let cwd_str = cwd.display().to_string();
-        let pane_group_id = state
-            .pane_group_id(&request.pane_id)?
-            .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
         let resume_session_id = claude_resume_session_id(&request.args).map(str::to_string);
         let fork_point = claude_fork_source_session_id(&request.args).map(str::to_string);
         let shell_model = shell_cli_model(&request.args);
@@ -795,19 +847,74 @@ impl ClaudeAdapter {
             &cwd_str,
         )?;
         let agent = apply_shell_cli_model(state, agent, &request.args)?;
+        let agent = if host.is_local() {
+            agent
+        } else {
+            state
+                .mutate_agent(&agent.id, |agent| agent.transcript_path = None)?
+                .ok_or_else(|| "prepared remote Claude agent disappeared".to_string())?
+        };
+        let envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
+        let remote_identity = if host.is_local() {
+            None
+        } else {
+            Some(
+                state
+                    .list_panes()?
+                    .into_iter()
+                    .find(|pane| pane.id == request.pane_id)
+                    .and_then(|pane| pane.remote_session)
+                    .ok_or_else(|| {
+                        format!(
+                            "remote pane {} is missing its tmux session identity",
+                            request.pane_id
+                        )
+                    })?,
+            )
+        };
+        let support_scope = remote_identity
+            .as_ref()
+            .map(|identity| identity.tmux_session.as_str())
+            .unwrap_or(request.pane_id.as_str());
         // The in-shell launch is exec'd by the CLI supervisor as soon as this
         // response returns — there is no PTY-spawn step in between to
-        // materialize support files, so write the hook settings eagerly here.
+        // materialize support files. Route the tiny settings plan through the
+        // owning pane's host so a remote shell receives remote paths and its
+        // configured qmux-cli in the generated hook commands.
         let settings_path = match hook_settings_support_file(state.config(), &request.pane_id)
             .and_then(|(settings_path, hook_settings)| {
-                crate::pty::materialize_support_files(&[hook_settings])?;
-                Ok(settings_path)
+                let mut support_plan = CommandPlan {
+                    program: binary.clone(),
+                    args: vec![settings_path.display().to_string()],
+                    cwd: cwd.clone(),
+                    envs: envs.clone(),
+                    support_files: vec![hook_settings],
+                    support_file_fallback: None,
+                };
+                materialize_in_pane_support_files(
+                    &host,
+                    &request.pane_id,
+                    support_scope,
+                    &mut support_plan,
+                )?;
+                support_plan
+                    .args
+                    .into_iter()
+                    .next()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| "Claude hook settings path was lost during provisioning".into())
             }) {
             Ok(settings_path) => settings_path,
             Err(err) => {
                 let _ = mark_agent_failed(state, &agent.id);
                 return Err(err);
             }
+        };
+        let launch_envs = match remote_identity.as_ref() {
+            Some(identity) => {
+                host.tmux_pane_envs(identity, &state.pane_remote_token(&request.pane_id)?, &envs)?
+            }
+            None => envs,
         };
         let agent = attach_agent_pane(state, &agent.id, request.pane_id.clone())?;
         let agent = if !args_contain_prompt(&request.args) {
@@ -824,7 +931,6 @@ impl ClaudeAdapter {
             agent
         };
 
-        let envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
         let agent_id = agent.id.clone();
         let worktree_dir = agent.worktree_dir.clone();
         state.emit(QmuxEvent::new(
@@ -838,14 +944,14 @@ impl ClaudeAdapter {
             "--settings".to_string(),
             settings_path.display().to_string(),
         ];
-        args.extend(self.plugin_dir_args());
+        args.extend(self.plugin_dir_args(&host));
         args.extend(request.args);
 
         Ok(PreparedShellAgentLaunch {
             binary,
             cwd: worktree_dir,
             args,
-            envs: envs
+            envs: launch_envs
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
@@ -884,22 +990,29 @@ impl ClaudeAdapter {
                 if let Some(current) = agent.as_ref() {
                     let session_id = super::string_field(&notification.payload, "session_id")
                         .or_else(|| super::string_field(&notification.payload, "sessionId"));
-                    let transcript_path =
-                        super::string_field(&notification.payload, "transcript_path")
-                            .or_else(|| {
-                                super::string_field(&notification.payload, "transcriptPath")
-                            })
-                            // This payload arrives over the control socket under the pane's
-                            // token, so a prompt-injected agent can forge a SessionStart.
-                            // Validate the path before binding and tailing it — otherwise it
-                            // could point the reader at an unrelated file (forging the
-                            // timeline the UI shows as an audit surface) or at a device/FIFO.
-                            .filter(|candidate| {
-                                hook_transcript_path_acceptable(
-                                    current.transcript_path.as_deref(),
-                                    candidate,
-                                )
-                            });
+                    // A remote path names the SSH host's filesystem, never the Mac's.
+                    // Do not persist it as `transcript_path`: transcript.append and the
+                    // tailer interpret that field locally. Remote Claude still records
+                    // its session id, matching the existing Codex remote behavior.
+                    let runs_locally = agent_runs_locally(state, current);
+                    let transcript_path = runs_locally
+                        .then(|| {
+                            super::string_field(&notification.payload, "transcript_path").or_else(
+                                || super::string_field(&notification.payload, "transcriptPath"),
+                            )
+                        })
+                        .flatten()
+                        // This payload arrives over the control socket under the pane's
+                        // token, so a prompt-injected agent can forge a SessionStart.
+                        // Validate the path before binding and tailing it — otherwise it
+                        // could point the reader at an unrelated file (forging the
+                        // timeline the UI shows as an audit surface) or at a device/FIFO.
+                        .filter(|candidate| {
+                            hook_transcript_path_acceptable(
+                                current.transcript_path.as_deref(),
+                                candidate,
+                            )
+                        });
                     // A fork (`--resume <src> --fork-session`) can deliver a SessionStart
                     // still carrying the *source* session's id/transcript (stale hook
                     // metadata; the forked session's id can never legitimately equal
@@ -935,13 +1048,18 @@ impl ClaudeAdapter {
                             // which would silently freeze the timeline while the agent runs.
                             if let Some(transcript_path) = transcript_path {
                                 agent.transcript_path = Some(transcript_path);
+                            } else if !runs_locally {
+                                // Also erase a path persisted by a pre-fix build.
+                                // Remote paths are never local transcript bindings.
+                                agent.transcript_path = None;
                             }
                             // A session starting doesn't mean a turn is running. Keep
                             // status unchanged here; the first real prompt/tool hook
                             // promotes the agent to Running.
                         })?;
-                        if let Some(transcript_path) =
-                            updated.and_then(|agent| agent.transcript_path)
+                        if agent_runs_locally(state, current)
+                            && let Some(transcript_path) =
+                                updated.and_then(|agent| agent.transcript_path)
                         {
                             start_transcript_tail(
                                 state.clone(),
@@ -1980,6 +2098,18 @@ fn adopt_forked_session_identity(
     else {
         return Ok(());
     };
+    if !agent_runs_locally(state, current) {
+        // Remote transcript paths are meaningful only on the SSH host. Adopt the
+        // session identity needed for resume/fork, but never turn a hook-controlled
+        // remote pathname into a local transcript destination.
+        state.mutate_agent(&current.id, |agent| {
+            if unbound_or_stale(agent.session_id.as_deref()) {
+                agent.session_id = Some(session_id.clone());
+                agent.transcript_path = None;
+            }
+        })?;
+        return Ok(());
+    }
     let Some(transcript_path) = super::string_field(payload, "transcript_path")
         .or_else(|| super::string_field(payload, "transcriptPath"))
         .filter(|candidate| {
@@ -2001,10 +2131,11 @@ fn adopt_forked_session_identity(
     })?;
     // Tail only if our pair actually landed (ours, or an identical concurrent
     // adoption — start_transcript_tail dedupes per path either way).
-    if updated
-        .as_ref()
-        .and_then(|agent| agent.transcript_path.as_deref())
-        == Some(transcript_path.as_str())
+    if agent_runs_locally(state, current)
+        && updated
+            .as_ref()
+            .and_then(|agent| agent.transcript_path.as_deref())
+            == Some(transcript_path.as_str())
     {
         start_transcript_tail(
             state.clone(),
@@ -2014,6 +2145,29 @@ fn adopt_forked_session_identity(
         );
     }
     Ok(())
+}
+
+fn agent_runs_locally(state: &AppState, agent: &AgentInfo) -> bool {
+    // Either durable group metadata or the live pane backend is sufficient to
+    // classify an agent as remote. Requiring a live, non-remote pane for the
+    // positive result makes missing/corrupt state fail closed for local IO.
+    if state
+        .group(&agent.group_id)
+        .ok()
+        .flatten()
+        .is_some_and(|group| group.remote.is_some())
+    {
+        return false;
+    }
+    let Some(pane_id) = agent.pane_id.as_deref() else {
+        return false;
+    };
+    state.list_panes().ok().is_some_and(|panes| {
+        panes
+            .iter()
+            .find(|pane| pane.id == pane_id)
+            .is_some_and(|pane| pane.remote_session.is_none())
+    })
 }
 
 /// Whether a transcript path reported by a Claude hook notification may be bound.
@@ -2571,6 +2725,7 @@ mod tests {
     };
     use crate::state::{AgentSendSource, PaneInfo, PaneRuntime, PaneStatus};
     use crate::transcript::TurnBlock;
+    use crate::workspace::{GroupInfo, RemoteMultiplexer, RemoteRef, WorkspaceScope};
     use portable_pty::{Child, ChildKiller, ExitStatus, PtySize, native_pty_system};
     use std::env;
     use std::io::{self, Write};
@@ -2920,6 +3075,38 @@ mod tests {
     }
 
     #[test]
+    fn remote_claude_uses_remote_binary_and_omits_the_local_plugin() {
+        let plugin_dir = unique_test_dir("qmux-claude-local-plugin");
+        let adapter = ClaudeAdapter {
+            binary: "/opt/remote/bin/claude".to_string(),
+            plugin_dir: plugin_dir.clone(),
+        };
+        let host = Host::Remote(crate::host::RemoteTarget {
+            id: "remote-1".to_string(),
+            label: "builder".to_string(),
+            ssh: "builder.example".to_string(),
+            qmux_cli: "/opt/remote/bin/qmux-cli".to_string(),
+            workspace_root: Some("/srv/qmux".to_string()),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+        });
+
+        assert!(AgentAdapter::supports_remote(&adapter));
+        assert_eq!(
+            adapter.binary_for_host(&host).unwrap(),
+            "/opt/remote/bin/claude"
+        );
+        assert!(adapter.plugin_dir_args(&host).is_empty());
+        assert_eq!(
+            adapter
+                .cwd_for_host(&host, "/srv/project", || "missing".to_string())
+                .unwrap(),
+            PathBuf::from("/srv/project")
+        );
+
+        fs::remove_dir_all(plugin_dir).ok();
+    }
+
+    #[test]
     fn hook_settings_are_written_under_qmux_workspace_root() {
         let workspace_root = unique_test_dir("qmux-claude-global-hooks");
         let project_dir = unique_test_dir("qmux-claude-project");
@@ -3107,6 +3294,8 @@ mod tests {
                     group_id: "group-1".to_string(),
                     cwd: "/tmp/qmux-hooks-test".to_string(),
                     active_workspace: None,
+                    remote_session: None,
+                    remote_connection: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,
@@ -3127,6 +3316,34 @@ mod tests {
             })
             .unwrap();
         bytes
+    }
+
+    fn install_remote_group(state: &AppState) {
+        state
+            .update_group(GroupInfo {
+                id: "group-1".to_string(),
+                name: "Remote".to_string(),
+                name_override: None,
+                dir: "/srv/qmux/project".to_string(),
+                managed_dir: "/tmp/qmux-hooks-test/group-1".to_string(),
+                base_repo: None,
+                base_ref: None,
+                parent_id: None,
+                created_at: 1,
+                collapsed: false,
+                scope: WorkspaceScope::Terminal,
+                imported_research_archive_id: None,
+                remote: Some(RemoteRef {
+                    id: "remote-1".to_string(),
+                    label: "Remote".to_string(),
+                    host: "remote.example".to_string(),
+                    multiplexer: RemoteMultiplexer::Tmux,
+                    qmux_cli: None,
+                    workspace_root: None,
+                }),
+                agents: vec!["agent-1".to_string()],
+            })
+            .unwrap();
     }
 
     fn hook(event: &str, payload: serde_json::Value) -> AdapterNotification {
@@ -3158,6 +3375,33 @@ mod tests {
             Ok(AdapterNotificationOutcome::Event(event)) => event,
             Err(err) => panic!("{err}"),
         }
+    }
+
+    #[test]
+    fn remote_session_start_records_identity_without_binding_a_local_transcript_path() {
+        let state = test_state();
+        install_remote_group(&state);
+        install_agent_pane(&state);
+        state
+            .mutate_agent("agent-1", |agent| {
+                agent.transcript_path = Some("/tmp/pre-fix-local.jsonl".to_string());
+            })
+            .unwrap();
+
+        let event = ingest(
+            &state,
+            hook(
+                "SessionStart",
+                json!({
+                    "session_id": "remote-session-1",
+                    "transcript_path": "/tmp/qmux-attacker-controlled.jsonl"
+                }),
+            ),
+        );
+        assert_eq!(event.event_type, "agent.session_start");
+        let agent = state.agent("agent-1").unwrap().unwrap();
+        assert_eq!(agent.session_id.as_deref(), Some("remote-session-1"));
+        assert_eq!(agent.transcript_path, None);
     }
 
     fn written_text(bytes: &Arc<Mutex<Vec<u8>>>) -> String {
@@ -3553,6 +3797,8 @@ mod tests {
             group_id: agent.group_id.clone(),
             cwd: dir.display().to_string(),
             active_workspace: None,
+            remote_session: None,
+            remote_connection: None,
             cols: 80,
             rows: 24,
             status: PaneStatus::Running,

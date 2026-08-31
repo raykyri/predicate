@@ -3637,6 +3637,8 @@ mod tests {
             group_id: group_id.to_string(),
             cwd: cwd.display().to_string(),
             active_workspace: None,
+            remote_session: None,
+            remote_connection: None,
             cols: 80,
             rows: 24,
             status: crate::state::PaneStatus::Running,

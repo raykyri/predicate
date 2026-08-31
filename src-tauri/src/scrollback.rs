@@ -3,11 +3,13 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, LazyLock, Mutex, MutexGuard};
 
 const SCROLLBACK_DIR: &str = "terminal";
 const STATE_DIR: &str = ".qmux";
 const LOG_EXTENSION: &str = "pty";
+const REMOTE_HISTORY_EXTENSION: &str = "remote-history";
 /// Per-pane cap for durable terminal output — the size a trim retains. This is
 /// intentionally byte-based: the legacy portable renderer parses these bytes on
 /// replay, and retaining the latest bytes gives the same practical behavior as
@@ -48,6 +50,7 @@ static PANE_LOGS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<PaneLog>>>>> =
 /// wait on when none are free.
 static TRIM_PERMITS: LazyLock<(Mutex<usize>, Condvar)> =
     LazyLock::new(|| (Mutex::new(MAX_CONCURRENT_TRIMS), Condvar::new()));
+static REMOTE_HISTORY_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// RAII trim slot: `acquire` blocks until one of the `MAX_CONCURRENT_TRIMS`
 /// slots is free, and `Drop` returns it — so an early `?` return or a panic
@@ -282,13 +285,71 @@ pub fn remove_pane_scrollback(workspace_root: &Path, pane_id: &str) -> Result<()
         log.file = None;
         log
     });
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+    remove_if_present(&path, "scrollback")?;
+    remove_if_present(
+        &pane_remote_history_path(workspace_root, pane_id)?,
+        "remote history",
+    )
+}
+
+/// The newest tmux history tail that qmux has already accepted into local
+/// scrollback. It is separate from the terminal byte log because it is an
+/// overlap checkpoint, not content to render. Keeping it beside the log gives
+/// app-restart recovery a durable de-duplication cursor without expanding the
+/// main session state or persisting large terminal text in JSON.
+pub fn read_remote_history_checkpoint(
+    workspace_root: &Path,
+    pane_id: &str,
+) -> Result<Vec<u8>, String> {
+    let path = pane_remote_history_path(workspace_root, pane_id)?;
+    match fs::read(&path) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(err) => Err(format!(
-            "failed to remove scrollback {}: {err}",
+            "failed to read remote history checkpoint {}: {err}",
             path.display()
         )),
+    }
+}
+
+pub fn write_remote_history_checkpoint(
+    workspace_root: &Path,
+    pane_id: &str,
+    checkpoint: &[u8],
+) -> Result<(), String> {
+    let path = pane_remote_history_path(workspace_root, pane_id)?;
+    prepare_scrollback_dir(&path)?;
+    let temp = path.with_extension(format!(
+        "{REMOTE_HISTORY_EXTENSION}.{}.{}.tmp",
+        std::process::id(),
+        REMOTE_HISTORY_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    write_synced(&temp, checkpoint).map_err(|err| {
+        format!(
+            "failed to write remote history checkpoint {}: {err}",
+            temp.display()
+        )
+    })?;
+    fs::rename(&temp, &path).map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        format!(
+            "failed to commit remote history checkpoint {}: {err}",
+            path.display()
+        )
+    })?;
+    if let Some(parent) = path.parent()
+        && let Ok(dir) = File::open(parent)
+    {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+fn remove_if_present(path: &Path, kind: &str) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(format!("failed to remove {kind} {}: {err}", path.display())),
     }
 }
 
@@ -313,6 +374,7 @@ pub fn remove_orphaned_scrollback(workspace_root: &Path, live_pane_ids: &HashSet
         return;
     };
     let log_suffix = format!(".{LOG_EXTENSION}");
+    let remote_history_suffix = format!(".{REMOTE_HISTORY_EXTENSION}");
     // Hold the map lock across the sweep so a pane created in the startup window
     // (its id absent from the captured `live_pane_ids`) is still recognized as
     // live the moment its reader opens an append handle, instead of racing us to
@@ -332,10 +394,23 @@ pub fn remove_orphaned_scrollback(workspace_root: &Path, live_pane_ids: &HashSet
             }
             continue;
         }
-        let Some(pane_id) = name.strip_suffix(&log_suffix) else {
+        let pane_id = name
+            .strip_suffix(&log_suffix)
+            .or_else(|| name.strip_suffix(&remote_history_suffix));
+        let Some(pane_id) = pane_id else {
+            if remote_history_scratch_writer_pid(name).is_some_and(|pid| {
+                pid != std::process::id() && !crate::persistence::process_is_alive(pid)
+            }) {
+                let _ = fs::remove_file(&path);
+            }
             continue;
         };
-        if live_pane_ids.contains(pane_id) || live_logs.contains_key(&path) {
+        let live_log_path = pane_scrollback_path(workspace_root, pane_id).ok();
+        if live_pane_ids.contains(pane_id)
+            || live_log_path
+                .as_ref()
+                .is_some_and(|path| live_logs.contains_key(path))
+        {
             continue;
         }
         let _ = fs::remove_file(&path);
@@ -353,6 +428,16 @@ fn trim_scratch_writer_pid(name: &str) -> Option<u32> {
         return None;
     }
     pid.parse().ok()
+}
+
+fn remote_history_scratch_writer_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_suffix(".tmp")?;
+    let (rest, sequence) = rest.rsplit_once('.')?;
+    sequence.parse::<u64>().ok()?;
+    let (rest, pid) = rest.rsplit_once('.')?;
+    rest.ends_with(&format!(".{REMOTE_HISTORY_EXTENSION}"))
+        .then(|| pid.parse().ok())
+        .flatten()
 }
 
 /// Rewrites the log down to the newest `SCROLLBACK_LOG_CAP` bytes. Only called
@@ -508,6 +593,18 @@ fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn pane_scrollback_path(workspace_root: &Path, pane_id: &str) -> Result<PathBuf, String> {
+    pane_terminal_path(workspace_root, pane_id, LOG_EXTENSION)
+}
+
+fn pane_remote_history_path(workspace_root: &Path, pane_id: &str) -> Result<PathBuf, String> {
+    pane_terminal_path(workspace_root, pane_id, REMOTE_HISTORY_EXTENSION)
+}
+
+fn pane_terminal_path(
+    workspace_root: &Path,
+    pane_id: &str,
+    extension: &str,
+) -> Result<PathBuf, String> {
     if pane_id.is_empty()
         || !pane_id
             .bytes()
@@ -518,7 +615,7 @@ fn pane_scrollback_path(workspace_root: &Path, pane_id: &str) -> Result<PathBuf,
     Ok(workspace_root
         .join(STATE_DIR)
         .join(SCROLLBACK_DIR)
-        .join(format!("{pane_id}.{LOG_EXTENSION}")))
+        .join(format!("{pane_id}.{extension}")))
 }
 
 /// Converts a captured PTY byte stream into inert historical output suitable
@@ -1197,6 +1294,30 @@ mod tests {
 
         assert!(append_pane_scrollback(&workspace, "../pane", b"x").is_err());
         assert!(read_pane_scrollback(&workspace, "pane/1").is_err());
+        assert!(write_remote_history_checkpoint(&workspace, "pane/1", b"x").is_err());
+    }
+
+    #[test]
+    fn remote_history_checkpoint_round_trips_privately_and_is_removed_with_scrollback() {
+        let workspace = temp_workspace();
+        write_remote_history_checkpoint(&workspace, "pane-1", b"history tail").unwrap();
+
+        let path = pane_remote_history_path(&workspace, "pane-1").unwrap();
+        assert_eq!(
+            read_remote_history_checkpoint(&workspace, "pane-1").unwrap(),
+            b"history tail"
+        );
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+
+        remove_pane_scrollback(&workspace, "pane-1").unwrap();
+        assert!(
+            read_remote_history_checkpoint(&workspace, "pane-1")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1229,6 +1350,8 @@ mod tests {
         let dead_path = pane_scrollback_path(&workspace, "pane-dead").unwrap();
         fs::create_dir_all(dead_path.parent().unwrap()).unwrap();
         fs::write(&dead_path, b"drop me").unwrap();
+        write_remote_history_checkpoint(&workspace, "pane-live", b"keep checkpoint").unwrap();
+        write_remote_history_checkpoint(&workspace, "pane-dead", b"drop checkpoint").unwrap();
 
         let live: HashSet<String> = ["pane-live".to_string()].into_iter().collect();
         remove_orphaned_scrollback(&workspace, &live);
@@ -1237,7 +1360,17 @@ mod tests {
             read_pane_scrollback(&workspace, "pane-live").unwrap(),
             b"keep me"
         );
+        assert_eq!(
+            read_remote_history_checkpoint(&workspace, "pane-live").unwrap(),
+            b"keep checkpoint"
+        );
         assert!(!dead_path.exists(), "orphaned log should be removed");
+        assert!(
+            read_remote_history_checkpoint(&workspace, "pane-dead")
+                .unwrap()
+                .is_empty(),
+            "orphaned checkpoint should be removed"
+        );
     }
 
     #[test]
@@ -1289,6 +1422,26 @@ mod tests {
         assert_eq!(trim_scratch_writer_pid("pane-1.pty"), None);
         assert_eq!(trim_scratch_writer_pid("pane-1.trim.tmp"), None);
         assert_eq!(trim_scratch_writer_pid("pane-1.trim.notpid.tmp"), None);
+    }
+
+    #[test]
+    fn remote_history_scratch_writer_pid_parses_only_checkpoint_temps() {
+        assert_eq!(
+            remote_history_scratch_writer_pid("pane-1.remote-history.42.7.tmp"),
+            Some(42)
+        );
+        assert_eq!(
+            remote_history_scratch_writer_pid("pane-1.remote-history.42.tmp"),
+            None
+        );
+        assert_eq!(
+            remote_history_scratch_writer_pid("pane-1.pty.42.7.tmp"),
+            None
+        );
+        assert_eq!(
+            remote_history_scratch_writer_pid("pane-1.remote-history.x.7.tmp"),
+            None
+        );
     }
 
     #[test]

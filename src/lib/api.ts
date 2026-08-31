@@ -386,11 +386,13 @@ export function createGroupWithShell(
   dir: string,
   afterGroupId?: string | null,
   initialSize?: InitialPaneSize | null,
+  remoteId?: string | null,
 ) {
   return invoke<GroupWithInitialPane>("group_create_with_shell", {
     dir,
     afterGroupId: afterGroupId ?? null,
     initialSize: initialSize ?? null,
+    remoteId: remoteId ?? null,
   });
 }
 

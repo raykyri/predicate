@@ -1474,6 +1474,8 @@ mod tests {
                     group_id: "group-1".to_string(),
                     cwd: "/tmp/qmux-opencode-tests".to_string(),
                     active_workspace: None,
+                    remote_session: None,
+                    remote_connection: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,

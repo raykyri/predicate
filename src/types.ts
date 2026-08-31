@@ -78,6 +78,10 @@ export interface PaneInfo {
    * root, branch), resolved by the backend at spawn and on each shell prompt.
    * Agent tabs leave this unset and use AgentInfo.activeWorkspace instead. */
   activeWorkspace?: ActiveWorkspace | null;
+  /** Durable coordinates of a qmux-owned tmux session on a remote host. */
+  remoteSession?: RemoteSessionIdentity | null;
+  /** Health of the disposable SSH attachment to a durable remote session. */
+  remoteConnection?: RemoteConnectionInfo | null;
   cols: number;
   rows: number;
   status: "starting" | "running" | "exited" | "killed" | "failed";
@@ -88,6 +92,25 @@ export interface PaneInfo {
   recovered?: boolean;
   // Deprecated compatibility field. Flat tab layouts always use zero.
   depth?: number;
+}
+
+export interface RemoteSessionIdentity {
+  remoteId: string;
+  tmuxServer: string;
+  tmuxSession: string;
+  supportDir?: string;
+}
+
+export type RemoteConnectionState =
+  | "connecting"
+  | "connected"
+  | "reconnecting"
+  | "disconnected"
+  | "failed";
+
+export interface RemoteConnectionInfo {
+  state: RemoteConnectionState;
+  message?: string | null;
 }
 
 export type PaneSplitIntentSource = "command" | "join" | "drag-half" | "drag-divider";

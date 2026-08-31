@@ -124,9 +124,10 @@ pub const MAX_APPEND_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// then read back by the tailer exactly like a locally-written one, so nothing
 /// downstream needs to know where the agent ran.
 ///
-/// `path` is always the caller's *own* recorded `transcript_path`, resolved by
-/// the control socket from the authenticated pane. It is never a path the agent
-/// supplied, which is what keeps a forged request from aiming writes anywhere.
+/// `path` is the caller's *own* recorded `transcript_path`, resolved by the
+/// control socket rather than accepted in an append request. SSH-forwarded
+/// credentials cannot invoke this writer; local bindings retain the adapter's
+/// path validation and run with the same filesystem authority as the agent.
 pub fn append_transcript_lines(path: &Path, lines: &[String]) -> Result<usize, String> {
     if lines.len() > MAX_APPEND_LINES {
         return Err(format!(

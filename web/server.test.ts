@@ -1055,6 +1055,13 @@ test("the landing page renders the app replica and its own image policy", async 
   const porfforSection = body.slice(body.lastIndexOf("<section", porfforNameIndex), porfforNameIndex);
   assert.match(porfforSection, /pane-group has-panes is-active-group/);
   assert.doesNotMatch(porfforSection, /is-collapsed/);
+  assert.match(
+    body,
+    /title="autoresearch on GCP builder \(gcp-builder\.us-central1-a\.tdx-1-468104\)"/,
+  );
+  assert.match(body, /class="lucide pane-group-folder pane-group-remote-icon"/);
+  assert.match(body, /class="pane-group-remote-label">GCP builder<\/span>/);
+  assert.match(body, /<strong>Managed remote terminals<\/strong>/);
   assert.match(body, /class="turn-image"/);
   assert.match(body, /src="\/qmux\.png"/);
   assert.match(body, /alt="The qmux desktop interface"/);

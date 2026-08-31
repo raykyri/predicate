@@ -109,11 +109,15 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
   ref,
 ) {
   const visible = visibleProp ?? active;
+  const remoteUnavailable = Boolean(
+    pane.remoteSession && pane.remoteConnection?.state !== "connected",
+  );
+  const terminalInputBlocked = inputBlocked || remoteUnavailable;
   const hostRef = useRef<HTMLDivElement | null>(null);
   const lastVisibleRectRef = useRef<NativeTerminalRect | null>(null);
   const activeRef = useRef(active);
   const visibleRef = useRef(visible);
-  const inputBlockedRef = useRef(inputBlocked);
+  const inputBlockedRef = useRef(terminalInputBlocked);
   const readOnlyRef = useRef(readOnly);
   const webEditableFocusedRef = useRef(webEditableFocused);
   const pasteProtectionRef = useRef(pasteProtection);
@@ -121,7 +125,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
   const onActivateRef = useRef(onActivate);
   activeRef.current = active;
   visibleRef.current = visible;
-  inputBlockedRef.current = inputBlocked;
+  inputBlockedRef.current = terminalInputBlocked;
   readOnlyRef.current = readOnly;
   webEditableFocusedRef.current = webEditableFocused;
   pasteProtectionRef.current = pasteProtection;
@@ -373,7 +377,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
       const ownsKeyboard =
         surfaceVisible &&
         active &&
-        !inputBlocked &&
+        !terminalInputBlocked &&
         !readOnly &&
         !searchOpen &&
         !confirmOpen &&
@@ -404,11 +408,11 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
         width: rect.width,
         height: rect.height,
         visible: surfaceVisible,
-        acceptsPointerInput: !inputBlocked && !searchOpen && !confirmOpen,
+        acceptsPointerInput: !terminalInputBlocked && !searchOpen && !confirmOpen,
         // Unlike ownsKeyboard this ignores transient web focus states: a click
         // may still claim the keyboard away from a composer, but never into a
         // pane whose input is blocked by policy (read-only research panes).
-        acceptsKeyboardClaim: !inputBlocked && !readOnly,
+        acceptsKeyboardClaim: !terminalInputBlocked && !readOnly,
         deferGeometry: deferGeometryUpdates,
       }).then(
         () => {
@@ -443,7 +447,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
     deferGeometryUpdates,
     focus,
     focusSearchInput,
-    inputBlocked,
+    terminalInputBlocked,
     readOnly,
     pane.id,
     searchOpen,
@@ -475,6 +479,25 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
       onPointerDown={() => onActivateRef.current?.(pane.id)}
     >
       <div ref={hostRef} className="terminal-host" />
+      {remoteUnavailable ? (
+        <div className="remote-connection-overlay" role="status" aria-live="polite">
+          <span className="remote-connection-state">
+            {pane.remoteConnection?.state === "failed"
+              ? "Remote connection failed"
+              : pane.remoteConnection?.state === "disconnected"
+                ? "Remote disconnected"
+                : pane.remoteConnection?.state === "connecting"
+                  ? "Connecting to remote…"
+                  : "Reconnecting to remote…"}
+          </span>
+          {pane.remoteConnection?.message ? (
+            <span className="remote-connection-message">{pane.remoteConnection.message}</span>
+          ) : null}
+          <span className="remote-connection-detail">
+            The tmux session is still running; input resumes automatically.
+          </span>
+        </div>
+      ) : null}
       {confirmDialog}
       {searchOpen ? (
         <PaneSearchBar

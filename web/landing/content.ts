@@ -45,6 +45,11 @@ export const FEATURES: Feature[] = [
     copy: "Agents and tab groups automatically respawn on restart.",
   },
   {
+    name: "Managed remote terminals",
+    copy:
+      "Run shells, Claude, and Codex over SSH while tmux keeps the remote process alive through disconnects.",
+  },
+  {
     name: "Session forking",
     copy: "Fork sessions while they're working. Create worktrees with one click.",
   },

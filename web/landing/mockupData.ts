@@ -62,6 +62,12 @@ const ran = (step: number, command: string, ...output: string[]): TerminalBlock 
 
 export interface MockGroup {
   name: string;
+  // Remote groups keep the same sidebar geometry as local groups, but replace
+  // the folder glyph with a globe and show the snapshotted host label.
+  remote?: {
+    label: string;
+    host: string;
+  };
   // Whether the group starts collapsed. Every group carries its panes so the
   // enhanced sidebar can expand one without fetching anything.
   collapsed: boolean;
@@ -119,6 +125,10 @@ export const MOCK_GROUPS: MockGroup[] = [
   },
   {
     name: "autoresearch",
+    remote: {
+      label: "GCP builder",
+      host: "gcp-builder.us-central1-a.tdx-1-468104",
+    },
     collapsed: true,
     statuses: ["active"],
     panes: [

@@ -468,7 +468,6 @@ import {
   clearAgentWorkingStatus,
   closeWorktreePane,
   confirmAppExit,
-  createGroup,
   createGroupWithShell,
   pickGroupFolder,
   createResearchWorkspaceWithFolder,
@@ -4723,10 +4722,10 @@ function MainApp() {
         researchReadiness: "error" as const,
         message: `Checking ${adapter.label} on ${launcherRemote.label}…`,
         checkedAt: null,
-        instanceId: `remote:${launcherGroup!.id}:${adapter.id}`,
+        instanceId: `remote:${launcherRemote.id}:${adapter.id}`,
         target: {
           kind: "remote" as const,
-          id: launcherGroup!.id,
+          id: launcherRemote.id,
           label: launcherRemote.label,
         },
       }))
@@ -4752,8 +4751,10 @@ function MainApp() {
   const launchAdapterReady = !config || adapterCanLaunchTerminal(launchAdapterMetadata);
   const launcherOptions = launcherOptionsByAdapter[launchAdapter.id] ?? {};
   const LauncherOptions = launchAdapter.LauncherOptions;
-  // Skills only apply to Claude (the only adapter with a qmux plugin today).
-  const skillsEnabled = launchAdapter.id === CLAUDE_ADAPTER_ID;
+  // The bundled Claude plugin lives with the local app and is deliberately not
+  // assumed to exist on an SSH host. Remote Claude keeps lifecycle hooks but
+  // does not advertise slash-command skills it cannot load.
+  const skillsEnabled = !launcherRemote && launchAdapter.id === CLAUDE_ADAPTER_ID;
   const selectedSkill =
     skillsEnabled && selectedSkillId
       ? availableSkills.find((skill) => skill.id === selectedSkillId) ?? null
@@ -6194,24 +6195,25 @@ function MainApp() {
     }
   }
 
-  /** Creates a workspace bound to a declared remote.
-   *
-   * Deliberately not `group_create_with_shell`: a remote group cannot host a
-   * shell pane yet — shell integration is delivered as files on this machine —
-   * so bundling one would fail every remote creation. The group opens empty. */
+  /** Creates a remote workspace and its first durable shell atomically. A
+   * failed SSH/tmux launch rolls the group back just like local creation. */
   async function createRemoteGroup(remoteId: string, dir: string) {
     setSettingsMenu(null);
     setRemoteGroupDraft(null);
     setError(null);
     try {
       const anchorGroupId = launchGroupId();
-      const created = await createGroup({
+      const created = await createGroupWithShell(
         dir,
+        anchorGroupId ?? null,
+        estimateInitialPaneSize(false),
         remoteId,
-        afterGroupId: anchorGroupId ?? null,
-      });
+      );
+      const orderedPanes = panesWithNewTabInLaunchPosition(created.pane, created.group.id);
+      setPanesPreservingRecoveredDismissals(orderedPanes);
+      setActivePaneId(created.pane.id);
       await refreshGroups();
-      setLastActiveGroupId(created.id);
+      setLastActiveGroupId(created.group.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -15088,14 +15090,26 @@ function MainApp() {
               >
                 <div
                   className="pane-group-header"
-                  title={groupRootPath}
+                  title={
+                    group.remote
+                      ? `${groupRootPath} on ${group.remote.label} (${group.remote.host})`
+                      : groupRootPath
+                  }
                   onPointerDown={(event) => handleGroupHeaderPointerDown(event, group.id)}
                   onPointerMove={handleGroupHeaderPointerMove}
                   onPointerUp={handleGroupHeaderPointerUp}
                   onPointerCancel={handleGroupHeaderPointerCancel}
                 >
                   <span className="pane-group-title">
-                    <Folder className="pane-group-folder" size={13} aria-hidden="true" />
+                    {group.remote ? (
+                      <Globe
+                        className="pane-group-folder pane-group-remote-icon"
+                        size={13}
+                        aria-label={`Remote group on ${group.remote.label}`}
+                      />
+                    ) : (
+                      <Folder className="pane-group-folder" size={13} aria-hidden="true" />
+                    )}
                     <span
                       className="pane-group-name"
                       title={groupDisplayName}
@@ -15107,6 +15121,14 @@ function MainApp() {
                     >
                       {groupDisplayName}
                     </span>
+                    {group.remote ? (
+                      <span
+                        className="pane-group-remote-label"
+                        title={`Runs on ${group.remote.label}`}
+                      >
+                        {group.remote.label}
+                      </span>
+                    ) : null}
                     {isCollapsedGroup ? (
                       <span className="pane-group-count">{groupPanes.length}</span>
                     ) : null}

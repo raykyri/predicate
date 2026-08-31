@@ -396,12 +396,31 @@ export const MOCKUP_CSS = `
   color: var(--text-subtle);
 }
 
+.app-mockup .pane-group-remote-icon {
+  color: var(--accent-color);
+}
+
 .app-mockup .pane-group-name {
   min-width: 0;
   overflow: hidden;
   color: #d6dbd6;
   font-weight: 600;
   letter-spacing: 0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mockup .pane-group-remote-label {
+  min-width: 0;
+  max-width: 86px;
+  overflow: hidden;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, var(--accent-color) 34%, transparent);
+  border-radius: 999px;
+  color: color-mix(in srgb, var(--accent-color) 76%, var(--text-secondary));
+  font-size: 10px;
+  font-weight: 550;
+  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

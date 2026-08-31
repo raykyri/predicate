@@ -166,10 +166,24 @@ function PaneGroup({ group }: { group: MockGroup }) {
     <section
       className={`pane-group has-panes${group.collapsed ? " is-collapsed" : " is-active-group"}`}
     >
-      <div className="pane-group-header">
+      <div
+        className="pane-group-header"
+        title={
+          group.remote
+            ? `${group.name} on ${group.remote.label} (${group.remote.host})`
+            : group.name
+        }
+      >
         <span className="pane-group-title">
-          <FolderIcon className="lucide pane-group-folder" size={13} />
+          {group.remote ? (
+            <GlobeIcon className="lucide pane-group-folder pane-group-remote-icon" size={13} />
+          ) : (
+            <FolderIcon className="lucide pane-group-folder" size={13} />
+          )}
           <span className="pane-group-name">{group.name}</span>
+          {group.remote ? (
+            <span className="pane-group-remote-label">{group.remote.label}</span>
+          ) : null}
           <span className="pane-group-count">{group.panes.length}</span>
           {group.statuses?.length ? (
             <span className="pane-group-status-icons">

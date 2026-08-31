@@ -30,6 +30,7 @@ import type {
   PaneSplitInfo,
   QmuxEvent,
   QueuedTurn,
+  RemoteConnectionInfo,
   ShellAgentJobInfo,
   TranscriptHookEvent,
   Turn,
@@ -292,6 +293,30 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
             }
           })
           .catch(() => undefined);
+      }
+      if (event.type === "pane.remote_connection" && event.paneId) {
+        const raw = event.payload.connection;
+        if (typeof raw === "object" && raw !== null) {
+          const candidate = raw as Partial<RemoteConnectionInfo>;
+          if (
+            candidate.state === "connecting" ||
+            candidate.state === "connected" ||
+            candidate.state === "reconnecting" ||
+            candidate.state === "disconnected" ||
+            candidate.state === "failed"
+          ) {
+            const paneId = event.paneId;
+            const connection: RemoteConnectionInfo = {
+              state: candidate.state,
+              message: typeof candidate.message === "string" ? candidate.message : null,
+            };
+            setPanes((current) =>
+              current.map((pane) =>
+                pane.id === paneId ? { ...pane, remoteConnection: connection } : pane,
+              ),
+            );
+          }
+        }
       }
       if (event.type === "pane.cwd_changed" && event.paneId) {
         // A shell tab reported a directory change (the user cd'd). The backend has

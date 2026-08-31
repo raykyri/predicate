@@ -450,10 +450,10 @@ The qmux launcher can pass `--permission-mode` (`auto`, `accept-edits`,
 
 ### Remote groups
 
-A workspace can be bound to another machine. Remoteness belongs to the group
-rather than to an individual agent: the directory, its repository, and every
-pane opened against it are one machine's, so binding it at the group level is
-what stops an agent ending up somewhere other than the code it is editing.
+A terminal group can be bound to another machine. Its directory, Git worktrees,
+shells, and supported agents all run there; the qmux UI and terminal renderer
+stay local. Binding the machine to the group keeps an agent on the same host as
+the code it edits.
 
 Machines are declared under `remotes` in `qmux.config.json` and a group is
 created against one by passing its id:
@@ -472,43 +472,72 @@ created against one by passing its id:
 }
 ```
 
-`host` is passed to `ssh` verbatim, so `~/.ssh/config` aliases work; everything
-else is optional (`label` falls back to the id, `multiplexer` to `tmux`).
-`workspaceRoot` is where worktrees live there, since a group's `managedDir` is
-always local; it defaults to `~/.qmux/workspaces`, resolved against the
-*remote's* home (every argument qmux sends is quoted, so the tilde has to be
-expanded on this side or it would arrive at the far shell as a literal).
+`host` is passed to the system `ssh` client, so `~/.ssh/config` aliases,
+ProxyJump, agents, and hardware-backed keys work normally. Everything else is
+optional (`label` falls back to the id, `multiplexer` to `tmux`, and `qmuxCli`
+to `qmux-cli`). `workspaceRoot` is where remote worktrees live; it defaults to
+`~/.qmux/workspaces`, expanded against the remote account's home.
 
-The group **snapshots** the entry it was created against rather than
-referencing it, keeping the id only as provenance. Editing or deleting a
-`remotes` entry therefore never moves a workspace whose worktrees already live
-on the old machine.
+Before creating a remote group:
 
-Git worktree creation, status, removal, and every repository probe run on the
-group's host, and panes are spawned there too: `plan_to_spec` wraps a remote
-group's command in `ssh` plus its multiplexer, so this is adapter-agnostic — the
-pty still runs one local process, it is just `ssh`.
+- Configure non-interactive SSH authentication. Launch preparation and health
+  checks use `BatchMode=yes`, so password-only authentication is not supported.
+- Install tmux 3.2 or newer on the remote host.
+- Install `qmux-cli` on the remote host and set `qmuxCli` when it is not on the
+  remote PATH. Matching the app's qmux-cli version is recommended. Plain shell
+  transport can run without it, but shell wrappers and agent lifecycle hooks
+  cannot.
+- Install and authenticate Claude Code and/or Codex on the remote host if those
+  adapters will be used. The launcher probes the remote binaries and auth state;
+  it never reuses the Mac's readiness result.
 
-The multiplexer is what makes a pane survive a dropped connection. Plain `ssh`
-cannot: on disconnect sshd closes the pty master and the foreground process
-group takes a SIGHUP, and nothing in `ssh` buffers output for an absent client
-or lets a new connection re-attach to an old process's stdio. With `tmux`, panes
-run under `tmux new-session -A -s qmux-<pane>`, so the same command line starts
-a session the first time and reattaches to it afterwards. `herdr` is recognised
-but not yet driveable — its attach-or-create invocation isn't something to
-guess at, since a wrong flag would start a second session on every reconnect
-rather than reattaching — so a herdr group refuses to launch and says so.
+In Terminal mode, choose **New group on _Remote_…**, enter an absolute directory
+on that host, and qmux atomically creates the group plus its first shell. A
+failed SSH/tmux launch rolls the group back instead of leaving an empty entry.
 
-Two things a remote group cannot do yet, both refused rather than half-done.
-Shell panes: their integration is delivered as files written to the local
-filesystem and referenced by `ZDOTDIR`, and on the far side those paths don't
-exist, so a shell would come up silently missing cwd reporting and the agent
-wrappers. And every adapter: they resolve their binary against the
-local `PATH`, point flags at locally-materialized plugin directories, and rely
-on the pane's cwd being the worktree — all of which start fine over there and
-are then wrong in ways that look like the agent misbehaving. Adapters opt in
-through `AgentAdapter::supports_remote` once they've been checked for all
-three.
+The group **snapshots** the entry it was created against rather than referencing
+it, keeping the id only as provenance. Editing or deleting a `remotes` entry
+therefore never moves or disables a workspace whose worktrees already live on
+the old machine. Readiness checks also use that snapshot.
+
+Git creation/status/removal and repository probes run through SSH. Each pane's
+actual process runs in a nonce-named session on a dedicated
+`tmux -L qmux -f /dev/null` server; qmux only owns a disposable local SSH/PTTY
+attachment. It never uses attach-or-create during recovery, so a missing remote
+process is reported rather than silently replaced. Shell integration and
+per-pane agent hook files are provisioned under an owner-only
+`<remote workspaceRoot>/.qmux/support/<session>/` directory.
+
+SSH keepalives turn half-open links into reconnects, a short-lived ControlMaster
+reuses authentication across lifecycle calls, and batch operations have a wall
+clock deadline. While detached, the terminal shows a reconnect overlay and
+blocks input. The tmux process keeps running with a 50,000-line history; on
+reattach qmux safely reconciles the missed portion before live output resumes.
+Resizing during the outage is remembered and applied to the next attachment.
+Closing a pane kills its exact tmux session and removes its support directory.
+Restarting qmux reattaches to the persisted session rather than relaunching the
+command.
+
+Remote shells, Claude Code, and Codex are supported. Claude receives lifecycle
+settings but not qmux's bundled local plugin/skills. Codex keeps the remote
+user's normal `CODEX_HOME` (auth, config, and sessions) and receives process-local
+hook overrides. The remote control socket is an owner-only Unix socket forwarded
+through SSH; no TCP listener or bearer token is exposed on the network.
+
+Current limitations:
+
+- Remote Research/SDK runs are disabled. Remote transcript files are not yet
+  streamed into the local transcript sidebar, so message-anchored forks are
+  unavailable; session-head resume/fork and terminal lifecycle hooks still work.
+- Codex completion state uses its Stop hook remotely because the authoritative
+  transcript `task_complete` record is not streamed yet.
+- `herdr` is listed but intentionally not driveable; only managed tmux is
+  supported.
+- qmux does not blindly reap unclaimed `qmux-*` sessions at startup: two live
+  qmux instances may share a host, and a prefix-only sweep could destroy the
+  other instance's work. After a crash, inspect with
+  `tmux -L qmux -f /dev/null list-sessions` and remove only sessions you have
+  identified as stale. Automatic cleanup needs an explicit ownership lease.
 
 ## License
 

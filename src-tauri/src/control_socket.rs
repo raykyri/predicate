@@ -6,7 +6,7 @@ use crate::adapters::{
 use crate::connection_limit::ConnectionLimiter;
 use crate::events::QmuxEvent;
 use crate::pty::{PaneWriteOptions, write_pane};
-use crate::state::{AppState, canonical_loopback_artifact_url};
+use crate::state::{AppState, PaneKind, canonical_loopback_artifact_url};
 use crate::workspace::{
     LaunchOrigin, recover_shell_agent_from_session_start, validate_launch_workspace,
 };
@@ -61,6 +61,13 @@ enum PathCheck {
     Missing,
     Conflict,
     Unknown,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ControlCredential {
+    LocalPane,
+    RemotePane,
+    InteractiveUser,
 }
 
 enum GenerationEnd {
@@ -848,19 +855,26 @@ fn handle_line_with_peer(
         .map_err(|err| format!("invalid notification.send payload: {err}"))?;
         return crate::user_notifications::dispatch(state, None, payload);
     }
-    // A control token authorizes exactly one pane. Resolving it here means every
-    // command below acts only on the caller's own pane: a process in one pane cannot
-    // write to, or impersonate hooks for, any other pane.
-    let pane_auth = state.pane_for_token(&request.token);
-    let user_auth = state.pane_for_user_token(&request.token);
-    let (authed_pane, user_credential) = match (pane_auth, user_auth) {
-        (Some(pane), _) => (pane, false),
-        (None, Some(pane)) => (pane, true),
-        (None, None) => return Err("invalid QMUX_TOKEN".to_string()),
+    // Local panes, SSH-forwarded panes, and interactive users have separate token
+    // namespaces. In particular, a remote process never receives a local pane or
+    // user credential: after pane scope is resolved below, the remote namespace is
+    // also checked against an explicit role-sensitive command allowlist.
+    let (authed_pane, credential) = if let Some(pane) = state.pane_for_token(&request.token) {
+        (pane, ControlCredential::LocalPane)
+    } else if let Some(pane) = state.pane_for_remote_token(&request.token) {
+        (pane, ControlCredential::RemotePane)
+    } else if let Some(pane) = state.pane_for_user_token(&request.token) {
+        (pane, ControlCredential::InteractiveUser)
+    } else {
+        return Err("invalid QMUX_TOKEN".to_string());
     };
+    let user_credential = credential == ControlCredential::InteractiveUser;
 
     if user_credential && request.command != "cli.call" {
         return Err("QMUX_USER_TOKEN is valid only for public CLI operations".to_string());
+    }
+    if credential == ControlCredential::RemotePane {
+        ensure_remote_command_allowed(state, &authed_pane, &request.command)?;
     }
 
     match request.command.as_str() {
@@ -997,14 +1011,12 @@ fn handle_line_with_peer(
                         "SessionStart cannot recover a missing agent without an adapter id"
                             .to_string()
                     })?;
-                // Validate before creating durable state; an authenticated pane may
-                // recover only one of qmux's configured agent adapters.
-                adapter_registry(state.config()).get(&adapter_id)?;
                 let pane = state
                     .list_panes()?
                     .into_iter()
                     .find(|pane| pane.id == authed_pane)
                     .ok_or_else(|| format!("pane {authed_pane} was not found"))?;
+                validate_recovered_adapter_for_pane(state, &pane, &adapter_id)?;
                 let recovered = recover_shell_agent_from_session_start(
                     state,
                     &pane,
@@ -1063,9 +1075,9 @@ fn handle_line_with_peer(
                 .map_err(|err| format!("invalid transcript.append payload: {err}"))?;
 
             // The destination is qmux's own record for the agent bound to the
-            // authenticated pane. The caller never names a path, so a forged
-            // request cannot aim writes at another agent's transcript — or
-            // anywhere else on disk.
+            // authenticated pane; this request cannot name a path. SSH-forwarded
+            // credentials are rejected before reaching this arm, so only a local
+            // pane process can append to its validated local transcript binding.
             let agent = state
                 .agent_by_pane(&authed_pane)?
                 .ok_or_else(|| format!("no agent is bound to pane {authed_pane}"))?;
@@ -1176,6 +1188,62 @@ fn handle_line_with_peer(
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
         other => Err(format!("unknown control command '{other}'")),
     }
+}
+
+fn validate_recovered_adapter_for_pane(
+    state: &AppState,
+    pane: &crate::state::PaneInfo,
+    adapter_id: &str,
+) -> Result<(), String> {
+    // Validate before creating durable state. A remote SessionStart must not
+    // select an adapter that never opted into remote execution: those adapters
+    // may interpret hook paths against the local filesystem.
+    let registry = adapter_registry(state.config());
+    let adapter = registry.get(adapter_id)?;
+    if pane.remote_session.is_some() && !adapter.supports_remote() {
+        return Err(format!(
+            "the {adapter_id} adapter cannot recover from a remote pane"
+        ));
+    }
+    Ok(())
+}
+
+/// Restricts a token that crossed the SSH trust boundary to callbacks that the
+/// owning remote pane needs for its current role. Public shell-user authority,
+/// raw pane input, and local transcript writes are intentionally absent.
+fn ensure_remote_command_allowed(
+    state: &AppState,
+    pane_id: &str,
+    command: &str,
+) -> Result<(), String> {
+    let has_agent = state.agent_by_pane(pane_id)?.is_some();
+    let is_shell = state
+        .list_panes()?
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+        .is_some_and(|pane| matches!(pane.kind, PaneKind::Shell));
+    let allowed = match command {
+        // Transport health and user-visible completion notifications are valid in
+        // either a shell or an agent pane.
+        "ping" | "notification.send" => true,
+        // Shell integration may report cwd or prepare a supervised agent only
+        // while no agent currently owns the pane.
+        "pane.set_cwd" | "agent.prepare_shell_launch" | "claude.prepare_shell_launch" => {
+            is_shell && !has_agent
+        }
+        // SessionStart itself is allowed to recover a lost shell-agent binding.
+        "hook.notify" => true,
+        // These are documented agent capabilities and retain their existing
+        // pane/workspace/lineage checks. They are unavailable to a remote shell.
+        "agent.detach_pane" | "agent.fork" | "mcp.call" | "browser.open" | "cli.call" => has_agent,
+        // In particular: never accept pane.write or transcript.append from an
+        // SSH-forwarded credential. The latter writes local files and currently
+        // has no remote client producer.
+        _ => false,
+    };
+    allowed
+        .then_some(())
+        .ok_or_else(|| format!("remote pane credential is not authorized for '{command}'"))
 }
 
 #[cfg(any(
@@ -1567,6 +1635,105 @@ mod tests {
         let token = state.pane_token("pane-1").unwrap();
         let data = handle_line(&state, &request_line(&token, "ping", Value::Null)).unwrap();
         assert_eq!(data, json!({ "status": "ok" }));
+    }
+
+    #[test]
+    fn remote_token_allows_health_but_rejects_local_write_surfaces() {
+        let state = test_state();
+        let token = state.pane_remote_token("pane-1").unwrap();
+
+        let data = handle_line(&state, &request_line(&token, "ping", Value::Null)).unwrap();
+        assert_eq!(data, json!({ "status": "ok" }));
+
+        for (command, payload) in [
+            (
+                "pane.write",
+                json!({ "paneId": "pane-1", "data": "x", "paste": false, "submit": false }),
+            ),
+            ("transcript.append", json!({ "lines": ["{}"] })),
+            (
+                "cli.call",
+                json!({ "operation": "pane.list", "arguments": {} }),
+            ),
+        ] {
+            let err = handle_line(&state, &request_line(&token, command, payload)).unwrap_err();
+            assert!(
+                err.contains("remote pane credential is not authorized"),
+                "unexpected {command} error: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_agent_token_retains_explicit_agent_capabilities() {
+        let state = test_state();
+        state.insert_agent(agent_bound_to("pane-2")).unwrap();
+        let token = state.pane_remote_token("pane-2").unwrap();
+
+        let value = handle_line(
+            &state,
+            &request_line(
+                &token,
+                "mcp.call",
+                json!({ "name": "whoami", "arguments": {} }),
+            ),
+        )
+        .unwrap();
+        assert_eq!(value["agent"]["id"], "agent-1");
+    }
+
+    #[test]
+    fn remote_agent_cannot_append_to_even_a_previously_bound_local_path() {
+        let state = test_state();
+        let target = temp_dir().join("remote-forged.jsonl");
+        let mut agent = agent_bound_to("pane-2");
+        agent.transcript_path = Some(target.display().to_string());
+        state.insert_agent(agent).unwrap();
+        let token = state.pane_remote_token("pane-2").unwrap();
+
+        let err = handle_line(
+            &state,
+            &request_line(
+                &token,
+                "transcript.append",
+                json!({ "lines": ["{\"type\":\"attacker\"}"] }),
+            ),
+        )
+        .unwrap_err();
+        assert!(err.contains("remote pane credential is not authorized"));
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn remote_session_recovery_rejects_adapters_without_remote_support() {
+        let state = test_state();
+        let mut pane = crate::state::PaneInfo {
+            id: "pane-1".to_string(),
+            title: "Remote shell".to_string(),
+            last_osc_title: None,
+            kind: PaneKind::Shell,
+            agent_id: None,
+            group_id: "group-1".to_string(),
+            cwd: "/srv/project".to_string(),
+            active_workspace: None,
+            remote_session: Some(
+                crate::state::RemoteSessionIdentity::new("remote-1", "pane-1").unwrap(),
+            ),
+            remote_connection: Some(crate::state::RemoteConnectionInfo::default()),
+            cols: 80,
+            rows: 24,
+            status: crate::state::PaneStatus::Running,
+            last_active_at: 0,
+            recovered: false,
+            depth: 0,
+        };
+
+        validate_recovered_adapter_for_pane(&state, &pane, "claude").unwrap();
+        let err = validate_recovered_adapter_for_pane(&state, &pane, "grok").unwrap_err();
+        assert!(err.contains("cannot recover from a remote pane"));
+
+        pane.remote_session = None;
+        validate_recovered_adapter_for_pane(&state, &pane, "grok").unwrap();
     }
 
     #[test]

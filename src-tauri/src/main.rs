@@ -25,6 +25,7 @@ mod prompt_library;
 mod pty;
 mod publishing;
 mod recovery;
+mod remote_terminal;
 mod research;
 mod research_runtime;
 mod scrollback;
@@ -231,12 +232,7 @@ fn probe_agent_adapters(
                 .ok_or_else(|| format!("group {group_id} was not found"))
         })
         .transpose()?;
-    let remote_target = group.as_ref().and_then(|group| {
-        group
-            .remote
-            .as_ref()
-            .map(|remote| (group.id.as_str(), remote.label.as_str()))
-    });
+    let remote_target = group.as_ref().and_then(|group| group.remote.as_ref());
     adapters::probe_adapter_metadata_for_config(
         state.config(),
         remote_target,
@@ -2158,22 +2154,23 @@ struct GroupWithInitialPane {
 /// Creates a group and its first shell pane as one operation. The two used to
 /// be separate frontend round trips, which left a dead, empty group behind
 /// whenever the first spawn failed; creation with a rollback keeps the pair
-/// atomic from the frontend's point of view. Remote group creation will need
-/// exactly this shape — connect errors are the common case there, not the
-/// exception — so local creation adopts it first.
+/// atomic from the frontend's point of view. The same transaction now covers
+/// remote creation, where connection and tmux setup errors are common enough
+/// that an empty half-created group would be especially confusing.
 #[tauri::command]
 async fn group_create_with_shell(
     state: tauri::State<'_, AppState>,
     dir: String,
     after_group_id: Option<String>,
     initial_size: Option<InitialPaneSize>,
+    remote_id: Option<String>,
 ) -> Result<GroupWithInitialPane, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let group = create_group(
             &state,
             CreateGroupRequest {
-                remote_id: None,
+                remote_id,
                 name: None,
                 dir: Some(dir),
                 after_group_id,

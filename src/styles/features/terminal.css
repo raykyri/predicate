@@ -21,6 +21,40 @@
   z-index: 2;
 }
 
+.remote-connection-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 24px;
+  color: var(--text-primary);
+  text-align: center;
+  background: color-mix(in srgb, var(--terminal-bg, var(--terminal-pane-bg)) 86%, transparent);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;
+}
+
+.remote-connection-state {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.remote-connection-message,
+.remote-connection-detail {
+  max-width: 560px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.remote-connection-message {
+  font-family: var(--font-mono);
+}
+
 /* Match the dotted blue sidebar preview while a queue/wait option targets this
    visible terminal. The absolute border does not affect native PTY geometry. */
 .terminal-pane.is-visible.is-wait-target-preview::after {

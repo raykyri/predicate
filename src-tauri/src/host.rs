@@ -27,8 +27,9 @@
 //! the tests below are mostly about that.
 
 use crate::adapters::shell_quote_arg;
+use crate::state::RemoteSessionIdentity;
 use crate::workspace::{RemoteMultiplexer, RemoteRef};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::process::Command;
 use std::sync::{LazyLock, Mutex};
@@ -45,6 +46,8 @@ const DEFAULT_REMOTE_CLI: &str = "qmux-cli";
 /// transport actually needs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RemoteTarget {
+    /// Stable id snapshotted into both the group and every remote pane.
+    pub id: String,
     /// Display name, for error messages.
     pub label: String,
     /// Connection target: an ssh-config alias or `user@host`. Auth and address
@@ -75,6 +78,7 @@ pub fn for_group(remote: Option<&RemoteRef>) -> Host {
     match remote {
         None => Host::Local,
         Some(remote) => Host::Remote(RemoteTarget {
+            id: remote.id.clone(),
             label: remote.label.clone(),
             ssh: remote.host.clone(),
             qmux_cli: remote
@@ -129,58 +133,305 @@ pub struct RemoteCommand<'a> {
     pub forwards: Vec<SocketForward>,
 }
 
+/// Fully quoted SSH invocations for one durable qmux tmux session.
+///
+/// Creation and attachment are deliberately separate. Only `create_argv` may
+/// create the named session; every recovery path uses `attach_argv`, so a dead
+/// remote process can never be silently replaced by an empty shell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteTmuxCommands {
+    pub version_argv: Vec<String>,
+    pub create_argv: Vec<String>,
+    pub configure_argv: Vec<String>,
+    pub attach_argv: Vec<String>,
+    pub probe_argv: Vec<String>,
+    pub capture_argv: Vec<String>,
+    pub capture_full_argv: Vec<String>,
+    pub activity_argv: Vec<String>,
+    pub kill_argv: Vec<String>,
+    pub forward_cleanup_argv: Vec<String>,
+    pub support_cleanup_argv: Vec<String>,
+    pub remote_socket_path: String,
+}
+
 impl Host {
-    /// The full `ssh …` argv that runs a pane's command on this host, or `None`
-    /// locally.
-    ///
-    /// One wrapping site for every adapter. A pane's process needs the same
-    /// three things rewritten no matter who launched it: its control socket
-    /// must point at a reverse-forwarded path, its qmux CLI must be the remote
-    /// binary, and its environment has to travel in the command line because
-    /// ssh forwards none of it.
-    pub fn pane_argv(
+    fn validated_tmux_target(
         &self,
-        pane_id: &str,
+        identity: &RemoteSessionIdentity,
+    ) -> Result<&RemoteTarget, String> {
+        let target = self
+            .remote()
+            .ok_or_else(|| "tmux session commands require a remote host".to_string())?;
+        if target.multiplexer != RemoteMultiplexer::Tmux {
+            return Err(format!(
+                "remote '{}' uses the herdr multiplexer, which qmux cannot drive yet; use tmux for now",
+                target.label
+            ));
+        }
+        if target.id != identity.remote_id {
+            return Err(format!(
+                "remote session belongs to '{}' but workspace uses '{}'",
+                identity.remote_id, target.id
+            ));
+        }
+        validate_tmux_name("server", &identity.tmux_server)?;
+        validate_tmux_name("session", &identity.tmux_session)?;
+        Ok(target)
+    }
+
+    fn tmux_control_commands(
+        &self,
+        identity: &RemoteSessionIdentity,
         local_socket: &str,
+    ) -> Result<RemoteTmuxCommands, String> {
+        self.validated_tmux_target(identity)?;
+
+        let remote_socket_path = format!("/tmp/{}.sock", identity.tmux_session);
+        let exact_target = format!("={}", identity.tmux_session);
+        let mut attach_args = tmux_server_args(identity);
+        attach_args.extend([
+            "attach-session".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+        ]);
+        let mut probe_args = tmux_server_args(identity);
+        probe_args.extend([
+            "has-session".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+        ]);
+        let capture_base = [
+            "capture-pane".to_string(),
+            "-p".to_string(),
+            "-e".to_string(),
+            "-t".to_string(),
+            format!("{exact_target}:0.0"),
+        ];
+        let mut capture_args = tmux_server_args(identity);
+        capture_args.extend(capture_base.clone());
+        capture_args.extend([
+            "-S".to_string(),
+            "-8192".to_string(),
+            // Only capture lines that have scrolled above the visible pane.
+            // The attach stream redraws the current screen itself.
+            "-E".to_string(),
+            "-1".to_string(),
+        ]);
+        let mut capture_full_args = tmux_server_args(identity);
+        capture_full_args.extend(capture_base);
+        capture_full_args.extend([
+            "-S".to_string(),
+            "-".to_string(),
+            "-E".to_string(),
+            "-1".to_string(),
+        ]);
+        let mut activity_args = tmux_server_args(identity);
+        activity_args.extend([
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            format!("{exact_target}:0.0"),
+            "#{pane_current_command}\t#{pane_pid}\t#{pane_dead}".to_string(),
+        ]);
+        let mut configure_args = tmux_server_args(identity);
+        configure_args.extend([
+            // tmux is a durability layer for qmux, not a second interactive
+            // multiplexer. Disabling both prefixes lets every control byte
+            // reach the pane, while hiding the status line keeps the managed
+            // session visually indistinguishable from a direct terminal.
+            "set-option".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+            "prefix".to_string(),
+            "None".to_string(),
+            ";".to_string(),
+            "set-option".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+            "prefix2".to_string(),
+            "None".to_string(),
+            ";".to_string(),
+            "set-option".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+            "status".to_string(),
+            "off".to_string(),
+            ";".to_string(),
+            "set-option".to_string(),
+            "-w".to_string(),
+            "-t".to_string(),
+            format!("{exact_target}:0"),
+            "history-limit".to_string(),
+            "50000".to_string(),
+        ]);
+        let mut kill_args = tmux_server_args(identity);
+        kill_args.extend(["kill-session".to_string(), "-t".to_string(), exact_target]);
+        let support_cleanup_argv = if let Some(support_dir) = identity.support_dir.as_deref() {
+            self.remote_support_cleanup_argv(support_dir)?
+        } else {
+            Vec::new()
+        };
+        // OpenSSH's client-side StreamLocalBindUnlink does not reliably unlink
+        // the listening path of a *remote* Unix-socket forward (the server owns
+        // that bind). A killed ssh process can therefore strand this exact path
+        // and make fail-closed reconnect loop forever. The session component is
+        // validated above, so removing this one qmux-owned /tmp entry is bounded.
+        let forward_cleanup_argv = self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "rm",
+                    args: vec![
+                        "-f".to_string(),
+                        "--".to_string(),
+                        remote_socket_path.clone(),
+                    ],
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host");
+
+        let attach_argv = self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "tmux",
+                    args: attach_args,
+                    forwards: vec![SocketForward {
+                        remote_path: remote_socket_path.clone(),
+                        local_path: local_socket.to_string(),
+                    }],
+                    ..Default::default()
+                },
+                Interaction::Interactive,
+            )
+            .expect("validated remote host");
+        let batch_argv = |args| {
+            self.ssh_argv(
+                &RemoteCommand {
+                    program: "tmux",
+                    args,
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host")
+        };
+
+        Ok(RemoteTmuxCommands {
+            version_argv: self
+                .ssh_argv(
+                    &RemoteCommand {
+                        program: "tmux",
+                        args: vec!["-V".to_string()],
+                        ..Default::default()
+                    },
+                    Interaction::Batch,
+                )
+                .expect("validated remote host"),
+            create_argv: Vec::new(),
+            configure_argv: batch_argv(configure_args),
+            attach_argv,
+            probe_argv: batch_argv(probe_args),
+            capture_argv: batch_argv(capture_args),
+            capture_full_argv: batch_argv(capture_full_args),
+            activity_argv: batch_argv(activity_args),
+            kill_argv: batch_argv(kill_args),
+            forward_cleanup_argv,
+            support_cleanup_argv,
+            remote_socket_path,
+        })
+    }
+
+    /// Builds attach-only commands for an already-created durable session.
+    /// The returned create argv is empty by construction, making it impossible
+    /// for reconnect or app recovery callers to recreate a missing process.
+    pub fn existing_tmux_session_commands(
+        &self,
+        identity: &RemoteSessionIdentity,
+        local_socket: &str,
+    ) -> Result<RemoteTmuxCommands, String> {
+        self.tmux_control_commands(identity, local_socket)
+    }
+
+    /// Builds every transport command needed to own and revisit a remote pane.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tmux_session_commands(
+        &self,
+        identity: &RemoteSessionIdentity,
+        local_socket: &str,
+        remote_token: &str,
+        cwd: &str,
+        cols: u16,
+        rows: u16,
         program: &str,
         args: &[String],
         envs: &[(String, String)],
-    ) -> Option<Result<Vec<String>, String>> {
-        let target = self.remote()?;
-        let remote_socket = format!("/tmp/qmux-{pane_id}.sock");
-        let mut remote_envs: Vec<(String, String)> = envs
-            .iter()
-            .map(|(key, value)| match key.as_str() {
-                // Local paths that mean nothing on the far side.
-                "QMUX_SOCK" => (key.clone(), remote_socket.clone()),
-                "QMUX_CLI" => (key.clone(), target.qmux_cli.clone()),
-                _ => (key.clone(), value.clone()),
-            })
-            .collect();
-        remote_envs.sort();
-        remote_envs.dedup_by(|a, b| a.0 == b.0);
+    ) -> Result<RemoteTmuxCommands, String> {
+        self.validated_tmux_target(identity)?;
+        if program.trim().is_empty() {
+            return Err("a remote tmux session requires a program".to_string());
+        }
 
-        Some(
-            target
-                .multiplexed(&format!("qmux-{pane_id}"), program, args)
-                .and_then(|argv| {
-                    let (program, args) =
-                        argv.split_first().expect("multiplexed argv is never empty");
-                    self.ssh_argv(
-                        &RemoteCommand {
-                            program,
-                            args: args.to_vec(),
-                            envs: remote_envs,
-                            forwards: vec![SocketForward {
-                                remote_path: remote_socket,
-                                local_path: local_socket.to_string(),
-                            }],
-                        },
-                        Interaction::Interactive,
-                    )
-                    .ok_or_else(|| "a remote host must yield an ssh command".to_string())
-                }),
-        )
+        let mut commands = self.tmux_control_commands(identity, local_socket)?;
+        let pane_envs = self.tmux_pane_envs(identity, remote_token, envs)?;
+        let mut create_args = tmux_server_args(identity);
+        create_args.extend([
+            "new-session".to_string(),
+            "-d".to_string(),
+            "-s".to_string(),
+            identity.tmux_session.clone(),
+            "-x".to_string(),
+            cols.max(1).to_string(),
+            "-y".to_string(),
+            rows.max(1).to_string(),
+            "-c".to_string(),
+            cwd.to_string(),
+        ]);
+        for (key, value) in pane_envs {
+            create_args.push("-e".to_string());
+            create_args.push(format!("{key}={value}"));
+        }
+        create_args.push("--".to_string());
+        create_args.push(program.to_string());
+        create_args.extend(args.iter().cloned());
+
+        commands.create_argv = self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "tmux",
+                    args: create_args,
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host");
+
+        Ok(commands)
+    }
+
+    /// Rewrites a prepared pane environment for execution inside an existing
+    /// remote tmux session. This is also used by shell-level agent launches:
+    /// their command is prepared by the local control server, so its freshly
+    /// minted credentials initially name the local qmux CLI/socket and must be
+    /// rebound to the already-forwarded remote endpoint before exec.
+    pub fn tmux_pane_envs(
+        &self,
+        identity: &RemoteSessionIdentity,
+        remote_token: &str,
+        envs: &[(String, String)],
+    ) -> Result<Vec<(String, String)>, String> {
+        if remote_token.is_empty() || remote_token.chars().any(char::is_control) {
+            return Err("remote pane control token is invalid".to_string());
+        }
+        let target = self.validated_tmux_target(identity)?;
+        let remote_workspace_root = self.remote_workspace_root()?;
+        Ok(remote_pane_envs(
+            target,
+            &format!("/tmp/{}.sock", identity.tmux_session),
+            remote_token,
+            remote_workspace_root.as_deref(),
+            envs,
+        ))
     }
 
     #[allow(dead_code)]
@@ -269,14 +520,37 @@ impl Host {
         }
         argv.push("-o".to_string());
         argv.push(format!("ConnectTimeout={CONNECT_TIMEOUT_SECONDS}"));
+        // Detect half-open links (sleep/NAT/firewall drops) so the PTY reader
+        // reaches EOF and the durable tmux session can be reattached.
+        argv.push("-o".to_string());
+        argv.push("ServerAliveInterval=15".to_string());
+        argv.push("-o".to_string());
+        argv.push("ServerAliveCountMax=3".to_string());
+        // Reuse one authenticated transport for the launch's probes, uploads,
+        // create/configure calls, and attachment. ~/.ssh is owner-only under
+        // normal OpenSSH operation; %C hashes the full connection tuple and
+        // avoids Unix-socket path-length blowups.
+        argv.push("-o".to_string());
+        argv.push("ControlMaster=auto".to_string());
+        argv.push("-o".to_string());
+        argv.push("ControlPersist=60".to_string());
+        argv.push("-o".to_string());
+        argv.push("ControlPath=~/.ssh/qmux-%C".to_string());
 
         if !remote.forwards.is_empty() {
-            // A unix-socket forward fails outright if the remote path already
-            // exists, which it will after any unclean disconnect. Let ssh
-            // remove it rather than stranding the host until someone cleans up
-            // by hand.
+            // Ask OpenSSH to unlink stale stream sockets where the selected
+            // implementation supports it. Remote tmux attachments also run an
+            // explicit, bounded cleanup command because many servers apply
+            // this client option only to locally-bound sockets.
             argv.push("-o".to_string());
             argv.push("StreamLocalBindUnlink=yes".to_string());
+            // The forwarded control socket carries a pane capability. Keep it
+            // owner-only on the remote host, and refuse to report an attached
+            // terminal when the hook transport could not be established.
+            argv.push("-o".to_string());
+            argv.push("StreamLocalBindMask=0177".to_string());
+            argv.push("-o".to_string());
+            argv.push("ExitOnForwardFailure=yes".to_string());
         }
         for forward in &remote.forwards {
             argv.push("-R".to_string());
@@ -306,6 +580,93 @@ impl Host {
             .clone()
             .unwrap_or_else(|| DEFAULT_REMOTE_WORKSPACE_ROOT.to_string());
         self.expand_home(&root).map(Some)
+    }
+
+    pub fn remote_support_root(&self) -> Result<Option<String>, String> {
+        self.remote_workspace_root().map(|root| {
+            root.map(|root| {
+                Path::new(&root)
+                    .join(".qmux")
+                    .join("support")
+                    .display()
+                    .to_string()
+            })
+        })
+    }
+
+    /// Builds cleanup for exactly one direct child of the managed support root.
+    /// Persisted state is untrusted input here: reject parent components and
+    /// punctuation before constructing the otherwise destructive remote argv.
+    pub fn remote_support_cleanup_argv(&self, support_dir: &str) -> Result<Vec<String>, String> {
+        let support_root = self
+            .remote_support_root()?
+            .ok_or_else(|| "remote support cleanup requires a remote host".to_string())?;
+        let relative = Path::new(support_dir)
+            .strip_prefix(&support_root)
+            .map_err(|_| "remote support directory escapes its managed root".to_string())?;
+        if relative.components().count() != 1
+            || !relative.to_str().is_some_and(|name| {
+                !name.is_empty()
+                    && name
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+        {
+            return Err("remote support directory is not a managed pane directory".to_string());
+        }
+        Ok(self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "rm",
+                    args: vec!["-rf".to_string(), "--".to_string(), support_dir.to_string()],
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host"))
+    }
+
+    /// The login shell reported by sshd for this account. A remote pane must
+    /// not inherit the local Mac user's shell path (commonly `/bin/zsh`) and
+    /// assume that binary exists on a Linux builder.
+    pub fn interactive_shell(&self, local_default: &str) -> Result<String, String> {
+        let Some(target) = self.remote() else {
+            return Ok(local_default.to_string());
+        };
+        if let Some(shell) = REMOTE_SHELLS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&target.ssh)
+            .cloned()
+        {
+            return Ok(shell);
+        }
+        let output = self
+            .command(RemoteCommand {
+                program: "sh",
+                args: vec![
+                    "-lc".to_string(),
+                    "printf '%s' \"${SHELL:-/bin/sh}\"".to_string(),
+                ],
+                ..Default::default()
+            })
+            .output()
+            .map_err(|err| format!("failed to resolve shell on {}: {err}", target.label))?;
+        let shell = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !output.status.success()
+            || !Path::new(&shell).is_absolute()
+            || shell.contains(['\r', '\n'])
+        {
+            return Err(format!(
+                "remote '{}' did not report a usable login shell",
+                target.label
+            ));
+        }
+        REMOTE_SHELLS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(target.ssh.clone(), shell.clone());
+        Ok(shell)
     }
 
     /// Expands a leading `~` against the *remote's* home directory.
@@ -373,11 +734,73 @@ impl Host {
     }
 }
 
+fn tmux_server_args(identity: &RemoteSessionIdentity) -> Vec<String> {
+    vec![
+        "-L".to_string(),
+        identity.tmux_server.clone(),
+        // The dedicated server must not execute arbitrary user tmux config.
+        // Passing this on every command is harmless once the server exists and
+        // deterministic when this command starts it.
+        "-f".to_string(),
+        "/dev/null".to_string(),
+    ]
+}
+
+fn validate_tmux_name(kind: &str, value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 80
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(format!(
+            "remote tmux {kind} name must be 1-80 ASCII letters, digits, '-' or '_'"
+        ));
+    }
+    Ok(())
+}
+
+fn remote_pane_envs(
+    target: &RemoteTarget,
+    remote_socket: &str,
+    remote_token: &str,
+    remote_workspace_root: Option<&str>,
+    envs: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut resolved = BTreeMap::new();
+    for (key, value) in envs {
+        // Never copy a local pane credential or an interactive-user credential
+        // across SSH. The explicit token below belongs to the restricted remote
+        // namespace and is the only control authority a remote process receives.
+        if valid_env_name(key) && !matches!(key.as_str(), "QMUX_TOKEN" | "QMUX_USER_TOKEN") {
+            resolved.insert(key.clone(), value.clone());
+        }
+    }
+    // Local paths mean nothing on the far side. Apply these after caller envs
+    // so an untrusted or stale launch specification cannot override them.
+    resolved.insert("QMUX_SOCK".to_string(), remote_socket.to_string());
+    resolved.insert("QMUX_CLI".to_string(), target.qmux_cli.clone());
+    resolved.insert("QMUX_TOKEN".to_string(), remote_token.to_string());
+    if let Some(root) = remote_workspace_root {
+        resolved.insert("QMUX_WORKSPACE_ROOT".to_string(), root.to_string());
+    }
+    resolved.into_iter().collect()
+}
+
+fn valid_env_name(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
 /// The remote's `$HOME`, probed once per destination.
 ///
 /// Cached because it cannot change under a live connection and every worktree
 /// allocation would otherwise pay for another round trip.
 static REMOTE_HOMES: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+static REMOTE_SHELLS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn remote_home(target: &RemoteTarget) -> Result<String, String> {
@@ -436,51 +859,6 @@ pub(crate) fn seed_remote_home(ssh: &str, home: &str) {
         .insert(ssh.to_string(), home.to_string());
 }
 
-impl RemoteTarget {
-    /// Wraps a pane's command in whatever keeps it alive across a dropped
-    /// connection.
-    ///
-    /// This is the whole reason `RemoteRef` carries a multiplexer. Plain ssh
-    /// cannot be made restorable: on disconnect sshd closes the pty master and
-    /// the foreground process group takes a SIGHUP, and nothing in ssh buffers
-    /// output for an absent client or lets a new connection re-attach to an old
-    /// process's stdio. Something on the far side has to own the process.
-    fn multiplexed(
-        &self,
-        session: &str,
-        program: &str,
-        args: &[String],
-    ) -> Result<Vec<String>, String> {
-        match self.multiplexer {
-            // `new-session -A` attaches when the session exists and creates it
-            // otherwise, so one command line both starts a pane and reattaches
-            // to it after a reconnect. `--` keeps a program name beginning with
-            // "-" from being read as a tmux flag.
-            RemoteMultiplexer::Tmux => {
-                let mut argv = vec![
-                    "tmux".to_string(),
-                    "new-session".to_string(),
-                    "-A".to_string(),
-                    "-s".to_string(),
-                    session.to_string(),
-                    "--".to_string(),
-                    program.to_string(),
-                ];
-                argv.extend(args.iter().cloned());
-                Ok(argv)
-            }
-            // herdr is a real client-server multiplexer with session
-            // persistence, but its attach-or-create invocation is not something
-            // to guess at: a wrong flag would silently start a second session on
-            // every reconnect rather than reattaching to the first.
-            RemoteMultiplexer::Herdr => Err(format!(
-                "remote '{}' uses the herdr multiplexer, which qmux cannot drive yet; use tmux for now",
-                self.label
-            )),
-        }
-    }
-}
-
 /// The single shell-safe string ssh will hand to the remote shell.
 ///
 /// Every token is quoted, including the program: a command line is re-split by
@@ -493,11 +871,7 @@ fn remote_command_line(remote: &RemoteCommand<'_>) -> String {
             // The name is not quoted — `env` requires a literal NAME=VALUE — so
             // reject anything that isn't a plain identifier rather than letting
             // it through into the command line.
-            if key.is_empty()
-                || !key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-            {
+            if !valid_env_name(key) {
                 continue;
             }
             parts.push(format!("{key}={}", shell_quote_arg(value)));
@@ -525,6 +899,15 @@ mod tests {
 
     fn remote_host() -> Host {
         for_group(Some(&remote_ref(Some("/srv/work"), None)))
+    }
+
+    fn remote_identity() -> RemoteSessionIdentity {
+        RemoteSessionIdentity {
+            remote_id: "saved-1".to_string(),
+            tmux_server: "qmux".to_string(),
+            tmux_session: "qmux-pane-7-deadbeef".to_string(),
+            support_dir: None,
+        }
     }
 
     fn argv(host: &Host, remote: RemoteCommand<'_>, interaction: Interaction) -> Vec<String> {
@@ -564,6 +947,11 @@ mod tests {
         // than a pane that hangs forever on launch.
         assert!(argv.windows(2).any(|pair| pair == ["-o", "BatchMode=yes"]));
         assert!(argv.iter().any(|arg| arg == "ConnectTimeout=10"));
+        assert!(argv.iter().any(|arg| arg == "ServerAliveInterval=15"));
+        assert!(argv.iter().any(|arg| arg == "ServerAliveCountMax=3"));
+        assert!(argv.iter().any(|arg| arg == "ControlMaster=auto"));
+        assert!(argv.iter().any(|arg| arg == "ControlPersist=60"));
+        assert!(argv.iter().any(|arg| arg == "ControlPath=~/.ssh/qmux-%C"));
         assert!(!argv.contains(&"-t".to_string()), "batch needs no tty");
         assert!(
             !argv.iter().any(|arg| arg == "StreamLocalBindUnlink=yes"),
@@ -662,6 +1050,40 @@ mod tests {
     }
 
     #[test]
+    fn existing_remote_pane_env_rebinds_local_control_paths() {
+        let host = remote_host();
+        let envs = host
+            .tmux_pane_envs(
+                &remote_identity(),
+                "remote-token",
+                &[
+                    ("QMUX_SOCK".to_string(), "/local/qmux.sock".to_string()),
+                    ("QMUX_CLI".to_string(), "/Applications/qmux".to_string()),
+                    ("QMUX_TOKEN".to_string(), "pane-token".to_string()),
+                    ("QMUX_USER_TOKEN".to_string(), "user-token".to_string()),
+                ],
+            )
+            .unwrap()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            envs.get("QMUX_SOCK").map(String::as_str),
+            Some("/tmp/qmux-pane-7-deadbeef.sock")
+        );
+        assert_eq!(envs.get("QMUX_CLI").map(String::as_str), Some("qmux-cli"));
+        assert_eq!(
+            envs.get("QMUX_WORKSPACE_ROOT").map(String::as_str),
+            Some("/srv/work")
+        );
+        assert_eq!(
+            envs.get("QMUX_TOKEN").map(String::as_str),
+            Some("remote-token")
+        );
+        assert!(!envs.contains_key("QMUX_USER_TOKEN"));
+    }
+
+    #[test]
     fn a_variable_name_that_is_not_an_identifier_is_dropped() {
         // `env` needs a literal NAME=VALUE, so the name cannot be quoted. Rather
         // than emit an unquoted attacker-influenced token, drop it.
@@ -685,58 +1107,206 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_pane_runs_under_tmux_so_it_survives_a_dropped_connection() {
-        let argv = remote_host()
-            .pane_argv(
-                "pane-7",
+    fn managed_tmux_commands_separate_create_from_attach_and_probe() {
+        let commands = remote_host()
+            .tmux_session_commands(
+                &remote_identity(),
                 "/local/run/qmux.sock",
-                "/Applications/qmux",
-                &["agent".to_string()],
+                "remote-token",
+                "/srv/work/a b",
+                120,
+                40,
+                "/opt/qmux agent",
+                &["--prompt".to_string(), "it's safe".to_string()],
                 &[
-                    ("QMUX_SOCK".to_string(), "/local/run/qmux.sock".to_string()),
-                    ("QMUX_CLI".to_string(), "/Applications/qmux".to_string()),
-                    ("QMUX_TOKEN".to_string(), "tok".to_string()),
+                    ("QMUX_SOCK".to_string(), "/wrong/local.sock".to_string()),
+                    ("QMUX_CLI".to_string(), "/wrong/local/qmux".to_string()),
+                    ("QMUX_TOKEN".to_string(), "token value".to_string()),
+                    ("BAD-NAME".to_string(), "dropped".to_string()),
                 ],
             )
-            .expect("remote host")
-            .expect("tmux is supported");
+            .unwrap();
 
-        assert_eq!(argv[0], "ssh");
-        let line = argv.last().expect("remote command line");
-
-        // `new-session -A` is the whole reattach story: the same command line
-        // creates the session the first time and attaches to it afterwards, so
-        // a reconnect finds the agent still running rather than starting a
-        // second one.
+        let create = commands.create_argv.last().unwrap();
+        assert!(create.contains("'tmux' '-L' 'qmux' '-f' '/dev/null' 'new-session' '-d'"));
+        assert!(create.contains("'-s' 'qmux-pane-7-deadbeef'"));
+        assert!(create.contains("'-x' '120' '-y' '40' '-c' '/srv/work/a b'"));
+        assert!(create.contains("'-e' 'QMUX_CLI=qmux-cli'"));
+        assert!(create.contains("'-e' 'QMUX_SOCK=/tmp/qmux-pane-7-deadbeef.sock'"));
+        assert!(create.contains("'-e' 'QMUX_TOKEN=remote-token'"));
+        assert!(!create.contains("QMUX_USER_TOKEN"));
+        assert!(!create.contains("BAD-NAME"));
+        assert!(create.ends_with("'--' '/opt/qmux agent' '--prompt' 'it'\\''s safe'"));
         assert!(
-            line.contains("'tmux' 'new-session' '-A' '-s' 'qmux-pane-7' '--'"),
-            "{line}"
+            commands
+                .create_argv
+                .windows(2)
+                .any(|pair| pair == ["-o", "BatchMode=yes"])
         );
-        assert!(line.ends_with("'/Applications/qmux' 'agent'"), "{line}");
-
-        // Both local paths are rewritten; leaving either would point the remote
-        // process at something that does not exist there.
-        assert!(line.contains("QMUX_SOCK='/tmp/qmux-pane-7.sock'"), "{line}");
-        assert!(line.contains("QMUX_CLI='qmux-cli'"), "{line}");
-        assert!(line.contains("QMUX_TOKEN='tok'"), "{line}");
-
+        let configure = commands.configure_argv.last().unwrap();
         assert!(
-            argv.windows(2)
-                .any(|pair| pair == ["-R", "/tmp/qmux-pane-7.sock:/local/run/qmux.sock"]),
-            "{argv:?}"
+            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'prefix' 'None' ';'")
         );
-        // A pane may legitimately prompt for a passphrase, so not batch mode.
-        assert!(argv.contains(&"-t".to_string()));
-        assert!(!argv.iter().any(|arg| arg == "BatchMode=yes"));
+        assert!(
+            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'prefix2' 'None' ';'")
+        );
+        assert!(configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'status' 'off' ';'"));
+        assert!(
+            configure.contains(
+                "'set-option' '-w' '-t' '=qmux-pane-7-deadbeef:0' 'history-limit' '50000'"
+            )
+        );
+
+        let attach = commands.attach_argv.last().unwrap();
+        assert!(attach.contains("'attach-session' '-t' '=qmux-pane-7-deadbeef'"));
+        assert!(!attach.contains("new-session"));
+        assert!(commands.attach_argv.contains(&"-t".to_string()));
+        assert!(
+            commands.attach_argv.windows(2).any(|pair| {
+                pair == ["-R", "/tmp/qmux-pane-7-deadbeef.sock:/local/run/qmux.sock"]
+            })
+        );
+
+        let probe = commands.probe_argv.last().unwrap();
+        assert!(probe.contains("'has-session' '-t' '=qmux-pane-7-deadbeef'"));
+        assert!(!probe.contains("new-session"));
+        assert!(commands.capture_argv.last().unwrap().contains(
+            "'capture-pane' '-p' '-e' '-t' '=qmux-pane-7-deadbeef:0.0' '-S' '-8192' '-E' '-1'"
+        ));
+        assert!(commands.capture_full_argv.last().unwrap().contains(
+            "'capture-pane' '-p' '-e' '-t' '=qmux-pane-7-deadbeef:0.0' '-S' '-' '-E' '-1'"
+        ));
+        assert!(
+            commands
+                .activity_argv
+                .last()
+                .unwrap()
+                .contains("'display-message' '-p'")
+        );
+        assert!(
+            commands
+                .kill_argv
+                .last()
+                .unwrap()
+                .contains("'kill-session' '-t' '=qmux-pane-7-deadbeef'")
+        );
+        assert!(
+            commands
+                .forward_cleanup_argv
+                .last()
+                .unwrap()
+                .contains("'rm' '-f' '--' '/tmp/qmux-pane-7-deadbeef.sock'")
+        );
     }
 
     #[test]
-    fn a_local_pane_is_not_wrapped_at_all() {
+    fn managed_tmux_commands_reject_cross_host_and_forged_names() {
+        let mut identity = remote_identity();
+        identity.remote_id = "another-host".to_string();
+        let error = remote_host()
+            .tmux_session_commands(
+                &identity,
+                "/local.sock",
+                "remote-token",
+                "/srv",
+                80,
+                24,
+                "sh",
+                &[],
+                &[],
+            )
+            .unwrap_err();
+        assert!(error.contains("belongs to 'another-host'"));
+
+        identity = remote_identity();
+        identity.tmux_session = "bad/name; new-session -s injected".to_string();
+        let error = remote_host()
+            .tmux_session_commands(
+                &identity,
+                "/local.sock",
+                "remote-token",
+                "/srv",
+                80,
+                24,
+                "sh",
+                &[],
+                &[],
+            )
+            .unwrap_err();
+        assert!(error.contains("tmux session name"));
+
         assert!(
             Host::Local
-                .pane_argv("pane-1", "/run/qmux.sock", "qmux", &[], &[])
-                .is_none(),
-            "a local pane must reach the pty exactly as its adapter built it"
+                .tmux_session_commands(
+                    &remote_identity(),
+                    "/local.sock",
+                    "remote-token",
+                    "/srv",
+                    80,
+                    24,
+                    "sh",
+                    &[],
+                    &[]
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn existing_session_commands_cannot_create_a_missing_session() {
+        let commands = remote_host()
+            .existing_tmux_session_commands(&remote_identity(), "/local/run/qmux.sock")
+            .unwrap();
+
+        assert!(commands.create_argv.is_empty());
+        assert!(
+            commands
+                .attach_argv
+                .last()
+                .unwrap()
+                .contains("'attach-session' '-t' '=qmux-pane-7-deadbeef'")
+        );
+        for argv in [
+            &commands.attach_argv,
+            &commands.configure_argv,
+            &commands.probe_argv,
+            &commands.capture_argv,
+            &commands.kill_argv,
+            &commands.forward_cleanup_argv,
+        ] {
+            assert!(!argv.iter().any(|arg| arg.contains("new-session")));
+        }
+    }
+
+    #[test]
+    fn remote_support_cleanup_is_confined_to_one_managed_pane_directory() {
+        let mut identity = remote_identity();
+        identity.support_dir = Some("/srv/work/.qmux/support/pane-7".to_string());
+        let commands = remote_host()
+            .existing_tmux_session_commands(&identity, "/local/run/qmux.sock")
+            .unwrap();
+        assert!(
+            commands
+                .support_cleanup_argv
+                .last()
+                .unwrap()
+                .contains("'rm' '-rf' '--' '/srv/work/.qmux/support/pane-7'")
+        );
+
+        identity.support_dir = Some("/".to_string());
+        assert!(
+            remote_host()
+                .existing_tmux_session_commands(&identity, "/local/run/qmux.sock")
+                .unwrap_err()
+                .contains("escapes")
+        );
+
+        identity.support_dir = Some("/srv/work/.qmux/support/..".to_string());
+        assert!(
+            remote_host()
+                .existing_tmux_session_commands(&identity, "/local/run/qmux.sock")
+                .unwrap_err()
+                .contains("not a managed pane directory")
         );
     }
 
@@ -745,8 +1315,17 @@ mod tests {
         let mut reference = remote_ref(None, None);
         reference.multiplexer = RemoteMultiplexer::Herdr;
         let err = for_group(Some(&reference))
-            .pane_argv("pane-1", "/run/qmux.sock", "qmux", &[], &[])
-            .expect("remote host")
+            .tmux_session_commands(
+                &remote_identity(),
+                "/run/qmux.sock",
+                "remote-token",
+                "/srv/work",
+                80,
+                24,
+                "qmux",
+                &[],
+                &[],
+            )
             .expect_err("herdr is not driveable yet");
 
         // Guessing an attach flag would silently start a second session on every
@@ -782,6 +1361,16 @@ mod tests {
         assert!(
             argv.windows(2)
                 .any(|pair| pair == ["-o", "StreamLocalBindUnlink=yes"]),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-o", "StreamLocalBindMask=0177"]),
+            "{argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair == ["-o", "ExitOnForwardFailure=yes"]),
             "{argv:?}"
         );
     }

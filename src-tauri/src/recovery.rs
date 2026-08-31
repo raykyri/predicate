@@ -1,6 +1,6 @@
 use crate::adapters::adapter_registry;
 use crate::events::QmuxEvent;
-use crate::pty::respawn_shell_pane;
+use crate::pty::{reattach_remote_pane, respawn_shell_pane};
 use crate::scrollback::append_pane_scrollback;
 use crate::state::{AppState, PaneInfo, PaneKind, PaneStatus};
 use crate::workspace::{LaunchOrigin, mark_agent_failed, validate_launch_workspace};
@@ -43,9 +43,18 @@ pub fn respawn_session(state: &AppState, panes: Vec<PaneInfo>) {
         // otherwise unwind `respawn_session` and silently skip every later pane,
         // which is exactly the "one bad pane blocks the rest" failure this loop
         // exists to prevent.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match pane.kind {
-            PaneKind::Shell => respawn_shell_pane(state, &pane).map(|_| ()),
-            PaneKind::Agent => respawn_agent_pane(state, &pane).map(|_| ()),
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if pane.remote_session.is_some() {
+                reattach_remote_pane(state, &pane)?;
+                if matches!(pane.kind, PaneKind::Agent) {
+                    rebind_reattached_remote_agent(state, &pane)?;
+                }
+                return Ok(());
+            }
+            match pane.kind {
+                PaneKind::Shell => respawn_shell_pane(state, &pane).map(|_| ()),
+                PaneKind::Agent => respawn_agent_pane(state, &pane).map(|_| ()),
+            }
         }))
         .unwrap_or_else(|payload| {
             let detail = payload
@@ -81,6 +90,29 @@ pub fn respawn_session(state: &AppState, panes: Vec<PaneInfo>) {
             json!({ "recovered": recovered, "failed": failed }),
         ));
     }
+}
+
+fn rebind_reattached_remote_agent(state: &AppState, pane: &PaneInfo) -> Result<(), String> {
+    let agent_id = pane
+        .agent_id
+        .as_deref()
+        .ok_or_else(|| format!("remote agent pane {} has no agent id", pane.id))?;
+    let agent = state
+        .mutate_agent(agent_id, |agent| {
+            agent.pane_id = Some(pane.id.clone());
+        })?
+        .ok_or_else(|| format!("agent {agent_id} was not found during remote recovery"))?;
+    // This is an attach to the still-running process, not adapter.resume(): do
+    // not force Idle or launch a duplicate agent. Fresh lifecycle hooks resume
+    // status tracking over the forwarded socket. Remote transcript paths are
+    // intentionally not tailed through the local filesystem.
+    state.emit(QmuxEvent::new(
+        "agent.recovered",
+        Some(pane.id.clone()),
+        Some(agent.id.clone()),
+        json!({ "resumed": true, "remoteAttached": true, "agent": agent }),
+    ));
+    Ok(())
 }
 
 pub fn restore_last_closed_pane(state: &AppState) -> Result<Option<PaneInfo>, String> {

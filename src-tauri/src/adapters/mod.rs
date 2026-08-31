@@ -1182,8 +1182,45 @@ fn adapter_update_command(adapter_id: &str, binary: &str) -> Option<String> {
 
 fn run_adapter_probe(binary: &str, args: &[&str]) -> Result<ProbeOutput, String> {
     let command = format!("{binary} {}", args.join(" "));
-    let mut child = Command::new(binary)
-        .args(args)
+    let mut process = Command::new(binary);
+    process.args(args);
+    run_adapter_probe_command(process, &command)
+}
+
+fn run_remote_adapter_probe(
+    host: &crate::host::Host,
+    binary: &str,
+    args: &[&str],
+) -> Result<ProbeOutput, String> {
+    let command = format!("{binary} {} on {}", args.join(" "), host.label());
+    let process = host.command(crate::host::RemoteCommand {
+        program: binary,
+        args: args.iter().map(|arg| (*arg).to_string()).collect(),
+        ..Default::default()
+    });
+    run_adapter_probe_command(process, &command)
+}
+
+fn run_remote_command_presence_probe(
+    host: &crate::host::Host,
+    program: &str,
+) -> Result<ProbeOutput, String> {
+    let command = format!("find {program} on {}", host.label());
+    let process = host.command(crate::host::RemoteCommand {
+        program: "sh",
+        args: vec![
+            "-c".to_string(),
+            "command -v \"$1\" >/dev/null 2>&1".to_string(),
+            "qmux-remote-probe".to_string(),
+            program.to_string(),
+        ],
+        ..Default::default()
+    });
+    run_adapter_probe_command(process, &command)
+}
+
+fn run_adapter_probe_command(mut process: Command, command: &str) -> Result<ProbeOutput, String> {
+    let mut child = process
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1340,6 +1377,74 @@ fn probe_adapter_metadata(mut metadata: AdapterMetadata) -> AdapterMetadata {
     metadata
 }
 
+fn probe_remote_adapter_metadata(
+    mut metadata: AdapterMetadata,
+    host: &crate::host::Host,
+) -> AdapterMetadata {
+    metadata.checked_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    let binary = metadata.configured_binary.trim().to_string();
+    if binary.is_empty() {
+        metadata.resolved_binary = None;
+        metadata.readiness = AdapterReadiness::Missing;
+        metadata.research_readiness = AdapterReadiness::Error;
+        metadata.message = Some(format!(
+            "{} has no binary configured for {}.",
+            metadata.label,
+            host.label()
+        ));
+        return metadata;
+    }
+    metadata.resolved_binary = Some(binary.clone());
+    metadata.readiness = AdapterReadiness::Ready;
+    // This increment supports interactive remote terminals. Research still
+    // launches through a local SDK/transcript path and must not be advertised
+    // merely because the remote CLI itself is installed.
+    metadata.research_readiness = AdapterReadiness::Error;
+    metadata.message = Some("Remote terminal ready; Research remains local-only.".to_string());
+
+    let version_output =
+        match run_remote_adapter_probe(host, &binary, adapter_version_args(&metadata.id)) {
+            Ok(output) if output.success => output,
+            Ok(output) => {
+                metadata.readiness = AdapterReadiness::Error;
+                metadata.message = Some(first_probe_line(&output.text).unwrap_or_else(|| {
+                    format!(
+                        "{} version check failed on {}",
+                        metadata.label,
+                        host.label()
+                    )
+                }));
+                return metadata;
+            }
+            Err(err) => {
+                metadata.readiness = AdapterReadiness::Error;
+                metadata.message = Some(err);
+                return metadata;
+            }
+        };
+    metadata.version = first_probe_line(&version_output.text);
+
+    if let Some(args) = adapter_auth_args(&metadata.id)
+        && let Ok(output) = run_remote_adapter_probe(host, &binary, args)
+    {
+        metadata.auth = classify_auth(&metadata.id, &output);
+        if metadata.auth == AdapterAuthState::Unauthenticated {
+            metadata.readiness = AdapterReadiness::NeedsAuth;
+            metadata.message = metadata.login_command.as_ref().map(|command| {
+                format!(
+                    "{} is not signed in on {}. Run `{command}` in a remote shell and check again.",
+                    metadata.label,
+                    host.label()
+                )
+            });
+        }
+    }
+    metadata
+}
+
 /// Runs provider probes concurrently so one slow CLI consumes only its own
 /// timeout rather than serially delaying every status card and launcher.
 struct AdapterProbeCacheEntry {
@@ -1375,16 +1480,19 @@ fn cached_adapter_metadata(key: &str) -> Option<Vec<AdapterMetadata>> {
 
 pub fn probe_adapter_metadata_for_config(
     config: &QmuxConfig,
-    remote_target: Option<(&str, &str)>,
+    remote_target: Option<&crate::workspace::RemoteRef>,
     force: bool,
 ) -> Result<Vec<AdapterMetadata>, String> {
     let mut base = adapter_registry(config).metadata();
-    let key = adapter_probe_cache_key(&base, remote_target.map(|(id, _)| id));
+    let remote_cache_target = remote_target.map(|remote| format!("{}@{}", remote.id, remote.host));
+    let key = adapter_probe_cache_key(&base, remote_cache_target.as_deref());
     if !force && let Some(metadata) = cached_adapter_metadata(&key) {
         return Ok(metadata);
     }
 
-    let metadata = if let Some((remote_id, remote_label)) = remote_target {
+    let metadata: Vec<AdapterMetadata> = if let Some(remote) = remote_target {
+        let remote_id = remote.id.as_str();
+        let remote_label = remote.label.as_str();
         let checked_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -1405,18 +1513,59 @@ pub fn probe_adapter_metadata_for_config(
                     adapter.label, remote_label
                 ));
             } else {
-                // No adapter opts in today. Keeping an explicit error here
-                // prevents a future opt-in from silently reusing local state;
-                // the adapter must add a target-side probe with its support.
+                // Establish a remote-safe fallback before the probe thread is
+                // spawned. If that worker panics, never leak the registry's
+                // local PATH/auth result into a remote launcher.
+                adapter.resolved_binary = None;
                 adapter.readiness = AdapterReadiness::Error;
                 adapter.research_readiness = AdapterReadiness::Error;
                 adapter.message = Some(format!(
-                    "{} has not implemented readiness checks for remote '{}'.",
+                    "Could not verify {} on remote '{}'.",
                     adapter.label, remote_label
                 ));
             }
         }
-        base
+        // Probe the group's snapshotted binding, not the current saved-remote
+        // entry. Editing or removing a config entry must never silently move or
+        // disable an existing workspace that still points at its original host.
+        let host = crate::host::for_group(Some(remote));
+        let qmux_cli_error = host
+            .remote()
+            .map(|target| target.qmux_cli.as_str())
+            .and_then(|qmux_cli| match run_remote_command_presence_probe(&host, qmux_cli) {
+                Ok(output) if output.success => None,
+                Ok(_) => Some(format!(
+                    "Remote '{}' does not provide the configured qmuxCli '{}'; install qmux-cli there or update the remote configuration.",
+                    remote_label, qmux_cli
+                )),
+                Err(err) => Some(err),
+            });
+        let handles = base
+            .into_iter()
+            .map(|metadata| {
+                if !metadata.supports_remote {
+                    return (metadata, None);
+                }
+                if let Some(err) = qmux_cli_error.as_ref() {
+                    let mut metadata = metadata;
+                    metadata.message = Some(err.clone());
+                    return (metadata, None);
+                }
+                let fallback = metadata.clone();
+                let host = host.clone();
+                let handle =
+                    std::thread::spawn(move || probe_remote_adapter_metadata(metadata, &host));
+                (fallback, Some(handle))
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .map(|(fallback, handle)| {
+                handle
+                    .and_then(|handle| handle.join().ok())
+                    .unwrap_or(fallback)
+            })
+            .collect()
     } else {
         let handles = base
             .into_iter()
@@ -2104,7 +2253,24 @@ mod tests {
         assert!(!metadata[6].default);
         assert_eq!(metadata[7].id, "devin");
         assert!(!metadata[7].default);
-        assert!(metadata.iter().all(|adapter| !adapter.supports_remote));
+        assert!(
+            metadata
+                .iter()
+                .find(|adapter| adapter.id == "claude")
+                .is_some_and(|adapter| adapter.supports_remote)
+        );
+        assert!(
+            metadata
+                .iter()
+                .filter(|adapter| !matches!(adapter.id.as_str(), "claude" | "codex"))
+                .all(|adapter| !adapter.supports_remote)
+        );
+        assert!(
+            metadata
+                .iter()
+                .filter(|adapter| matches!(adapter.id.as_str(), "claude" | "codex"))
+                .all(|adapter| adapter.supports_remote)
+        );
         assert!(
             metadata
                 .iter()
@@ -2193,22 +2359,58 @@ mod tests {
     }
 
     #[test]
+    fn remote_prerequisite_probe_treats_the_program_as_one_opaque_argument() {
+        let host = crate::host::Host::Local;
+        assert!(
+            run_remote_command_presence_probe(&host, "/bin/sh")
+                .unwrap()
+                .success
+        );
+        assert!(
+            !run_remote_command_presence_probe(&host, "/definitely missing/qmux-cli")
+                .unwrap()
+                .success
+        );
+    }
+
+    #[test]
     fn remote_probe_never_reuses_local_provider_readiness() {
         let config = test_config();
+        let remote = crate::config::SavedRemote {
+            host: "127.0.0.1".to_string(),
+            label: Some("Build host".to_string()),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: None,
+        }
+        .to_ref("build-host");
 
-        let metadata =
-            probe_adapter_metadata_for_config(&config, Some(("build-host", "Build host")), true)
-                .expect("remote metadata");
+        let metadata = probe_adapter_metadata_for_config(&config, Some(&remote), true)
+            .expect("remote metadata");
         assert_eq!(metadata.len(), 8);
         assert!(metadata.iter().all(|adapter| {
-            adapter.target.kind == "remote"
-                && adapter.target.id.as_deref() == Some("build-host")
-                && adapter.readiness == AdapterReadiness::Error
-                && adapter
-                    .message
-                    .as_deref()
-                    .is_some_and(|message| message.contains("cannot run on remote"))
+            adapter.target.kind == "remote" && adapter.target.id.as_deref() == Some("build-host")
         }));
+        assert!(
+            metadata
+                .iter()
+                .filter(|adapter| matches!(adapter.id.as_str(), "claude" | "codex"))
+                .all(|adapter| adapter.readiness == AdapterReadiness::Error
+                    && adapter
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| !message.contains("was not found")))
+        );
+        assert!(
+            metadata
+                .iter()
+                .filter(|adapter| !matches!(adapter.id.as_str(), "claude" | "codex"))
+                .all(|adapter| adapter.readiness == AdapterReadiness::Error
+                    && adapter
+                        .message
+                        .as_deref()
+                        .is_some_and(|message| message.contains("cannot run on remote")))
+        );
     }
 
     #[test]

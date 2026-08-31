@@ -9,7 +9,7 @@ use super::{
 };
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
-use crate::host;
+use crate::host::{self, Host};
 use crate::pty::{
     CommandPlan, InitialPaneSize, PaneMeta, agent_pane_envs, plan_to_spec, recoverable_dir,
     spawn_pty,
@@ -74,6 +74,54 @@ impl CodexAdapter {
         let binary = codex_binary_with_code_mode_host(binary);
         Ok(binary.display().to_string())
     }
+
+    fn host_for_group(&self, state: &AppState, group_id: &str) -> Result<Host, String> {
+        let group = state.group(group_id)?;
+        Ok(host::for_group(
+            group.as_ref().and_then(|group| group.remote.as_ref()),
+        ))
+    }
+
+    fn binary_for_host(&self, host: &Host) -> Result<String, String> {
+        if host.is_local() {
+            self.ensure_binary()
+        } else if self.binary.trim().is_empty() {
+            Err("Codex adapter binary cannot be empty for a remote launch".to_string())
+        } else {
+            // The configured program is resolved by tmux on the SSH host. A
+            // local PATH check would reject a valid remote install or turn a
+            // local macOS path into the remote command by accident.
+            Ok(self.binary.clone())
+        }
+    }
+
+    fn cwd_for_host(
+        &self,
+        host: &Host,
+        path: &str,
+        missing_message: impl FnOnce() -> String,
+    ) -> Result<PathBuf, String> {
+        if host.is_local() {
+            recoverable_dir(path).ok_or_else(missing_message)
+        } else {
+            Ok(PathBuf::from(path))
+        }
+    }
+
+    fn integration_for_host(
+        &self,
+        host: &Host,
+    ) -> Result<(Option<PathBuf>, Option<String>), String> {
+        if host.is_local() {
+            Ok((Some(ensure_codex_integration()?), None))
+        } else {
+            let qmux_cli = host
+                .remote()
+                .map(|remote| remote.qmux_cli.clone())
+                .ok_or_else(|| "remote Codex launch lost its host configuration".to_string())?;
+            Ok((None, Some(qmux_cli)))
+        }
+    }
 }
 
 fn codex_binary_with_code_mode_host(binary: PathBuf) -> PathBuf {
@@ -109,6 +157,10 @@ impl AgentAdapter for CodexAdapter {
 
     fn configured_binary(&self) -> &str {
         &self.binary
+    }
+
+    fn supports_remote(&self) -> bool {
+        true
     }
 
     fn launch(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
@@ -296,9 +348,7 @@ impl CodexAdapter {
     }
 
     fn spawn_pane(&self, state: &AppState, request: SpawnAgentRequest) -> Result<PaneInfo, String> {
-        let binary = self.ensure_binary()?;
         let options = CodexLaunchOptions::from_value(request.options)?;
-        let codex_home = ensure_codex_integration()?;
         let resume_session_id = request
             .resume_session_id
             .as_deref()
@@ -350,7 +400,10 @@ impl CodexAdapter {
             .cwd
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(&agent.worktree_dir));
-        if !cwd.is_dir() {
+        let host = self.host_for_group(state, &agent.group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        let (codex_home, remote_hook_cli) = self.integration_for_host(&host)?;
+        if host.is_local() && !cwd.is_dir() {
             let _ = mark_agent_failed(state, &agent.id);
             return Err(format!(
                 "Codex working directory {} does not exist",
@@ -380,17 +433,21 @@ impl CodexAdapter {
         let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let args = build_codex_args(
             &cwd,
-            Some(&state.config().workspace_root),
+            host.is_local()
+                .then_some(state.config().workspace_root.as_path()),
             request.model.as_deref(),
             &options,
             worktree_root
                 .as_deref()
                 .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
+            remote_hook_cli.as_deref(),
             tail_args,
         );
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
-        envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        if let Some(codex_home) = codex_home {
+            envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        }
         add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         // Bind before spawn so a fast SessionStart hook can authenticate against the
@@ -436,13 +493,19 @@ impl CodexAdapter {
         pane: &PaneInfo,
         agent: &AgentInfo,
     ) -> Result<PaneInfo, String> {
+        let host = self.host_for_group(state, &agent.group_id)?;
         // Older qmux versions could persist a hook-reported side-conversation id
         // beside the original rollout path. The rollout is the durable authority,
-        // so repair that hybrid before choosing which Codex session to resume.
-        let agent = reconcile_codex_agent_identity(state, agent)?;
-        let binary = self.ensure_binary()?;
-        let codex_home = ensure_codex_integration()?;
-        let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
+        // so repair that hybrid before choosing which Codex session to resume. A
+        // remote rollout path cannot be opened through the local filesystem.
+        let agent = if host.is_local() {
+            reconcile_codex_agent_identity(state, agent)?
+        } else {
+            agent.clone()
+        };
+        let binary = self.binary_for_host(&host)?;
+        let (codex_home, remote_hook_cli) = self.integration_for_host(&host)?;
+        let cwd = self.cwd_for_host(&host, &agent.worktree_dir, || {
             format!(
                 "agent worktree {} no longer exists; relaunch manually",
                 agent.worktree_dir
@@ -455,17 +518,21 @@ impl CodexAdapter {
         let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let (args, resumed) = build_codex_resume_args(
             &cwd,
-            Some(&state.config().workspace_root),
+            host.is_local()
+                .then_some(state.config().workspace_root.as_path()),
             agent.model.as_deref(),
             &options,
             worktree_root
                 .as_deref()
                 .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
+            remote_hook_cli.as_deref(),
             agent.session_id.as_deref(),
         );
 
         let mut envs = agent_pane_envs(state, &pane.id, &agent.id)?;
-        envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        if let Some(codex_home) = codex_home {
+            envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        }
         add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         let spec = plan_to_spec(
@@ -499,7 +566,9 @@ impl CodexAdapter {
         // Running) so a recovered quiet session isn't shown as working; the first real
         // prompt/tool hook promotes it to Running.
         let restored = attach_codex_agent_pane(state, &agent.id, pane.id.clone(), false)?;
-        if let Some(transcript_path) = restored.transcript_path.clone() {
+        if host.is_local()
+            && let Some(transcript_path) = restored.transcript_path.clone()
+        {
             start_transcript_tail(
                 state.clone(),
                 restored.id.clone(),
@@ -527,8 +596,6 @@ impl CodexAdapter {
         use_worktree: bool,
         prompt: Option<&str>,
     ) -> Result<(PaneInfo, AgentInfo), String> {
-        let binary = self.ensure_binary()?;
-        let codex_home = ensure_codex_integration()?;
         let session_id = source
             .session_id
             .clone()
@@ -566,7 +633,10 @@ impl CodexAdapter {
         agent.status = AgentStatus::Idle;
         state.update_agent(agent.clone())?;
 
-        let cwd = recoverable_dir(&agent.worktree_dir).ok_or_else(|| {
+        let host = self.host_for_group(state, &agent.group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        let (codex_home, remote_hook_cli) = self.integration_for_host(&host)?;
+        let cwd = self.cwd_for_host(&host, &agent.worktree_dir, || {
             format!(
                 "fork working directory {} does not exist",
                 agent.worktree_dir
@@ -581,12 +651,14 @@ impl CodexAdapter {
         let worktree_root = codex_worktree_root(state, &agent, &cwd)?;
         let args = build_codex_fork_args(
             &cwd,
-            Some(&state.config().workspace_root),
+            host.is_local()
+                .then_some(state.config().workspace_root.as_path()),
             agent.model.as_deref(),
             &options,
             worktree_root
                 .as_deref()
                 .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
+            remote_hook_cli.as_deref(),
             &session_id,
             if has_initial_prompt {
                 Some(prompt)
@@ -597,7 +669,9 @@ impl CodexAdapter {
 
         let pane_id = state.next_id("pane");
         let mut envs = agent_pane_envs(state, &pane_id, &agent.id)?;
-        envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        if let Some(codex_home) = codex_home {
+            envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        }
         add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
 
         // Bind before spawn so a fast Codex SessionStart hook passes the control
@@ -645,30 +719,32 @@ impl CodexAdapter {
         state: &AppState,
         request: PrepareShellAgentLaunchRequest,
     ) -> Result<PreparedShellAgentLaunch, String> {
-        let binary = self.ensure_binary()?;
         validate_shell_tail_args(&request.args)?;
 
         if !state.pane_exists(&request.pane_id)? {
             return Err(format!("pane {} was not found", request.pane_id));
         }
 
+        let pane_group_id = state
+            .pane_group_id(&request.pane_id)?
+            .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
+        let host = self.host_for_group(state, &pane_group_id)?;
+        let binary = self.binary_for_host(&host)?;
+        let (codex_home, remote_hook_cli) = self.integration_for_host(&host)?;
+
         let shell_cwd = PathBuf::from(&request.cwd);
-        if !shell_cwd.is_dir() {
+        if host.is_local() && !shell_cwd.is_dir() {
             return Err(format!(
                 "Codex working directory {} does not exist",
                 shell_cwd.display()
             ));
         }
-        let agent_cwd = codex_effective_cwd(&shell_cwd, &request.args)?;
-        let codex_home = ensure_codex_integration()?;
+        let agent_cwd = codex_effective_cwd(&host, &shell_cwd, &request.args)?;
 
         // A restart-driven resume (`codex resume <id>`) rebinds the original agent for
         // that session instead of minting a duplicate; any other invocation starts a
         // fresh agent in the current directory.
         let cwd_str = agent_cwd.display().to_string();
-        let pane_group_id = state
-            .pane_group_id(&request.pane_id)?
-            .ok_or_else(|| format!("pane {} was not found", request.pane_id))?;
         let resume_session_id = codex_resume_session_id(&request.args).map(str::to_string);
         let fork_point = codex_fork_source_session_id(&request.args).map(str::to_string);
         let shell_model = shell_cli_model(&request.args);
@@ -718,22 +794,53 @@ impl CodexAdapter {
             request.pane_id.clone(),
             args_contain_prompt(&request.args),
         )?;
+        let agent = if host.is_local() {
+            agent
+        } else {
+            state
+                .mutate_agent(&agent.id, |agent| agent.transcript_path = None)?
+                .ok_or_else(|| "prepared remote Codex agent disappeared".to_string())?
+        };
 
         let options = CodexLaunchOptions::default();
         let worktree_root = codex_worktree_root(state, &agent, &agent_cwd)?;
         let args = build_codex_args(
             &shell_cwd,
-            Some(&state.config().workspace_root),
+            host.is_local()
+                .then_some(state.config().workspace_root.as_path()),
             None,
             &options,
             worktree_root
                 .as_deref()
                 .map(|_| CODEX_QMUX_WORKTREE_INSTRUCTIONS),
+            remote_hook_cli.as_deref(),
             request.args,
         );
         let mut envs = agent_pane_envs(state, &request.pane_id, &agent.id)?;
-        envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        if let Some(codex_home) = codex_home {
+            envs.push(("CODEX_HOME".to_string(), codex_home.display().to_string()));
+        }
         add_codex_worktree_root_env(&mut envs, worktree_root.as_deref());
+        let launch_envs = if host.is_local() {
+            envs
+        } else {
+            let identity = state
+                .list_panes()?
+                .into_iter()
+                .find(|pane| pane.id == request.pane_id)
+                .and_then(|pane| pane.remote_session)
+                .ok_or_else(|| {
+                    format!(
+                        "remote pane {} is missing its tmux session identity",
+                        request.pane_id
+                    )
+                })?;
+            host.tmux_pane_envs(
+                &identity,
+                &state.pane_remote_token(&request.pane_id)?,
+                &envs,
+            )?
+        };
         let agent_id = agent.id.clone();
         let launch_cwd = shell_cwd.display().to_string();
 
@@ -748,7 +855,7 @@ impl CodexAdapter {
             binary,
             cwd: launch_cwd,
             args,
-            envs: envs
+            envs: launch_envs
                 .into_iter()
                 .map(|(key, value)| LaunchEnv { key, value })
                 .collect(),
@@ -762,6 +869,13 @@ impl CodexAdapter {
         notification: AdapterNotification,
     ) -> Result<AdapterNotificationOutcome, String> {
         let pane_id = notification.pane_id.clone();
+        let remote_pane = pane_id.as_deref().is_some_and(|pane_id| {
+            state.list_panes().ok().is_some_and(|panes| {
+                panes
+                    .iter()
+                    .any(|pane| pane.id == pane_id && pane.remote_session.is_some())
+            })
+        });
         let mut send_tracking = None;
         let mut agent = notification
             .agent_id
@@ -772,14 +886,18 @@ impl CodexAdapter {
                     .as_deref()
                     .and_then(|pane_id| state.agent_by_pane(pane_id).ok().flatten())
             });
-        if let Some(current) = agent.take() {
+        if !remote_pane && let Some(current) = agent.take() {
             agent = Some(reconcile_codex_agent_identity(state, &current)?);
         }
         let hook_event = notification.event.clone();
         if hook_event != "SessionStart"
             && let Some(current) = agent.as_ref()
         {
-            adopt_forked_codex_session_identity(state, current, &notification.payload)?;
+            if remote_pane {
+                adopt_remote_forked_codex_session_identity(state, current, &notification.payload)?;
+            } else {
+                adopt_forked_codex_session_identity(state, current, &notification.payload)?;
+            }
         }
         let event_type = match hook_event.as_str() {
             "SessionStart" => {
@@ -788,39 +906,50 @@ impl CodexAdapter {
                         .or_else(|| string_field(&notification.payload, "sessionId"))
                         .or_else(|| string_field(&notification.payload, "resource_id"))
                         .or_else(|| string_field(&notification.payload, "resourceId"));
-                    let transcript_path = string_field(&notification.payload, "transcript_path")
-                        .or_else(|| string_field(&notification.payload, "transcriptPath"))
-                        // This payload arrives over the control socket under the pane's
-                        // token, so a prompt-injected agent can forge a SessionStart.
-                        // Reject a path that isn't a sibling of the already-bound
-                        // transcript (or isn't a .jsonl) before tailing it; a rejected
-                        // path falls back to session-id directory discovery, which is
-                        // confined to $CODEX_HOME/sessions and matched on session_meta id.
-                        .filter(|candidate| {
-                            hook_transcript_path_acceptable(
-                                current.transcript_path.as_deref(),
-                                candidate,
-                            )
-                        });
-                    let stale_fork_payload =
-                        current.fork_point.as_deref().is_some_and(|fork_point| {
-                            session_id.as_deref() == Some(fork_point)
-                                || transcript_path.as_deref().is_some_and(|path| {
-                                    codex_transcript_session_id(Path::new(path)).as_deref()
-                                        == Some(fork_point)
-                                })
-                        });
-                    if !stale_fork_payload {
-                        // A SessionStart can describe an ephemeral TUI fork routed
-                        // through the same pane token. Keep its identity provisional;
-                        // the binding worker promotes both fields together only after
-                        // a rollout's session_meta proves the reported id.
-                        start_codex_transcript_binding(
-                            state.clone(),
-                            current.id.clone(),
-                            session_id,
-                            transcript_path,
-                        );
+                    if remote_pane {
+                        if let Some(session_id) = session_id
+                            .as_deref()
+                            .and_then(valid_remote_codex_session_id)
+                            && current.fork_point.as_deref() != Some(session_id.as_str())
+                        {
+                            record_remote_codex_session_id(state, current, session_id)?;
+                        }
+                    } else {
+                        let transcript_path =
+                            string_field(&notification.payload, "transcript_path")
+                                .or_else(|| string_field(&notification.payload, "transcriptPath"))
+                                // This payload arrives over the control socket under the pane's
+                                // token, so a prompt-injected agent can forge a SessionStart.
+                                // Reject a path that isn't a sibling of the already-bound
+                                // transcript (or isn't a .jsonl) before tailing it; a rejected
+                                // path falls back to session-id directory discovery, which is
+                                // confined to $CODEX_HOME/sessions and matched on session_meta id.
+                                .filter(|candidate| {
+                                    hook_transcript_path_acceptable(
+                                        current.transcript_path.as_deref(),
+                                        candidate,
+                                    )
+                                });
+                        let stale_fork_payload =
+                            current.fork_point.as_deref().is_some_and(|fork_point| {
+                                session_id.as_deref() == Some(fork_point)
+                                    || transcript_path.as_deref().is_some_and(|path| {
+                                        codex_transcript_session_id(Path::new(path)).as_deref()
+                                            == Some(fork_point)
+                                    })
+                            });
+                        if !stale_fork_payload {
+                            // A SessionStart can describe an ephemeral TUI fork routed
+                            // through the same pane token. Keep its identity provisional;
+                            // the binding worker promotes both fields together only after
+                            // a rollout's session_meta proves the reported id.
+                            start_codex_transcript_binding(
+                                state.clone(),
+                                current.id.clone(),
+                                session_id,
+                                transcript_path,
+                            );
+                        }
                     }
                 }
                 "agent.session_start"
@@ -922,6 +1051,17 @@ impl CodexAdapter {
                 };
                 if waiting_on_subagents {
                     "agent.running"
+                } else if remote_pane {
+                    // Local panes settle from the authoritative task_complete
+                    // transcript record. Remote transcript streaming is not in
+                    // the first terminal increment, so Stop is the best
+                    // available completion boundary there; any later tool or
+                    // prompt hook promotes the agent back to Running.
+                    if let Some(agent) = agent.as_mut() {
+                        agent.status = AgentStatus::AwaitingInput;
+                        state.set_agent_status(&agent.id, agent.status)?;
+                    }
+                    "agent.awaiting_input"
                 } else {
                     "agent.stop_observed"
                 }
@@ -1060,6 +1200,7 @@ fn build_codex_args(
     model: Option<&str>,
     options: &CodexLaunchOptions,
     developer_instructions: Option<&str>,
+    remote_hook_cli: Option<&str>,
     tail_args: Vec<String>,
 ) -> Vec<String> {
     let mut args = vec!["--cd".to_string(), cwd.display().to_string()];
@@ -1072,8 +1213,7 @@ fn build_codex_args(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
-    args.push("--profile".to_string());
-    args.push(CODEX_QMUX_PROFILE.to_string());
+    push_codex_hook_integration(&mut args, remote_hook_cli);
     if let Some(developer_instructions) = developer_instructions {
         args.push("--config".to_string());
         args.push(format!(
@@ -1116,6 +1256,7 @@ fn build_codex_resume_args(
     model: Option<&str>,
     options: &CodexLaunchOptions,
     developer_instructions: Option<&str>,
+    remote_hook_cli: Option<&str>,
     session_id: Option<&str>,
 ) -> (Vec<String>, bool) {
     let Some(session_id) = session_id
@@ -1129,6 +1270,7 @@ fn build_codex_resume_args(
                 model,
                 options,
                 developer_instructions,
+                remote_hook_cli,
                 Vec::new(),
             ),
             false,
@@ -1142,6 +1284,7 @@ fn build_codex_resume_args(
             model,
             options,
             developer_instructions,
+            remote_hook_cli,
             vec!["resume".to_string(), session_id.to_string()],
         ),
         true,
@@ -1154,6 +1297,7 @@ fn build_codex_fork_args(
     model: Option<&str>,
     options: &CodexLaunchOptions,
     developer_instructions: Option<&str>,
+    remote_hook_cli: Option<&str>,
     session_id: &str,
     prompt: Option<&str>,
 ) -> Vec<String> {
@@ -1172,8 +1316,38 @@ fn build_codex_fork_args(
         model,
         options,
         developer_instructions,
+        remote_hook_cli,
         tail_args,
     )
+}
+
+/// Local Codex panes use qmux's generated profile in the user's CODEX_HOME.
+/// A remote pane must not point CODEX_HOME at a pane support directory: doing
+/// so would hide the remote user's auth, config, and session history. Instead,
+/// inject only the qmux lifecycle hooks as process-local config overrides and
+/// leave the remote Codex home untouched.
+fn push_codex_hook_integration(args: &mut Vec<String>, remote_hook_cli: Option<&str>) {
+    let Some(qmux_cli) = remote_hook_cli else {
+        args.push("--profile".to_string());
+        args.push(CODEX_QMUX_PROFILE.to_string());
+        return;
+    };
+
+    args.push("--config".to_string());
+    args.push("features.hooks=true".to_string());
+    let command_prefix = shell_quote_arg(qmux_cli);
+    for event in CODEX_HOOK_EVENTS {
+        let command = toml_string(&format!("{command_prefix} notify {event}"));
+        let entry = if *event == "SessionStart" {
+            format!(
+                "hooks.{event}=[{{matcher=\"startup|resume\",hooks=[{{type=\"command\",command={command},timeout=5}}]}}]"
+            )
+        } else {
+            format!("hooks.{event}=[{{hooks=[{{type=\"command\",command={command},timeout=5}}]}}]")
+        };
+        args.push("--config".to_string());
+        args.push(entry);
+    }
 }
 
 fn codex_worktree_root(
@@ -1232,7 +1406,7 @@ fn attach_codex_agent_pane(
 /// The project Codex will actually operate on for a shell invocation. Keep this
 /// separate from the process cwd so the intercepted shell command retains normal
 /// relative-path behavior while qMux identity and resume matching follow `--cd`.
-fn codex_effective_cwd(shell_cwd: &Path, args: &[String]) -> Result<PathBuf, String> {
+fn codex_effective_cwd(host: &Host, shell_cwd: &Path, args: &[String]) -> Result<PathBuf, String> {
     let mut requested = None;
     let mut index = 0;
     while index < args.len() {
@@ -1267,13 +1441,20 @@ fn codex_effective_cwd(shell_cwd: &Path, args: &[String]) -> Result<PathBuf, Str
         Some(path) => shell_cwd.join(path),
         None => shell_cwd.to_path_buf(),
     };
-    if !cwd.is_dir() {
+    if host.is_local() && !cwd.is_dir() {
         return Err(format!(
             "Codex working directory {} does not exist",
             cwd.display()
         ));
     }
-    Ok(fs::canonicalize(&cwd).unwrap_or(cwd))
+    if host.is_local() {
+        Ok(fs::canonicalize(&cwd).unwrap_or(cwd))
+    } else {
+        // This path belongs to the SSH host. It is already passed to Codex and
+        // tmux as an opaque remote path, so never canonicalize or stat it on
+        // the machine running the qmux UI.
+        Ok(cwd)
+    }
 }
 
 /// Whether a manual `codex ...` invocation carries an inline prompt. Value-taking
@@ -1713,6 +1894,68 @@ fn reconcile_codex_agent_identity(
                 current.id
             )
         })
+}
+
+fn valid_remote_codex_session_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then(|| value.to_string())
+}
+
+/// Remote hooks cannot hand their rollout to the local transcript validator.
+/// Keep only the bounded opaque session id needed for tmux recovery/resume and
+/// deliberately do not persist or tail the remote filesystem path. The hook is
+/// still scoped by the pane's forwarded capability token.
+fn record_remote_codex_session_id(
+    state: &AppState,
+    current: &AgentInfo,
+    session_id: String,
+) -> Result<(), String> {
+    state
+        .mutate_agent(&current.id, |agent| {
+            if agent.pane_id == current.pane_id {
+                agent.session_id = Some(session_id.clone());
+            }
+        })?
+        .ok_or_else(|| {
+            format!(
+                "agent {} disappeared while recording its remote Codex session",
+                current.id
+            )
+        })?;
+    Ok(())
+}
+
+fn adopt_remote_forked_codex_session_identity(
+    state: &AppState,
+    current: &AgentInfo,
+    payload: &Value,
+) -> Result<(), String> {
+    let Some(fork_point) = current.fork_point.as_deref() else {
+        return Ok(());
+    };
+    if current
+        .session_id
+        .as_deref()
+        .is_some_and(|session_id| session_id != fork_point)
+    {
+        return Ok(());
+    }
+    let child_session_id = string_field(payload, "session_id")
+        .or_else(|| string_field(payload, "sessionId"))
+        .or_else(|| string_field(payload, "resource_id"))
+        .or_else(|| string_field(payload, "resourceId"))
+        .as_deref()
+        .and_then(valid_remote_codex_session_id)
+        .filter(|session_id| session_id != fork_point);
+    if let Some(session_id) = child_session_id {
+        record_remote_codex_session_id(state, current, session_id)?;
+    }
+    Ok(())
 }
 
 /// Recovers a fork's child identity when its startup hook briefly reported the
@@ -2974,6 +3217,7 @@ mod tests {
             Some("gpt-5"),
             &options,
             Some("Use QMUX_WORKTREE_ROOT.\nTreat it as an opaque path."),
+            None,
             vec!["--".to_string(), "start here".to_string()],
         );
 
@@ -3015,6 +3259,7 @@ mod tests {
             None,
             None,
             &options,
+            None,
             None,
             Vec::new(),
         );
@@ -3075,6 +3320,7 @@ mod tests {
             Some("gpt-5.6-luna"),
             &options,
             None,
+            None,
             Vec::new(),
         );
 
@@ -3094,6 +3340,33 @@ mod tests {
                 "--search"
             ]
         );
+    }
+
+    #[test]
+    fn remote_args_inline_hooks_without_replacing_codex_home() {
+        let args = build_codex_args(
+            Path::new("/srv/project"),
+            None,
+            None,
+            &CodexLaunchOptions::default(),
+            None,
+            Some("/opt/qmux tools/qmux-cli"),
+            Vec::new(),
+        );
+
+        assert!(!args.iter().any(|arg| arg == "--profile"));
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--config", "features.hooks=true"] })
+        );
+        assert!(args.iter().any(|arg| {
+            arg.starts_with("hooks.SessionStart=")
+                && arg.contains("matcher=\"startup|resume\"")
+                && arg.contains("'/opt/qmux tools/qmux-cli' notify SessionStart")
+        }));
+        assert!(args.iter().any(|arg| {
+            arg.starts_with("hooks.Stop=") && arg.contains("'/opt/qmux tools/qmux-cli' notify Stop")
+        }));
     }
 
     #[test]
@@ -3169,28 +3442,71 @@ mod tests {
         fs::create_dir_all(&project).unwrap();
 
         assert_eq!(
-            codex_effective_cwd(&shell, &[]).unwrap(),
+            codex_effective_cwd(&Host::Local, &shell, &[]).unwrap(),
             fs::canonicalize(&shell).unwrap()
         );
         assert_eq!(
-            codex_effective_cwd(&shell, &svec(&["--cd", "../project"])).unwrap(),
+            codex_effective_cwd(&Host::Local, &shell, &svec(&["--cd", "../project"])).unwrap(),
             fs::canonicalize(&project).unwrap()
         );
         assert_eq!(
-            codex_effective_cwd(&shell, &svec(&[&format!("--cd={}", project.display())])).unwrap(),
+            codex_effective_cwd(
+                &Host::Local,
+                &shell,
+                &svec(&[&format!("--cd={}", project.display())]),
+            )
+            .unwrap(),
             fs::canonicalize(&project).unwrap()
         );
         assert_eq!(
-            codex_effective_cwd(&shell, &svec(&[&format!("-C{}", project.display())])).unwrap(),
+            codex_effective_cwd(
+                &Host::Local,
+                &shell,
+                &svec(&[&format!("-C{}", project.display())]),
+            )
+            .unwrap(),
             fs::canonicalize(&project).unwrap()
         );
         assert_eq!(
-            codex_effective_cwd(&shell, &svec(&["--", "--cd", "../project"])).unwrap(),
+            codex_effective_cwd(&Host::Local, &shell, &svec(&["--", "--cd", "../project"]),)
+                .unwrap(),
             fs::canonicalize(&shell).unwrap()
         );
-        assert!(codex_effective_cwd(&shell, &svec(&["--cd"])).is_err());
+        assert!(codex_effective_cwd(&Host::Local, &shell, &svec(&["--cd"])).is_err());
 
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn remote_shell_cd_stays_opaque_to_the_local_filesystem() {
+        let host = Host::Remote(crate::host::RemoteTarget {
+            id: "remote-1".to_string(),
+            label: "builder".to_string(),
+            ssh: "builder.example".to_string(),
+            qmux_cli: "qmux-cli".to_string(),
+            workspace_root: Some("/srv/qmux".to_string()),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+        });
+        assert_eq!(
+            codex_effective_cwd(
+                &host,
+                Path::new("/srv/project"),
+                &svec(&["--cd", "../other"]),
+            )
+            .unwrap(),
+            PathBuf::from("/srv/project/../other")
+        );
+        let adapter = CodexAdapter {
+            binary: "/opt/remote/bin/codex".to_string(),
+        };
+        assert!(AgentAdapter::supports_remote(&adapter));
+        assert_eq!(
+            adapter.binary_for_host(&host).unwrap(),
+            "/opt/remote/bin/codex"
+        );
+        let (codex_home, hook_cli) = adapter.integration_for_host(&host).unwrap();
+        assert_eq!(codex_home, None);
+        assert_eq!(hook_cli.as_deref(), Some("qmux-cli"));
     }
 
     #[test]
@@ -3259,6 +3575,7 @@ mod tests {
             Some("gpt-5"),
             &options,
             None,
+            None,
             Some(" session-123 "),
         );
 
@@ -3299,6 +3616,7 @@ mod tests {
             Some("gpt-5"),
             &options,
             None,
+            None,
             " session-123 ",
             Some("  continue here  "),
         );
@@ -3337,6 +3655,7 @@ mod tests {
             None,
             &options,
             None,
+            None,
             "session-123",
             Some("   "),
         );
@@ -3366,6 +3685,7 @@ mod tests {
             None,
             None,
             &options,
+            None,
             None,
             Some("   "),
         );
@@ -4778,6 +5098,35 @@ trusted_hash = "sha256:trusted"
         assert!(matches!(agent.status, AgentStatus::Done));
     }
 
+    #[test]
+    fn remote_hooks_record_session_identity_and_settle_without_local_transcript_io() {
+        let state = test_state();
+        install_remote_agent_pane(&state);
+
+        let started = ingest(
+            &state,
+            hook_for_agent(
+                "SessionStart",
+                "agent-1",
+                json!({
+                    "session_id": "remote-session-1",
+                    "transcript_path": "/home/remote/.codex/sessions/rollout.jsonl"
+                }),
+            ),
+        );
+        assert_eq!(started.event_type, "agent.session_start");
+        let agent = state.agent("agent-1").unwrap().unwrap();
+        assert_eq!(agent.session_id.as_deref(), Some("remote-session-1"));
+        assert_eq!(agent.transcript_path, None);
+
+        let stopped = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(stopped.event_type, "agent.awaiting_input");
+        assert!(matches!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::AwaitingInput
+        ));
+    }
+
     fn test_state() -> AppState {
         AppState::new(QmuxConfig {
             remotes: Default::default(),
@@ -4892,6 +5241,8 @@ trusted_hash = "sha256:trusted"
                     group_id: "group-1".to_string(),
                     cwd: "/tmp/qmux-codex-test".to_string(),
                     active_workspace: None,
+                    remote_session: None,
+                    remote_connection: None,
                     cols: 80,
                     rows: 24,
                     status: PaneStatus::Running,
@@ -4912,6 +5263,57 @@ trusted_hash = "sha256:trusted"
             })
             .unwrap();
         bytes
+    }
+
+    fn install_remote_agent_pane(state: &AppState) {
+        state.insert_agent(sample_agent()).unwrap();
+        state
+            .insert_pane(PaneRuntime {
+                info: PaneInfo {
+                    id: "pane-1".to_string(),
+                    title: "Codex".to_string(),
+                    last_osc_title: None,
+                    kind: PaneKind::Agent,
+                    agent_id: Some("agent-1".to_string()),
+                    group_id: "group-1".to_string(),
+                    cwd: "/srv/qmux/project".to_string(),
+                    active_workspace: None,
+                    remote_session: Some(
+                        crate::state::RemoteSessionIdentity::new("remote-1", "pane-1").unwrap(),
+                    ),
+                    remote_connection: Some(crate::state::RemoteConnectionInfo::default()),
+                    cols: 80,
+                    rows: 24,
+                    status: PaneStatus::Running,
+                    last_active_at: 0,
+                    recovered: false,
+                    depth: 0,
+                },
+                backend: crate::state::PaneBackend::RemoteTmux(
+                    crate::state::RemoteTmuxBackend::new(
+                        crate::remote_terminal::RemoteAttachmentController::new(),
+                        crate::remote_terminal::RemoteHistoryCheckpoint::new(Vec::new()),
+                        Arc::new(Mutex::new(Default::default())),
+                        crate::host::RemoteTmuxCommands {
+                            version_argv: Vec::new(),
+                            create_argv: Vec::new(),
+                            configure_argv: Vec::new(),
+                            attach_argv: Vec::new(),
+                            probe_argv: Vec::new(),
+                            capture_argv: Vec::new(),
+                            capture_full_argv: Vec::new(),
+                            activity_argv: Vec::new(),
+                            kill_argv: Vec::new(),
+                            forward_cleanup_argv: Vec::new(),
+                            support_cleanup_argv: Vec::new(),
+                            remote_socket_path: "/tmp/qmux-pane-1.sock".to_string(),
+                        },
+                        false,
+                    ),
+                ),
+                cwd_observation_seq: 0,
+            })
+            .unwrap();
     }
 
     fn hook_for_agent(

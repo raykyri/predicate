@@ -1,8 +1,10 @@
 use crate::adapters::MessageAnchor;
 use crate::config::QmuxConfig;
 use crate::events::QmuxEvent;
+use crate::host::RemoteTmuxCommands;
 use crate::journal;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
+use crate::remote_terminal::{RemoteAttachmentController, RemoteHistoryCheckpoint};
 use crate::research::{
     self, CreateResearchDocumentRequest, CreateResearchTreeRequest, RecentResearchQuery,
     RecentResearchQueryCursor, RecentResearchQueryPage, ResearchBranchRemoval, ResearchHighlight,
@@ -42,44 +44,96 @@ pub struct HostPtyBackend {
     pub native_surface: bool,
 }
 
+pub struct RemoteTmuxBackend {
+    pub controller: Arc<RemoteAttachmentController>,
+    pub history: Arc<RemoteHistoryCheckpoint>,
+    pub writer: SharedWriter,
+    pub backlog: SharedBacklog,
+    pub commands: RemoteTmuxCommands,
+    pub native_surface: bool,
+}
+
+impl RemoteTmuxBackend {
+    pub fn new(
+        controller: Arc<RemoteAttachmentController>,
+        history: Arc<RemoteHistoryCheckpoint>,
+        backlog: SharedBacklog,
+        commands: RemoteTmuxCommands,
+        native_surface: bool,
+    ) -> Self {
+        let writer = controller.stable_writer();
+        Self {
+            controller,
+            history,
+            writer,
+            backlog,
+            commands,
+            native_surface,
+        }
+    }
+}
+
 pub enum PaneBackend {
     #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
     HostPty(HostPtyBackend),
+    RemoteTmux(RemoteTmuxBackend),
 }
 
 impl PaneBackend {
     fn writer(&self) -> Option<SharedWriter> {
         match self {
             Self::HostPty(backend) => Some(backend.writer.clone()),
+            Self::RemoteTmux(backend) => Some(backend.writer.clone()),
         }
     }
 
     fn host_master(&self) -> Option<SharedMaster> {
         match self {
             Self::HostPty(backend) => Some(backend.master.clone()),
+            Self::RemoteTmux(backend) => backend.controller.current_master(),
         }
     }
 
     fn host_child(&self) -> Option<SharedChild> {
         match self {
             Self::HostPty(backend) => Some(backend.child.clone()),
+            Self::RemoteTmux(_) => None,
         }
     }
 
     fn backlog(&self) -> SharedBacklog {
         match self {
             Self::HostPty(backend) => backend.backlog.clone(),
+            Self::RemoteTmux(backend) => backend.backlog.clone(),
         }
     }
 
     fn uses_native_surface(&self) -> bool {
         match self {
             Self::HostPty(backend) => backend.native_surface,
+            Self::RemoteTmux(backend) => backend.native_surface,
         }
     }
 
     fn has_host_pty(&self) -> bool {
         matches!(self, Self::HostPty(_))
+    }
+
+    fn remote_control(
+        &self,
+    ) -> Option<(
+        Arc<RemoteAttachmentController>,
+        Arc<RemoteHistoryCheckpoint>,
+        RemoteTmuxCommands,
+    )> {
+        match self {
+            Self::HostPty(_) => None,
+            Self::RemoteTmux(backend) => Some((
+                backend.controller.clone(),
+                backend.history.clone(),
+                backend.commands.clone(),
+            )),
+        }
     }
 }
 
@@ -227,6 +281,10 @@ pub struct AppState {
 struct AppStateInner {
     config: QmuxConfig,
     pane_tokens: Mutex<HashMap<String, String>>,
+    // Credentials exposed across an SSH reverse-forward. Kept distinct from local
+    // pane tokens so the control socket can apply a remote-only command policy and
+    // a compromised host never learns the stronger credential used by local hooks.
+    remote_tokens: Mutex<HashMap<String, String>>,
     // Credentials injected only into interactive shell panes. Agent launches
     // strip them before exec, keeping cross-pane user control distinct from
     // the pane-scoped token inherited by hooks and MCP servers.
@@ -1359,6 +1417,84 @@ pub struct PaneRuntime {
     pub cwd_observation_seq: u64,
 }
 
+/// Durable coordinates for the tmux session that owns a remote pane.
+///
+/// The SSH connection is intentionally absent: connections are disposable,
+/// while these names are the stable identity a new connection must attach to.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteSessionIdentity {
+    /// The snapshotted remote id from the pane's workspace group.
+    pub remote_id: String,
+    /// A qmux-specific tmux server, isolated from the user's default server.
+    pub tmux_server: String,
+    /// A collision-resistant session name persisted across qmux restarts.
+    pub tmux_session: String,
+    /// Owner-only remote directory containing generated files for this pane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support_dir: Option<String>,
+}
+
+impl RemoteSessionIdentity {
+    pub fn new(remote_id: &str, pane_id: &str) -> Result<Self, String> {
+        if remote_id.trim().is_empty() {
+            return Err("a remote session requires a remote id".to_string());
+        }
+        let mut nonce = [0_u8; 12];
+        getrandom::getrandom(&mut nonce)
+            .map_err(|err| format!("failed to generate remote session identity: {err}"))?;
+        let nonce = nonce
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join("");
+        let pane_slug = pane_id
+            .chars()
+            .map(|ch| {
+                if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                    ch
+                } else {
+                    '_'
+                }
+            })
+            .take(40)
+            .collect::<String>();
+        let pane_slug = if pane_slug.is_empty() {
+            "pane"
+        } else {
+            pane_slug.as_str()
+        };
+        Ok(Self {
+            remote_id: remote_id.to_string(),
+            tmux_server: "qmux".to_string(),
+            tmux_session: format!("qmux-{pane_slug}-{nonce}"),
+            support_dir: None,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteConnectionState {
+    Connecting,
+    Connected,
+    Reconnecting,
+    #[default]
+    Disconnected,
+    Failed,
+}
+
+/// Process-local connection health exposed with pane metadata. Persisted files
+/// may contain the last observation, but restore always resets it to
+/// `disconnected`; only a live attachment may claim a stronger state.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteConnectionInfo {
+    pub state: RemoteConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneInfo {
@@ -1379,6 +1515,13 @@ pub struct PaneInfo {
     /// live `AgentInfo.active_workspace` from transcript tailing instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_workspace: Option<ActiveWorkspace>,
+    /// Present only for panes whose process is owned by qmux-managed tmux on a
+    /// remote host. This identity, not a local ssh child pid, drives recovery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_session: Option<RemoteSessionIdentity>,
+    /// Live attachment health for a remote pane. Local panes leave it absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_connection: Option<RemoteConnectionInfo>,
     pub cols: u16,
     pub rows: u16,
     pub status: PaneStatus,
@@ -1722,6 +1865,7 @@ impl AppState {
             inner: Arc::new(AppStateInner {
                 config,
                 pane_tokens: Mutex::new(HashMap::new()),
+                remote_tokens: Mutex::new(HashMap::new()),
                 user_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
@@ -2263,6 +2407,10 @@ impl AppState {
         // normalized records during the normal recovery pass.
         for pane in &mut persisted.panes {
             pane.depth = 0;
+            pane.remote_connection = pane
+                .remote_session
+                .as_ref()
+                .map(|_| RemoteConnectionInfo::default());
         }
         if source_version == Some(2)
             && let Err(err) =
@@ -2943,6 +3091,34 @@ impl AppState {
         let tokens = self
             .inner
             .pane_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        tokens
+            .iter()
+            .find_map(|(pane_id, pane_token)| (pane_token == token).then(|| pane_id.clone()))
+    }
+
+    /// Returns the restricted control credential injected into a remote pane.
+    /// It deliberately has a separate namespace from `pane_token`: callers on
+    /// the far side of SSH must pass the remote command policy in control_socket.
+    pub fn pane_remote_token(&self, pane_id: &str) -> Result<String, String> {
+        let mut tokens = self
+            .inner
+            .remote_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if let Some(existing) = tokens.get(pane_id) {
+            return Ok(existing.clone());
+        }
+        let token = random_token()?;
+        Ok(tokens.entry(pane_id.to_string()).or_insert(token).clone())
+    }
+
+    /// Resolves a restricted SSH-forwarded credential to its owning pane.
+    pub fn pane_for_remote_token(&self, token: &str) -> Option<String> {
+        let tokens = self
+            .inner
+            .remote_tokens
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         tokens
@@ -3799,9 +3975,7 @@ impl AppState {
         Ok(state)
     }
 
-    pub fn notification_log(
-        &self,
-    ) -> Result<crate::user_notifications::NotificationLog, String> {
+    pub fn notification_log(&self) -> Result<crate::user_notifications::NotificationLog, String> {
         let model = self
             .inner
             .model
@@ -7609,11 +7783,14 @@ impl AppState {
                 remove_group_without_open_panes_locked(&mut model, group_id, true)
             })
         };
-        // The pane's control-socket token is captured by its in-pane process as
-        // QMUX_TOKEN; once the pane is gone for good it can never legitimately be used
-        // again, so drop it rather than leave a live credential resolving (via
-        // `pane_for_token`) to a pane that no longer exists. Separate lock from `model`.
+        // Pane credentials are captured by in-pane processes; once the pane is gone
+        // for good they can never legitimately be used again. Revoke every namespace
+        // rather than leave a credential resolving to a pane that no longer exists.
+        // These locks stay separate from `model`.
         if let Ok(mut tokens) = self.inner.pane_tokens.lock() {
+            tokens.remove(pane_id);
+        }
+        if let Ok(mut tokens) = self.inner.remote_tokens.lock() {
             tokens.remove(pane_id);
         }
         if let Ok(mut tokens) = self.inner.user_tokens.lock() {
@@ -10533,6 +10710,59 @@ impl AppState {
             .map(|pane| pane.backend.has_host_pty()))
     }
 
+    pub fn pane_remote_control(
+        &self,
+        pane_id: &str,
+    ) -> Result<
+        Option<(
+            Arc<RemoteAttachmentController>,
+            Arc<RemoteHistoryCheckpoint>,
+            RemoteTmuxCommands,
+        )>,
+        String,
+    > {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        Ok(model
+            .panes
+            .get(pane_id)
+            .and_then(|pane| pane.backend.remote_control()))
+    }
+
+    pub fn update_remote_connection(
+        &self,
+        pane_id: &str,
+        state: RemoteConnectionState,
+        message: Option<String>,
+    ) -> Result<(), String> {
+        let connection = RemoteConnectionInfo { state, message };
+        {
+            let mut model = self
+                .inner
+                .model
+                .lock()
+                .map_err(|_| "model lock poisoned".to_string())?;
+            let pane = model
+                .panes
+                .get_mut(pane_id)
+                .ok_or_else(|| format!("pane {pane_id} was not found"))?;
+            if pane.info.remote_session.is_none() {
+                return Err(format!("pane {pane_id} is not remote"));
+            }
+            pane.info.remote_connection = Some(connection.clone());
+        }
+        self.emit(QmuxEvent::new(
+            "pane.remote_connection",
+            Some(pane_id.to_string()),
+            None,
+            json!({ "connection": connection }),
+        ));
+        Ok(())
+    }
+
     pub fn research_pane_accepts_input(&self, pane_id: &str) -> Result<Option<bool>, String> {
         let model = self
             .inner
@@ -12527,6 +12757,8 @@ mod tests {
             group_id: "group-1".to_string(),
             cwd: "/tmp/work/agent-1".to_string(),
             active_workspace: None,
+            remote_session: None,
+            remote_connection: None,
             cols: 132,
             rows: 43,
             status: PaneStatus::Running,
@@ -19336,6 +19568,25 @@ mod tests {
     }
 
     #[test]
+    fn remote_control_token_is_distinct_and_reclaimed_with_its_pane() {
+        let workspace = temp_workspace();
+        let state = AppState::new(test_config(workspace));
+        state.insert_pane(sample_pane_runtime("pane-1")).unwrap();
+
+        let local = state.pane_token("pane-1").unwrap();
+        let remote = state.pane_remote_token("pane-1").unwrap();
+        assert_ne!(remote, local);
+        assert_eq!(
+            state.pane_for_remote_token(&remote).as_deref(),
+            Some("pane-1")
+        );
+        assert!(state.pane_for_token(&remote).is_none());
+
+        state.remove_pane("pane-1").unwrap();
+        assert!(state.pane_for_remote_token(&remote).is_none());
+    }
+
+    #[test]
     fn remove_pane_reclaims_its_interactive_user_token() {
         let workspace = temp_workspace();
         let state = AppState::new(test_config(workspace));
@@ -19723,6 +19974,16 @@ mod tests {
         // Stand in for a previous process having persisted a full session.
         let mut legacy_pane = sample_pane("pane-7", Some("agent-1"));
         legacy_pane.depth = 3;
+        legacy_pane.remote_session = Some(RemoteSessionIdentity {
+            remote_id: "devbox".to_string(),
+            tmux_server: "qmux".to_string(),
+            tmux_session: "qmux-pane-7-deadbeef".to_string(),
+            support_dir: None,
+        });
+        legacy_pane.remote_connection = Some(RemoteConnectionInfo {
+            state: RemoteConnectionState::Connected,
+            message: Some("stale live state".to_string()),
+        });
         let persisted = PersistedState {
             next_id: 99,
             groups: vec![sample_terminal_group()],
@@ -19747,6 +20008,17 @@ mod tests {
         assert_eq!(pane.cols, 132);
         assert_eq!(pane.rows, 43);
         assert_eq!(pane.depth, 0);
+        assert_eq!(
+            pane.remote_session
+                .as_ref()
+                .map(|identity| identity.tmux_session.as_str()),
+            Some("qmux-pane-7-deadbeef")
+        );
+        assert_eq!(
+            pane.remote_connection,
+            Some(RemoteConnectionInfo::default()),
+            "restore must preserve session identity but distrust connection health"
+        );
 
         // ...but the stale runtime is NOT trusted: no live pane exists until respawn.
         assert!(state.list_panes().unwrap().is_empty());
@@ -19774,6 +20046,24 @@ mod tests {
         let raw = state.next_id("pane");
         let seq: u64 = raw.rsplit('-').next().unwrap().parse().unwrap();
         assert!(seq >= 99, "expected next_id >= persisted high-water mark");
+    }
+
+    #[test]
+    fn remote_session_identity_is_unique_tmux_safe_and_carries_the_remote() {
+        let first = RemoteSessionIdentity::new("devbox", "pane:unsafe/name").unwrap();
+        let second = RemoteSessionIdentity::new("devbox", "pane:unsafe/name").unwrap();
+
+        assert_eq!(first.remote_id, "devbox");
+        assert_eq!(first.tmux_server, "qmux");
+        assert_ne!(first.tmux_session, second.tmux_session);
+        assert!(first.tmux_session.starts_with("qmux-pane_unsafe_name-"));
+        assert!(
+            first
+                .tmux_session
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        );
+        assert!(RemoteSessionIdentity::new("  ", "pane-1").is_err());
     }
 
     #[test]

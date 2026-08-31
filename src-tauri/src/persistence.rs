@@ -1412,6 +1412,8 @@ mod tests {
             group_id: "group-1".to_string(),
             cwd: "/tmp/work".to_string(),
             active_workspace: None,
+            remote_session: None,
+            remote_connection: None,
             cols: 120,
             rows: 40,
             status: PaneStatus::Running,

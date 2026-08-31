@@ -1,8 +1,16 @@
 use crate::adapters::{ShellCommandIntegration, adapter_registry};
 use crate::events::QmuxEvent;
-use crate::scrollback::{append_pane_scrollback, read_pane_scrollback, sanitize_scrollback_replay};
+use crate::host::Host;
+use crate::remote_terminal::{
+    RemoteAttachment, RemoteAttachmentController, RemoteHistoryCheckpoint,
+};
+use crate::scrollback::{
+    append_pane_scrollback, read_pane_scrollback, read_remote_history_checkpoint,
+    remove_pane_scrollback, sanitize_scrollback_replay, write_remote_history_checkpoint,
+};
 use crate::state::{
     AppState, HostPtyBackend, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus,
+    RemoteConnectionInfo, RemoteConnectionState, RemoteSessionIdentity, RemoteTmuxBackend,
     SharedBacklog, SharedChild, SharedWriter, ShellAgentResume,
 };
 use crate::turn_queue::{abort_fork_barrier_for_child, release_waiters_for_agent};
@@ -20,12 +28,15 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SUBMIT_KEY: &[u8] = b"\r";
+const REMOTE_BATCH_TIMEOUT: Duration = Duration::from_secs(55);
+static VALIDATED_TMUX_VERSIONS: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
 // End by clearing Kitty keyboard enhancements. Historical agent output is
 // sanitized before this is sent, but the explicit reset is defense in depth
 // against an unrecognized keyboard-protocol form reaching the fresh surface.
@@ -250,18 +261,12 @@ pub struct PaneMeta {
 pub fn plan_to_spec(
     state: &AppState,
     meta: PaneMeta,
-    plan: CommandPlan,
+    mut plan: CommandPlan,
 ) -> Result<PtySpawnSpec, String> {
     let remote = state.group(&meta.group_id)?.and_then(|group| group.remote);
     let host = crate::host::for_group(remote.as_ref());
     let pane_id = meta.pane_id.clone();
 
-    // Shell integration is delivered as files written to *this* filesystem and
-    // referenced by env (ZDOTDIR and friends). On a remote pane those paths do
-    // not exist, so the shell would come up silently stripped of cwd reporting
-    // and the agent wrappers. Refuse rather than hand back a pane that looks
-    // fine and quietly isn't; agent panes carry no support files and are
-    // unaffected.
     // An adapter has to have been built for this. The failure mode otherwise is
     // silent: the process starts over there with a binary path resolved here, a
     // plugin directory that exists only here, and its worktree not as its cwd.
@@ -278,39 +283,32 @@ pub fn plan_to_spec(
             ));
         }
     }
-
-    if !host.is_local() && !plan.support_files.is_empty() {
-        return Err(format!(
-            "group {} is bound to remote '{}'; panes needing shell integration cannot run there yet",
-            meta.group_id,
-            host.label()
-        ));
+    if !host.is_local()
+        && let Some(agent_id) = meta.agent_id.as_deref()
+    {
+        // A transcript path stored by an older build may name a local file even
+        // though this process will run over SSH. Clear it before the remote token
+        // becomes reachable; remote hooks record session identity without local IO.
+        state.mutate_agent(agent_id, |agent| agent.transcript_path = None)?;
     }
 
-    let (program, args, envs, cwd) = match pane_id
-        .as_deref()
-        .and_then(|pane_id| {
-            host.pane_argv(
-                pane_id,
-                &state.config().socket_path.display().to_string(),
-                &plan.program,
-                &plan.args,
-                &plan.envs,
-            )
+    let remote = if let Some(target) = host.remote() {
+        let pane_id = pane_id
+            .as_deref()
+            .ok_or_else(|| "a remote pane requires a stable pane id".to_string())?;
+        let mut identity = RemoteSessionIdentity::new(&target.id, pane_id)?;
+        // The tmux session includes a random nonce and is collision-resistant
+        // across qmux workspaces/processes. Scope support files to that durable
+        // identity rather than the sequential pane id, which can repeat.
+        let support_dir =
+            relocate_remote_support_files(&host, pane_id, &identity.tmux_session, &mut plan)?;
+        identity.support_dir = support_dir;
+        Some(RemoteSpawnSpec {
+            host: host.clone(),
+            identity,
         })
-        .transpose()?
-    {
-        Some(argv) => (
-            argv[0].clone(),
-            argv[1..].to_vec(),
-            // Everything the remote process reads is in the command line; ssh
-            // itself needs nothing.
-            Vec::new(),
-            // The pty runs `ssh` here, so its directory must exist on *this*
-            // machine — the plan's cwd is the far side's.
-            state.default_open_dir(),
-        ),
-        None => (plan.program, plan.args, plan.envs, plan.cwd),
+    } else {
+        None
     };
 
     Ok(PtySpawnSpec {
@@ -320,15 +318,103 @@ pub fn plan_to_spec(
         kind: meta.kind,
         title: meta.title,
         last_osc_title: meta.last_osc_title,
-        program,
-        args,
-        cwd,
-        envs,
+        program: plan.program,
+        args: plan.args,
+        cwd: plan.cwd,
+        envs: plan.envs,
         support_files: plan.support_files,
         support_file_fallback: plan.support_file_fallback,
         initial_size: meta.initial_size,
         recovered: meta.recovered,
+        remote,
     })
+}
+
+fn relocate_remote_support_files(
+    host: &Host,
+    pane_id: &str,
+    remote_scope: &str,
+    plan: &mut CommandPlan,
+) -> Result<Option<String>, String> {
+    if plan.support_files.is_empty() {
+        return Ok(None);
+    }
+    if pane_id.is_empty()
+        || !pane_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("invalid pane id for remote support directory".to_string());
+    }
+    let global_root = PathBuf::from(
+        host.remote_support_root()?
+            .ok_or_else(|| "remote support files require a remote host".to_string())?,
+    );
+    if remote_scope.is_empty()
+        || !remote_scope
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("invalid remote support scope".to_string());
+    }
+    let pane_root = global_root.join(remote_scope);
+    let local_cli = plan
+        .envs
+        .iter()
+        .find_map(|(key, value)| (key == "QMUX_CLI").then(|| value.clone()));
+    let remote_cli = host.remote().map(|target| target.qmux_cli.clone());
+    let mut root_rewrites = Vec::new();
+
+    for file in &mut plan.support_files {
+        let relative = support_file_relative(file)?;
+        let (old_prefix, relative) = if let Ok(stripped) = relative.strip_prefix(pane_id) {
+            (file.root.join(pane_id), stripped.to_path_buf())
+        } else {
+            (file.root.clone(), relative)
+        };
+        let old_root = old_prefix.display().to_string();
+        let new_root = pane_root.display().to_string();
+        file.root = pane_root.clone();
+        file.path = pane_root.join(relative);
+        root_rewrites.push((old_root, new_root));
+    }
+    root_rewrites.sort_by_key(|(old, _)| std::cmp::Reverse(old.len()));
+    root_rewrites.dedup();
+
+    let rewrite = |value: &mut String| {
+        for (old, new) in &root_rewrites {
+            if value == old || value.starts_with(&format!("{old}/")) {
+                *value = format!("{new}{}", &value[old.len()..]);
+                break;
+            }
+        }
+    };
+    for arg in &mut plan.args {
+        rewrite(arg);
+    }
+    for (key, value) in &mut plan.envs {
+        rewrite(value);
+        if key == "QMUX_ORIGINAL_ZDOTDIR" {
+            *value = host.expand_home("~")?;
+        } else if key == "QMUX_ORIGINAL_BASHRC" {
+            *value = host.expand_home("~/.bashrc")?;
+        }
+    }
+    for file in &mut plan.support_files {
+        for (old, new) in &root_rewrites {
+            file.contents = file.contents.replace(old, new);
+        }
+        if let (Some(local), Some(remote)) = (&local_cli, &remote_cli) {
+            file.contents = file.contents.replace(local, remote);
+        }
+    }
+    Ok(Some(pane_root.display().to_string()))
+}
+
+#[derive(Debug)]
+pub struct RemoteSpawnSpec {
+    pub host: Host,
+    pub identity: RemoteSessionIdentity,
 }
 
 #[derive(Debug)]
@@ -347,6 +433,7 @@ pub struct PtySpawnSpec {
     pub support_file_fallback: Option<SupportFileFallback>,
     pub initial_size: Option<InitialPaneSize>,
     pub recovered: bool,
+    pub remote: Option<RemoteSpawnSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -563,6 +650,120 @@ pub fn respawn_shell_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInfo,
     spawn_pty(state, spec)
 }
 
+/// Rebuilds only the local attachment for a persisted remote pane. This path
+/// never has a create command: a missing tmux identity is a recovery failure,
+/// not permission to launch a replacement process.
+pub fn reattach_remote_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInfo, String> {
+    let identity = pane
+        .remote_session
+        .clone()
+        .ok_or_else(|| format!("pane {} has no remote session identity", pane.id))?;
+    let group = state
+        .group(&pane.group_id)?
+        .ok_or_else(|| format!("group {} was not found", pane.group_id))?;
+    let remote = group
+        .remote
+        .as_ref()
+        .ok_or_else(|| format!("group {} is no longer remote", pane.group_id))?;
+    if remote.id != identity.remote_id {
+        return Err(format!(
+            "pane {} belongs to remote '{}' but its group uses '{}'",
+            pane.id, identity.remote_id, remote.id
+        ));
+    }
+    let host = crate::host::for_group(Some(remote));
+    let commands = host.existing_tmux_session_commands(
+        &identity,
+        &state.config().socket_path.display().to_string(),
+    )?;
+    ensure_remote_tmux_version(&commands.version_argv)?;
+    let probe = probe_remote_session(&commands.probe_argv);
+    if probe == Ok(false) {
+        return Err(format!(
+            "remote tmux session '{}' no longer exists",
+            identity.tmux_session
+        ));
+    }
+
+    let native_surface = cfg!(all(target_os = "macos", not(test)));
+    let controller = RemoteAttachmentController::new();
+    let history = RemoteHistoryCheckpoint::new(read_remote_history_checkpoint(
+        &state.config().workspace_root,
+        &pane.id,
+    )?);
+    let backlog: SharedBacklog = Arc::new(Mutex::new(Default::default()));
+    let mut recovered = pane.clone();
+    recovered.recovered = true;
+    recovered.remote_connection = Some(match &probe {
+        Ok(true) => RemoteConnectionInfo {
+            state: RemoteConnectionState::Connecting,
+            message: None,
+        },
+        Err(err) => RemoteConnectionInfo {
+            state: RemoteConnectionState::Disconnected,
+            message: Some(err.clone()),
+        },
+        Ok(false) => unreachable!("missing sessions returned above"),
+    });
+    let backend = RemoteTmuxBackend::new(
+        controller.clone(),
+        history.clone(),
+        backlog.clone(),
+        commands.clone(),
+        native_surface,
+    );
+    let stable_writer = backend.writer.clone();
+    state.insert_pane(PaneRuntime {
+        info: recovered.clone(),
+        backend: PaneBackend::RemoteTmux(backend),
+        cwd_observation_seq: 0,
+    })?;
+    if native_surface {
+        if let Err(err) = crate::native_terminal::create_host_managed(&pane.id, None) {
+            let _ = state.remove_pane(&pane.id);
+            return Err(err);
+        }
+        register_native_input_writer(&pane.id, stable_writer);
+    }
+
+    match probe {
+        Ok(true) => {
+            if let Err(err) = attach_remote_generation(
+                state,
+                &pane.id,
+                controller.clone(),
+                history.clone(),
+                commands.clone(),
+                backlog.clone(),
+                native_surface,
+            ) {
+                schedule_remote_reconnect(
+                    state.clone(),
+                    pane.id.clone(),
+                    controller,
+                    history,
+                    commands,
+                    backlog,
+                    native_surface,
+                    err,
+                );
+            }
+        }
+        Err(err) => schedule_remote_reconnect(
+            state.clone(),
+            pane.id.clone(),
+            controller,
+            history,
+            commands,
+            backlog,
+            native_surface,
+            err,
+        ),
+        Ok(false) => unreachable!("missing sessions returned above"),
+    }
+    Ok(recovered)
+}
+
 fn apply_recovered_shell_titles(spec: &mut PtySpawnSpec, pane: &PaneInfo) {
     spec.title.clone_from(&pane.title);
     spec.last_osc_title.clone_from(&pane.last_osc_title);
@@ -634,9 +835,16 @@ fn shell_spawn_spec(
     recovered: bool,
     startup_command: Option<String>,
 ) -> Result<PtySpawnSpec, String> {
-    let shell = pane_shell();
-    let qmux_cli = crate::launch_path::qmux_cli_path()
-        .map_err(|err| format!("failed to resolve qmux executable for shell integration: {err}"))?;
+    let remote = state.group(&group_id)?.and_then(|group| group.remote);
+    let host = crate::host::for_group(remote.as_ref());
+    let shell = host.interactive_shell(&pane_shell())?;
+    let qmux_cli = if let Some(target) = host.remote() {
+        PathBuf::from(&target.qmux_cli)
+    } else {
+        crate::launch_path::qmux_cli_path().map_err(|err| {
+            format!("failed to resolve qmux executable for shell integration: {err}")
+        })?
+    };
     let mut envs = shell_pane_envs(state, &pane_id)?;
     let plain_shell_envs = envs.clone();
     let mut args = Vec::new();
@@ -656,6 +864,15 @@ fn shell_spawn_spec(
         Ok(Some(injection)) => {
             args = injection.args;
             envs.extend(injection.envs);
+            if host.remote().is_some() {
+                let remote_home = host.expand_home("~")?;
+                let remote_bashrc = host.expand_home("~/.bashrc")?;
+                match shell_kind(&shell) {
+                    ShellKind::Zsh => upsert_env(&mut envs, "QMUX_ORIGINAL_ZDOTDIR", remote_home),
+                    ShellKind::Bash => upsert_env(&mut envs, "QMUX_ORIGINAL_BASHRC", remote_bashrc),
+                    ShellKind::Unsupported => {}
+                }
+            }
             support_files = injection.support_files;
             envs.push(("QMUX_AGENT_FUNCTIONS".to_string(), "1".to_string()));
             if startup_command.is_none() || recovered {
@@ -775,6 +992,14 @@ fn shell_pane_envs(state: &AppState, pane_id: &str) -> Result<Vec<(String, Strin
     ));
     envs.push(("QMUX_SHELL_INTEGRATION".to_string(), "1".to_string()));
     Ok(envs)
+}
+
+fn upsert_env(envs: &mut Vec<(String, String)>, key: &str, value: String) {
+    if let Some((_, current)) = envs.iter_mut().find(|(name, _)| name == key) {
+        *current = value;
+    } else {
+        envs.push((key.to_string(), value));
+    }
 }
 
 struct ShellFunctionInjection {
@@ -1141,6 +1366,28 @@ fn create_owner_only_dir(dir: &Path) -> Result<(), String> {
         .map_err(|err| format!("failed to restrict {}: {err}", dir.display()))
 }
 
+fn support_file_relative(file: &SupportFile) -> Result<PathBuf, String> {
+    let relative = file.path.strip_prefix(&file.root).map_err(|_| {
+        format!(
+            "support file {} escapes its root {}",
+            file.path.display(),
+            file.root.display()
+        )
+    })?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(format!(
+            "support file {} escapes its root {}",
+            file.path.display(),
+            file.root.display()
+        ));
+    }
+    Ok(relative.to_path_buf())
+}
+
 /// Writes a spec's support files on the local filesystem: the local half of the
 /// `SupportFile` contract. Carries the pruning and O_EXCL semantics of the
 /// inline writers this replaced, and tightens their directory handling: every
@@ -1153,33 +1400,11 @@ pub(crate) fn materialize_support_files(files: &[SupportFile]) -> Result<(), Str
             .path
             .parent()
             .ok_or_else(|| format!("support file {} has no parent", file.path.display()))?;
-        let relative = file.path.strip_prefix(&file.root).map_err(|_| {
-            format!(
-                "support file {} escapes its root {}",
-                file.path.display(),
-                file.root.display()
-            )
-        })?;
-        if relative.as_os_str().is_empty() {
-            return Err(format!(
-                "support file {} is its own root",
-                file.path.display()
-            ));
-        }
+        let relative = support_file_relative(file)?;
         // `strip_prefix` is purely lexical: it happily hands back a relative
         // path that starts with `..`, which would satisfy the containment check
         // above while resolving outside the root. Require plain names so the
         // path really does sit below the root it claims.
-        if relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-        {
-            return Err(format!(
-                "support file {} escapes its root {}",
-                file.path.display(),
-                file.root.display()
-            ));
-        }
         // Create the chain one component at a time, restricting each level
         // before the next is created inside it, so another local account can
         // never pre-create (or traverse into) a directory we are about to write
@@ -1247,11 +1472,208 @@ fn materialize_support_files_or_fallback(spec: &mut PtySpawnSpec) -> Result<(), 
     Ok(())
 }
 
+const REMOTE_SUPPORT_FILE_SCRIPT: &str = r#"set -eu
+managed_root=$1
+root=$2
+path=$3
+mode=$4
+exclusive=$5
+prefix=$6
+case "$managed_root" in /*) ;; *) echo 'managed support root is not absolute' >&2; exit 64 ;; esac
+case "$root" in /*) ;; *) echo 'support root is not absolute' >&2; exit 64 ;; esac
+case "$root" in
+  "$managed_root"/*)
+    scope=${root#"$managed_root"/}
+    case "$scope" in ''|*/*) echo 'support root is not one managed directory' >&2; exit 64 ;; esac
+    ;;
+  *) echo 'support root escapes managed root' >&2; exit 64 ;;
+esac
+case "$path" in "$root"/*) ;; *) echo 'support path escapes root' >&2; exit 64 ;; esac
+umask 077
+mkdir -p -- "$managed_root"
+[ -d "$managed_root" ] && [ ! -L "$managed_root" ] || { echo 'managed support root is unsafe' >&2; exit 65; }
+chmod 700 -- "$managed_root"
+if [ ! -e "$root" ] && [ ! -L "$root" ]; then
+  mkdir -- "$root"
+fi
+[ -d "$root" ] && [ ! -L "$root" ] || { echo 'support root is unsafe' >&2; exit 65; }
+chmod 700 -- "$root"
+relative=${path#"$root"/}
+parent=${path%/*}
+current=$root
+relative_parent=${relative%/*}
+if [ "$relative_parent" != "$relative" ]; then
+  old_ifs=$IFS
+  IFS=/
+  set -f
+  for component in $relative_parent; do
+    current=$current/$component
+    if [ ! -e "$current" ] && [ ! -L "$current" ]; then
+      mkdir -- "$current"
+    fi
+    [ -d "$current" ] && [ ! -L "$current" ] || { echo 'support directory is unsafe' >&2; exit 65; }
+    chmod 700 -- "$current"
+  done
+  set +f
+  IFS=$old_ifs
+fi
+if [ -n "$prefix" ]; then
+  for candidate in "$parent"/"$prefix"*; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    rm -rf -- "$candidate"
+  done
+fi
+tmp_dir=$parent/.qmux-upload.$$
+if ! mkdir -- "$tmp_dir"; then
+  echo 'could not reserve support upload directory' >&2
+  exit 66
+fi
+trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
+tmp=$tmp_dir/file
+cat > "$tmp"
+chmod "$mode" -- "$tmp"
+if [ "$exclusive" = 1 ]; then
+  # Hard-link creation is atomic and refuses every existing final entry,
+  # including symlinks and FIFOs. The temporary file lives in a freshly-created
+  # 0700 directory, so the upload never writes through an attacker-controlled
+  # final path.
+  ln -- "$tmp" "$path"
+  rm -f -- "$tmp"
+else
+  # rename replaces a final symlink rather than following it.
+  mv -f -- "$tmp" "$path"
+fi
+rm -rf -- "$tmp_dir"
+trap - EXIT HUP INT TERM
+"#;
+
+fn materialize_remote_support_files(host: &Host, files: &[SupportFile]) -> Result<(), String> {
+    let managed_root = host
+        .remote_support_root()?
+        .ok_or_else(|| "remote support files require a remote host".to_string())?;
+    for file in files {
+        support_file_relative(file)?;
+        if file.mode & !0o777 != 0 {
+            return Err(format!("invalid support file mode {:o}", file.mode));
+        }
+        let root = file
+            .root
+            .to_str()
+            .ok_or_else(|| format!("support root {} is not UTF-8", file.root.display()))?;
+        let path = file
+            .path
+            .to_str()
+            .ok_or_else(|| format!("support path {} is not UTF-8", file.path.display()))?;
+        let prefix = file.prune_prefix.as_deref().unwrap_or_default();
+        if prefix.contains('/') || prefix.contains(['\r', '\n']) {
+            return Err("remote support prune prefix contains a path separator".to_string());
+        }
+        let command = host.command(crate::host::RemoteCommand {
+            program: "sh",
+            args: vec![
+                "-c".to_string(),
+                REMOTE_SUPPORT_FILE_SCRIPT.to_string(),
+                "qmux-support".to_string(),
+                managed_root.clone(),
+                root.to_string(),
+                path.to_string(),
+                format!("{:o}", file.mode),
+                if file.create_new { "1" } else { "0" }.to_string(),
+                prefix.to_string(),
+            ],
+            ..Default::default()
+        });
+        let output = remote_command_output(
+            command,
+            Some(file.contents.as_bytes().to_vec()),
+            &format!("provision {path} on {}", host.label()),
+        )?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                format!(
+                    "failed to provision {path} on {}: {}",
+                    host.label(),
+                    output.status
+                )
+            } else {
+                format!("failed to provision {path} on {}: {detail}", host.label())
+            });
+        }
+    }
+    Ok(())
+}
+
+fn materialize_remote_support_files_or_fallback(
+    host: &Host,
+    spec: &mut PtySpawnSpec,
+) -> Result<(), String> {
+    let Err(err) = materialize_remote_support_files(host, &spec.support_files) else {
+        return Ok(());
+    };
+    let Some(fallback) = spec.support_file_fallback.take() else {
+        return Err(err);
+    };
+    spec.args = fallback.args;
+    spec.envs = fallback.envs;
+    if let Some(key) = fallback.error_env_key {
+        spec.envs.push((key, err));
+    }
+    spec.support_files.clear();
+    Ok(())
+}
+
+/// Materializes support files for a command that will be exec'd inside an
+/// already-running pane rather than spawned through [`spawn_pty`]. Shell agent
+/// wrappers use this path: their preparation request is handled by the local
+/// control server, but the returned command may execute in a remote tmux pane.
+/// Keep the same relocation, CLI rewriting, ownership, and fallback semantics
+/// as a fresh pane spawn.
+pub(crate) fn materialize_in_pane_support_files(
+    host: &Host,
+    pane_id: &str,
+    remote_scope: &str,
+    plan: &mut CommandPlan,
+) -> Result<(), String> {
+    if host.is_local() {
+        let Err(err) = materialize_support_files(&plan.support_files) else {
+            return Ok(());
+        };
+        let Some(fallback) = plan.support_file_fallback.take() else {
+            return Err(err);
+        };
+        plan.args = fallback.args;
+        plan.envs = fallback.envs;
+        if let Some(key) = fallback.error_env_key {
+            plan.envs.push((key, err));
+        }
+        plan.support_files.clear();
+        return Ok(());
+    }
+    relocate_remote_support_files(host, pane_id, remote_scope, plan)?;
+    let Err(err) = materialize_remote_support_files(host, &plan.support_files) else {
+        return Ok(());
+    };
+    let Some(fallback) = plan.support_file_fallback.take() else {
+        return Err(err);
+    };
+    plan.args = fallback.args;
+    plan.envs = fallback.envs;
+    if let Some(key) = fallback.error_env_key {
+        plan.envs.push((key, err));
+    }
+    plan.support_files.clear();
+    Ok(())
+}
+
 fn spawn_portable_pty(
     state: &AppState,
     mut spec: PtySpawnSpec,
     native_surface: bool,
 ) -> Result<PaneInfo, String> {
+    if let Some(remote) = spec.remote.take() {
+        return spawn_remote_tmux(state, spec, remote, native_surface);
+    }
     let base_envs = base_child_envs(state)?;
     materialize_support_files_or_fallback(&mut spec)?;
     let pane_id = spec.pane_id.unwrap_or_else(|| state.next_id("pane"));
@@ -1320,6 +1742,8 @@ fn spawn_portable_pty(
             }
             PaneKind::Agent => None,
         },
+        remote_session: None,
+        remote_connection: None,
         cols: initial_size.cols,
         rows: initial_size.rows,
         status: PaneStatus::Running,
@@ -1363,10 +1787,701 @@ fn spawn_portable_pty(
         reader,
         backlog,
         native_surface,
+        None,
     );
     start_child_watcher(state.clone(), pane_id, child, root_pid);
 
     Ok(pane)
+}
+
+struct RemoteReaderContext {
+    controller: Arc<RemoteAttachmentController>,
+    history: Arc<RemoteHistoryCheckpoint>,
+    generation: u64,
+    commands: crate::host::RemoteTmuxCommands,
+}
+
+fn spawn_remote_tmux(
+    state: &AppState,
+    mut spec: PtySpawnSpec,
+    remote: RemoteSpawnSpec,
+    native_surface: bool,
+) -> Result<PaneInfo, String> {
+    if let Err(err) = materialize_remote_support_files_or_fallback(&remote.host, &mut spec) {
+        cleanup_remote_support_dir(&remote.host, remote.identity.support_dir.as_deref());
+        return Err(err);
+    }
+    let pane_id = spec
+        .pane_id
+        .clone()
+        .ok_or_else(|| "a remote pane requires a stable pane id".to_string())?;
+    let remote_cwd = spec
+        .cwd
+        .to_str()
+        .ok_or_else(|| "remote pane working directory is not valid UTF-8".to_string())?;
+    let initial_size = resolved_initial_size(spec.initial_size);
+    let remote_token = state.pane_remote_token(&pane_id)?;
+    let commands = match remote.host.tmux_session_commands(
+        &remote.identity,
+        &state.config().socket_path.display().to_string(),
+        &remote_token,
+        remote_cwd,
+        initial_size.cols,
+        initial_size.rows,
+        &spec.program,
+        &spec.args,
+        &spec.envs,
+    ) {
+        Ok(commands) => commands,
+        Err(err) => {
+            cleanup_remote_support_dir(&remote.host, remote.identity.support_dir.as_deref());
+            return Err(err);
+        }
+    };
+    if let Err(err) = ensure_remote_tmux_version(&commands.version_argv) {
+        cleanup_remote_support(&commands);
+        return Err(err);
+    }
+    create_remote_tmux_session(&commands)?;
+    if let Err(err) = run_remote_argv(&commands.configure_argv, "configure remote tmux session") {
+        cleanup_remote_launch(&commands);
+        return Err(err);
+    }
+    let initial_history = match capture_remote_history(&commands.capture_argv) {
+        Ok(history) => history,
+        Err(err) => {
+            cleanup_remote_launch(&commands);
+            return Err(err);
+        }
+    };
+    let history = RemoteHistoryCheckpoint::new(Vec::new());
+    let backlog: SharedBacklog = Arc::new(Mutex::new(Default::default()));
+    let initial_replay = terminalize_tmux_history(&history.delta(&initial_history));
+    if !initial_replay.is_empty() {
+        let mut pending = match backlog.lock() {
+            Ok(pending) => pending,
+            Err(_) => {
+                cleanup_remote_launch(&commands);
+                return Err(format!(
+                    "pane {pane_id} backlog lock poisoned during remote launch"
+                ));
+            }
+        };
+        append_capped(&mut pending.buffer, &initial_replay);
+    }
+    if let Err(err) = persist_remote_history_checkpoint(state, &pane_id, &history, &initial_history)
+    {
+        cleanup_remote_launch(&commands);
+        return Err(err);
+    }
+    if let Err(err) = run_remote_argv(
+        &commands.forward_cleanup_argv,
+        "remove stale remote hook socket",
+    ) {
+        cleanup_remote_launch(&commands);
+        return Err(err);
+    }
+    let attachment = match spawn_remote_attachment(state, &commands.attach_argv, initial_size) {
+        Ok(attachment) => attachment,
+        Err(err) => {
+            cleanup_remote_launch(&commands);
+            let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
+            return Err(err);
+        }
+    };
+    let reader = match attachment
+        .master
+        .lock()
+        .map_err(|_| format!("pane {pane_id} master lock poisoned"))
+        .and_then(|master| {
+            master
+                .try_clone_reader()
+                .map_err(|err| format!("failed to clone remote PTY reader: {err}"))
+        }) {
+        Ok(reader) => reader,
+        Err(err) => {
+            let _ = kill_child(&pane_id, attachment.child);
+            cleanup_remote_launch(&commands);
+            let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
+            return Err(err);
+        }
+    };
+    let controller = RemoteAttachmentController::new();
+    let (generation, previous) = controller.begin_generation();
+    debug_assert!(previous.is_none());
+    if controller
+        .install_if_current(generation, attachment.clone())
+        .is_err()
+    {
+        let _ = kill_child(&pane_id, attachment.child);
+        cleanup_remote_launch(&commands);
+        let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
+        return Err("remote attachment was superseded during initial launch".to_string());
+    }
+
+    let pane = PaneInfo {
+        id: pane_id.clone(),
+        title: spec.title,
+        last_osc_title: spec.last_osc_title,
+        kind: spec.kind,
+        agent_id: spec.agent_id,
+        group_id: spec.group_id,
+        cwd: spec.cwd.display().to_string(),
+        // Remote filesystem observations must never be resolved locally.
+        active_workspace: None,
+        remote_session: Some(remote.identity),
+        remote_connection: Some(RemoteConnectionInfo {
+            state: RemoteConnectionState::Connecting,
+            message: None,
+        }),
+        cols: initial_size.cols,
+        rows: initial_size.rows,
+        status: PaneStatus::Running,
+        last_active_at: crate::state::now_millis(),
+        recovered: spec.recovered,
+        depth: 0,
+    };
+    let backend = RemoteTmuxBackend::new(
+        controller.clone(),
+        history.clone(),
+        backlog.clone(),
+        commands.clone(),
+        native_surface,
+    );
+    let stable_writer = backend.writer.clone();
+    if let Err(err) = state.insert_pane(PaneRuntime {
+        info: pane.clone(),
+        backend: PaneBackend::RemoteTmux(backend),
+        cwd_observation_seq: 0,
+    }) {
+        let _ = controller.begin_generation();
+        let _ = kill_child(&pane_id, attachment.child);
+        cleanup_remote_launch(&commands);
+        let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
+        return Err(err);
+    }
+
+    if native_surface {
+        if let Err(err) = crate::native_terminal::create_host_managed(&pane_id, None) {
+            let _ = controller.begin_generation();
+            let _ = kill_child(&pane_id, attachment.child);
+            cleanup_remote_launch(&commands);
+            let _ = state.remove_pane(&pane_id);
+            return Err(err);
+        }
+        register_native_input_writer(&pane_id, stable_writer);
+    }
+    start_reader_thread(
+        state.clone(),
+        pane_id,
+        reader,
+        backlog,
+        native_surface,
+        Some(RemoteReaderContext {
+            controller,
+            history,
+            generation,
+            commands,
+        }),
+    );
+    Ok(pane)
+}
+
+fn spawn_remote_attachment(
+    state: &AppState,
+    attach_argv: &[String],
+    initial_size: InitialPaneSize,
+) -> Result<RemoteAttachment, String> {
+    let (program, args) = attach_argv
+        .split_first()
+        .ok_or_else(|| "remote attach command is empty".to_string())?;
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: initial_size.rows,
+            cols: initial_size.cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|err| format!("failed to open remote attachment PTY: {err}"))?;
+    let mut command = CommandBuilder::new(program);
+    command.args(args);
+    command.cwd(state.default_open_dir());
+    scrub_inherited_qmux_context(&mut command);
+    command.env("TERM", "xterm-256color");
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|err| format!("failed to open remote PTY writer: {err}"))?;
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|err| format!("failed to spawn remote tmux attachment: {err}"))?;
+    drop(pair.slave);
+    Ok(RemoteAttachment {
+        child: Arc::new(Mutex::new(child)),
+        master: Arc::new(Mutex::new(pair.master)),
+        writer: Arc::new(Mutex::new(writer)),
+    })
+}
+
+/// Runs one non-interactive SSH helper with a wall-clock deadline while
+/// draining both output pipes concurrently. `ConnectTimeout` alone covers only
+/// connection establishment; this also bounds a server that accepts the TCP
+/// connection and then stops responding. Supplying stdin on its own thread
+/// prevents a large support-file upload from blocking the launch thread before
+/// the deadline can be enforced.
+fn remote_command_output(
+    command: Command,
+    input: Option<Vec<u8>>,
+    action: &str,
+) -> Result<Output, String> {
+    remote_command_output_with_timeout(command, input, action, REMOTE_BATCH_TIMEOUT)
+}
+
+fn remote_command_output_with_timeout(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+    action: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    command
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("failed to {action}: {err}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("failed to capture output while trying to {action}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("failed to capture errors while trying to {action}"))?;
+    let stdout_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stdout = stdout;
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let stderr_reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut stderr = stderr;
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let input_writer = input.map(|bytes| {
+        let mut stdin = child.stdin.take();
+        thread::spawn(move || -> Result<(), String> {
+            stdin
+                .as_mut()
+                .ok_or_else(|| "failed to open remote command stdin".to_string())?
+                .write_all(&bytes)
+                .map_err(|err| format!("failed to upload remote command input: {err}"))
+        })
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(writer) = input_writer {
+                    let _ = writer.join();
+                }
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!(
+                    "failed to {action}: timed out after {} seconds",
+                    timeout.as_secs_f64()
+                ));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(writer) = input_writer {
+                    let _ = writer.join();
+                }
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(format!("failed to {action}: {err}"));
+            }
+        }
+    };
+    if let Some(writer) = input_writer {
+        writer
+            .join()
+            .map_err(|_| format!("failed to {action}: input writer panicked"))??;
+    }
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| format!("failed to {action}: output reader panicked"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| format!("failed to {action}: error reader panicked"))?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn run_remote_argv(argv: &[String], action: &str) -> Result<(), String> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| format!("cannot {action}: command is empty"))?;
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = remote_command_output(command, None, action)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        format!("failed to {action}: {}", output.status)
+    } else {
+        format!("failed to {action}: {detail}")
+    })
+}
+
+fn create_remote_tmux_session(commands: &crate::host::RemoteTmuxCommands) -> Result<(), String> {
+    if let Err(err) = run_remote_argv(&commands.create_argv, "create remote tmux session") {
+        // A failed or timed-out SSH helper has an uncertain remote result: tmux
+        // may have created its detached session before the acknowledgement was
+        // lost. The nonce-named target belongs only to this launch, so always
+        // issue the exact compensating kill before returning the original error.
+        cleanup_remote_launch(commands);
+        return Err(err);
+    }
+    Ok(())
+}
+
+fn cleanup_remote_launch(commands: &crate::host::RemoteTmuxCommands) {
+    let _ = run_remote_argv(&commands.kill_argv, "clean up remote tmux session");
+    cleanup_remote_support(commands);
+}
+
+fn cleanup_remote_support(commands: &crate::host::RemoteTmuxCommands) {
+    if !commands.support_cleanup_argv.is_empty()
+        && let Err(err) = run_remote_argv(
+            &commands.support_cleanup_argv,
+            "remove remote pane support files",
+        )
+    {
+        eprintln!("qmux: {err}");
+    }
+}
+
+fn cleanup_remote_support_dir(host: &Host, support_dir: Option<&str>) {
+    let Some(support_dir) = support_dir else {
+        return;
+    };
+    let argv = match host.remote_support_cleanup_argv(support_dir) {
+        Ok(argv) => argv,
+        Err(err) => {
+            eprintln!("qmux: refused unsafe remote support cleanup: {err}");
+            return;
+        }
+    };
+    if let Err(err) = run_remote_argv(&argv, "remove remote pane support files") {
+        eprintln!("qmux: {err}");
+    }
+}
+
+fn capture_remote_history(argv: &[String]) -> Result<Vec<u8>, String> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| "remote history capture command is empty".to_string())?;
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = remote_command_output(command, None, "capture remote tmux history")?;
+    if output.status.success() {
+        return Ok(output.stdout);
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(if detail.is_empty() {
+        format!("failed to capture remote tmux history: {}", output.status)
+    } else {
+        format!("failed to capture remote tmux history: {detail}")
+    })
+}
+
+fn persist_remote_history_checkpoint(
+    state: &AppState,
+    pane_id: &str,
+    history: &RemoteHistoryCheckpoint,
+    capture: &[u8],
+) -> Result<(), String> {
+    let tail = history.advance(capture);
+    write_remote_history_checkpoint(&state.config().workspace_root, pane_id, &tail)
+}
+
+fn synchronize_remote_history(
+    state: &AppState,
+    pane_id: &str,
+    history: &RemoteHistoryCheckpoint,
+    capture_argv: &[String],
+    capture_full_argv: &[String],
+    backlog: &SharedBacklog,
+    native_surface: bool,
+) -> Result<(), String> {
+    let mut capture = capture_remote_history(capture_argv)?;
+    if !history.has_trustworthy_overlap(&capture) {
+        // The ordinary probe is capped to the most recent 8192 lines. Fall
+        // back to the full configured tmux history only when rollover or an
+        // unusually large disconnected burst erased every safe overlap.
+        capture = capture_remote_history(capture_full_argv)?;
+    }
+    let delta = history.delta(&capture);
+    if !delta.is_empty() {
+        let replay = terminalize_tmux_history(&delta);
+        let live = match backlog.lock() {
+            Ok(mut backlog) => {
+                if backlog.ready {
+                    true
+                } else {
+                    append_capped(&mut backlog.buffer, &replay);
+                    false
+                }
+            }
+            Err(_) => true,
+        };
+        if live {
+            if native_surface {
+                crate::native_terminal::receive(pane_id, &replay, true)?;
+            }
+            record_scrollback(state, pane_id, &replay);
+        }
+    }
+    // Advance only after the delta has been accepted by the surface/backlog.
+    // A checkpoint write failure is a recovery-quality failure, not a reason to
+    // tear down a healthy attachment; retain the in-memory cursor and report it.
+    let tail = history.advance(&capture);
+    if let Err(err) =
+        write_remote_history_checkpoint(&state.config().workspace_root, pane_id, &tail)
+    {
+        eprintln!("qmux: failed to persist remote history checkpoint for pane {pane_id}: {err}");
+    }
+    Ok(())
+}
+
+/// `capture-pane -p` separates rows with LF, while a terminal LF preserves the
+/// current column. Turn those row boundaries into CRLF before replay so history
+/// starts in column zero without altering an existing CRLF pair.
+fn terminalize_tmux_history(capture: &[u8]) -> Vec<u8> {
+    let mut replay = Vec::with_capacity(capture.len() + capture.len() / 40);
+    let mut previous = None;
+    for byte in capture {
+        if *byte == b'\n' && previous != Some(b'\r') {
+            replay.push(b'\r');
+        }
+        replay.push(*byte);
+        previous = Some(*byte);
+    }
+    replay
+}
+
+fn probe_remote_session(argv: &[String]) -> Result<bool, String> {
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| "remote session probe command is empty".to_string())?;
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = remote_command_output(command, None, "check remote session")?;
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    match output.status.code() {
+        Some(0) => Ok(true),
+        // Exit 1 is also used for permission/config/socket failures. Only the
+        // two tmux diagnostics that actually mean absence may delete pane state.
+        Some(1)
+            if detail.contains("can't find session") || detail.contains("no server running") =>
+        {
+            Ok(false)
+        }
+        _ => Err(if detail.is_empty() {
+            format!("could not check remote session: {}", output.status)
+        } else {
+            format!("could not check remote session: {detail}")
+        }),
+    }
+}
+
+fn ensure_remote_tmux_version(argv: &[String]) -> Result<(), String> {
+    let cache_key = argv.join("\u{1f}");
+    if VALIDATED_TMUX_VERSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&cache_key)
+    {
+        return Ok(());
+    }
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| "remote tmux version command is empty".to_string())?;
+    let mut command = Command::new(program);
+    command.args(args);
+    let output = remote_command_output(command, None, "check remote tmux version")?;
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!("failed to check remote tmux version: {}", output.status)
+        } else {
+            format!("failed to check remote tmux version: {detail}")
+        });
+    }
+    let version = raw
+        .strip_prefix("tmux ")
+        .and_then(|version| {
+            let numeric = version
+                .trim()
+                .trim_end_matches(|character: char| character.is_ascii_alphabetic());
+            let (major, minor) = numeric.split_once('.')?;
+            Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?))
+        })
+        .ok_or_else(|| format!("remote host returned an unrecognized tmux version: {raw:?}"))?;
+    if version < (3, 2) {
+        return Err(format!(
+            "remote panes require tmux 3.2 or newer (remote reported {raw})"
+        ));
+    }
+    VALIDATED_TMUX_VERSIONS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(cache_key);
+    Ok(())
+}
+
+const REMOTE_RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
+
+fn schedule_remote_reconnect(
+    state: AppState,
+    pane_id: String,
+    controller: Arc<RemoteAttachmentController>,
+    history: Arc<RemoteHistoryCheckpoint>,
+    commands: crate::host::RemoteTmuxCommands,
+    backlog: SharedBacklog,
+    native_surface: bool,
+    message: String,
+) {
+    let _ = state.update_remote_connection(
+        &pane_id,
+        RemoteConnectionState::Reconnecting,
+        Some(message),
+    );
+    thread::spawn(move || {
+        loop {
+            let delay = controller
+                .next_reconnect_delay(REMOTE_RECONNECT_INITIAL_DELAY, REMOTE_RECONNECT_MAX_DELAY);
+            thread::sleep(delay);
+            let Ok(Some((current, current_history, _))) = state.pane_remote_control(&pane_id)
+            else {
+                return;
+            };
+            if !Arc::ptr_eq(&current, &controller) || !Arc::ptr_eq(&current_history, &history) {
+                return;
+            }
+            match attach_remote_generation(
+                &state,
+                &pane_id,
+                controller.clone(),
+                history.clone(),
+                commands.clone(),
+                backlog.clone(),
+                native_surface,
+            ) {
+                Ok(()) => return,
+                Err(err) => {
+                    let _ = state.update_remote_connection(
+                        &pane_id,
+                        RemoteConnectionState::Reconnecting,
+                        Some(err),
+                    );
+                }
+            }
+        }
+    });
+}
+
+fn attach_remote_generation(
+    state: &AppState,
+    pane_id: &str,
+    controller: Arc<RemoteAttachmentController>,
+    history: Arc<RemoteHistoryCheckpoint>,
+    commands: crate::host::RemoteTmuxCommands,
+    backlog: SharedBacklog,
+    native_surface: bool,
+) -> Result<(), String> {
+    let pane = state
+        .list_panes()?
+        .into_iter()
+        .find(|pane| pane.id == pane_id)
+        .ok_or_else(|| format!("pane {pane_id} was not found"))?;
+    let initial_size = resolved_initial_size(Some(InitialPaneSize {
+        cols: pane.cols,
+        rows: pane.rows,
+    }));
+    run_remote_argv(&commands.configure_argv, "configure remote tmux session")?;
+    synchronize_remote_history(
+        state,
+        pane_id,
+        &history,
+        &commands.capture_argv,
+        &commands.capture_full_argv,
+        &backlog,
+        native_surface,
+    )?;
+    let (generation, previous) = controller.begin_generation();
+    if let Some(previous) = previous {
+        let _ = kill_child(pane_id, previous.child);
+    }
+    run_remote_argv(
+        &commands.forward_cleanup_argv,
+        "remove stale remote hook socket",
+    )?;
+    let attachment = spawn_remote_attachment(state, &commands.attach_argv, initial_size)?;
+    let reader = match attachment
+        .master
+        .lock()
+        .map_err(|_| format!("pane {pane_id} master lock poisoned"))
+        .and_then(|master| {
+            master
+                .try_clone_reader()
+                .map_err(|err| format!("failed to clone remote PTY reader: {err}"))
+        }) {
+        Ok(reader) => reader,
+        Err(err) => {
+            let _ = kill_child(pane_id, attachment.child);
+            return Err(err);
+        }
+    };
+    if let Err(stale) = controller.install_if_current(generation, attachment) {
+        let _ = kill_child(pane_id, stale.child);
+        return Err("remote attachment was superseded before installation".to_string());
+    }
+    start_reader_thread(
+        state.clone(),
+        pane_id.to_string(),
+        reader,
+        backlog,
+        native_surface,
+        Some(RemoteReaderContext {
+            controller,
+            history,
+            generation,
+            commands,
+        }),
+    );
+    Ok(())
 }
 
 /// A qmux process can itself be launched from inside another qmux pane. The PTY
@@ -1949,9 +3064,16 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
         .ok()
         .flatten()
         .is_some_and(|agent| agent_needs_explicit_resize_signal(Some(&agent.adapter)));
-    let master = state
-        .pane_master(&pane_id)?
-        .ok_or_else(|| format!("pane {pane_id} was not found"))?;
+    let Some(master) = state.pane_master(&pane_id)? else {
+        // A remote pane deliberately has no local master between attachment
+        // generations. Persist the desired geometry so the next SSH PTY is
+        // created at the latest size rather than treating "offline" as
+        // "missing" and permanently dropping this resize.
+        if state.pane_exists(&pane_id)? {
+            return state.update_pane_size(&pane_id, cols, rows);
+        }
+        return Err(format!("pane {pane_id} was not found"));
+    };
     let master = master
         .lock()
         .map_err(|_| format!("pane {pane_id} master lock poisoned"))?;
@@ -1962,7 +3084,7 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
         .get_size()
         .map(|size| size.cols != cols || size.rows != rows)
         .unwrap_or(true);
-    if size_changed {
+    let resize_result = if size_changed {
         master
             .resize(PtySize {
                 rows,
@@ -1970,10 +3092,13 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .map_err(|err| format!("failed to resize pane {pane_id}: {err}"))?;
-    }
+            .map_err(|err| format!("failed to resize pane {pane_id}: {err}"))
+    } else {
+        Ok(())
+    };
     #[cfg(target_os = "macos")]
-    if size_changed
+    if resize_result.is_ok()
+        && size_changed
         && explicitly_notify_resize
         && let Some(process_group) = master.process_group_leader()
     {
@@ -1992,7 +3117,12 @@ pub fn resize_pane(state: &AppState, pane_id: String, cols: u16, rows: u16) -> R
             }
         }
     }
-    state.update_pane_size(&pane_id, cols, rows)
+    drop(master);
+    // Persist even when an attachment vanished during the ioctl. Reconnect
+    // will apply this geometry to the replacement PTY; the caller still gets
+    // the immediate resize error for observability.
+    state.update_pane_size(&pane_id, cols, rows)?;
+    resize_result
 }
 
 #[cfg(target_os = "macos")]
@@ -2006,9 +3136,6 @@ pub fn resize_native_host_pane(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    if state.pane_has_host_pty(pane_id)? != Some(true) {
-        return state.update_pane_size(pane_id, cols, rows);
-    }
     // Ghostty-driven callers (NativeTerminalPane) already delayed this until
     // after the new IOSurface present. Keep the ioctl itself synchronous:
     // `pane_resize` and other non-Ghostty callers must not wait on a frame.
@@ -2198,6 +3325,37 @@ pub fn pane_activity(state: &AppState, pane_id: String) -> Result<PaneActivity, 
     if !state.list_panes()?.iter().any(|pane| pane.id == pane_id) {
         return Err(format!("pane {pane_id} was not found"));
     }
+    if let Some((_, _, commands)) = state.pane_remote_control(&pane_id)? {
+        let (program, args) = commands
+            .activity_argv
+            .split_first()
+            .ok_or_else(|| "remote pane activity command is empty".to_string())?;
+        let mut command = Command::new(program);
+        command.args(args);
+        let output = remote_command_output(command, None, "inspect remote pane activity")?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if detail.is_empty() {
+                format!("failed to inspect remote pane activity: {}", output.status)
+            } else {
+                format!("failed to inspect remote pane activity: {detail}")
+            });
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let mut fields = raw.trim().split('\t');
+        let command = fields.next().unwrap_or_default().trim();
+        let _pane_pid = fields.next().unwrap_or_default();
+        let dead = fields.next().unwrap_or_default().trim() == "1";
+        let idle_shell = matches!(
+            command,
+            "sh" | "bash" | "dash" | "zsh" | "fish" | "ksh" | "tcsh" | "csh" | "nu"
+        );
+        return if dead || idle_shell || command.is_empty() {
+            Ok(PaneActivity::idle())
+        } else {
+            Ok(PaneActivity::running_process(1, Some(command.to_string())))
+        };
+    }
 
     let child = state
         .pane_child(&pane_id)?
@@ -2236,13 +3394,55 @@ pub fn pane_activity(state: &AppState, pane_id: String) -> Result<PaneActivity, 
 
 pub fn kill_pane(state: &AppState, pane_id: String) -> Result<(), String> {
     let native_surface = state.pane_is_native(&pane_id)? == Some(true);
-    let child = state
-        .pane_child(&pane_id)?
-        .ok_or_else(|| format!("pane {pane_id} was not found"))?;
     let pane_agent_id = state.agent_by_pane(&pane_id)?.map(|agent| agent.id);
     if let Err(err) = state.capture_last_closed_pane(&pane_id) {
         eprintln!("qmux: failed to capture closed pane {pane_id}: {err}");
     }
+    if let Some((controller, _, commands)) = state.pane_remote_control(&pane_id)? {
+        if let Err(err) = run_remote_argv(&commands.kill_argv, "kill remote tmux session")
+            && probe_remote_session(&commands.probe_argv) != Ok(false)
+        {
+            state.clear_last_closed_pane_for_pane(&pane_id);
+            let _ = state.update_remote_connection(
+                &pane_id,
+                RemoteConnectionState::Failed,
+                Some(err.clone()),
+            );
+            return Err(err);
+        }
+        // Fence and tear down the disposable attachment only after the remote
+        // session is confirmed gone. If the kill/probe transport failed, leave
+        // the live generation installed so the user can keep working or retry
+        // close instead of stranding a Failed pane with no reconnect path.
+        let (_, attachment) = controller.begin_generation();
+        if let Some(attachment) = attachment {
+            let _ = kill_child(&pane_id, attachment.child);
+        }
+        cleanup_remote_support(&commands);
+        if let Some(agent_id) = pane_agent_id.as_deref()
+            && let Err(err) = abort_fork_barrier_for_child(
+                state,
+                agent_id,
+                "Forked terminal exited before its initial prompt was accepted",
+            )
+        {
+            eprintln!("qmux: failed to release fork barrier for closed agent {agent_id}: {err}");
+        }
+        state.remove_pane(&pane_id)?;
+        if native_surface {
+            let _ = crate::native_terminal::remove(&pane_id);
+            remove_native_input_writer(&pane_id);
+        }
+        if let Some(agent_id) = pane_agent_id
+            && let Err(err) = release_waiters_for_agent(state, &agent_id)
+        {
+            eprintln!("qmux: failed to release waiters for closed agent {agent_id}: {err}");
+        }
+        return Ok(());
+    }
+    let child = state
+        .pane_child(&pane_id)?
+        .ok_or_else(|| format!("pane {pane_id} was not found"))?;
     if let Err(err) = kill_child(&pane_id, child) {
         // The kill couldn't confirm the child dead. If it has since exited — it may
         // have died from the group SIGTERM just after kill_child gave up — reap and
@@ -2297,7 +3497,8 @@ pub fn native_pane_did_close(state: &AppState, pane_id: &str, process_alive: boo
     }
     // A delegate delivery for a pane no longer in the model (a late or
     // duplicate close) has nothing left to tear down.
-    if state.pane_has_host_pty(pane_id).ok().flatten() == Some(true)
+    if (state.pane_has_host_pty(pane_id).ok().flatten() == Some(true)
+        || state.pane_remote_control(pane_id).ok().flatten().is_some())
         && let Err(err) = kill_pane(state, pane_id.to_string())
     {
         eprintln!("qmux: failed to close host-managed pane {pane_id}: {err}");
@@ -2387,6 +3588,7 @@ fn start_reader_thread(
     mut reader: Box<dyn Read + Send>,
     backlog: SharedBacklog,
     native_surface: bool,
+    remote: Option<RemoteReaderContext>,
 ) {
     thread::spawn(move || {
         // 64KB per read: every chunk pays fixed costs beyond the syscall — the
@@ -2395,11 +3597,25 @@ fn start_reader_thread(
         // `cat` of a large file) paid that overhead 8x as often. Heap-allocated
         // to keep the reader thread's stack frame small.
         let mut buffer = vec![0_u8; 64 * 1024];
+        let mut remote_confirmed = false;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
                     let chunk = &buffer[..count];
+                    if !remote_confirmed
+                        && let Some(remote) = remote.as_ref()
+                        && remote
+                            .controller
+                            .mark_attachment_live_if_current(remote.generation)
+                    {
+                        let _ = state.update_remote_connection(
+                            &pane_id,
+                            RemoteConnectionState::Connected,
+                            None,
+                        );
+                        remote_confirmed = true;
+                    }
                     // Hold the backlog lock only long enough to decide; emitting
                     // live happens after releasing it. `attach_pane` flips `ready`
                     // (and drains the buffer) under the same lock, so no chunk is
@@ -2451,7 +3667,68 @@ fn start_reader_thread(
         // for the life of the qmux process, and report its real exit code rather
         // than a blanket `None`. A pane killed via `kill_pane` is already reaped and
         // removed there, so this returns None and emits the exit with no code.
-        let exit_code = reap_pane_child(&state, &pane_id);
+        let exit_code = if let Some(remote) = remote {
+            let Some(attachment) = remote.controller.clear_if_current(remote.generation) else {
+                // A newer attachment owns the pane. This generation's late EOF
+                // must not alter its state or remove its surface.
+                return;
+            };
+            let exit_code = attachment
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.wait().ok())
+                .map(|status| status.exit_code() as i32);
+            // Reconcile before probing/retrying. The remote program continues
+            // while these batch SSH calls run, so merely advancing the cursor at
+            // EOF could mark post-disconnect output as seen even though it never
+            // traversed the dead attachment. Accepting the capture into local
+            // history first favors a possible repeated connected line over
+            // silently losing a disconnected one.
+            let _ = synchronize_remote_history(
+                &state,
+                &pane_id,
+                &remote.history,
+                &remote.commands.capture_argv,
+                &remote.commands.capture_full_argv,
+                &backlog,
+                native_surface,
+            );
+            match probe_remote_session(&remote.commands.probe_argv) {
+                Ok(true) => {
+                    schedule_remote_reconnect(
+                        state.clone(),
+                        pane_id.clone(),
+                        remote.controller,
+                        remote.history,
+                        remote.commands,
+                        backlog.clone(),
+                        native_surface,
+                        "SSH connection closed; reconnecting".to_string(),
+                    );
+                    return;
+                }
+                Err(err) => {
+                    schedule_remote_reconnect(
+                        state.clone(),
+                        pane_id.clone(),
+                        remote.controller,
+                        remote.history,
+                        remote.commands,
+                        backlog.clone(),
+                        native_surface,
+                        err,
+                    );
+                    return;
+                }
+                Ok(false) => {
+                    cleanup_remote_support(&remote.commands);
+                    exit_code
+                }
+            }
+        } else {
+            reap_pane_child(&state, &pane_id)
+        };
         let pane_agent_id = state
             .agent_by_pane(&pane_id)
             .ok()
@@ -3073,10 +4350,11 @@ mod tests {
     }
 
     fn test_state_with_workspace(workspace_root: PathBuf) -> AppState {
+        let socket_path = workspace_root.join("qmux-test.sock");
         AppState::new(QmuxConfig {
             remotes: Default::default(),
             workspace_root,
-            socket_path: PathBuf::from("/tmp/qmux.sock"),
+            socket_path,
             adapters: AdapterConfigs {
                 pi: Default::default(),
                 claude: ClaudeAdapterConfig {
@@ -3154,7 +4432,7 @@ mod tests {
             host: "workbox".to_string(),
             multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
             qmux_cli: None,
-            workspace_root: None,
+            workspace_root: Some("/srv/qmux".to_string()),
         }
     }
 
@@ -3347,7 +4625,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_to_spec_refuses_remote_panes_that_need_shell_integration() {
+    fn remote_support_files_are_relocated_with_their_references() {
         let state = test_state_with_workspace(temp_workspace());
         let group = create_group(
             &state,
@@ -3367,20 +4645,47 @@ mod tests {
         .unwrap();
         assert_eq!(group.dir, "/no/such/dir/on/this/machine");
 
-        let error = shell_spawn_spec(
+        let local_root = shell_integration_root();
+        let local_path = local_root.join("pane-remote").join("bashrc");
+        let spec = plan_to_spec(
             &state,
-            "pane-remote".to_string(),
-            group.id.clone(),
-            std::env::temp_dir(),
-            None,
-            false,
-            None,
+            PaneMeta {
+                pane_id: Some("pane-remote".to_string()),
+                agent_id: None,
+                group_id: group.id,
+                kind: PaneKind::Shell,
+                title: "Remote shell".to_string(),
+                last_osc_title: None,
+                initial_size: None,
+                recovered: false,
+            },
+            CommandPlan {
+                program: "/bin/bash".to_string(),
+                args: vec!["--rcfile".to_string(), local_path.display().to_string()],
+                cwd: PathBuf::from("/srv/qmux"),
+                envs: vec![(
+                    "ZDOTDIR".to_string(),
+                    local_root.join("pane-remote").display().to_string(),
+                )],
+                support_files: vec![SupportFile {
+                    root: local_root,
+                    path: local_path,
+                    contents: "source generated".to_string(),
+                    mode: 0o600,
+                    create_new: false,
+                    prune_prefix: None,
+                }],
+                support_file_fallback: None,
+            },
         )
-        .unwrap_err();
-        assert!(
-            error.contains("shell integration"),
-            "a shell pane's integration files are local-only: {error}"
-        );
+        .unwrap();
+        let remote = spec.remote.as_ref().expect("remote plan");
+        let support_dir = remote.identity.support_dir.as_deref().unwrap();
+        assert!(support_dir.starts_with("/srv/qmux/.qmux/support/qmux-pane-remote-"));
+        let remote_path = format!("{support_dir}/bashrc");
+        assert_eq!(spec.args[1], remote_path);
+        assert_eq!(spec.support_files[0].path, PathBuf::from(&remote_path));
+        assert_eq!(remote.identity.support_dir.as_deref(), Some(support_dir));
     }
 
     #[test]
@@ -3400,7 +4705,8 @@ mod tests {
         )
         .unwrap();
 
-        let agent = sample_remote_agent(&group.id);
+        let mut agent = sample_remote_agent(&group.id);
+        agent.adapter = "pi".to_string();
         state.insert_agent(agent.clone()).unwrap();
 
         let error = plan_to_spec(
@@ -3416,7 +4722,7 @@ mod tests {
                 recovered: false,
             },
             CommandPlan {
-                program: "/usr/local/bin/claude".to_string(),
+                program: "/usr/local/bin/pi".to_string(),
                 args: Vec::new(),
                 cwd: PathBuf::from("/srv/code/project"),
                 envs: Vec::new(),
@@ -3426,10 +4732,385 @@ mod tests {
         )
         .unwrap_err();
 
-        // Silently succeeding would launch claude over there with a binary path
-        // resolved here and a plugin directory that only exists here.
-        assert!(error.contains("claude"), "{error}");
+        // Silently succeeding would launch this adapter over there with paths
+        // and integration files that were resolved only on the local machine.
+        assert!(error.contains("pi"), "{error}");
         assert!(error.contains("cannot run on remote"), "{error}");
+    }
+
+    #[test]
+    fn plan_to_spec_preserves_remote_command_and_allocates_tmux_identity() {
+        let state = test_state_with_workspace(temp_workspace());
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some("/srv/code/project".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(test_remote()),
+                remote_id: None,
+            },
+        )
+        .unwrap();
+        let spec = plan_to_spec(
+            &state,
+            PaneMeta {
+                pane_id: Some("pane-remote".to_string()),
+                agent_id: None,
+                group_id: group.id,
+                kind: PaneKind::Shell,
+                title: "Remote shell".to_string(),
+                last_osc_title: None,
+                initial_size: Some(InitialPaneSize { cols: 91, rows: 27 }),
+                recovered: false,
+            },
+            CommandPlan {
+                program: "/bin/sh".to_string(),
+                args: vec!["-l".to_string()],
+                cwd: PathBuf::from("/srv/code/project"),
+                envs: vec![("REMOTE_TEST".to_string(), "yes".to_string())],
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spec.program, "/bin/sh");
+        assert_eq!(spec.args, ["-l"]);
+        assert_eq!(spec.cwd, PathBuf::from("/srv/code/project"));
+        let remote = spec.remote.expect("remote execution plan");
+        assert_eq!(remote.identity.remote_id, "remote-1");
+        assert_eq!(remote.identity.tmux_server, "qmux");
+        assert!(
+            remote
+                .identity
+                .tmux_session
+                .starts_with("qmux-pane-remote-")
+        );
+    }
+
+    #[test]
+    fn remote_probe_distinguishes_exists_missing_and_transport_failure() {
+        assert_eq!(
+            probe_remote_session(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "exit 0".to_string()
+            ]),
+            Ok(true)
+        );
+        assert_eq!(
+            probe_remote_session(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf \"can't find session: exact\" >&2; exit 1".to_string()
+            ]),
+            Ok(false)
+        );
+        assert!(
+            probe_remote_session(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf permission-denied >&2; exit 1".to_string(),
+            ])
+            .unwrap_err()
+            .contains("permission-denied")
+        );
+        assert!(
+            probe_remote_session(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf transport-failed >&2; exit 255".to_string(),
+            ])
+            .unwrap_err()
+            .contains("transport-failed")
+        );
+    }
+
+    #[test]
+    fn remote_tmux_version_gate_explains_the_minimum() {
+        assert!(
+            ensure_remote_tmux_version(&[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf 'tmux 3.1\\n'".to_string(),
+            ])
+            .unwrap_err()
+            .contains("3.2 or newer")
+        );
+        ensure_remote_tmux_version(&[
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "printf 'tmux 3.4a\\n'".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn remote_batch_helper_kills_a_command_at_its_wall_clock_deadline() {
+        let command = Command::new("/bin/sleep");
+        let mut command = command;
+        command.arg("5");
+        let started = Instant::now();
+        let error = remote_command_output_with_timeout(
+            command,
+            None,
+            "wait for stalled remote",
+            Duration::from_millis(50),
+        )
+        .unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn remote_create_failure_compensates_for_an_uncertain_remote_result() {
+        let marker = temp_workspace().join("created-session");
+        let marker_arg = marker.display().to_string();
+        let commands = crate::host::RemoteTmuxCommands {
+            version_argv: Vec::new(),
+            create_argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf created > \"$1\"; exit 1".to_string(),
+                "qmux-create-test".to_string(),
+                marker_arg.clone(),
+            ],
+            configure_argv: Vec::new(),
+            attach_argv: Vec::new(),
+            probe_argv: Vec::new(),
+            capture_argv: Vec::new(),
+            capture_full_argv: Vec::new(),
+            activity_argv: Vec::new(),
+            kill_argv: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "rm -f -- \"$1\"".to_string(),
+                "qmux-cleanup-test".to_string(),
+                marker_arg,
+            ],
+            forward_cleanup_argv: Vec::new(),
+            support_cleanup_argv: Vec::new(),
+            remote_socket_path: "/tmp/qmux-create-test.sock".to_string(),
+        };
+
+        let error = create_remote_tmux_session(&commands).unwrap_err();
+
+        assert!(error.contains("create remote tmux session"), "{error}");
+        assert!(
+            !marker.exists(),
+            "the compensating kill must remove a session created before SSH reports failure"
+        );
+    }
+
+    #[test]
+    fn tmux_history_rows_replay_from_column_zero_without_doubling_crlf() {
+        assert_eq!(
+            terminalize_tmux_history(b"one\ntwo\r\nthree"),
+            b"one\r\ntwo\r\nthree"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires QMUX_TEST_SSH_TARGET and mutates a qmux-prefixed tmux session there"]
+    fn managed_remote_tmux_round_trip() {
+        let target = std::env::var("QMUX_TEST_SSH_TARGET").expect("QMUX_TEST_SSH_TARGET");
+        let workspace = temp_workspace();
+        let state = test_state_with_workspace(workspace.clone());
+        // The SSH attachment is required to fail closed when its reverse hook
+        // forward cannot be created, so exercise it against a real qmux control
+        // listener rather than the stale/nonexistent path older versions of
+        // this test tolerated.
+        let _control = crate::control_socket::start_control_socket(state.clone()).unwrap();
+        let remote_ref = crate::workspace::RemoteRef {
+            id: "integration-remote".to_string(),
+            label: target.clone(),
+            host: target,
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: Some("/tmp/qmux-integration-workspaces".to_string()),
+        };
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: Some("Remote integration".to_string()),
+                dir: Some("/tmp".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(remote_ref.clone()),
+                remote_id: None,
+            },
+        )
+        .unwrap();
+        let pane_id = "pane-remote-integration".to_string();
+        let support_dir =
+            PathBuf::from("/tmp/qmux-integration-workspaces/.qmux/support/pane-remote-integration");
+        let support_path = support_dir.join("probe.txt");
+        let mut identity = RemoteSessionIdentity::new("integration-remote", &pane_id).unwrap();
+        identity.support_dir = Some(support_dir.display().to_string());
+        let pane = spawn_pty(
+            &state,
+            PtySpawnSpec {
+                pane_id: Some(pane_id.clone()),
+                agent_id: None,
+                group_id: group.id,
+                kind: PaneKind::Shell,
+                title: "Remote integration".to_string(),
+                last_osc_title: None,
+                program: "/bin/sh".to_string(),
+                args: vec![
+                    "-lc".to_string(),
+                    format!("test \"$(cat '{}')\" = 'provisioned remotely' || exit 91; printf 'remote-ready\\n'; IFS= read -r trigger; printf 'remote-gap-armed\\n'; sleep 0.2; gap=1; while [ \"$gap\" -le 40 ]; do printf 'remote-offline-gap-%s\\n' \"$gap\"; gap=$((gap + 1)); done; count=1; while [ \"$count\" -le 2 ]; do IFS= read -r line; printf 'remote-got-%s:%s\\n' \"$count\" \"$line\"; count=$((count + 1)); done; sleep 300", support_path.display()),
+                ],
+                cwd: PathBuf::from("/tmp"),
+                envs: Vec::new(),
+                support_files: vec![SupportFile {
+                    root: support_dir.clone(),
+                    path: support_path,
+                    contents: "provisioned remotely".to_string(),
+                    mode: 0o600,
+                    create_new: true,
+                    prune_prefix: Some("probe".to_string()),
+                }],
+                support_file_fallback: None,
+                initial_size: Some(InitialPaneSize { cols: 90, rows: 10 }),
+                recovered: false,
+                remote: Some(RemoteSpawnSpec {
+                    host: crate::host::for_group(Some(&remote_ref)),
+                    identity,
+                }),
+            },
+        )
+        .unwrap();
+
+        let wait_for = |needle: &[u8]| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(15);
+            loop {
+                let backlog = state.pane_backlog(&pane.id).unwrap().unwrap();
+                let buffered = windows_contains(&backlog.lock().unwrap().buffer, needle);
+                let durable = read_pane_scrollback(&workspace, &pane.id)
+                    .map(|bytes| windows_contains(&bytes, needle))
+                    .unwrap_or(false);
+                if buffered || durable {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+        };
+        let ready = wait_for(b"remote-ready");
+        if ready {
+            state
+                .pane_writer(&pane.id)
+                .unwrap()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .write_all(b"arm gap\r")
+                .unwrap();
+        }
+        let gap_armed = ready && wait_for(b"remote-gap-armed");
+        let (first_controller, _, _) = state
+            .pane_remote_control(&pane.id)
+            .unwrap()
+            .expect("remote controller");
+        let first_child = first_controller.current_child().expect("first SSH child");
+        first_child.lock().unwrap().kill().unwrap();
+        let reconnect_deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let reconnected = loop {
+            if let Some(child) = first_controller.current_child()
+                && !Arc::ptr_eq(&child, &first_child)
+            {
+                break true;
+            }
+            if std::time::Instant::now() >= reconnect_deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        let disconnected_history = reconnected && wait_for(b"remote-offline-gap-40");
+        attach_pane(&state, pane.id.clone()).unwrap();
+        if gap_armed && reconnected {
+            state
+                .pane_writer(&pane.id)
+                .unwrap()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .write_all(b"hello from qmux\r")
+                .unwrap();
+        }
+        let round_trip = gap_armed && reconnected && wait_for(b"remote-got-1:hello from qmux");
+
+        // Replace the process-local runtime with the persisted pane identity,
+        // simulating a qmux restart. Recovery must attach the existing session
+        // and must not execute any create command.
+        let snapshot = state
+            .list_panes()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.id == pane.id)
+            .unwrap();
+        let (_, attachment) = first_controller.begin_generation();
+        if let Some(attachment) = attachment {
+            let _ = kill_child(&pane.id, attachment.child);
+        }
+        let restart_recovered = reattach_remote_pane(&state, &snapshot).unwrap();
+        let (restart_controller, _, commands) = state
+            .pane_remote_control(&pane.id)
+            .unwrap()
+            .expect("recovered remote controller");
+        assert!(!Arc::ptr_eq(&first_controller, &restart_controller));
+        assert!(commands.create_argv.is_empty());
+        state
+            .pane_writer(&pane.id)
+            .unwrap()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .write_all(b"after restart\r")
+            .unwrap();
+        let restart_round_trip = wait_for(b"remote-got-2:after restart");
+        let durable_history = read_pane_scrollback(&workspace, &pane.id).unwrap();
+        let cleanup = kill_pane(&state, pane.id.clone());
+        let support_removed = crate::host::for_group(Some(&remote_ref))
+            .command(crate::host::RemoteCommand {
+                program: "test",
+                args: vec![
+                    "!".to_string(),
+                    "-e".to_string(),
+                    support_dir.display().to_string(),
+                ],
+                ..Default::default()
+            })
+            .status()
+            .is_ok_and(|status| status.success());
+        let _ = fs::remove_dir_all(workspace);
+
+        assert!(ready, "remote pane never produced its startup output");
+        assert!(
+            round_trip,
+            "remote pane did not reconnect and round trip through tmux"
+        );
+        assert!(
+            disconnected_history && windows_contains(&durable_history, b"remote-offline-gap-40"),
+            "output produced while SSH was detached was not reconciled into local scrollback"
+        );
+        assert!(restart_recovered.recovered);
+        assert!(
+            support_removed,
+            "remote support directory was not cleaned up"
+        );
+        assert!(
+            restart_round_trip,
+            "attach-only restart recovery did not reach the existing process"
+        );
+        cleanup.unwrap();
     }
 
     #[test]
@@ -3522,6 +5203,7 @@ mod tests {
             }),
             initial_size: None,
             recovered: true,
+            remote: None,
         };
 
         materialize_support_files_or_fallback(&mut spec).unwrap();
@@ -4110,6 +5792,7 @@ mod tests {
                 support_file_fallback: None,
                 initial_size: None,
                 recovered: false,
+                remote: None,
             },
         )
         .expect("spawning a test PTY")
@@ -4132,6 +5815,7 @@ mod tests {
             support_file_fallback: None,
             initial_size: None,
             recovered: true,
+            remote: None,
         };
         let pane = PaneInfo {
             id: "pane-1".to_string(),
@@ -4142,6 +5826,8 @@ mod tests {
             group_id: "group-1".to_string(),
             cwd: std::env::temp_dir().display().to_string(),
             active_workspace: None,
+            remote_session: None,
+            remote_connection: None,
             cols: 100,
             rows: 24,
             status: PaneStatus::Running,
@@ -4271,6 +5957,68 @@ mod tests {
         assert_eq!(size.cols, 100);
         assert_eq!(size.rows, 40);
         let _ = kill_pane(&state, pane.id);
+    }
+
+    #[test]
+    fn disconnected_remote_resize_is_persisted_for_the_next_attachment() {
+        let state = test_state();
+        let controller = RemoteAttachmentController::new();
+        let history = RemoteHistoryCheckpoint::new(Vec::new());
+        let backlog: SharedBacklog = Arc::new(Mutex::new(Default::default()));
+        let commands = crate::host::RemoteTmuxCommands {
+            version_argv: Vec::new(),
+            create_argv: Vec::new(),
+            configure_argv: Vec::new(),
+            attach_argv: Vec::new(),
+            probe_argv: Vec::new(),
+            capture_argv: Vec::new(),
+            capture_full_argv: Vec::new(),
+            activity_argv: Vec::new(),
+            kill_argv: Vec::new(),
+            forward_cleanup_argv: Vec::new(),
+            support_cleanup_argv: Vec::new(),
+            remote_socket_path: "/tmp/qmux-offline.sock".to_string(),
+        };
+        state
+            .insert_pane(PaneRuntime {
+                info: PaneInfo {
+                    id: "pane-offline-resize".to_string(),
+                    title: "Remote".to_string(),
+                    last_osc_title: None,
+                    kind: PaneKind::Shell,
+                    agent_id: None,
+                    group_id: "group-1".to_string(),
+                    cwd: "/srv/project".to_string(),
+                    active_workspace: None,
+                    remote_session: Some(
+                        RemoteSessionIdentity::new("remote-1", "pane-offline-resize").unwrap(),
+                    ),
+                    remote_connection: Some(RemoteConnectionInfo {
+                        state: RemoteConnectionState::Reconnecting,
+                        message: None,
+                    }),
+                    cols: 80,
+                    rows: 24,
+                    status: PaneStatus::Running,
+                    last_active_at: 0,
+                    recovered: false,
+                    depth: 0,
+                },
+                backend: PaneBackend::RemoteTmux(RemoteTmuxBackend::new(
+                    controller, history, backlog, commands, false,
+                )),
+                cwd_observation_seq: 0,
+            })
+            .unwrap();
+
+        resize_pane(&state, "pane-offline-resize".to_string(), 132, 41).unwrap();
+        let pane = state
+            .list_panes()
+            .unwrap()
+            .into_iter()
+            .find(|pane| pane.id == "pane-offline-resize")
+            .unwrap();
+        assert_eq!((pane.cols, pane.rows), (132, 41));
     }
 
     #[test]
