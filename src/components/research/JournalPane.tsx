@@ -2,6 +2,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "rea
 import type { FormEvent, KeyboardEvent, MouseEvent } from "react";
 import { createPortal } from "react-dom";
 import {
+  ChevronDown,
   Copy,
   ExternalLink,
   LoaderCircle,
@@ -13,6 +14,16 @@ import {
   X,
 } from "lucide-react";
 import type { JournalEntry, JournalTweetEntry } from "../../lib/journal";
+import {
+  activityDayLabel,
+  buildRecentActivity,
+  type RecentActivityEvent,
+} from "../../lib/activity";
+import type {
+  RecentResearchQuery,
+  RecentResearchQueryCursor,
+  ResearchTreeSummary,
+} from "../../types";
 import type {
   QuotedTweetSnapshot,
   TweetSnapshot,
@@ -21,10 +32,15 @@ import type {
 import { openExternalUrl } from "../../lib/api";
 import { writeClipboardText } from "../../lib/clipboard";
 import { ResearchDocumentFrame } from "./ResearchDocumentChrome";
+import ActivityMetadataLine from "../ActivityMetadataLine";
 
-interface JournalPaneProps {
+interface RecentActivityPaneProps {
   /** Oldest first (storage order); the feed renders newest first. */
   entries: JournalEntry[];
+  researchQueries: RecentResearchQuery[];
+  researchTrees: ResearchTreeSummary[];
+  nextResearchCursor: RecentResearchQueryCursor | null;
+  loadingOlderQueries: boolean;
   /** The most recently removed entry, still restorable. */
   pendingUndo: { entry: JournalEntry } | null;
   onAddEntry: (input: string) => void;
@@ -32,6 +48,8 @@ interface JournalPaneProps {
   onRetryTweet: (id: string) => void;
   onUndoRemove: () => void;
   onDismissUndo: () => void;
+  onOpenResearchQuery: (query: RecentResearchQuery) => void;
+  onLoadOlderQueries: () => void;
 }
 
 const JOURNAL_MENU_WIDTH = 180;
@@ -577,21 +595,79 @@ function JournalEntryCard({
   );
 }
 
-function JournalPane({
+function ResearchQueryCard({
+  query,
+  onOpen,
+}: {
+  query: RecentResearchQuery;
+  onOpen: () => void;
+}) {
+  return (
+    <article className="journal-entry recent-query-card">
+      <button className="control-button recent-query-open" type="button" onClick={onOpen}>
+        {query.prompt}
+      </button>
+      <div className="recent-query-actions" aria-label="Query actions">
+        <button
+          className="control-button recent-query-action"
+          type="button"
+          title="Copy query"
+          aria-label="Copy query"
+          onClick={() => void writeClipboardText(query.prompt)}
+        >
+          <Copy size={12} aria-hidden="true" />
+        </button>
+        <button
+          className="control-button recent-query-action"
+          type="button"
+          title="Open research"
+          aria-label="Open research"
+          onClick={onOpen}
+        >
+          <ExternalLink size={12} aria-hidden="true" />
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function RecentActivityPane({
   entries,
+  researchQueries,
+  researchTrees,
+  nextResearchCursor,
+  loadingOlderQueries,
   pendingUndo,
   onAddEntry,
   onRemoveEntry,
   onRetryTweet,
   onUndoRemove,
   onDismissUndo,
-}: JournalPaneProps) {
+  onOpenResearchQuery,
+  onLoadOlderQueries,
+}: RecentActivityPaneProps) {
   const [draft, setDraft] = useState("");
   const [menu, setMenu] = useState<{ entryId: string; left: number; top: number } | null>(
     null,
   );
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const feed = useMemo(() => [...entries].reverse(), [entries]);
+  const feed = useMemo(
+    () => buildRecentActivity(entries, researchQueries, researchTrees),
+    [entries, researchQueries, researchTrees],
+  );
+  const groupedFeed = useMemo(() => {
+    const groups: { label: string; events: RecentActivityEvent[] }[] = [];
+    for (const event of feed) {
+      const label = activityDayLabel(event.occurredAt);
+      const last = groups[groups.length - 1];
+      if (last?.label === label) {
+        last.events.push(event);
+      } else {
+        groups.push({ label, events: [event] });
+      }
+    }
+    return groups;
+  }, [feed]);
   const menuEntry = menu
     ? entries.find((entry) => entry.id === menu.entryId) ?? null
     : null;
@@ -763,7 +839,7 @@ function JournalPane({
   }
 
   return (
-    <ResearchDocumentFrame title="Journal">
+    <ResearchDocumentFrame title="Recent Activity">
       <div className="research-document-scroll journal-scroll">
         <div className="journal-column">
           <form className="journal-composer" onSubmit={handleSubmit}>
@@ -772,7 +848,7 @@ function JournalPane({
               value={draft}
               rows={2}
               placeholder="Add a note or paste a URL…"
-              aria-label="New journal entry"
+              aria-label="New recent activity entry"
               onChange={(event) => setDraft(event.currentTarget.value)}
               onKeyDown={handleKeyDown}
             />
@@ -802,21 +878,50 @@ function JournalPane({
               </button>
             </div>
           ) : null}
-          <div className="journal-feed" role="feed" aria-label="Journal entries">
-            {feed.map((entry) => (
-              <JournalEntryCard
-                key={entry.id}
-                entry={entry}
-                menuOpen={menu?.entryId === entry.id}
-                onOpenMenu={openMenuFromTrigger}
-                onOpenContextMenu={openContextMenu}
-                onRetryTweet={onRetryTweet}
-              />
+          <div className="journal-feed" role="feed" aria-label="Recent activity">
+            {groupedFeed.map((group) => (
+              <section className="recent-activity-day" key={group.label} aria-label={group.label}>
+                <h2 className="recent-activity-day-label">{group.label}</h2>
+                {group.events.map((event) => (
+                  <div className="recent-activity-unit" key={event.id}>
+                    <ActivityMetadataLine event={event} />
+                    {event.source.kind === "journal" ? (
+                      <JournalEntryCard
+                        entry={event.source.entry}
+                        menuOpen={menu?.entryId === event.source.entry.id}
+                        onOpenMenu={openMenuFromTrigger}
+                        onOpenContextMenu={openContextMenu}
+                        onRetryTweet={onRetryTweet}
+                      />
+                    ) : (
+                      <ResearchQueryCard
+                        query={event.source.query}
+                        onOpen={() => {
+                          if (event.source.kind === "research-query") {
+                            onOpenResearchQuery(event.source.query);
+                          }
+                        }}
+                      />
+                    )}
+                  </div>
+                ))}
+              </section>
             ))}
             {feed.length === 0 ? (
               <p className="journal-empty">
-                Notes and links you add appear here, newest first.
+                Notes, links, posts, and research queries appear here, newest first.
               </p>
+            ) : null}
+            {nextResearchCursor ? (
+              <button
+                className="control-button recent-activity-load-older"
+                type="button"
+                disabled={loadingOlderQueries}
+                onClick={onLoadOlderQueries}
+              >
+                <ChevronDown size={13} aria-hidden="true" />
+                <span>{loadingOlderQueries ? "Loading…" : "Load older activity"}</span>
+              </button>
             ) : null}
           </div>
         </div>
@@ -827,7 +932,7 @@ function JournalPane({
               ref={menuRef}
               className="popover-surface popover-surface--context pane-context-menu journal-entry-menu"
               role="menu"
-              aria-label="Journal entry actions"
+              aria-label="Saved entry actions"
               style={{ left: menu.left, top: menu.top }}
               onMouseDown={(event) => event.stopPropagation()}
               onContextMenu={(event) => event.preventDefault()}
@@ -861,4 +966,4 @@ function JournalPane({
   );
 }
 
-export default memo(JournalPane);
+export default memo(RecentActivityPane);

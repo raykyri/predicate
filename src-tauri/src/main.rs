@@ -62,10 +62,10 @@ use pty::{
     write_pane,
 };
 use research::{
-    CreateResearchDocumentRequest, CreateResearchTreeRequest, ResearchBranchRemoval,
-    ResearchFolderState, ResearchHighlight, ResearchHighlightAnchor, ResearchNode,
-    ResearchNodeContent, ResearchTree, ResearchTreeDetail, ResearchTreeSummary,
-    UpdateResearchDocumentRequest, UpdateResearchDocumentResult,
+    CreateResearchDocumentRequest, CreateResearchTreeRequest, RecentResearchQueryCursor,
+    RecentResearchQueryPage, ResearchBranchRemoval, ResearchFolderState, ResearchHighlight,
+    ResearchHighlightAnchor, ResearchNode, ResearchNodeContent, ResearchTree, ResearchTreeDetail,
+    ResearchTreeSummary, UpdateResearchDocumentRequest, UpdateResearchDocumentResult,
 };
 use show_hide_shortcut::{
     show_hide_shortcut_capture_set, show_hide_shortcut_get, show_hide_shortcut_set,
@@ -1223,6 +1223,15 @@ async fn list_research_activity(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ResearchNode>, String> {
     state.list_research_activity()
+}
+
+#[tauri::command]
+async fn list_recent_research_queries(
+    state: tauri::State<'_, AppState>,
+    limit: Option<usize>,
+    before: Option<RecentResearchQueryCursor>,
+) -> Result<RecentResearchQueryPage, String> {
+    state.list_recent_research_queries(limit.unwrap_or(50), before)
 }
 
 #[tauri::command]
@@ -3452,6 +3461,7 @@ fn main() {
             journal_set,
             journal_fetch_tweet,
             list_research_activity,
+            list_recent_research_queries,
             get_research_tree,
             create_research_tree,
             create_research_document,

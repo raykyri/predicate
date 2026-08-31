@@ -354,6 +354,30 @@ export interface ResearchNode {
   highlights: ResearchHighlight[];
 }
 
+/** Compact research-run history returned to Recent Activity. */
+export interface RecentResearchQuery {
+  nodeId: string;
+  treeId: string;
+  parentNodeId?: string | null;
+  inline: boolean;
+  prompt: string;
+  title?: string | null;
+  adapter: string;
+  model?: string | null;
+  status: ResearchNodeStatus;
+  createdAt: number;
+}
+
+export interface RecentResearchQueryCursor {
+  createdAt: number;
+  nodeId: string;
+}
+
+export interface RecentResearchQueryPage {
+  items: RecentResearchQuery[];
+  nextCursor?: RecentResearchQueryCursor | null;
+}
+
 export interface ResearchHighlight {
   id: string;
   anchor: ResearchHighlightAnchor;

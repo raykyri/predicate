@@ -4,11 +4,12 @@ use crate::events::QmuxEvent;
 use crate::journal;
 use crate::persistence::{self, PersistedState, STATE_VERSION};
 use crate::research::{
-    self, CreateResearchDocumentRequest, CreateResearchTreeRequest, ResearchBranchRemoval,
-    ResearchHighlight, ResearchHighlightAnchor, ResearchNode, ResearchNodeCard,
-    ResearchNodeContent, ResearchNodeKind, ResearchNodeOrigin, ResearchNodeStatus,
-    ResearchPublicationProposal, ResearchRuntime, ResearchTree, ResearchTreeDetail,
-    ResearchTreeSummary, UpdateResearchDocumentRequest, UpdateResearchDocumentResult,
+    self, CreateResearchDocumentRequest, CreateResearchTreeRequest, RecentResearchQuery,
+    RecentResearchQueryCursor, RecentResearchQueryPage, ResearchBranchRemoval, ResearchHighlight,
+    ResearchHighlightAnchor, ResearchNode, ResearchNodeCard, ResearchNodeContent, ResearchNodeKind,
+    ResearchNodeOrigin, ResearchNodeStatus, ResearchPublicationProposal, ResearchRuntime,
+    ResearchTree, ResearchTreeDetail, ResearchTreeSummary, UpdateResearchDocumentRequest,
+    UpdateResearchDocumentResult,
 };
 use crate::scrollback::{bounded_undo_scrollback, read_pane_scrollback, remove_pane_scrollback};
 use crate::thread_graph;
@@ -3893,6 +3894,51 @@ impl AppState {
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| (node.created_at, node.id.clone()));
         Ok(nodes)
+    }
+
+    pub fn list_recent_research_queries(
+        &self,
+        limit: usize,
+        before: Option<RecentResearchQueryCursor>,
+    ) -> Result<RecentResearchQueryPage, String> {
+        let model = self
+            .inner
+            .model
+            .lock()
+            .map_err(|_| "model lock poisoned".to_string())?;
+        let mut nodes = model
+            .research_nodes
+            .values()
+            .filter(|node| {
+                node.kind.is_run()
+                    && model.research_trees.contains_key(&node.tree_id)
+                    && before.as_ref().is_none_or(|cursor| {
+                        node.created_at < cursor.created_at
+                            || (node.created_at == cursor.created_at && node.id < cursor.node_id)
+                    })
+            })
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            right
+                .created_at
+                .cmp(&left.created_at)
+                .then_with(|| right.id.cmp(&left.id))
+        });
+        let page_size = limit.clamp(1, 100);
+        let has_more = nodes.len() > page_size;
+        nodes.truncate(page_size);
+        let items = nodes
+            .into_iter()
+            .map(RecentResearchQuery::from)
+            .collect::<Vec<_>>();
+        let next_cursor = has_more.then(|| {
+            let last = items.last().expect("a non-empty limited page");
+            RecentResearchQueryCursor {
+                created_at: last.created_at,
+                node_id: last.node_id.clone(),
+            }
+        });
+        Ok(RecentResearchQueryPage { items, next_cursor })
     }
 
     pub fn research_tree(&self, tree_id: &str) -> Result<ResearchTreeDetail, String> {
@@ -12484,6 +12530,58 @@ mod tests {
         state.remove_research_tree(&detail.tree.id).unwrap();
         assert!(state.list_research_trees().unwrap().is_empty());
         assert!(state.research_tree(&detail.tree.id).is_err());
+    }
+
+    #[test]
+    fn recent_research_queries_page_runs_at_every_depth_with_a_stable_cursor() {
+        let state = AppState::new(test_config(temp_workspace()));
+        state.insert_group_after(sample_group(), None).unwrap();
+        let detail = state
+            .create_research_tree(CreateResearchTreeRequest {
+                prompt: "Root query".to_string(),
+                title: None,
+                adapter: "claude".to_string(),
+                model: Some("opus".to_string()),
+                effort: None,
+                group_id: "group-1".to_string(),
+            })
+            .unwrap();
+        let root = detail.nodes[0].clone();
+        {
+            let mut model = state.inner.model.lock().unwrap();
+            let mut child = root.clone();
+            child.id = "nested-query".to_string();
+            child.parent_node_id = Some(root.id.clone());
+            child.prompt = "Nested query".to_string();
+            child.created_at += 1;
+            model.research_nodes.insert(child.id.clone(), child);
+
+            let mut document = root.clone();
+            document.id = "document-node".to_string();
+            document.kind = ResearchNodeKind::Document;
+            document.created_at += 2;
+            model.research_nodes.insert(document.id.clone(), document);
+        }
+
+        let first = state.list_recent_research_queries(1, None).unwrap();
+        assert_eq!(first.items[0].node_id, "nested-query");
+        assert_eq!(
+            first.items[0].parent_node_id.as_deref(),
+            Some(root.id.as_str())
+        );
+        let second = state
+            .list_recent_research_queries(1, first.next_cursor)
+            .unwrap();
+        assert_eq!(second.items[0].node_id, root.id);
+        assert!(second.next_cursor.is_none());
+        assert!(
+            state
+                .list_recent_research_queries(100, None)
+                .unwrap()
+                .items
+                .iter()
+                .all(|query| query.node_id != "document-node")
+        );
     }
 
     #[test]

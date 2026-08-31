@@ -383,6 +383,55 @@ pub struct ResearchNode {
     pub highlights: Vec<ResearchHighlight>,
 }
 
+/// Compact, durable query history for Recent Activity. This deliberately omits
+/// transcripts, filesystem paths, highlights, and runtime bindings: the feed
+/// needs query identity and display metadata, not the full research record.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentResearchQuery {
+    pub node_id: String,
+    pub tree_id: String,
+    pub parent_node_id: Option<String>,
+    pub inline: bool,
+    pub prompt: String,
+    pub title: Option<String>,
+    pub adapter: String,
+    pub model: Option<String>,
+    pub status: ResearchNodeStatus,
+    pub created_at: u128,
+}
+
+impl From<&ResearchNode> for RecentResearchQuery {
+    fn from(node: &ResearchNode) -> Self {
+        Self {
+            node_id: node.id.clone(),
+            tree_id: node.tree_id.clone(),
+            parent_node_id: node.parent_node_id.clone(),
+            inline: node.inline,
+            prompt: node.prompt.clone(),
+            title: node.title.clone(),
+            adapter: node.adapter.clone(),
+            model: node.model.clone(),
+            status: node.status,
+            created_at: node.created_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentResearchQueryCursor {
+    pub created_at: u128,
+    pub node_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentResearchQueryPage {
+    pub items: Vec<RecentResearchQuery>,
+    pub next_cursor: Option<RecentResearchQueryCursor>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResearchPublicationProposal {

@@ -47,6 +47,8 @@ import type {
   RemoveQueuedAgentTurnResult,
   ReorderQueuedAgentTurnResult,
   ResearchBranchRemoval,
+  RecentResearchQueryCursor,
+  RecentResearchQueryPage,
   ResearchHighlight,
   ResearchHighlightAnchor,
   ResearchTree,
@@ -490,6 +492,16 @@ export function setResearchFolders(folders: ResearchFolderState) {
 
 export function listResearchActivity() {
   return invoke<ResearchNode[]>("list_research_activity");
+}
+
+export function listRecentResearchQueries(
+  limit = 50,
+  before?: RecentResearchQueryCursor | null,
+) {
+  return invoke<RecentResearchQueryPage>("list_recent_research_queries", {
+    limit,
+    before: before ?? null,
+  });
 }
 
 /** The stored journal, as an untyped blob: callers normalize it through

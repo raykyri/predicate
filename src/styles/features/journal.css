@@ -1,5 +1,5 @@
-/* The Journal: a research-surface page holding a narrow, left-aligned feed
-   of notes, links, and embedded tweets. Note/link cards borrow the research
+/* Recent Activity: a research-surface page holding a narrow, left-aligned feed
+   of saved items and research queries. Note/link cards borrow the research
    question card recipe (--content-card-bg on a 10px radius); tweet entries
    drop the padding so the tweet card IS the entry — a feed of tweets, not
    tweets framed inside content items. */
@@ -48,7 +48,82 @@
 .journal-feed {
   display: flex;
   flex-direction: column;
+  gap: 18px;
+}
+
+.recent-activity-day {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+}
+
+.recent-activity-day-label {
+  margin: 0 0 1px;
+  color: var(--text-subtle);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.recent-activity-unit {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+/* Event metadata is intentionally outside the content surface. All activity
+   producers share the same ordered slots and only semantic state gets color. */
+.activity-metadata {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 0;
+  padding: 0 3px;
+  color: var(--text-subtle);
+  font-size: 11.5px;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.activity-metadata > span,
+.activity-metadata > time {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-metadata > :not(:first-child)::before {
+  content: "·";
+  margin: 0 5px;
+  color: var(--text-subtlest, var(--text-subtle));
+}
+
+.activity-metadata-primary {
+  flex: none;
+  color: var(--text-secondary, var(--text-subtle));
+  font-weight: 550;
+}
+
+.activity-metadata-context {
+  flex: 1;
+}
+
+.activity-metadata-state {
+  flex: none;
+}
+
+.activity-metadata-state.is-active {
+  color: var(--accent-color);
+}
+
+.activity-metadata-state.is-failed {
+  color: var(--danger-color, #e66);
+}
+
+.activity-metadata-state.is-cancelled {
+  color: var(--text-subtle);
 }
 
 .journal-empty {
@@ -63,6 +138,68 @@
   padding: 10px 14px;
   border-radius: 10px;
   background: var(--content-card-bg);
+}
+
+.recent-query-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding-right: 8px;
+}
+
+.recent-query-open {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recent-query-actions {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.recent-query-card:hover .recent-query-actions,
+.recent-query-card:focus-within .recent-query-actions {
+  opacity: 1;
+}
+
+.recent-query-action {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text-subtle);
+}
+
+.recent-query-action:hover {
+  color: var(--text-interactive);
+  background: var(--surface-fill-hover);
+}
+
+.recent-activity-load-older {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 7px;
+  color: var(--text-subtle);
+  font-size: 12px;
 }
 
 .journal-entry.is-tweet {
@@ -548,8 +685,10 @@ a.journal-tweet-more:hover {
 
 /* — Sidebar tab above the Research heading — */
 
-/* The tab is an ordinary research row (same nesting, same metrics); it only
-   needs the gap that separates it from the Research heading below. */
+/* Match the scrollable research section's horizontal padding while keeping
+   Recent Activity fixed above it, then leave the gap before the Research heading. */
 .journal-sidebar-row {
+  width: calc(100% - 14px);
+  margin-inline: 7px;
   margin-bottom: 8px;
 }

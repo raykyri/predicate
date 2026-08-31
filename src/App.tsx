@@ -36,7 +36,6 @@ import {
   Minimize2,
   Minus,
   MoreHorizontal,
-  NotebookPen,
   PanelBottomClose,
   PanelBottomOpen,
   PanelLeftClose,
@@ -154,7 +153,7 @@ import {
 } from "./lib/researchScope";
 import ResearchDocument from "./components/research/ResearchDocument";
 import ExportToResearchDialog from "./components/research/ExportToResearchDialog";
-import JournalPane from "./components/research/JournalPane";
+import RecentActivityPane from "./components/research/JournalPane";
 import {
   normalizeNotificationLog,
   type NotificationLogEntry,
@@ -380,7 +379,13 @@ import {
   isResearchTreeSelectionChange,
   pruneResearchNavigation,
   pruneResearchNavigationNodes,
+  researchNavigationStore,
+  saveResearchNavigation,
 } from "./lib/researchNavigation";
+import {
+  recentResearchQueryFromNode,
+  upsertRecentResearchQuery,
+} from "./lib/activity";
 import { isActiveResearchStatus } from "./lib/researchThreads";
 import {
   groupsForScope,
@@ -531,6 +536,7 @@ import {
   listPanes,
   listPublications,
   listResearchActivity,
+  listRecentResearchQueries,
   listResearchFolders,
   listResearchTrees,
   setResearchFolders,
@@ -618,6 +624,8 @@ import type {
   PaneSplitInfo,
   QmuxEvent,
   QueuedTurn,
+  RecentResearchQuery,
+  RecentResearchQueryCursor,
   ResearchHighlightAnchor,
   ResearchNode,
   ResearchTreeDetail,
@@ -2057,6 +2065,7 @@ function MainApp() {
   const researchDetailRequestSeqRef = useRef(0);
   const researchNavRefreshSeqRef = useRef(0);
   const researchNavRefreshInFlightRef = useRef(0);
+  const recentResearchPageRequestSeqRef = useRef(0);
   const researchViewAckInFlightRef = useRef(new Set<string>());
   const researchViewAckPendingRef = useRef(new Set<string>());
   const markVisibleResearchTreeViewedRef = useRef<
@@ -2070,6 +2079,10 @@ function MainApp() {
   activeResearchPaneIdRef.current = activeResearchPaneId;
   const [researchTrees, setResearchTrees] = useState<ResearchTreeSummary[]>([]);
   const [archivedResearchTrees, setArchivedResearchTrees] = useState<ResearchTreeSummary[]>([]);
+  const [recentResearchQueries, setRecentResearchQueries] = useState<RecentResearchQuery[]>([]);
+  const [recentResearchCursor, setRecentResearchCursor] =
+    useState<RecentResearchQueryCursor | null>(null);
+  const [loadingOlderResearchQueries, setLoadingOlderResearchQueries] = useState(false);
   // Sidebar multi-selection (shift/meta click). Pruned against the scoped
   // active list where it is consumed, so stale ids drop out on their own.
   const [researchMultiSelectIds, setResearchMultiSelectIds] = useState<string[]>([]);
@@ -7371,6 +7384,7 @@ function MainApp() {
           existingAgents,
           existingResearchTrees,
           existingResearchActivity,
+          existingRecentResearchQueries,
           existingResearchFolders,
           existingPublications,
           existingArtifacts,
@@ -7386,6 +7400,7 @@ function MainApp() {
           listAgents(),
           listResearchTrees(true).catch((): ResearchTreeSummary[] => []),
           listResearchActivity().catch((): ResearchNode[] => []),
+          listRecentResearchQueries().catch(() => ({ items: [], nextCursor: null })),
           listResearchFolders().catch(emptyResearchFolderState),
           listPublications().catch((): PublicationBinding[] => []),
           artifactList().catch((): ArtifactInfo[] => []),
@@ -7412,6 +7427,8 @@ function MainApp() {
         setResearchTrees(partitionedResearchTrees.active);
         setArchivedResearchTrees(partitionedResearchTrees.archived);
         setResearchActivity(existingResearchActivity);
+        setRecentResearchQueries(existingRecentResearchQueries.items);
+        setRecentResearchCursor(existingRecentResearchQueries.nextCursor ?? null);
         // Adopt the backend-owned grouping. One-time migration: earlier builds
         // kept folders in localStorage. If the backend has none yet but a
         // localStorage copy survives, push it up once and clear the local key so
@@ -8008,11 +8025,14 @@ function MainApp() {
     // next research event.
     const requestSeq = researchNavRefreshSeqRef.current + 1;
     researchNavRefreshSeqRef.current = requestSeq;
+    recentResearchPageRequestSeqRef.current += 1;
+    setLoadingOlderResearchQueries(false);
     researchNavRefreshInFlightRef.current += 1;
     try {
-      const [trees, activity] = await Promise.all([
+      const [trees, activity, recentQueries] = await Promise.all([
         listResearchTrees(true),
         listResearchActivity(),
+        listRecentResearchQueries(),
       ]);
       if (researchNavRefreshSeqRef.current !== requestSeq) {
         return null;
@@ -8025,6 +8045,8 @@ function MainApp() {
         reconcileResearchTreeSummaries(current, partitioned.archived),
       );
       setResearchActivity((current) => reconcileResearchActivity(current, activity));
+      setRecentResearchQueries(recentQueries.items);
+      setRecentResearchCursor(recentQueries.nextCursor ?? null);
       // The backend can remove the selected tree out from under the UI (a root
       // launch that failed removes its never-launched tree). Left selected, the
       // document would spin on a tree that no longer exists with nothing able to
@@ -8283,6 +8305,49 @@ function MainApp() {
     setJournalOpen,
     setSidebarMode,
   ]);
+  const openRecentResearchQuery = useCallback(
+    (query: RecentResearchQuery) => {
+      const navigationStore = researchNavigationStore();
+      const navigation = navigationStore[query.treeId] ?? { scrollByNode: {} };
+      navigation.selectedNodeId = query.nodeId;
+      navigationStore[query.treeId] = navigation;
+      saveResearchNavigation();
+      if (archivedResearchTreesRef.current.some((tree) => tree.id === query.treeId)) {
+        changeResearchVisibilityFilter("all");
+      }
+      void selectResearchTree(query.treeId);
+    },
+    [changeResearchVisibilityFilter, selectResearchTree],
+  );
+  const loadOlderResearchQueries = useCallback(() => {
+    if (!recentResearchCursor || loadingOlderResearchQueries) return;
+    const requestSeq = recentResearchPageRequestSeqRef.current + 1;
+    recentResearchPageRequestSeqRef.current = requestSeq;
+    setLoadingOlderResearchQueries(true);
+    void listRecentResearchQueries(50, recentResearchCursor)
+      .then((page) => {
+        if (recentResearchPageRequestSeqRef.current !== requestSeq) return;
+        setRecentResearchQueries((current) => {
+          const byId = new Map(current.map((query) => [query.nodeId, query]));
+          for (const query of page.items) byId.set(query.nodeId, query);
+          return [...byId.values()].sort(
+            (left, right) =>
+              right.createdAt - left.createdAt || right.nodeId.localeCompare(left.nodeId),
+          );
+        });
+        setRecentResearchCursor(page.nextCursor ?? null);
+      })
+      .catch((err) => {
+        if (recentResearchPageRequestSeqRef.current === requestSeq) {
+          setError(err instanceof Error ? err.message : String(err));
+        }
+      })
+      .finally(() => {
+        if (recentResearchPageRequestSeqRef.current === requestSeq) {
+          setLoadingOlderResearchQueries(false);
+        }
+      });
+  }, [loadingOlderResearchQueries, recentResearchCursor]);
   const retryActiveResearchDetail = useCallback(() => {
     const treeId = activeResearchTreeIdRef.current;
     if (treeId) {
@@ -8994,6 +9059,8 @@ function MainApp() {
           researchNavRefreshInFlightRef.current > 0 ||
           researchNavigationRecoveryTimerRef.current !== null;
         researchNavRefreshSeqRef.current += 1;
+        recentResearchPageRequestSeqRef.current += 1;
+        setLoadingOlderResearchQueries(false);
         if (needsRecovery) {
           // An event invalidated a pre-event collection snapshot. Retry once
           // after the event stream goes quiet; resetting this timer prevents a
@@ -9034,6 +9101,10 @@ function MainApp() {
         invalidateVisibleDetailSnapshot(node.treeId);
         setActiveResearchDetail((current) => patchResearchDetailNode(current, node));
         setResearchActivity((current) => upsertResearchActivity(current, node));
+        const recentQuery = recentResearchQueryFromNode(node);
+        if (recentQuery) {
+          setRecentResearchQueries((current) => upsertRecentResearchQuery(current, recentQuery));
+        }
         if (previous) {
           const patchSummary = (summary: ResearchTreeSummary) =>
             patchResearchSummaryForNode(summary, previous, node, timestamp);
@@ -9056,6 +9127,12 @@ function MainApp() {
             );
           }
           setResearchActivity((current) => upsertResearchActivity(current, event.node));
+          const recentQuery = recentResearchQueryFromNode(event.node);
+          if (recentQuery) {
+            setRecentResearchQueries((current) =>
+              upsertRecentResearchQuery(current, recentQuery),
+            );
+          }
           break;
         }
         case "research.document.updated": {
@@ -9174,6 +9251,9 @@ function MainApp() {
             removeResearchDetailNodes(current, event.treeId, removedIds),
           );
           setResearchActivity((current) => removeResearchNodes(current, removedIds));
+          setRecentResearchQueries((current) =>
+            current.filter((query) => !removedIds.has(query.nodeId)),
+          );
           patchSummaryState(event.treeId, (summary) =>
             patchResearchSummaryForRemovedNodes(
               summary,
@@ -9203,6 +9283,9 @@ function MainApp() {
               .map((node) => node.id);
             return removeResearchNodes(current, removedIds);
           });
+          setRecentResearchQueries((current) =>
+            current.filter((query) => query.treeId !== event.treeId),
+          );
           for (const [nodeId, node] of researchNodeEventCacheRef.current) {
             if (node.treeId === event.treeId) {
               researchNodeEventCacheRef.current.delete(nodeId);
@@ -14876,9 +14959,9 @@ function MainApp() {
           className={`pane-list${draggingPaneId || draggingGroupId ? " is-dragging" : ""}`}
           aria-label={sidebarMode === "terminal" ? "Terminal tabs" : "Research"}
         >
-          {/* The Journal tab uses the same row/select/copy nesting every
-              research row uses, so it inherits the list's metrics rather than
-              restating them. */}
+          {/* Recent Activity uses the same row/select/copy nesting every
+              research row uses. Its fixed-row inset mirrors the scrollable
+              research section below. */}
           {sidebarMode === "research" ? (
             <div
               className={`research-sidebar-row journal-sidebar-row${
@@ -14889,17 +14972,12 @@ function MainApp() {
                 type="button"
                 className="control-button research-sidebar-select"
                 aria-current={researchStageView === "journal" ? "page" : undefined}
-                title="Journal"
+                title="Recent Activity"
                 onClick={openJournal}
               >
                 <span className="research-sidebar-copy">
                   <span className="research-sidebar-title">
-                    <NotebookPen
-                      className="research-sidebar-doc-icon"
-                      size={12}
-                      aria-hidden="true"
-                    />
-                    <span className="research-sidebar-title-text">Journal</span>
+                    <span className="research-sidebar-title-text">Recent Activity</span>
                   </span>
                 </span>
               </button>
@@ -17321,14 +17399,20 @@ function MainApp() {
             </div>
           ) : null}
           {researchStageView === "journal" ? (
-            <JournalPane
+            <RecentActivityPane
               entries={journal.entries}
+              researchQueries={recentResearchQueries}
+              researchTrees={[...researchTrees, ...archivedResearchTrees]}
+              nextResearchCursor={recentResearchCursor}
+              loadingOlderQueries={loadingOlderResearchQueries}
               pendingUndo={journalUndo ? { entry: journalUndo.entry } : null}
               onAddEntry={addJournalEntry}
               onRemoveEntry={removeJournalEntry}
               onRetryTweet={retryJournalTweet}
               onUndoRemove={undoJournalRemove}
               onDismissUndo={dismissJournalUndo}
+              onOpenResearchQuery={openRecentResearchQuery}
+              onLoadOlderQueries={loadOlderResearchQueries}
             />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to
