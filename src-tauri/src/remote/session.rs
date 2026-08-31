@@ -151,7 +151,8 @@ async fn run_control_stream(
 
     // Register with the fan-out for the life of the session. Dormant until
     // the first Subscribe: no events queue and no pane has a ring.
-    let (fanout_id, channels) = state.remote_fanout().register_session();
+    let fanout_registration = state.remote_fanout().register_session_guard();
+    let channels = fanout_registration.channels();
     let mut pumps = Pumps {
         state: state.clone(),
         connection: connection.clone(),
@@ -258,7 +259,6 @@ async fn run_control_stream(
 
     drop(call_tx);
     let _ = call_worker.await;
-    state.remote_fanout().unregister_session(fanout_id);
     pumps.stop();
     drop(writer_tx);
     let _ = writer.await;

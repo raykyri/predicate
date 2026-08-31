@@ -136,9 +136,9 @@ async fn run_pairing(
     connection: &Connection,
     remote: EndpointId,
 ) -> Result<(), String> {
-    let (mut send, mut recv) = connection
-        .accept_bi()
+    let (mut send, mut recv) = tokio::time::timeout(REQUEST_TIMEOUT, connection.accept_bi())
         .await
+        .map_err(|_| "timed out waiting for the pairing stream".to_string())?
         .map_err(|err| format!("no pairing stream: {err}"))?;
     let request = tokio::time::timeout(REQUEST_TIMEOUT, frames::read_json(&mut recv))
         .await

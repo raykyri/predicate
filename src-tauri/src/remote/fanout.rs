@@ -225,6 +225,26 @@ pub struct RemoteFanout {
     active: AtomicUsize,
 }
 
+/// Cancellation-safe session membership. Dropping a control-stream future at
+/// any await point unregisters its queues from the long-lived AppState.
+pub struct SessionRegistration<'a> {
+    fanout: &'a RemoteFanout,
+    id: u64,
+    channels: Arc<SessionChannels>,
+}
+
+impl SessionRegistration<'_> {
+    pub fn channels(&self) -> Arc<SessionChannels> {
+        self.channels.clone()
+    }
+}
+
+impl Drop for SessionRegistration<'_> {
+    fn drop(&mut self) {
+        self.fanout.unregister_session(self.id);
+    }
+}
+
 impl Default for RemoteFanout {
     fn default() -> Self {
         Self {
@@ -244,6 +264,15 @@ impl RemoteFanout {
             self.active.store(sessions.len(), Ordering::SeqCst);
         }
         (id, channels)
+    }
+
+    pub fn register_session_guard(&self) -> SessionRegistration<'_> {
+        let (id, channels) = self.register_session();
+        SessionRegistration {
+            fanout: self,
+            id,
+            channels,
+        }
     }
 
     pub fn unregister_session(&self, id: u64) {
@@ -387,6 +416,17 @@ mod tests {
         assert!(!resync);
 
         fanout.unregister_session(id);
+        assert_eq!(fanout.session_count(), 0);
+    }
+
+    #[test]
+    fn session_registration_is_cancellation_safe() {
+        let fanout = RemoteFanout::default();
+        {
+            let registration = fanout.register_session_guard();
+            registration.channels().set_events_on(true);
+            assert_eq!(fanout.session_count(), 1);
+        }
         assert_eq!(fanout.session_count(), 0);
     }
 }

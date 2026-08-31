@@ -110,10 +110,12 @@ pub const CLOSE_PROTOCOL_ERROR: u32 = 2;
 pub const CLOSE_GOING_AWAY: u32 = 3;
 pub const CLOSE_NO_PAIRING_WINDOW: u32 = 4;
 
-/// Ceiling on concurrent remote connections across all devices. Sessions are
-/// long-lived, so this bounds devices plus in-flight handshakes, not request
-/// rate; at the cap new connections wait in the accept queue.
-const MAX_REMOTE_CONNECTIONS: usize = 16;
+/// Separate capacity pools prevent unauthenticated pairing peers from starving
+/// already-paired control sessions. Handshakes have their own bounded pool;
+/// protocol pools reject excess completed connections instead of queueing them.
+const MAX_PENDING_HANDSHAKES: usize = 32;
+const MAX_REMOTE_SESSIONS: usize = 16;
+const MAX_PAIR_CONNECTIONS: usize = 4;
 
 /// Owns the endpoint, its dedicated tokio runtime, and the accept loop.
 ///
@@ -463,22 +465,30 @@ impl Drop for RemoteControlRuntime {
 }
 
 async fn accept_loop(this: Weak<RemoteControlRuntime>, endpoint: Endpoint) {
-    let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_CONNECTIONS));
+    let handshakes = Arc::new(tokio::sync::Semaphore::new(MAX_PENDING_HANDSHAKES));
+    let remote_sessions = Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_SESSIONS));
+    let pair_connections = Arc::new(tokio::sync::Semaphore::new(MAX_PAIR_CONNECTIONS));
     while let Some(incoming) = endpoint.accept().await {
         let Some(this) = this.upgrade() else {
             break;
         };
-        let Ok(permit) = limiter.clone().acquire_owned().await else {
+        let Ok(handshake_permit) = handshakes.clone().acquire_owned().await else {
             break;
         };
         let this = this.clone();
+        let remote_sessions = remote_sessions.clone();
+        let pair_connections = pair_connections.clone();
         tokio::spawn(async move {
-            let _permit = permit;
             let Ok(connection) = incoming.await else {
                 return;
             };
+            drop(handshake_permit);
             let alpn = connection.alpn().to_vec();
             if alpn == REMOTE_ALPN {
+                let Ok(_session_permit) = remote_sessions.try_acquire_owned() else {
+                    connection.close(CLOSE_GOING_AWAY.into(), b"remote session limit");
+                    return;
+                };
                 let remote = connection.remote_id();
                 match (this.gate)(&remote) {
                     Some(access) => {
@@ -512,6 +522,10 @@ async fn accept_loop(this: Weak<RemoteControlRuntime>, endpoint: Endpoint) {
                     }
                 }
             } else if alpn == PAIR_ALPN {
+                let Ok(_pair_permit) = pair_connections.try_acquire_owned() else {
+                    connection.close(CLOSE_GOING_AWAY.into(), b"pairing busy");
+                    return;
+                };
                 crate::remote::pairing::serve_pair_connection(this.clone(), connection).await;
             } else {
                 connection.close(CLOSE_PROTOCOL_ERROR.into(), b"unknown protocol");
