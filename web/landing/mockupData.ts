@@ -241,7 +241,18 @@ export interface TranscriptImage {
   alt: string;
 }
 
-export type TranscriptItem = TranscriptParagraph | TranscriptActivity | TranscriptImage;
+export interface TranscriptVisualization {
+  type: "visualization";
+  step: number;
+  title: string;
+  file: string;
+}
+
+export type TranscriptItem =
+  | TranscriptParagraph
+  | TranscriptActivity
+  | TranscriptImage
+  | TranscriptVisualization;
 
 const p = (
   step: number,
@@ -267,6 +278,17 @@ const image = (
   step,
   src,
   alt,
+});
+
+const visualization = (
+  step: number,
+  title: string,
+  file: string,
+): TranscriptVisualization => ({
+  type: "visualization",
+  step,
+  title,
+  file,
 });
 
 export interface MockUserTurn {
@@ -323,9 +345,14 @@ export const MOCK_SESSIONS: Record<string, MockSession> = {
       activity(10, "Called 2 tools"),
       p(
         11,
-        "Everything is passing. Here is the qmux layout reference embedded directly in the rendered transcript:",
+        "Everything is passing. The static capture remains embedded, and the interactive design reference now renders as a native attachment that opens in qmux's browser:",
       ),
       image(12, "/qmux.png", "The qmux desktop interface"),
+      visualization(
+        12,
+        "Recent activity design",
+        "recent-activity-design.fragment.html",
+      ),
     ],
     terminalBlocks: [
       explored(

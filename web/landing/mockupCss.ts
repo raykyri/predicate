@@ -56,6 +56,7 @@ export const MOCKUP_CSS = `
   --surface-border-subtle: rgba(255, 255, 255, 0.075);
   --surface-border-default: rgba(255, 255, 255, 0.12);
   --surface-border-faint: rgba(255, 255, 255, 0.06);
+  --surface-fill-subtle: rgba(255, 255, 255, 0.05);
   --surface-fill-hover: rgba(255, 255, 255, 0.06);
   --sidebar-switcher-bg: rgba(0, 0, 0, 0.18);
   --sidebar-switcher-hover-bg: rgba(255, 255, 255, 0.045);
@@ -1056,6 +1057,94 @@ export const MOCKUP_CSS = `
   object-position: top;
 }
 
+/* Current Codex visualization references use the desktop app's native
+   attachment treatment. The landing replica opens this control into its
+   existing browser overlay; it does not imply an inline iframe. */
+.app-mockup .turn-visualization-attachment {
+  appearance: none;
+  display: grid;
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 10px 11px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: var(--surface-fill-subtle);
+  font: inherit;
+  text-align: left;
+}
+
+.app-mockup.is-interactive .turn-visualization-attachment {
+  cursor: pointer;
+}
+
+.app-mockup.is-interactive .turn-visualization-attachment:hover {
+  border-color: var(--surface-border-default);
+  background: var(--surface-fill-hover);
+}
+
+.app-mockup .turn-visualization-attachment:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+.app-mockup .turn-visualization-attachment-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+
+.app-mockup .turn-visualization-attachment-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.app-mockup .turn-visualization-attachment-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.app-mockup .turn-visualization-attachment-copy strong,
+.app-mockup .turn-visualization-attachment-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-mockup .turn-visualization-attachment-copy strong {
+  font-weight: 580;
+}
+
+.app-mockup .turn-visualization-attachment-copy span,
+.app-mockup .turn-visualization-attachment-action {
+  font-size: 11.5px;
+}
+
+.app-mockup .turn-visualization-attachment-copy span {
+  color: var(--text-subtle);
+}
+
+.app-mockup .turn-visualization-attachment-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+}
+
+.app-mockup .turn-visualization-attachment-action svg {
+  width: 12px;
+  height: 12px;
+}
+
 /* The app's image lightbox, constrained to the replica's window rather than
    covering the marketing page. The thumbnail and expanded view share the
    original 2704×1704 source, so CSS downsizing never limits the opened image. */
@@ -1822,6 +1911,10 @@ export const MOCKUP_CSS = `
   background: #f7f7f4;
 }
 
+.app-mockup .browser-overlay-page[data-mock-browser-kind="visualization"] {
+  background: #101314;
+}
+
 /* A stand-in for the dev server's page: enough structure to read as a rendered
    document, with none of it pretending to be live. */
 .app-mockup .mock-preview {
@@ -1830,6 +1923,23 @@ export const MOCKUP_CSS = `
   flex-direction: column;
   gap: 10px;
   color: #1c2022;
+}
+
+.app-mockup .mock-preview[hidden] {
+  display: none;
+}
+
+.app-mockup .mock-visualization-preview {
+  color: #e7e7e2;
+}
+
+.app-mockup .mock-visualization-preview .mock-preview-eyebrow,
+.app-mockup .mock-visualization-preview .mock-preview-name {
+  color: #8a938e;
+}
+
+.app-mockup .mock-visualization-preview .mock-preview-row {
+  border-top-color: #2a2d2f;
 }
 
 .app-mockup .mock-preview-eyebrow {

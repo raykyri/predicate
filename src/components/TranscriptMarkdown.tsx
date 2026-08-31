@@ -16,7 +16,7 @@ import type {
   ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
-import { Ellipsis, ExternalLink } from "lucide-react";
+import { Ellipsis, ExternalLink, FileCode2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -48,8 +48,80 @@ interface TranscriptHastNode {
 
 const LOCAL_HTML_DATA_KEY = "qmuxLocalHtmlUrl";
 const CODEX_INLINE_VIS_DATA_KEY = "qmuxCodexInlineVisFile";
+const CODEX_VISUALIZATION_REFERENCE_DATA_KEY = "qmuxCodexVisualizationReference";
 const CODEX_INLINE_VIS_PATTERN =
   /^::codex-inline-vis\{file="([a-z0-9]+(?:-[a-z0-9]+)*\.html)"\}$/u;
+const CODEX_VISUALIZATION_REFERENCE_PREFIX = "visualize";
+const CODEX_VISUALIZATION_REFERENCE_SUFFIX = "";
+const MAX_CODEX_VISUALIZATION_REFERENCE_CHARACTERS = 8_192;
+const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-z]:[\\/]/iu;
+const PATH_CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/u;
+
+export interface CodexVisualizationReference {
+  path: string;
+  title?: string;
+  /** Reserved by the Codex contract for a future wider presentation. V1
+   * deliberately opens every reference in qmux's existing browser overlay. */
+  mode?: "wide";
+}
+
+/** Parses the current Codex visualization content-reference contract. Keeping
+ * this deliberately exact prevents prose, code samples, and malformed control
+ * text from turning into launchable local-file UI. */
+export function parseCodexVisualizationReference(
+  text: string,
+): CodexVisualizationReference | null {
+  if (
+    text.length > MAX_CODEX_VISUALIZATION_REFERENCE_CHARACTERS ||
+    !text.startsWith(CODEX_VISUALIZATION_REFERENCE_PREFIX) ||
+    !text.endsWith(CODEX_VISUALIZATION_REFERENCE_SUFFIX)
+  ) {
+    return null;
+  }
+  const payload = text.slice(
+    CODEX_VISUALIZATION_REFERENCE_PREFIX.length,
+    -CODEX_VISUALIZATION_REFERENCE_SUFFIX.length,
+  );
+  let value: unknown;
+  try {
+    value = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const path = typeof record.path === "string" ? record.path.trim() : "";
+  const absolutePath =
+    path.startsWith("/") || path.startsWith("\\\\") || WINDOWS_ABSOLUTE_PATH_PATTERN.test(path);
+  if (
+    !absolutePath ||
+    PATH_CONTROL_CHARACTER_PATTERN.test(path) ||
+    !path.toLowerCase().endsWith(".html")
+  ) {
+    return null;
+  }
+  const title =
+    typeof record.title === "string" && record.title.trim()
+      ? record.title.trim().replace(/\s+/gu, " ").slice(0, 250)
+      : undefined;
+  const mode = record.mode === "wide" ? "wide" : undefined;
+  if (record.mode !== undefined && mode === undefined) {
+    return null;
+  }
+  return { path, ...(title ? { title } : {}), ...(mode ? { mode } : {}) };
+}
+
+function visualizationTitle(reference: CodexVisualizationReference) {
+  if (reference.title) {
+    return reference.title;
+  }
+  const basename = reference.path.split(/[\\/]/u).pop() ?? "Visualization";
+  const stem = basename.replace(/(?:\.fragment)?\.html$/iu, "");
+  const words = stem.replace(/[-_]+/gu, " ").trim();
+  return words ? `${words[0].toLocaleUpperCase()}${words.slice(1)}` : "Visualization";
+}
 
 function exactTextChild(node: TranscriptHastNode): string | undefined {
   if (node.children?.length !== 1 || node.children[0]?.type !== "text") {
@@ -83,6 +155,12 @@ function rehypeTranscriptArtifacts() {
           const directive = CODEX_INLINE_VIS_PATTERN.exec(text);
           if (directive?.[1]) {
             (node.data ??= {})[CODEX_INLINE_VIS_DATA_KEY] = directive[1];
+          } else {
+            const reference = parseCodexVisualizationReference(text);
+            if (reference) {
+              (node.data ??= {})[CODEX_VISUALIZATION_REFERENCE_DATA_KEY] =
+                JSON.stringify(reference);
+            }
           }
         }
       }
@@ -137,6 +215,9 @@ export interface LinkActions {
   openLink: (url: string) => void;
   openLinkMenu: (url: string, x: number, y: number) => void;
   openCodexInlineVisualization?: (file: string) => void;
+  openCodexVisualizationReference?: (
+    reference: CodexVisualizationReference,
+  ) => void | Promise<void>;
 }
 
 const LinkActionsContext = createContext<LinkActions>({
@@ -259,14 +340,84 @@ function MarkdownCode({
   );
 }
 
+function CodexVisualizationAttachment({
+  reference,
+  onOpen,
+}: {
+  reference: CodexVisualizationReference;
+  onOpen: (reference: CodexVisualizationReference) => void | Promise<void>;
+}) {
+  const [openState, setOpenState] = useState<"idle" | "opening" | "error">("idle");
+  const title = visualizationTitle(reference);
+  const detail =
+    openState === "opening"
+      ? "Opening visualization…"
+      : openState === "error"
+        ? "Couldn’t open visualization"
+        : "Interactive visualization";
+  const action =
+    openState === "opening" ? "Opening…" : openState === "error" ? "Retry" : "Open";
+
+  return (
+    <button
+      type="button"
+      className="turn-visualization-attachment"
+      data-open-state={openState}
+      title={`${action} ${title}`}
+      aria-label={`${action} visualization: ${title}`}
+      aria-busy={openState === "opening"}
+      disabled={openState === "opening"}
+      onClick={async () => {
+        setOpenState("opening");
+        try {
+          await onOpen(reference);
+          setOpenState("idle");
+        } catch {
+          // The owning app action keeps the detailed failure in qmux's global
+          // error surface; this local state leaves an obvious retry affordance
+          // exactly where the user clicked without exposing the absolute path.
+          setOpenState("error");
+        }
+      }}
+    >
+      <span className="turn-visualization-attachment-icon" aria-hidden="true">
+        <FileCode2 />
+      </span>
+      <span className="turn-visualization-attachment-copy">
+        <strong>{title}</strong>
+        <span aria-live="polite">{detail}</span>
+      </span>
+      <span className="turn-visualization-attachment-action" aria-hidden="true">
+        {action}
+        {openState === "opening" ? null : <ExternalLink />}
+      </span>
+    </button>
+  );
+}
+
 function MarkdownParagraph({
   node,
   children,
   ...props
 }: ComponentPropsWithoutRef<"p"> & { node?: TranscriptHastNode }) {
-  const { openCodexInlineVisualization } = useContext(LinkActionsContext);
+  const { openCodexInlineVisualization, openCodexVisualizationReference } =
+    useContext(LinkActionsContext);
   const artifactLinks = useContext(TranscriptArtifactLinksContext);
   const file = markedValue(node, CODEX_INLINE_VIS_DATA_KEY);
+  const referenceValue = markedValue(node, CODEX_VISUALIZATION_REFERENCE_DATA_KEY);
+  const reference = referenceValue
+    ? parseCodexVisualizationReference(
+        `${CODEX_VISUALIZATION_REFERENCE_PREFIX}${referenceValue}${CODEX_VISUALIZATION_REFERENCE_SUFFIX}`,
+      )
+    : null;
+  if (artifactLinks && reference && openCodexVisualizationReference) {
+    return (
+      <CodexVisualizationAttachment
+        reference={reference}
+        onOpen={openCodexVisualizationReference}
+      />
+    );
+  }
   return (
     <p {...props}>
       {children}

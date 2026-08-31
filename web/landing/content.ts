@@ -33,7 +33,8 @@ export const SUPPORTED_AGENTS: SupportedAgent[] = [
 export const FEATURES: Feature[] = [
   {
     name: "Rich text transcripts",
-    copy: "Easy-to-read transcripts with Markdown, tables, code blocks, and diagrams.",
+    copy:
+      "Easy-to-read transcripts with Markdown, tables, code, diagrams, and interactive visualization attachments.",
   },
   {
     name: "Cross-agent queueing",

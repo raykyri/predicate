@@ -1063,6 +1063,16 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="mock-image-lightbox-img"[^>]*width="2704" height="1704"/);
   assert.doesNotMatch(body, /qmux desktop layout reference/);
   assert.match(body, /class="turn-card role-assistant turn-image-card" data-step="12"/);
+  assert.equal(
+    (body.match(/data-mock-visualization="recent-activity-design\.fragment\.html"/g) ?? [])
+      .length,
+    3,
+  );
+  assert.match(body, /class="turn-visualization-attachment"/);
+  assert.match(body, />Recent activity design</);
+  assert.match(body, />Interactive visualization</);
+  assert.match(body, /data-mock-browser-page="visualization" hidden/);
+  assert.match(body, /interactive visualization attachments/);
   assert.match(body, /\.\/porf \/tmp\/replaceall-smoke\.js/);
   assert.match(body, /10 passed in 0\.42s/);
   assert.match(body, /All results match for block_size=512\./);
@@ -1143,7 +1153,7 @@ test("the landing page renders the app replica and its own image policy", async 
   assert.match(body, /class="mock-research-mark is-anchor"/);
   assert.match(body, /class="control-button research-followup-card is-anchored" style="top:96px"/);
   assert.match(body, /class="research-followup-unread"/);
-  assert.match(body, /Continue thread/);
+  assert.match(body, /Continues the thread under this answer/);
   assert.match(body, /Ask a follow-up/);
   // A run still streaming carries its segment's own terminal and cancel
   // controls, and the sidebar spinner that goes with them.
@@ -1245,6 +1255,8 @@ test("the landing page's enhancement script is served as JavaScript", async (t) 
   assert.match(body, /createResearch/);
   assert.match(body, /createJournal/);
   assert.match(body, /createResearchMenus/);
+  assert.match(body, /querySelectorAll\("\[data-mock-visualization\]"\)/);
+  assert.match(body, /showBrowserPage\("visualization"\)/);
 
   const bootResponse = await fetch(`http://127.0.0.1:${address.port}/mockup-boot.js`);
   const bootBody = await bootResponse.text();

@@ -855,6 +855,60 @@ async fn browser_open_codex_inline_visualization(
     .map_err(|err| format!("browser_open_codex_inline_visualization task failed: {err}"))?
 }
 
+/// Resolve and open an absolute HTML-fragment path from the current Codex
+/// `visualize` content-reference contract. The transcript path is untrusted:
+/// it must resolve beneath this pane's own roots or qmux's durable designs
+/// directory before it receives an exact preview grant.
+#[tauri::command(async)]
+async fn browser_open_codex_visualization_reference(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !state.pane_exists(&pane_id)? {
+            return Err(format!("pane {pane_id} was not found"));
+        }
+        let agent = state
+            .agent_by_pane(&pane_id)?
+            .ok_or_else(|| format!("pane {pane_id} has no attached agent"))?;
+        if agent.adapter != "codex" {
+            return Err(
+                "visualization references can only be opened for a Codex session".to_string(),
+            );
+        }
+        let pane_roots = state.pane_file_roots(&pane_id);
+        if pane_roots.is_empty() {
+            return Err("local visualization references are unavailable for this pane".to_string());
+        }
+        let designs_root = state.config().workspace_root.join("designs");
+        let path = file_server::resolve_codex_visualization_reference(
+            &designs_root,
+            &pane_roots,
+            std::path::Path::new(path.trim()),
+        )?;
+        let canonical = state.grant_pane_file_preview(&pane_id, &path)?;
+        let port = state
+            .file_server_port()
+            .ok_or_else(|| "the file server is not running".to_string())?;
+        let token = state.pane_file_token(&pane_id)?;
+        let url = format!(
+            "{}?codex-inline-vis=1",
+            file_server::file_url(port, &token, &canonical)
+        );
+        state.emit(events::QmuxEvent::new(
+            "browser.open",
+            Some(pane_id),
+            None,
+            serde_json::json!({ "url": url, "sandbox": true }),
+        ));
+        Ok(serde_json::json!({ "url": url, "sandbox": true }))
+    })
+    .await
+    .map_err(|err| format!("browser_open_codex_visualization_reference task failed: {err}"))?
+}
+
 fn is_file_server_url(url: &str, port: u16) -> bool {
     url.starts_with(&format!("http://127.0.0.1:{port}/"))
         || url.starts_with(&format!("http://localhost:{port}/"))
@@ -3359,6 +3413,7 @@ fn main() {
             browser_reveal_local_path,
             browser_open_local_path_external,
             browser_open_codex_inline_visualization,
+            browser_open_codex_visualization_reference,
             artifact_list,
             artifact_remove,
             artifact_restore,

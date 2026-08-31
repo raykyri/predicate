@@ -257,6 +257,33 @@ pub fn resolve_codex_inline_visualization(
     }
 }
 
+/// Resolves an absolute path carried by the current Codex visualization
+/// content-reference contract. Ordinary pane roots cover the attached
+/// checkout and temporary output; qmux's durable designs directory is added
+/// explicitly because it sits inside private workspace metadata that must not
+/// become a general pane file root.
+pub fn resolve_codex_visualization_reference(
+    designs_root: &Path,
+    pane_roots: &[PathBuf],
+    reference: &Path,
+) -> Result<PathBuf, String> {
+    if !reference.is_absolute() {
+        return Err("Codex visualization references must use an absolute path".to_string());
+    }
+    if !reference
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("html"))
+    {
+        return Err("Codex visualization references must target an HTML fragment".to_string());
+    }
+    let mut allowed_roots = pane_roots.to_vec();
+    allowed_roots.push(designs_root.to_path_buf());
+    resolve_under_roots(reference, &allowed_roots)
+        .filter(|path| path.is_file())
+        .ok_or_else(|| "Codex visualization is outside this pane's approved roots".to_string())
+}
+
 struct RequestHead {
     method: String,
     target: String,
@@ -760,9 +787,35 @@ svg, canvas, img { max-width: 100%; }\
 .text-center { text-align: center !important; }\
 .text-nowrap { white-space: nowrap; }\
 .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }\
+.qmux-visualization-error { margin: 0 0 12px; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--destructive) 60%, var(--border)); border-radius: 7px; color: var(--foreground); background: color-mix(in srgb, var(--destructive) 12%, var(--background)); }\
+.qmux-visualization-error[hidden] { display: none; }\
 [data-lucide] { display: inline-flex; width: 16px; height: 16px; align-items: center; justify-content: center; font-style: normal; }\
 [data-lucide]:empty::before { content: '\\25c7'; font-size: 11px; }\
 :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }";
+
+// The parent attachment can report resolution failures, but once this page is
+// loaded only the isolated document can see a CSP-blocked dependency or a
+// fragment script crash. Keep the warning deliberately generic: source paths
+// and exception details do not need to escape into rendered UI.
+const CODEX_INLINE_VIS_ERROR_REPORTER: &str = r#"<div id="qmux-visualization-error" class="qmux-visualization-error" role="alert" hidden></div>
+<script>
+(() => {
+  const reveal = (message) => {
+    const notice = document.getElementById("qmux-visualization-error");
+    if (!notice) return;
+    notice.textContent = message;
+    notice.hidden = false;
+  };
+  window.addEventListener("error", (event) => {
+    reveal(event.target === window
+      ? "This visualization encountered an error."
+      : "This visualization could not load one of its resources.");
+  }, true);
+  window.addEventListener("unhandledrejection", () => {
+    reveal("This visualization encountered an error.");
+  });
+})();
+</script>"#;
 
 fn render_codex_inline_visualization_page(
     path: &Path,
@@ -781,7 +834,7 @@ fn render_codex_inline_visualization_page(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{css}</style>\n</head>\n\
-         <body>\n{source}\n</body>\n</html>\n"
+         <body>\n{CODEX_INLINE_VIS_ERROR_REPORTER}\n{source}\n</body>\n</html>\n"
     )
 }
 
@@ -1037,6 +1090,21 @@ mod tests {
         // The general file-content CSP, by contrast, still permits (contained) inline
         // script for self-hosted reports.
         assert!(file_content_csp(12345).contains("script-src 'unsafe-inline'"));
+    }
+
+    #[test]
+    fn codex_visualization_page_reports_fragment_load_failures_generically() {
+        let source = "<div id=\"visualization-source\">Ready</div>";
+        let page = render_codex_inline_visualization_page(
+            Path::new("/tmp/activity.fragment.html"),
+            source,
+            None,
+        );
+        assert!(page.contains(source));
+        assert!(page.contains("qmux-visualization-error"));
+        assert!(page.contains("could not load one of its resources"));
+        assert!(page.contains("unhandledrejection"));
+        assert!(!page.contains("/tmp/activity.fragment.html"));
     }
 
     #[test]
@@ -1455,6 +1523,56 @@ mod tests {
             )
             .unwrap_err()
             .contains("ambiguous")
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolves_current_codex_visualization_references_only_under_approved_roots() {
+        let base = std::env::temp_dir().join(format!(
+            "qmux-fs-visualization-reference-{}",
+            std::process::id()
+        ));
+        let designs = base.join("workspace-metadata/designs");
+        let pane_root = base.join("pane");
+        let outside = base.join("outside");
+        for directory in [&designs, &pane_root, &outside] {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        let durable = designs.join("activity/recent-activity.fragment.html");
+        std::fs::create_dir_all(durable.parent().unwrap()).unwrap();
+        std::fs::write(&durable, "<div>durable</div>").unwrap();
+        let temporary = pane_root.join("chart.html");
+        std::fs::write(&temporary, "<div>temporary</div>").unwrap();
+        let secret = outside.join("secret.html");
+        std::fs::write(&secret, "<div>secret</div>").unwrap();
+
+        let pane_roots = vec![pane_root.clone()];
+        assert_eq!(
+            resolve_codex_visualization_reference(&designs, &pane_roots, &durable).unwrap(),
+            std::fs::canonicalize(&durable).unwrap()
+        );
+        assert_eq!(
+            resolve_codex_visualization_reference(&designs, &pane_roots, &temporary).unwrap(),
+            std::fs::canonicalize(&temporary).unwrap()
+        );
+        assert!(resolve_codex_visualization_reference(&designs, &pane_roots, &secret).is_err());
+        assert!(
+            resolve_codex_visualization_reference(
+                &designs,
+                &pane_roots,
+                Path::new("relative.html")
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_codex_visualization_reference(
+                &designs,
+                &pane_roots,
+                &pane_root.join("chart.svg")
+            )
+            .is_err()
         );
 
         let _ = std::fs::remove_dir_all(&base);

@@ -3,6 +3,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import TranscriptMarkdown, {
+  parseCodexVisualizationReference,
   TranscriptLinkActionsProvider,
   transcriptMathPluginsReady,
   type LinkActions,
@@ -14,6 +15,7 @@ const actions: LinkActions = {
   openLink: () => undefined,
   openLinkMenu: () => undefined,
   openCodexInlineVisualization: () => undefined,
+  openCodexVisualizationReference: () => undefined,
 };
 
 function render(text: string, artifactLinks = true) {
@@ -63,6 +65,52 @@ test("only a standalone valid codex-inline-vis directive receives a launch butto
   assert.equal(
     artifactButtonCount(render('::codex-inline-vis{file="../artifact.html"}')),
     0,
+  );
+});
+
+test("a current Codex visualization reference renders as a native attachment", () => {
+  const reference =
+    'visualize{"path":"/tmp/recent-activity-design.fragment.html"}';
+  const html = render(reference);
+  assert.match(html, /class="turn-visualization-attachment"/u);
+  assert.match(html, /data-open-state="idle"/u);
+  assert.match(html, /aria-busy="false"/u);
+  assert.match(html, />Recent activity design</u);
+  assert.match(html, />Interactive visualization</u);
+  assert.doesNotMatch(html, /visualize/u);
+  assert.doesNotMatch(html, /\/tmp\/recent-activity/u);
+});
+
+test("visualization references support title and wide display metadata", () => {
+  const reference =
+    'visualize{"path":"/tmp/design.html","mode":"wide","title":"Activity system"}';
+  const parsed = parseCodexVisualizationReference(reference);
+  assert.deepEqual(parsed, {
+    path: "/tmp/design.html",
+    mode: "wide",
+    title: "Activity system",
+  });
+  const html = render(reference);
+  assert.match(html, />Activity system</u);
+  assert.match(html, />Interactive visualization</u);
+});
+
+test("visualization references stay literal outside exact supported contexts", () => {
+  const reference = 'visualize{"path":"/tmp/design.html"}';
+  assert.doesNotMatch(render(reference, false), /turn-visualization-attachment/u);
+  assert.doesNotMatch(render(`Open ${reference}`), /turn-visualization-attachment/u);
+  assert.doesNotMatch(render(`\`${reference}\``), /turn-visualization-attachment/u);
+  assert.doesNotMatch(
+    render('visualize{"path":"/tmp/design.svg"}'),
+    /turn-visualization-attachment/u,
+  );
+  assert.doesNotMatch(
+    render('visualize{"path":"relative/design.html"}'),
+    /turn-visualization-attachment/u,
+  );
+  assert.doesNotMatch(
+    render('visualize{"path":"/tmp/design.html","mode":"giant"}'),
+    /turn-visualization-attachment/u,
   );
 });
 

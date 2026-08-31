@@ -1184,6 +1184,19 @@ function enhanceQmuxMockup(mockup, replayBoot) {
       }
     }
 
+    /** @param {"default" | "visualization"} kind */
+    function showBrowserPage(kind) {
+      const page = mockup.querySelector(".browser-overlay-page");
+      if (page instanceof HTMLElement) {
+        page.dataset.mockBrowserKind = kind;
+      }
+      for (const preview of mockup.querySelectorAll("[data-mock-browser-page]")) {
+        if (preview instanceof HTMLElement) {
+          preview.hidden = preview.dataset.mockBrowserPage !== kind;
+        }
+      }
+    }
+
     // Only one popover at a time, the way the app's menus behave.
     /** @param {string} name */
     function togglePanel(name) {
@@ -1303,8 +1316,37 @@ function enhanceQmuxMockup(mockup, replayBoot) {
           const origin = (address.textContent || "").split("/")[0];
           address.textContent = `${origin}/${name}`;
         }
+        showBrowserPage("default");
         setPanel("browser", true);
         announce(`Opened ${name} in the browser.`);
+      });
+    }
+
+    // Visualization attachments are transcript-native controls, but v1 hands
+    // their local HTML fragment to the same sandboxed browser overlay as the
+    // desktop app. Keep them separate from the artifact tray: opening one does
+    // not claim that qmux registered another artifact.
+    for (const node of [...mockup.querySelectorAll("[data-mock-visualization]")]) {
+      const file = node instanceof HTMLElement ? node.dataset.mockVisualization ?? "" : "";
+      const title =
+        node instanceof HTMLElement
+          ? node.dataset.mockVisualizationTitle ?? "Visualization"
+          : "Visualization";
+      const button = promote(node, "button");
+      if (!button || !file) {
+        continue;
+      }
+      button.setAttribute("aria-label", `Open visualization: ${title}`);
+      button.setAttribute("title", `Open ${title}`);
+      button.addEventListener("click", () => {
+        const address = mockup.querySelector("[data-mock-browser-url]");
+        if (address) {
+          const origin = (address.textContent || "").split("/")[0];
+          address.textContent = `${origin}/designs/${file}`;
+        }
+        showBrowserPage("visualization");
+        setPanel("browser", true);
+        announce(`Opened ${title} in the browser.`);
       });
     }
 

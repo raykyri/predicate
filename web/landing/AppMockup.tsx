@@ -33,6 +33,7 @@ import {
   EllipsisVerticalIcon,
   ExpandIcon,
   ExternalLinkIcon,
+  FileCode2Icon,
   FileTextIcon,
   FolderGit2Icon,
   FolderIcon,
@@ -1359,7 +1360,7 @@ function BrowserOverlay() {
         </span>
       </div>
       <div className="browser-overlay-page">
-        <div className="mock-preview">
+        <div className="mock-preview" data-mock-browser-page="default">
           <p className="mock-preview-eyebrow">qmux &middot; landing preview</p>
           <h4>Interactive session mock</h4>
           <p className="mock-preview-figure">14 sessions rendered</p>
@@ -1374,6 +1375,27 @@ function BrowserOverlay() {
           <div className="mock-preview-row">
             <span className="mock-preview-name">server tests</span>
             <span className="mock-preview-pass">19 passing</span>
+          </div>
+        </div>
+        <div
+          className="mock-preview mock-visualization-preview"
+          data-mock-browser-page="visualization"
+          hidden
+        >
+          <p className="mock-preview-eyebrow">qmux &middot; interactive visualization</p>
+          <h4>Recent activity design</h4>
+          <p className="mock-preview-figure">Research / Recent activity</p>
+          <div className="mock-preview-row">
+            <span className="mock-preview-name">Journal and research feed</span>
+            <span className="mock-preview-pass">preview</span>
+          </div>
+          <div className="mock-preview-row">
+            <span className="mock-preview-name">Activity timeline</span>
+            <span className="mock-preview-pass">controls</span>
+          </div>
+          <div className="mock-preview-row">
+            <span className="mock-preview-name">Local HTML fragment</span>
+            <span className="mock-preview-pass">sandboxed</span>
           </div>
         </div>
       </div>
@@ -1882,6 +1904,35 @@ function TranscriptSession({
                     />
                   </span>
                 </figure>
+              </div>
+            </div>
+          </article>
+        ) : item.type === "visualization" ? (
+          <article
+            key={index}
+            className="turn-card role-assistant turn-visualization-card"
+            data-step={item.step}
+            data-replay-pending={replayPending(stageReplay, sessionId, item.step)}
+          >
+            <div className="turn-blocks">
+              <div className="turn-message-block">
+                <span
+                  className="turn-visualization-attachment"
+                  data-mock-visualization={item.file}
+                  data-mock-visualization-title={item.title}
+                >
+                  <span className="turn-visualization-attachment-icon">
+                    <FileCode2Icon />
+                  </span>
+                  <span className="turn-visualization-attachment-copy">
+                    <strong>{item.title}</strong>
+                    <span>Interactive visualization</span>
+                  </span>
+                  <span className="turn-visualization-attachment-action">
+                    Open
+                    <ExternalLinkIcon />
+                  </span>
+                </span>
               </div>
             </div>
           </article>

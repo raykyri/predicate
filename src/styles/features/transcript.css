@@ -1153,6 +1153,100 @@ header + .turn-blocks {
   background: var(--surface-fill-hover);
 }
 
+/* A current Codex visualization reference is a first-class transcript object,
+   rather than exposing the transport marker or its absolute local path. */
+.turn-visualization-attachment {
+  appearance: none;
+  display: grid;
+  width: 100%;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 10px 11px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  background: var(--surface-fill-subtle);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.turn-visualization-attachment:hover {
+  border-color: var(--surface-border-default);
+  background: var(--surface-fill-hover);
+}
+
+.turn-visualization-attachment[data-open-state="error"] {
+  border-color: var(--danger-border);
+}
+
+.turn-visualization-attachment[data-open-state="error"] .turn-visualization-attachment-copy span,
+.turn-visualization-attachment[data-open-state="error"] .turn-visualization-attachment-action {
+  color: var(--danger-fg-strong);
+}
+
+.turn-visualization-attachment:disabled {
+  cursor: progress;
+}
+
+.turn-visualization-attachment:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 2px;
+}
+
+.turn-visualization-attachment-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  color: var(--accent-color);
+  background: color-mix(in srgb, var(--accent-color) 12%, transparent);
+}
+
+.turn-visualization-attachment-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.turn-visualization-attachment-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.turn-visualization-attachment-copy strong,
+.turn-visualization-attachment-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-visualization-attachment-copy strong {
+  font-weight: 580;
+}
+
+.turn-visualization-attachment-copy span {
+  color: var(--text-subtle);
+  font-size: calc(11.5px + var(--transcript-font-delta, 0px));
+}
+
+.turn-visualization-attachment-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: calc(11.5px + var(--transcript-font-delta, 0px));
+}
+
+.turn-visualization-attachment-action svg {
+  width: 12px;
+  height: 12px;
+}
+
 .turn-markdown blockquote {
   border-left: 2px solid var(--markdown-blockquote-border);
   padding-left: 9px;

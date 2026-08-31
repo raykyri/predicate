@@ -972,6 +972,15 @@ export function browserOpenCodexInlineVisualization(paneId: string, file: string
   );
 }
 
+/** Open an absolute fragment path from the current Codex visualization
+ * content-reference contract after backend root confinement. */
+export function browserOpenCodexVisualizationReference(paneId: string, path: string) {
+  return invoke<{ url: string; sandbox: boolean }>(
+    "browser_open_codex_visualization_reference",
+    { paneId, path },
+  );
+}
+
 export function artifactList() {
   return invoke<ArtifactInfo[]>("artifact_list");
 }

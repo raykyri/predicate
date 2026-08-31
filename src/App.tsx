@@ -548,6 +548,7 @@ import {
   movePaneToGroup,
   openExternalUrl,
   browserOpenCodexInlineVisualization,
+  browserOpenCodexVisualizationReference,
   browserOpenLocalPath,
   paneActivity,
   playCompletionSound,
@@ -5262,6 +5263,15 @@ function MainApp() {
           void browserOpenCodexInlineVisualization(paneId, file).catch((err) => {
             setError(err instanceof Error ? err.message : String(err));
           });
+        },
+        openCodexVisualizationReference: async (reference) => {
+          setError(null);
+          try {
+            await browserOpenCodexVisualizationReference(paneId, reference.path);
+          } catch (err) {
+            setError(err instanceof Error ? err.message : String(err));
+            throw err;
+          }
         },
       };
       cache.set(paneId, actions);
