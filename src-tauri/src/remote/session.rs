@@ -643,6 +643,64 @@ mod tests {
     }
 
     #[test]
+    fn authorization_is_rechecked_after_session_registration() {
+        let _serial = test_support::net_serial_guard();
+        let state = fixture_state("authorization-race");
+        let client_secret = SecretKey::generate();
+        let client_id = client_secret.public();
+        let gate_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let gate: DeviceGate = {
+            let gate_calls = gate_calls.clone();
+            Arc::new(move |remote| {
+                (*remote == client_id
+                    && gate_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0)
+                    .then(|| RemoteAccess {
+                        device_name: "revoked iphone".to_string(),
+                        read_only: false,
+                    })
+            })
+        };
+        let server = RemoteControlRuntime::start(
+            state,
+            SecretKey::generate(),
+            RemoteReach::Local,
+            false,
+            gate,
+        )
+        .expect("start runtime");
+
+        runtime().block_on(async {
+            let endpoint = Endpoint::builder(presets::Minimal)
+                .secret_key(client_secret)
+                .relay_mode(RelayMode::Disabled)
+                .bind()
+                .await
+                .expect("bind client");
+            let connection = endpoint
+                .connect(loopback_addr(server.endpoint()), REMOTE_ALPN)
+                .await
+                .expect("connect");
+            let (mut send, mut recv) = connection.open_bi().await.expect("open stream");
+            let _ = frames::write_json(
+                &mut send,
+                &RemoteFrame::Hello {
+                    api_version: REMOTE_PROTOCOL_VERSION,
+                    client: "qmux-test/0".to_string(),
+                    device_name: None,
+                },
+            )
+            .await;
+            let outcome = frames::read_json(&mut recv).await;
+            assert!(
+                !matches!(outcome, Ok(Some(_))),
+                "authorization removed before registration must receive no frame: {outcome:?}"
+            );
+        });
+        assert!(gate_calls.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+        server.shutdown();
+    }
+
+    #[test]
     fn read_only_access_reaches_ready_but_not_writes() {
         let _serial = test_support::net_serial_guard();
         let state = fixture_state("read-only");

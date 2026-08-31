@@ -453,12 +453,20 @@ async fn accept_loop(this: Weak<RemoteControlRuntime>, endpoint: Endpoint) {
                             connected_at: crate::remote::devices::now_millis(),
                             connection: connection.clone(),
                         });
-                        crate::remote::session::serve_remote_connection(
-                            this.state.clone(),
-                            access,
-                            connection,
-                        )
-                        .await;
+                        // Re-read authorization only after the connection is
+                        // visible to disconnect_device. A revoke/read-only
+                        // update before registration is caught here; one after
+                        // this check necessarily sees and closes the session.
+                        if let Some(current_access) = (this.gate)(&remote) {
+                            crate::remote::session::serve_remote_connection(
+                                this.state.clone(),
+                                current_access,
+                                connection,
+                            )
+                            .await;
+                        } else {
+                            connection.close(CLOSE_NOT_PAIRED.into(), b"not paired");
+                        }
                         this.unregister_session(session_id);
                     }
                     None => {
