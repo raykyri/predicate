@@ -24,10 +24,10 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long a connecting device has to present its request.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Unambiguous code alphabet (no 0/O, 1/I/L, U). 10 characters ≈ 49 bits:
-/// single-use, three-minute TTL, three attempts.
-const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTVWXYZ23456789";
-const CODE_LENGTH: usize = 10;
+/// The invite carries a full 128-bit one-time secret. Hex is deliberately
+/// boring: it preserves every random bit without modulo bias and remains easy
+/// for the UI to group if somebody has to type it instead of scanning the QR.
+const SECRET_BYTES: usize = 16;
 
 /// The open pairing window. One at a time; beginning a new one replaces it.
 pub struct PairingWindow {
@@ -104,12 +104,9 @@ pub(crate) struct PendingPair {
 }
 
 fn generate_code() -> Result<String, String> {
-    let mut bytes = [0_u8; CODE_LENGTH];
+    let mut bytes = [0_u8; SECRET_BYTES];
     getrandom::getrandom(&mut bytes).map_err(|err| format!("failed to draw randomness: {err}"))?;
-    Ok(bytes
-        .iter()
-        .map(|byte| CODE_ALPHABET[(*byte as usize) % CODE_ALPHABET.len()] as char)
-        .collect())
+    Ok(bytes.iter().map(|byte| format!("{byte:02X}")).collect())
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -582,7 +579,8 @@ mod tests {
     fn a_window_burns_on_match_and_closes_after_three_misses() {
         let mut window = PairingWindow::open().unwrap();
         let secret = window.secret().to_string();
-        assert_eq!(secret.len(), CODE_LENGTH);
+        assert_eq!(secret.len(), SECRET_BYTES * 2);
+        assert!(secret.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(window.consume("WRONGWRONG"), ConsumeOutcome::Wrong);
         assert_eq!(window.consume(&secret), ConsumeOutcome::Matched);
 
