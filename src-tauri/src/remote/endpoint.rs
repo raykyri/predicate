@@ -15,7 +15,7 @@ use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey};
 use qmux_proto::remote::{PAIR_ALPN, REMOTE_ALPN};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 /// How far the endpoint reaches; `Local` is the default when the toggle
 /// turns on.
@@ -148,6 +148,23 @@ impl RemoteControlRuntime {
         discovery: bool,
         gate: DeviceGate,
     ) -> Result<Arc<Self>, String> {
+        // Tauri commands run inside its Tokio runtime. Entering this private
+        // runtime from there panics, so its blocking lifecycle lives on a
+        // plain management thread.
+        std::thread::spawn(move || {
+            Self::start_on_management_thread(state, secret, reach, discovery, gate)
+        })
+        .join()
+        .map_err(|_| "remote runtime startup thread panicked".to_string())?
+    }
+
+    fn start_on_management_thread(
+        state: AppState,
+        secret: SecretKey,
+        reach: RemoteReach,
+        discovery: bool,
+        gate: DeviceGate,
+    ) -> Result<Arc<Self>, String> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .thread_name("qmux-remote")
@@ -165,7 +182,7 @@ impl RemoteControlRuntime {
             sessions: std::sync::Mutex::new(HashMap::new()),
             next_session_id: std::sync::atomic::AtomicU64::new(1),
         });
-        runtime.spawn(accept_loop(this.clone()));
+        runtime.spawn(accept_loop(Arc::downgrade(&this), this.endpoint.clone()));
         *this
             .runtime
             .lock()
@@ -395,8 +412,12 @@ impl RemoteControlRuntime {
         let Some(runtime) = self.runtime.lock().ok().and_then(|mut slot| slot.take()) else {
             return;
         };
-        runtime.block_on(self.endpoint.close());
-        runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+        let endpoint = self.endpoint.clone();
+        let _ = std::thread::spawn(move || {
+            runtime.block_on(endpoint.close());
+            runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+        })
+        .join();
     }
 }
 
@@ -406,9 +427,12 @@ impl Drop for RemoteControlRuntime {
     }
 }
 
-async fn accept_loop(this: Arc<RemoteControlRuntime>) {
+async fn accept_loop(this: Weak<RemoteControlRuntime>, endpoint: Endpoint) {
     let limiter = Arc::new(tokio::sync::Semaphore::new(MAX_REMOTE_CONNECTIONS));
-    while let Some(incoming) = this.endpoint.accept().await {
+    while let Some(incoming) = endpoint.accept().await {
+        let Some(this) = this.upgrade() else {
+            break;
+        };
         let Ok(permit) = limiter.clone().acquire_owned().await else {
             break;
         };

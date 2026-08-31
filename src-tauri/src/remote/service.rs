@@ -142,6 +142,10 @@ fn emit_status(state: &AppState) {
 
 /// Turns remote control on with the persisted reach. Idempotent.
 pub fn start(state: &AppState) -> Result<RemoteStatus, String> {
+    state.with_remote_lifecycle(|| start_locked(state))
+}
+
+fn start_locked(state: &AppState) -> Result<RemoteStatus, String> {
     if state.remote_runtime().is_some() {
         return Ok(status(state));
     }
@@ -154,7 +158,11 @@ pub fn start(state: &AppState) -> Result<RemoteStatus, String> {
         true,
         devices::gate(state.clone()),
     )?;
-    state.set_remote_runtime(Some(runtime));
+    if let Some(displaced) = state.set_remote_runtime(Some(runtime)) {
+        // The lifecycle lock makes this unreachable in normal operation, but
+        // never abandon a bound endpoint if replacement semantics change.
+        displaced.shutdown();
+    }
     emit_status(state);
     Ok(status(state))
 }
@@ -162,6 +170,10 @@ pub fn start(state: &AppState) -> Result<RemoteStatus, String> {
 /// Turns remote control off: closes every session, unbinds the endpoint,
 /// withdraws discovery, drops the relay connection, drops the runtime.
 pub fn stop(state: &AppState) -> RemoteStatus {
+    state.with_remote_lifecycle(|| stop_locked(state))
+}
+
+fn stop_locked(state: &AppState) -> RemoteStatus {
     if let Some(runtime) = state.set_remote_runtime(None) {
         runtime.shutdown();
         emit_status(state);
@@ -197,14 +209,16 @@ pub fn remote_set_reach(
     state: tauri::State<'_, AppState>,
     reach: ReachPref,
 ) -> Result<RemoteStatus, String> {
-    update_prefs(&state, |prefs| prefs.reach = reach)?;
-    if state.remote_runtime().is_some() {
-        // The reach is endpoint construction, not a runtime flag: rebind.
-        stop(&state);
-        return start(&state);
-    }
-    emit_status(&state);
-    Ok(status(&state))
+    state.with_remote_lifecycle(|| {
+        update_prefs(&state, |prefs| prefs.reach = reach)?;
+        if state.remote_runtime().is_some() {
+            // The reach is endpoint construction, not a runtime flag: rebind.
+            stop_locked(&state);
+            return start_locked(&state);
+        }
+        emit_status(&state);
+        Ok(status(&state))
+    })
 }
 
 #[tauri::command(async)]
@@ -358,6 +372,48 @@ mod tests {
         let invite = runtime.begin_pairing().unwrap();
         let svg = render_qr_svg(&invite.payload).unwrap();
         assert!(svg.contains("<svg"), "expected an svg, got: {svg:.>40}");
+        stop(&state);
+    }
+
+    #[test]
+    fn lifecycle_calls_are_safe_inside_a_tokio_runtime() {
+        let _serial = test_support::net_serial_guard();
+        let state = state("nested-runtime");
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                assert!(start(&state).unwrap().enabled);
+                assert!(!stop(&state).enabled);
+            });
+    }
+
+    #[test]
+    fn concurrent_starts_install_exactly_one_endpoint() {
+        let _serial = test_support::net_serial_guard();
+        let state = state("concurrent-start");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let handles = (0..2)
+            .map(|_| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    start(&state).unwrap().endpoint_id.unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let endpoint_ids = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(endpoint_ids[0], endpoint_ids[1]);
+        assert_eq!(
+            state.remote_runtime().unwrap().endpoint_id().to_string(),
+            endpoint_ids[0]
+        );
         stop(&state);
     }
 }

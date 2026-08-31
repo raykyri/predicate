@@ -194,6 +194,9 @@ struct AppStateInner {
     /// The live remote-control runtime while the toggle is on; None is what
     /// "off" means (no endpoint bound anywhere).
     remote_runtime: Mutex<Option<Arc<crate::remote::endpoint::RemoteControlRuntime>>>,
+    /// Serializes endpoint construction and teardown across concurrent UI
+    /// commands. The data lock above is intentionally held only for swaps.
+    remote_lifecycle: Mutex<()>,
     pane_tokens: Mutex<HashMap<String, String>>,
     // Credentials injected only into interactive shell panes. Agent launches
     // strip them before exec, keeping cross-pane user control distinct from
@@ -1692,6 +1695,7 @@ impl AppState {
                 pane_tokens: Mutex::new(HashMap::new()),
                 remote_fanout: Default::default(),
                 remote_runtime: Mutex::new(None),
+                remote_lifecycle: Mutex::new(()),
                 user_tokens: Mutex::new(HashMap::new()),
                 file_tokens: Mutex::new(HashMap::new()),
                 file_preview_grants: Mutex::new(HashMap::new()),
@@ -2986,6 +2990,15 @@ impl AppState {
             .and_then(|slot| slot.clone())
     }
 
+    pub fn with_remote_lifecycle<T>(&self, action: impl FnOnce() -> T) -> T {
+        let _guard = self
+            .inner
+            .remote_lifecycle
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        action()
+    }
+
     /// Swaps the live runtime, returning the previous one so the caller can
     /// shut it down outside the lock.
     pub fn set_remote_runtime(
@@ -3800,9 +3813,7 @@ impl AppState {
         Ok(state)
     }
 
-    pub fn notification_log(
-        &self,
-    ) -> Result<crate::user_notifications::NotificationLog, String> {
+    pub fn notification_log(&self) -> Result<crate::user_notifications::NotificationLog, String> {
         let model = self
             .inner
             .model
