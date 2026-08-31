@@ -12218,6 +12218,7 @@ pub(crate) mod test_support {
                 agent_id: None,
                 group_id: group_id.to_string(),
                 cwd: "/tmp/work".to_string(),
+                active_workspace: None,
                 cols: 80,
                 rows: 24,
                 status: PaneStatus::Running,
@@ -12232,6 +12233,7 @@ pub(crate) mod test_support {
                 backlog: Default::default(),
                 native_surface: false,
             },
+            cwd_observation_seq: 0,
         }
     }
 }
