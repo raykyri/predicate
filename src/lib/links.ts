@@ -6,6 +6,15 @@
 // recognizes and routes through the token-scoped file server.
 export const QMUX_FILE_HREF_PREFIX = "qmux-file:";
 
+// Transcript renderers commonly receive source references in the same form used
+// by editors and compiler diagnostics: `/path/to/file.ts:36` (or `:36:8`). The
+// position is useful display metadata, but it is not part of the filesystem path.
+// Apply this only inside the local-path parser so URL ports and other
+// colon-bearing web links keep their original meaning.
+function withoutTrailingSourcePosition(path: string): string {
+  return path.replace(/:\d+(?::\d+)?$/u, "");
+}
+
 // Only let links through that the webview can safely open. Transcript markdown and
 // terminal output can contain arbitrary agent/process text; a javascript:/file:/tauri:
 // URL clicked inside the Tauri webview reaches a JS context with native IPC access.
@@ -52,7 +61,7 @@ export function absoluteLocalFilePath(href: string): string | undefined {
   }
   if (trimmed.startsWith(QMUX_FILE_HREF_PREFIX)) {
     const path = trimmed.slice(QMUX_FILE_HREF_PREFIX.length);
-    return path.startsWith("/") ? path : undefined;
+    return path.startsWith("/") ? withoutTrailingSourcePosition(path) : undefined;
   }
   if (trimmed.startsWith("file:")) {
     try {
@@ -64,29 +73,30 @@ export function absoluteLocalFilePath(href: string): string | undefined {
       // URL pathname is percent-decoded for file URLs on modern engines, but
       // decode explicitly so `%20` survives older resolvers.
       const path = decodeURIComponent(url.pathname);
-      return path.startsWith("/") ? path : undefined;
+      return path.startsWith("/") ? withoutTrailingSourcePosition(path) : undefined;
     } catch {
       return undefined;
     }
   }
+  const pathWithoutPosition = withoutTrailingSourcePosition(trimmed);
   // Unix absolute path (not protocol-relative //host/...). Site-relative links
   // like `/docs/intro` are deliberately excluded: they lack a known filesystem
   // root prefix and would otherwise steal ordinary in-repo markdown links.
-  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) {
+  if (pathWithoutPosition.startsWith("/") && !pathWithoutPosition.startsWith("//")) {
     if (
-      /^\/(Users|home|tmp|var|private|opt|Volumes|mnt|root)\//.test(trimmed) ||
+      /^\/(Users|home|tmp|var|private|opt|Volumes|mnt|root)\//.test(pathWithoutPosition) ||
       // Multi-segment absolute path ending in a file-looking last segment
       // (has an extension). Covers e.g. /workspace/out/report.html in containers.
-      (/^\/[^/]+\/.+\.[A-Za-z0-9]{1,16}$/.test(trimmed) &&
-        !trimmed.includes("?") &&
-        !trimmed.includes("#"))
+      (/^\/[^/]+\/.+\.[A-Za-z0-9]{1,16}$/.test(pathWithoutPosition) &&
+        !pathWithoutPosition.includes("?") &&
+        !pathWithoutPosition.includes("#"))
     ) {
-      return trimmed;
+      return pathWithoutPosition;
     }
   }
   // Windows drive path.
-  if (/^[A-Za-z]:[\\/]/.test(trimmed)) {
-    return trimmed;
+  if (/^[A-Za-z]:[\\/]/.test(pathWithoutPosition)) {
+    return pathWithoutPosition;
   }
   return undefined;
 }
@@ -100,7 +110,7 @@ export function pathFromQmuxFileHref(url: string): string | undefined {
     return undefined;
   }
   const path = url.slice(QMUX_FILE_HREF_PREFIX.length);
-  return path.length > 0 ? path : undefined;
+  return path.length > 0 ? withoutTrailingSourcePosition(path) : undefined;
 }
 
 // Mirrors the file server's explicit browser-renderable MIME allowlist. This is

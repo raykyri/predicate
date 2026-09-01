@@ -61,6 +61,38 @@ test("safeHref recognizes file: URLs and common filesystem roots", () => {
   );
 });
 
+test("local file links drop trailing source positions before opening", () => {
+  assert.equal(
+    safeHref("/Users/raymond/Code/foks/README-FOKS.md:36"),
+    `${QMUX_FILE_HREF_PREFIX}/Users/raymond/Code/foks/README-FOKS.md`,
+  );
+  assert.equal(
+    absoluteLocalFilePath("file:///tmp/example.ts:36:8"),
+    "/tmp/example.ts",
+  );
+  assert.equal(
+    absoluteLocalFilePath(`${QMUX_FILE_HREF_PREFIX}/tmp/example.ts:36`),
+    "/tmp/example.ts",
+  );
+  assert.equal(
+    absoluteLocalFilePath("/workspace/out/example.ts:36"),
+    "/workspace/out/example.ts",
+  );
+  assert.equal(
+    pathFromQmuxFileHref(`${QMUX_FILE_HREF_PREFIX}/tmp/example.ts:36:8`),
+    "/tmp/example.ts",
+  );
+  assert.equal(
+    absoluteLocalFilePath("C:\\work\\example.ts:36:8"),
+    "C:\\work\\example.ts",
+  );
+});
+
+test("source-position cleanup does not alter web URL ports", () => {
+  assert.equal(safeHref("http://localhost:36"), "http://localhost:36/");
+  assert.equal(absoluteLocalFilePath("http://localhost:36"), undefined);
+});
+
 test("safeHref does not treat ordinary site-relative paths as files", () => {
   // /docs/intro has no file extension and no known FS root — leave it alone.
   // Resolving against the dummy base would make https://qmux.invalid/docs/intro,
