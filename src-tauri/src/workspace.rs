@@ -283,7 +283,8 @@ pub struct CreateGroupRequest {
     pub base_ref: Option<String>,
     #[serde(default)]
     pub remote: Option<RemoteRef>,
-    /// Names a `remotes` entry in `qmux.config.json` to bind this group to.
+    /// Names an effective config- or preferences-backed saved remote to bind
+    /// this group to.
     /// Resolved into `remote` before the group is created; ignored when
     /// `remote` is already set.
     #[serde(default)]
@@ -315,7 +316,8 @@ pub fn create_group(
     if request.remote.is_none()
         && let Some(id) = request.remote_id.as_deref()
     {
-        request.remote = Some(state.config().saved_remote(id)?);
+        let preferences = persistence::load_preferences(&state.config().workspace_root)?;
+        request.remote = Some(state.config().saved_remote_with(id, &preferences.remotes)?);
     }
 
     create_scoped_group(state, request, WorkspaceScope::Terminal)
@@ -823,9 +825,10 @@ pub(crate) fn create_group_record(
     scope: WorkspaceScope,
 ) -> Result<GroupInfo, String> {
     let id = state.next_id("group");
-    let dir = match request.dir.as_deref() {
-        Some(dir) => group_canonical_dir(request.remote.as_ref(), dir)?,
-        None => state.default_open_dir(),
+    let dir = match (request.remote.as_ref(), request.dir.as_deref()) {
+        (remote, Some(dir)) => group_canonical_dir(remote, dir)?,
+        (Some(remote), None) => group_canonical_dir(Some(remote), "~")?,
+        (None, None) => state.default_open_dir(),
     };
     let generated_name = group_name_for_dir(&dir);
     let name_override = request
@@ -1836,10 +1839,13 @@ fn canonical_dir(path: &str) -> Result<PathBuf, String> {
 /// to a local fallback directory.
 pub fn group_canonical_dir(remote: Option<&RemoteRef>, path: &str) -> Result<PathBuf, String> {
     match remote {
-        // Remote paths cannot be resolved locally. Until a remote transport
-        // exists, accept the string as given; the spawn layer refuses to
-        // launch into remote groups, so nothing acts on the unverified path.
-        Some(_) => Ok(PathBuf::from(path)),
+        // Remote paths live on the far side: don't canonicalize or stat them
+        // locally. Expand a leading `~` against the remote account's home so
+        // the stored dir (and later tmux `-c`) is an absolute path rather than
+        // a quoted literal tilde.
+        Some(remote) => Ok(PathBuf::from(
+            crate::host::for_group(Some(remote)).expand_home(path)?,
+        )),
         None => canonical_dir(path),
     }
 }
@@ -1847,7 +1853,7 @@ pub fn group_canonical_dir(remote: Option<&RemoteRef>, path: &str) -> Result<Pat
 /// Group-aware companion to `pty::recoverable_dir`: returns the path only when
 /// it still resolves for the host the group's processes run on. Local groups
 /// stat the local filesystem; remote groups pass the string through untouched
-/// for the same reason as `group_canonical_dir`.
+/// because it cannot be validated locally.
 pub fn group_recoverable_dir(remote: Option<&RemoteRef>, path: &str) -> Option<PathBuf> {
     match remote {
         Some(_) => Some(PathBuf::from(path)),
@@ -2725,6 +2731,24 @@ mod tests {
         assert_eq!(group_recoverable_dir(None, missing), None);
     }
 
+    #[test]
+    fn remote_group_canonical_dir_expands_home() {
+        crate::host::seed_remote_home("workbox", "/home/dev");
+        let remote = test_remote();
+        assert_eq!(
+            group_canonical_dir(Some(&remote), "~").unwrap(),
+            PathBuf::from("/home/dev")
+        );
+        assert_eq!(
+            group_canonical_dir(Some(&remote), "~/src").unwrap(),
+            PathBuf::from("/home/dev/src")
+        );
+        assert_eq!(
+            group_canonical_dir(Some(&remote), "/srv/code/project").unwrap(),
+            PathBuf::from("/srv/code/project")
+        );
+    }
+
     fn remote_host(root: Option<&str>) -> Host {
         host::for_group(Some(&RemoteRef {
             id: "saved-1".to_string(),
@@ -2772,6 +2796,82 @@ mod tests {
         assert_eq!(remote.host, "user@devbox");
         assert_eq!(remote.label, "Dev box");
         assert!(group.is_remote());
+    }
+
+    #[test]
+    fn a_remote_group_without_a_dir_opens_in_the_remote_home() {
+        crate::host::seed_remote_home("user@qmux-remote-home-dir", "/home/dev");
+        let root = std::env::temp_dir().join("qmux-remote-home-dir");
+        let state = test_state_with_remotes(
+            root,
+            std::collections::BTreeMap::from([(
+                "devbox".to_string(),
+                crate::config::SavedRemote {
+                    host: "user@qmux-remote-home-dir".to_string(),
+                    label: Some("Dev box".to_string()),
+                    ..Default::default()
+                },
+            )]),
+        );
+
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: None,
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+                remote_id: Some("devbox".to_string()),
+            },
+        )
+        .expect("creates");
+
+        assert_eq!(group.dir, "/home/dev");
+        assert_eq!(group.name, "dev");
+        assert!(group.is_remote());
+    }
+
+    #[test]
+    fn a_preference_remote_id_binds_the_group_to_that_machine() {
+        let root = temp_workspace("preference-remote-id");
+        let state = test_state_with_workspace(root.clone());
+        persistence::save_preferences(
+            &state.config().workspace_root,
+            &persistence::AppPreferences {
+                remotes: std::collections::BTreeMap::from([(
+                    "buildbox".to_string(),
+                    crate::config::SavedRemote {
+                        host: "user@buildbox".to_string(),
+                        label: Some("Build box".to_string()),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: None,
+                dir: Some("/srv/code/project".to_string()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: None,
+                remote_id: Some("buildbox".to_string()),
+            },
+        )
+        .expect("creates from preferences");
+
+        let remote = group.remote.as_ref().expect("bound to the remote");
+        assert_eq!(remote.id, "buildbox");
+        assert_eq!(remote.host, "user@buildbox");
+        assert_eq!(remote.label, "Build box");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -3659,6 +3759,7 @@ mod tests {
             status: crate::state::PaneStatus::Running,
             last_active_at: 1,
             recovered: false,
+            ssh_target: None,
             depth: 0,
         }
     }

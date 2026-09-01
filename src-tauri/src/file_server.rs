@@ -1373,6 +1373,7 @@ mod tests {
                     status: PaneStatus::Running,
                     last_active_at: 1,
                     recovered: false,
+                    ssh_target: None,
                     depth: 0,
                 },
                 backend: PaneBackend::HostPty(crate::state::HostPtyBackend {

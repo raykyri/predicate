@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -249,6 +250,13 @@ import {
 } from "./lib/appHelpers";
 import { sanitizeTerminalTitle } from "./lib/terminalTitle";
 import {
+  availableRemoteId,
+  remoteDraftFromSshAlias,
+  remoteIdFromLabel,
+  unconfiguredSshAliases,
+  type RemoteSettingsDraft,
+} from "./lib/remoteSettings";
+import {
   agentTabStatusDotClass,
   agentTabStatusPill,
   queueWaitsOnOtherAgent,
@@ -473,6 +481,7 @@ import {
   closeWorktreePane,
   confirmAppExit,
   createGroupWithShell,
+  deleteRemote,
   pickGroupFolder,
   createResearchWorkspaceWithFolder,
   renameResearchWorkspace,
@@ -510,6 +519,7 @@ import {
   getShowHideShortcut,
   activatePane,
   getRuntimeConfig,
+  probeRemote,
   probeAgentAdapters,
   getUseLoginShell,
   getResearchLaunchInstruction,
@@ -522,6 +532,7 @@ import {
   listGroups,
   listAgents,
   listShellAgentJobs,
+  listSshConfigAliases,
   listClaudeSkills,
   listNativeTerminalThemes,
   listSavedPrompts,
@@ -606,6 +617,7 @@ import {
   setQueuedTurnPause,
   submitAgentTurn,
   submitPaneInput,
+  upsertRemote,
   unpauseAgent,
   updateMenuBar,
   worktreeStatus,
@@ -637,6 +649,9 @@ import type {
   ResearchTreeDetail,
   ResearchTreeSummary,
   RuntimeConfig,
+  RemoteChoice,
+  RemoteProbeResult,
+  SavedRemote,
   SavedPrompt,
   ShellAgentJobInfo,
   ThreadGraph,
@@ -653,6 +668,27 @@ const LEFT_SIDEBAR_DEFAULT_WIDTH = 268;
 type WorktreeCreateAction =
   | { kind: "open" }
   | { kind: "fork"; prompt?: string; anchor?: MessageAnchor };
+
+function remoteSettingsDraft(remote: RemoteChoice): RemoteSettingsDraft {
+  return {
+    id: remote.id,
+    label: remote.label,
+    host: remote.host,
+    workspaceRoot: remote.workspaceRoot ?? "",
+    qmuxCli: remote.qmuxCli ?? "",
+    multiplexer: remote.multiplexer,
+  };
+}
+
+function savedRemoteFromSettingsDraft(draft: RemoteSettingsDraft): SavedRemote {
+  return {
+    host: draft.host.trim(),
+    label: draft.label.trim() || null,
+    multiplexer: draft.multiplexer,
+    qmuxCli: draft.qmuxCli.trim() || null,
+    workspaceRoot: draft.workspaceRoot.trim() || null,
+  };
+}
 
 // How long the artifact tray's undo footer holds the last removal.
 const ARTIFACT_UNDO_MS = 10_000;
@@ -2602,12 +2638,58 @@ function MainApp() {
     [],
   );
   const [settingsTab, setSettingsTab] = useState<
-    "basic" | "agents" | "theme" | "mouseCursor"
+    "basic" | "agents" | "remotes" | "theme" | "mouseCursor"
   >("basic");
   const [expandedSettingsAgentIds, setExpandedSettingsAgentIds] = useState<Set<string>>(
     () => new Set(),
   );
   const settingsAgentExpansionSeededRef = useRef(false);
+  const [expandedSettingsRemoteId, setExpandedSettingsRemoteId] = useState<string | null>(null);
+  const [remoteAddMenuOpen, setRemoteAddMenuOpen] = useState(false);
+  const remoteAddMenuRef = useRef<HTMLDivElement | null>(null);
+  const remoteAddMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [remoteSettingsDraftState, setRemoteSettingsDraftState] =
+    useState<RemoteSettingsDraft | null>(null);
+  const [remoteSettingsDraftIsNew, setRemoteSettingsDraftIsNew] = useState(false);
+  const [remoteSettingsIdManuallyEdited, setRemoteSettingsIdManuallyEdited] = useState(false);
+  const [remoteSettingsSaving, setRemoteSettingsSaving] = useState(false);
+  const [remoteSettingsError, setRemoteSettingsError] = useState<string | null>(null);
+  const [remoteDeleteConfirm, setRemoteDeleteConfirm] = useState<{
+    id: string;
+    label: string;
+  } | null>(null);
+  const remoteDeleteConfirmButtonRef = useRef<HTMLButtonElement | null>(null);
+  const [remoteProbeResult, setRemoteProbeResult] = useState<RemoteProbeResult | null>(null);
+  const [remoteProbeLoading, setRemoteProbeLoading] = useState(false);
+  const remoteProbeRequestRef = useRef(0);
+  const [sshConfigAliases, setSshConfigAliases] = useState<string[]>([]);
+  const [sshConfigAliasesLoading, setSshConfigAliasesLoading] = useState(false);
+  const [sshConfigAliasesError, setSshConfigAliasesError] = useState<string | null>(null);
+  const sshConfigAliasesRequestRef = useRef(0);
+  const availableSshConfigAliases = useMemo(
+    () => unconfiguredSshAliases(sshConfigAliases, config?.remotes ?? []),
+    [config?.remotes, sshConfigAliases],
+  );
+  const refreshSshConfigAliases = useCallback(async () => {
+    const request = sshConfigAliasesRequestRef.current + 1;
+    sshConfigAliasesRequestRef.current = request;
+    setSshConfigAliasesLoading(true);
+    setSshConfigAliasesError(null);
+    try {
+      const aliases = await listSshConfigAliases();
+      if (sshConfigAliasesRequestRef.current === request) {
+        setSshConfigAliases(aliases);
+      }
+    } catch (err) {
+      if (sshConfigAliasesRequestRef.current === request) {
+        setSshConfigAliasesError(unknownErrorMessage(err));
+      }
+    } finally {
+      if (sshConfigAliasesRequestRef.current === request) {
+        setSshConfigAliasesLoading(false);
+      }
+    }
+  }, []);
   const [openRouterKeyVisible, setOpenRouterKeyVisible] = useState(false);
   const [showHideShortcutSetting, setShowHideShortcutSetting] =
     useState<ShowHideShortcutSetting>({
@@ -3015,24 +3097,10 @@ function MainApp() {
   const exitConfirmButtonRef = useRef<HTMLButtonElement | null>(null);
   const [exitPreflightRequest, setExitPreflightRequest] =
     useState<ExitPreflightRequest | null>(null);
-  // A remote workspace's directory lives on the far side, so a folder picker
-  // cannot browse to it — the id is chosen from the menu and the path typed.
-  const [remoteGroupDraft, setRemoteGroupDraft] = useState<{
-    remoteId: string;
-    label: string;
-    dir: string;
-  } | null>(null);
   const [renamePaneId, setRenamePaneId] = useState<string | null>(null);
   const [renameGroupId, setRenameGroupId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const renameInputRef = useRef<HTMLInputElement | null>(null);
-  // Reopening the settings menu should offer the remote list again rather than
-  // a half-typed path from a dismissed attempt.
-  useEffect(() => {
-    if (!settingsMenu) {
-      setRemoteGroupDraft(null);
-    }
-  }, [settingsMenu]);
   const [titleGenerationTest, setTitleGenerationTest] =
     useState<TitleGenerationTestState | null>(null);
   const [paneContextMenu, setPaneContextMenu] = useState<PaneContextMenuState | null>(null);
@@ -4224,6 +4292,379 @@ function MainApp() {
       setAppToast(null);
       appToastTimerRef.current = null;
     }, APP_TOAST_TIMEOUT_MS);
+  }
+
+  function openRemoteSettings() {
+    setSettingsMenu(null);
+    setSettingsTab("remotes");
+    setSettingsOpen(true);
+  }
+
+  function resetRemoteProbe() {
+    remoteProbeRequestRef.current += 1;
+    setRemoteProbeLoading(false);
+    setRemoteProbeResult(null);
+  }
+
+  function changeRemoteSettingsDraft(
+    update: (current: RemoteSettingsDraft) => RemoteSettingsDraft,
+  ) {
+    resetRemoteProbe();
+    setRemoteSettingsError(null);
+    setRemoteSettingsDraftState((current) => (current ? update(current) : current));
+  }
+
+  function beginAddingRemote() {
+    const id = availableRemoteId("remote", config?.remotes ?? []);
+    setExpandedSettingsRemoteId("__new__");
+    setRemoteSettingsDraftState({
+      id,
+      label: "",
+      host: "",
+      workspaceRoot: "",
+      qmuxCli: "",
+      multiplexer: "tmux",
+    });
+    setRemoteSettingsDraftIsNew(true);
+    setRemoteSettingsIdManuallyEdited(false);
+    setRemoteSettingsError(null);
+    setRemoteDeleteConfirm(null);
+    resetRemoteProbe();
+  }
+
+  function beginAddingRemoteFromSshAlias(alias: string) {
+    setExpandedSettingsRemoteId("__new__");
+    setRemoteSettingsDraftState(remoteDraftFromSshAlias(alias, config?.remotes ?? []));
+    setRemoteSettingsDraftIsNew(true);
+    setRemoteSettingsIdManuallyEdited(false);
+    setRemoteSettingsError(null);
+    setRemoteDeleteConfirm(null);
+    resetRemoteProbe();
+  }
+
+  function beginCopyingRemote(remote: RemoteChoice) {
+    const id = availableRemoteId(`${remote.id}-copy`, config?.remotes ?? []);
+    setExpandedSettingsRemoteId("__new__");
+    setRemoteSettingsDraftState({
+      ...remoteSettingsDraft(remote),
+      id,
+      label: `${remote.label} copy`,
+      // The UI only creates driveable remotes. A config entry may retain the
+      // documented future-facing `herdr` value, but its editable copy should
+      // be immediately usable by qmux.
+      multiplexer: "tmux",
+    });
+    setRemoteSettingsDraftIsNew(true);
+    setRemoteSettingsIdManuallyEdited(false);
+    setRemoteSettingsError(null);
+    setRemoteDeleteConfirm(null);
+    resetRemoteProbe();
+  }
+
+  function toggleRemoteSettings(remote: RemoteChoice) {
+    if (expandedSettingsRemoteId === remote.id) {
+      setExpandedSettingsRemoteId(null);
+      setRemoteSettingsDraftState(null);
+      setRemoteSettingsError(null);
+      setRemoteDeleteConfirm(null);
+      resetRemoteProbe();
+      return;
+    }
+    setExpandedSettingsRemoteId(remote.id);
+    setRemoteSettingsDraftState(remoteSettingsDraft(remote));
+    setRemoteSettingsDraftIsNew(false);
+    setRemoteSettingsIdManuallyEdited(true);
+    setRemoteSettingsError(null);
+    setRemoteDeleteConfirm(null);
+    resetRemoteProbe();
+  }
+
+  async function saveRemoteSettings() {
+    const draft = remoteSettingsDraftState;
+    if (!draft || remoteSettingsSaving) {
+      return;
+    }
+    const id = draft.id.trim();
+    const label = draft.label.trim();
+    const host = draft.host.trim();
+    if (!id || !label || !host) {
+      setRemoteSettingsError("Name, ID, and SSH host are required.");
+      return;
+    }
+    if (remoteSettingsDraftIsNew && (config?.remotes ?? []).some((remote) => remote.id === id)) {
+      setRemoteSettingsError(`A remote with the ID “${id}” already exists.`);
+      return;
+    }
+    const remote = savedRemoteFromSettingsDraft({ ...draft, label, host });
+    setRemoteSettingsSaving(true);
+    setRemoteSettingsError(null);
+    try {
+      const remotes = await upsertRemote(id, remote);
+      setConfig((current) => (current ? { ...current, remotes } : current));
+      setExpandedSettingsRemoteId(id);
+      setRemoteSettingsDraftState({ ...draft, id, label, host });
+      setRemoteSettingsDraftIsNew(false);
+      showAppToast(remoteSettingsDraftIsNew ? "Remote added" : "Remote updated");
+    } catch (err) {
+      setRemoteSettingsError(unknownErrorMessage(err));
+    } finally {
+      setRemoteSettingsSaving(false);
+    }
+  }
+
+  async function testRemoteSettings(draft: RemoteSettingsDraft) {
+    if (!draft.host.trim()) {
+      setRemoteSettingsError("Enter an SSH host before testing.");
+      return;
+    }
+    const request = remoteProbeRequestRef.current + 1;
+    remoteProbeRequestRef.current = request;
+    setRemoteProbeLoading(true);
+    setRemoteProbeResult(null);
+    setRemoteSettingsError(null);
+    try {
+      const result = await probeRemote(savedRemoteFromSettingsDraft(draft));
+      if (remoteProbeRequestRef.current === request) {
+        setRemoteProbeResult(result);
+      }
+    } catch (err) {
+      if (remoteProbeRequestRef.current === request) {
+        setRemoteSettingsError(unknownErrorMessage(err));
+      }
+    } finally {
+      if (remoteProbeRequestRef.current === request) {
+        setRemoteProbeLoading(false);
+      }
+    }
+  }
+
+  async function removeRemoteSettings(id: string) {
+    if (remoteSettingsSaving) {
+      return;
+    }
+    setRemoteSettingsSaving(true);
+    setRemoteSettingsError(null);
+    try {
+      const remotes = await deleteRemote(id);
+      setConfig((current) => (current ? { ...current, remotes } : current));
+      setExpandedSettingsRemoteId(null);
+      setRemoteSettingsDraftState(null);
+      setRemoteDeleteConfirm(null);
+      resetRemoteProbe();
+      showAppToast("Remote removed");
+    } catch (err) {
+      setRemoteSettingsError(unknownErrorMessage(err));
+    } finally {
+      setRemoteSettingsSaving(false);
+    }
+  }
+
+  function renderRemoteProbeStatus() {
+    if (remoteProbeLoading) {
+      return (
+        <div className="settings-remote-probe-loading" role="status">
+          <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
+          Checking SSH, tmux, qmux-cli, and agent providers…
+        </div>
+      );
+    }
+    if (!remoteProbeResult) {
+      return null;
+    }
+    const remoteAdapters = remoteProbeResult.adapters.filter((adapter) => adapter.supportsRemote);
+    return (
+      <div className="settings-remote-probe-result" aria-live="polite">
+        <div className="settings-remote-checks">
+          {remoteProbeResult.checks.map((check) => (
+            <div className={`settings-remote-check is-${check.status}`} key={check.id}>
+              {check.status === "passed" ? (
+                <Check size={13} aria-hidden="true" />
+              ) : check.status === "failed" ? (
+                <X size={13} aria-hidden="true" />
+              ) : (
+                <Minus size={13} aria-hidden="true" />
+              )}
+              <span>
+                <strong>{check.label}</strong>
+                <small>{check.message}</small>
+              </span>
+            </div>
+          ))}
+        </div>
+        {remoteAdapters.length > 0 ? (
+          <div className="settings-remote-provider-results">
+            <span>Remote agent providers</span>
+            {remoteAdapters.map((adapter) => (
+              <div key={adapter.instanceId}>
+                <strong>{adapter.label}</strong>
+                <span className={`settings-agent-status is-${adapter.readiness}`}>
+                  {adapterReadinessLabel(adapter)}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  function renderRemoteSettingsForm() {
+    const draft = remoteSettingsDraftState;
+    if (!draft) {
+      return null;
+    }
+    const fieldPrefix = `settings-remote-${encodeURIComponent(draft.id || "new")}`;
+    return (
+      <div className="settings-remote-detail">
+        <div className="settings-remote-fields">
+          <label htmlFor={`${fieldPrefix}-label`}>
+            <span>Name</span>
+            <input
+              id={`${fieldPrefix}-label`}
+              className="form-field"
+              type="text"
+              autoFocus={remoteSettingsDraftIsNew}
+              value={draft.label}
+              placeholder="Build server"
+              onChange={(event) => {
+                const label = event.currentTarget.value;
+                changeRemoteSettingsDraft((current) => {
+                  const nextSlug = remoteIdFromLabel(label);
+                  const id =
+                    remoteSettingsDraftIsNew && !remoteSettingsIdManuallyEdited && nextSlug
+                      ? availableRemoteId(nextSlug, config?.remotes ?? [])
+                      : current.id;
+                  return { ...current, label, id };
+                });
+              }}
+            />
+          </label>
+          <label htmlFor={`${fieldPrefix}-id`}>
+            <span>ID</span>
+            <input
+              id={`${fieldPrefix}-id`}
+              className="form-field"
+              type="text"
+              value={draft.id}
+              disabled={!remoteSettingsDraftIsNew}
+              spellCheck={false}
+              onChange={(event) => {
+                const id = remoteIdFromLabel(event.currentTarget.value);
+                setRemoteSettingsIdManuallyEdited(true);
+                changeRemoteSettingsDraft((current) => ({ ...current, id }));
+              }}
+            />
+          </label>
+          <label htmlFor={`${fieldPrefix}-host`}>
+            <span>SSH host</span>
+            <input
+              id={`${fieldPrefix}-host`}
+              className="form-field"
+              type="text"
+              value={draft.host}
+              placeholder="devbox or user@host"
+              list={sshConfigAliases.length > 0 ? "settings-ssh-host-aliases" : undefined}
+              spellCheck={false}
+              onChange={(event) => {
+                const host = event.currentTarget.value;
+                changeRemoteSettingsDraft((current) => ({ ...current, host }));
+              }}
+            />
+            {sshConfigAliases.length > 0 ? (
+              <small>{sshConfigAliases.length} aliases available from ~/.ssh/config</small>
+            ) : null}
+          </label>
+          <label htmlFor={`${fieldPrefix}-root`}>
+            <span>Workspace root <small>optional</small></span>
+            <input
+              id={`${fieldPrefix}-root`}
+              className="form-field"
+              type="text"
+              value={draft.workspaceRoot}
+              placeholder="~/.qmux/workspaces"
+              spellCheck={false}
+              onChange={(event) => {
+                const workspaceRoot = event.currentTarget.value;
+                changeRemoteSettingsDraft((current) => ({ ...current, workspaceRoot }));
+              }}
+            />
+          </label>
+          <label htmlFor={`${fieldPrefix}-cli`}>
+            <span>qmux CLI <small>optional</small></span>
+            <input
+              id={`${fieldPrefix}-cli`}
+              className="form-field"
+              type="text"
+              value={draft.qmuxCli}
+              placeholder="qmux-cli"
+              spellCheck={false}
+              onChange={(event) => {
+                const qmuxCli = event.currentTarget.value;
+                changeRemoteSettingsDraft((current) => ({ ...current, qmuxCli }));
+              }}
+            />
+          </label>
+          <datalist id="settings-ssh-host-aliases">
+            {sshConfigAliases.map((alias) => (
+              <option value={alias} key={alias} />
+            ))}
+          </datalist>
+        </div>
+        {remoteSettingsError ? (
+          <p className="settings-agent-error" role="alert">{remoteSettingsError}</p>
+        ) : null}
+        {renderRemoteProbeStatus()}
+        <div className="settings-remote-actions">
+          <button
+            type="button"
+            className="control-button settings-remote-test"
+            disabled={remoteSettingsSaving || remoteProbeLoading}
+            onClick={() => void testRemoteSettings(draft)}
+          >
+            {remoteProbeLoading ? "Testing…" : "Test connection"}
+          </button>
+          {!remoteSettingsDraftIsNew ? (
+            <button
+              type="button"
+              className="control-button settings-remote-remove"
+              disabled={remoteSettingsSaving}
+              onClick={() => {
+                setRemoteSettingsError(null);
+                setRemoteDeleteConfirm({
+                  id: draft.id,
+                  label: draft.label.trim() || draft.id,
+                });
+              }}
+            >
+              Remove
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="control-button settings-remote-remove"
+              disabled={remoteSettingsSaving}
+              onClick={() => {
+                setExpandedSettingsRemoteId(null);
+                setRemoteSettingsDraftState(null);
+                setRemoteSettingsDraftIsNew(false);
+                setRemoteSettingsError(null);
+                resetRemoteProbe();
+              }}
+            >
+              Cancel
+            </button>
+          )}
+          <button
+            type="button"
+            className="control-button settings-remote-save"
+            disabled={remoteSettingsSaving}
+            onClick={() => void saveRemoteSettings()}
+          >
+            {remoteSettingsSaving ? "Saving…" : remoteSettingsDraftIsNew ? "Add remote" : "Save"}
+          </button>
+        </div>
+      </div>
+    );
   }
 
   function setPaneTitleRegenerationBusy(paneId: string, busy: boolean) {
@@ -6230,16 +6671,16 @@ function MainApp() {
     }
   }
 
-  /** Creates a remote workspace and its first durable shell atomically. A
-   * failed SSH/tmux launch rolls the group back just like local creation. */
-  async function createRemoteGroup(remoteId: string, dir: string) {
+  /** Creates a remote workspace and its first durable shell atomically,
+   * opening in the remote account's home directory. A failed SSH/tmux launch
+   * rolls the group back just like local creation. */
+  async function createRemoteGroup(remoteId: string) {
     setSettingsMenu(null);
-    setRemoteGroupDraft(null);
     setError(null);
     try {
       const anchorGroupId = launchGroupId();
       const created = await createGroupWithShell(
-        dir,
+        "~",
         anchorGroupId ?? null,
         estimateInitialPaneSize(false),
         remoteId,
@@ -6249,6 +6690,30 @@ function MainApp() {
       setActivePaneId(created.pane.id);
       await refreshGroups();
       setLastActiveGroupId(created.group.id);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  /** Opens `ssh` to the saved remote as a tab in the current group. If that
+   * group is already bound to the machine, this is an ordinary remote shell. */
+  async function addRemoteShell(remoteId: string) {
+    setSettingsMenu(null);
+    setError(null);
+    try {
+      const groupId = launchGroupId();
+      const sourcePaneId = groupId ? (activePaneRef.current?.id ?? null) : null;
+      const pane = await spawnShell(
+        estimateInitialPaneSize(false),
+        sourcePaneId,
+        groupId,
+        remoteId,
+      );
+      const orderedPanes = panesWithNewTabInLaunchPosition(pane, pane.groupId);
+      setPanesPreservingRecoveredDismissals(orderedPanes);
+      setActivePaneId(pane.id);
+      setLastActiveGroupId(pane.groupId);
+      await refreshGroups();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -10422,6 +10887,38 @@ function MainApp() {
   }, [refreshAdapterReadiness, settingsOpen, settingsTab]);
 
   useEffect(() => {
+    if (!settingsOpen || settingsTab !== "remotes") {
+      return;
+    }
+    void refreshSshConfigAliases();
+  }, [refreshSshConfigAliases, settingsOpen, settingsTab]);
+
+  useEffect(() => {
+    if (!settingsOpen || settingsTab !== "remotes") {
+      setRemoteAddMenuOpen(false);
+      setRemoteDeleteConfirm(null);
+    }
+  }, [settingsOpen, settingsTab]);
+
+  useEffect(() => {
+    if (!remoteAddMenuOpen) {
+      return;
+    }
+    const handleMouseDown = (event: MouseEvent) => {
+      if (!remoteAddMenuRef.current?.contains(event.target as Node)) {
+        setRemoteAddMenuOpen(false);
+      }
+    };
+    const handleResize = () => setRemoteAddMenuOpen(false);
+    window.addEventListener("mousedown", handleMouseDown);
+    window.addEventListener("resize", handleResize);
+    return () => {
+      window.removeEventListener("mousedown", handleMouseDown);
+      window.removeEventListener("resize", handleResize);
+    };
+  }, [remoteAddMenuOpen]);
+
+  useEffect(() => {
     if (!settingsOpen || settingsTab !== "agents") {
       settingsAgentExpansionSeededRef.current = false;
       return;
@@ -11972,6 +12469,23 @@ function MainApp() {
     };
   }, [exitDialog]);
 
+  useEffect(() => {
+    if (!remoteDeleteConfirm) {
+      return;
+    }
+
+    const focusRemoveButton = (force = false) =>
+      focusConfirmDialogButton(remoteDeleteConfirmButtonRef.current, force);
+
+    focusRemoveButton(true);
+    const frame = requestAnimationFrame(() => focusRemoveButton());
+    const settle = window.setTimeout(() => focusRemoveButton(), 100);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(settle);
+    };
+  }, [remoteDeleteConfirm]);
+
   function handlePaneTabClosePointerDown(
     event: ReactPointerEvent<HTMLElement>,
     pane: PaneInfo,
@@ -12681,6 +13195,9 @@ function MainApp() {
     paneContextMenu,
     groupMenu,
     settingsMenu,
+    remoteAddMenuOpen,
+    remoteDeleteConfirm,
+    remoteSettingsSaving,
     worktreeCreateDialog,
     closeDialog,
     exitDialog,
@@ -12697,6 +13214,9 @@ function MainApp() {
       paneContextMenu,
       groupMenu,
       settingsMenu,
+      remoteAddMenuOpen,
+      remoteDeleteConfirm,
+      remoteSettingsSaving,
       worktreeCreateDialog,
       closeDialog,
       exitDialog,
@@ -12759,6 +13279,25 @@ function MainApp() {
         event.stopPropagation();
         if (browserEscapeDisposition === "exclusive") {
           event.stopImmediatePropagation();
+        }
+        return;
+      }
+
+      if (overlays.remoteAddMenuOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        setRemoteAddMenuOpen(false);
+        requestAnimationFrame(() => remoteAddMenuButtonRef.current?.focus());
+        return;
+      }
+
+      if (overlays.remoteDeleteConfirm) {
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        if (!overlays.remoteSettingsSaving) {
+          setRemoteDeleteConfirm(null);
         }
         return;
       }
@@ -15467,88 +16006,74 @@ function MainApp() {
         >
           <div className="group-context-actions">
             {sidebarMode === "terminal" ? (
-              <button
-                type="button"
-                role="menuitem"
-                className="control-button context-menu-has-shortcut"
-                disabled={folderPickerStatus !== null}
-                onClick={() => {
-                  void createGroupFromSettingsMenu();
-                }}
-              >
-                <Plus size={13} aria-hidden="true" />
-                <span>New group...</span>
-                <kbd className="context-menu-shortcut">⌘⇧N</kbd>
-              </button>
+              <>
+                {(config?.remotes?.length ?? 0) > 0
+                  ? (config?.remotes ?? []).map((remote, index) => (
+                      <Fragment key={remote.id}>
+                        {index > 0 ? (
+                          <div className="context-menu-divider" role="separator" />
+                        ) : null}
+                        <div className="settings-context-menu-label" role="presentation">
+                          {remote.label}
+                        </div>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="control-button"
+                          // A multiplexer qmux cannot drive is shown rather than
+                          // hidden, so the remote is discoverable and the reason it
+                          // is unavailable is visible.
+                          disabled={!remote.usable}
+                          onClick={() => {
+                            void createRemoteGroup(remote.id);
+                          }}
+                        >
+                          <Globe size={13} aria-hidden="true" />
+                          <span>New remote group</span>
+                        </button>
+                        {settings.codeMode ? (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="control-button"
+                            disabled={!remote.usable}
+                            onClick={() => {
+                              void addRemoteShell(remote.id);
+                            }}
+                          >
+                            <SquareTerminal size={13} aria-hidden="true" />
+                            <span>New remote shell</span>
+                          </button>
+                        ) : null}
+                      </Fragment>
+                    ))
+                  : (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="control-button"
+                        onClick={openRemoteSettings}
+                      >
+                        <Globe size={13} aria-hidden="true" />
+                        <span>Add a remote...</span>
+                      </button>
+                    )}
+                <div className="context-menu-divider" role="separator" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="control-button context-menu-has-shortcut"
+                  disabled={folderPickerStatus !== null}
+                  onClick={() => {
+                    void createGroupFromSettingsMenu();
+                  }}
+                >
+                  <Plus size={13} aria-hidden="true" />
+                  <span>New group...</span>
+                  <kbd className="context-menu-shortcut">⌘⇧N</kbd>
+                </button>
+              </>
             ) : null}
-            {sidebarMode === "terminal" && (config?.remotes?.length ?? 0) > 0
-              ? remoteGroupDraft
-                ? (
-                    <form
-                      className="settings-remote-group-form"
-                      onSubmit={(event) => {
-                        event.preventDefault();
-                        const dir = remoteGroupDraft.dir.trim();
-                        if (dir) {
-                          void createRemoteGroup(remoteGroupDraft.remoteId, dir);
-                        }
-                      }}
-                    >
-                      <label htmlFor="remote-group-dir">
-                        Directory on {remoteGroupDraft.label}
-                      </label>
-                      <input
-                        id="remote-group-dir"
-                        type="text"
-                        autoFocus
-                        spellCheck={false}
-                        placeholder="/srv/code/project"
-                        value={remoteGroupDraft.dir}
-                        onChange={(event) =>
-                          setRemoteGroupDraft({
-                            ...remoteGroupDraft,
-                            dir: event.target.value,
-                          })
-                        }
-                        onKeyDown={(event) => {
-                          if (event.key === "Escape") {
-                            event.preventDefault();
-                            setRemoteGroupDraft(null);
-                          }
-                        }}
-                      />
-                    </form>
-                  )
-                : (
-                    config?.remotes ?? []
-                  ).map((remote) => (
-                    <button
-                      key={remote.id}
-                      type="button"
-                      role="menuitem"
-                      className="control-button"
-                      // A multiplexer qmux cannot drive is shown rather than
-                      // hidden, so the remote is discoverable and the reason it
-                      // is unavailable is visible.
-                      disabled={!remote.usable}
-                      title={
-                        remote.usable
-                          ? `${remote.host} · ${remote.multiplexer}`
-                          : `${remote.host} · qmux cannot drive the ${remote.multiplexer} multiplexer yet`
-                      }
-                      onClick={() => {
-                        setRemoteGroupDraft({
-                          remoteId: remote.id,
-                          label: remote.label,
-                          dir: "",
-                        });
-                      }}
-                    >
-                      <Globe size={13} aria-hidden="true" />
-                      <span>New group on {remote.label}...</span>
-                    </button>
-                  ))
-              : null}
             {sidebarMode === "research" ? (
               <>
                 {RESEARCH_VISIBILITY_FILTER_OPTIONS.map(({ id, label }) => (
@@ -16024,6 +16549,15 @@ function MainApp() {
               <button
                 type="button"
                 role="tab"
+                aria-selected={settingsTab === "remotes"}
+                className={`control-button${settingsTab === "remotes" ? " is-active" : ""}`}
+                onClick={() => setSettingsTab("remotes")}
+              >
+                Remotes
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={settingsTab === "theme"}
                 className={`control-button${settingsTab === "theme" ? " is-active" : ""}`}
                 onClick={() => setSettingsTab("theme")}
@@ -16047,14 +16581,15 @@ function MainApp() {
                   <div>
                     <h3>Agent providers</h3>
                     <p className="settings-hint">
-                      qmux uses provider CLIs already installed on this machine. Credentials stay
-                      with each provider.
+                      qmux uses your existing coding agent subscriptions.
                     </p>
                   </div>
                   <button
                     type="button"
                     className="control-button settings-agent-refresh"
                     disabled={adapterProbeLoading}
+                    aria-label={adapterProbeLoading ? "Checking agent providers" : "Check again"}
+                    title={adapterProbeLoading ? "Checking agent providers" : "Check again"}
                     onClick={() =>
                       void refreshAdapterReadiness({ force: true }).catch(() => undefined)
                     }
@@ -16064,7 +16599,6 @@ function MainApp() {
                       className={adapterProbeLoading ? "is-spinning" : undefined}
                       aria-hidden="true"
                     />
-                    <span>{adapterProbeLoading ? "Checking…" : "Check again"}</span>
                   </button>
                 </div>
                 {adapterProbeError ? (
@@ -16205,6 +16739,218 @@ function MainApp() {
                   Custom executable paths can be set under <code>adapters.*.binary</code> in
                   <code> qmux.config.json</code>.
                 </p>
+              </div>
+            ) : settingsTab === "remotes" ? (
+              <div className="settings-content settings-remotes" role="tabpanel">
+                <div className="settings-agents-heading">
+                  <div>
+                    <h3>Remote machines</h3>
+                  </div>
+                  <div className="settings-remote-add-group" ref={remoteAddMenuRef}>
+                    <button
+                      type="button"
+                      className="control-button settings-remote-add settings-remote-add-main"
+                      disabled={remoteSettingsSaving || remoteSettingsDraftIsNew}
+                      onClick={() => {
+                        setRemoteAddMenuOpen(false);
+                        beginAddingRemote();
+                      }}
+                    >
+                      <Plus size={13} aria-hidden="true" />
+                      Add
+                    </button>
+                    <button
+                      ref={remoteAddMenuButtonRef}
+                      type="button"
+                      className="control-button settings-remote-add settings-remote-add-menu-button"
+                      disabled={remoteSettingsSaving || remoteSettingsDraftIsNew}
+                      aria-label="Add remote options"
+                      aria-haspopup="menu"
+                      aria-expanded={remoteAddMenuOpen}
+                      aria-controls="settings-remote-add-menu"
+                      onClick={() => {
+                        const opening = !remoteAddMenuOpen;
+                        setRemoteAddMenuOpen(opening);
+                        if (opening && !sshConfigAliasesLoading) {
+                          void refreshSshConfigAliases();
+                        }
+                      }}
+                    >
+                      <ChevronDown size={13} aria-hidden="true" />
+                    </button>
+                    {remoteAddMenuOpen ? (
+                      <div
+                        id="settings-remote-add-menu"
+                        className="popover-surface popover-surface--context settings-remote-add-menu"
+                        role="menu"
+                        aria-label="Add remote options"
+                      >
+                        <div className="group-context-actions">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="control-button"
+                            autoFocus
+                            onClick={() => {
+                              setRemoteAddMenuOpen(false);
+                              beginAddingRemote();
+                            }}
+                          >
+                            <Plus size={13} aria-hidden="true" />
+                            <span>Add manually</span>
+                          </button>
+                          <div className="context-menu-divider" role="separator" />
+                          <div className="settings-remote-add-menu-label" role="presentation">
+                            From SSH config
+                          </div>
+                          <div
+                            className="settings-remote-add-menu-aliases"
+                            role="group"
+                            aria-label="From SSH config"
+                          >
+                            {availableSshConfigAliases.map((alias) => (
+                              <button
+                                type="button"
+                                role="menuitem"
+                                className="control-button"
+                                key={alias}
+                                onClick={() => {
+                                  setRemoteAddMenuOpen(false);
+                                  beginAddingRemoteFromSshAlias(alias);
+                                }}
+                              >
+                                <Globe size={13} aria-hidden="true" />
+                                <span title={alias}>{alias}</span>
+                              </button>
+                            ))}
+                            {availableSshConfigAliases.length === 0 ? (
+                              <div
+                                className="settings-remote-add-menu-empty"
+                                role="menuitem"
+                                aria-disabled="true"
+                                aria-live="polite"
+                                title={sshConfigAliasesError ?? undefined}
+                              >
+                                {sshConfigAliasesLoading
+                                  ? "Loading SSH hosts…"
+                                  : sshConfigAliasesError
+                                    ? "Couldn’t load SSH config"
+                                    : sshConfigAliases.length > 0
+                                      ? "All SSH hosts are already added"
+                                      : "No SSH hosts found"}
+                              </div>
+                            ) : null}
+                          </div>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="settings-agent-list settings-remote-list">
+                  {remoteSettingsDraftIsNew && remoteSettingsDraftState ? (
+                    <section className="settings-agent-card settings-remote-card">
+                      <div className="settings-remote-new-heading">
+                        <Globe size={16} aria-hidden="true" />
+                        <strong>New remote</strong>
+                      </div>
+                      {renderRemoteSettingsForm()}
+                    </section>
+                  ) : null}
+                  {(config?.remotes ?? []).map((remote) => {
+                    const isExpanded = expandedSettingsRemoteId === remote.id;
+                    const safeRemoteId = encodeURIComponent(remote.id);
+                    const summaryId = `settings-remote-summary-${safeRemoteId}`;
+                    const detailsId = `settings-remote-details-${safeRemoteId}`;
+                    return (
+                      <section className="settings-agent-card settings-remote-card" key={remote.id}>
+                        <button
+                          id={summaryId}
+                          type="button"
+                          className="settings-agent-summary settings-remote-summary"
+                          aria-expanded={isExpanded}
+                          aria-controls={detailsId}
+                          onClick={() => toggleRemoteSettings(remote)}
+                        >
+                          <Globe size={16} className="settings-remote-icon" aria-hidden="true" />
+                          <span className="settings-agent-identity">
+                            <strong>{remote.label}</strong>
+                            <span className="settings-agent-summary-meta">{remote.host}</span>
+                          </span>
+                          <span className="settings-remote-source">
+                            {remote.source === "config" ? "Config file" : "Saved"}
+                          </span>
+                          <ChevronDown
+                            size={13}
+                            className={`settings-agent-chevron${isExpanded ? " is-open" : ""}`}
+                            aria-hidden="true"
+                          />
+                        </button>
+                        {isExpanded ? (
+                          <div id={detailsId} role="region" aria-labelledby={summaryId}>
+                            {remote.source === "preferences" ? (
+                              renderRemoteSettingsForm()
+                            ) : (
+                              <div className="settings-remote-detail settings-remote-readonly">
+                                <dl className="settings-agent-details">
+                                  <div>
+                                    <dt>ID</dt>
+                                    <dd>{remote.id}</dd>
+                                  </div>
+                                  <div>
+                                    <dt>Multiplexer</dt>
+                                    <dd>{remote.multiplexer}</dd>
+                                  </div>
+                                  <div>
+                                    <dt>Workspace root</dt>
+                                    <dd>{remote.workspaceRoot ?? "Default"}</dd>
+                                  </div>
+                                  <div>
+                                    <dt>qmux CLI</dt>
+                                    <dd>{remote.qmuxCli ?? "qmux-cli"}</dd>
+                                  </div>
+                                </dl>
+                                {remoteSettingsError ? (
+                                  <p className="settings-agent-error" role="alert">
+                                    {remoteSettingsError}
+                                  </p>
+                                ) : null}
+                                {renderRemoteProbeStatus()}
+                                <div className="settings-remote-actions">
+                                  <button
+                                    type="button"
+                                    className="control-button settings-remote-test"
+                                    disabled={remoteProbeLoading}
+                                    onClick={() => void testRemoteSettings(remoteSettingsDraft(remote))}
+                                  >
+                                    {remoteProbeLoading ? "Testing…" : "Test connection"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="control-button"
+                                    disabled={remoteProbeLoading}
+                                    onClick={() => beginCopyingRemote(remote)}
+                                  >
+                                    Copy to my remotes
+                                  </button>
+                                </div>
+                                <p className="settings-hint">
+                                  This remote is declared in <code>qmux.config.json</code>. Edit the
+                                  file to change it, or copy it into an editable saved remote.
+                                </p>
+                              </div>
+                            )}
+                          </div>
+                        ) : null}
+                      </section>
+                    );
+                  })}
+                  {(config?.remotes?.length ?? 0) === 0 && !remoteSettingsDraftIsNew ? (
+                    <div className="settings-remote-empty">
+                      <Globe size={22} aria-hidden="true" />
+                      <span>No remote machines saved yet.</span>
+                    </div>
+                  ) : null}
+                </div>
               </div>
             ) : settingsTab === "basic" || settingsTab === "theme" ? (
               <div className="settings-content" role="tabpanel">
@@ -17229,6 +17975,55 @@ function MainApp() {
               </ConfirmDialogActionButton>
             </div>
           </form>
+        </div>
+      ) : null}
+
+      {remoteDeleteConfirm ? (
+        <div
+          className="confirm-dialog-backdrop settings-remote-delete-dialog"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !remoteSettingsSaving) {
+              setRemoteDeleteConfirm(null);
+            }
+          }}
+        >
+          <div
+            className="confirm-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="remote-delete-dialog-title"
+            aria-busy={remoteSettingsSaving}
+          >
+            <h2 id="remote-delete-dialog-title">Remove {remoteDeleteConfirm.label}?</h2>
+            <p>Existing groups stay connected to this machine.</p>
+            {remoteSettingsError ? (
+              <p className="confirm-dialog-error" role="alert">
+                {remoteSettingsError}
+              </p>
+            ) : null}
+            <div className="confirm-dialog-actions">
+              <button
+                className="control-button"
+                type="button"
+                disabled={remoteSettingsSaving}
+                onClick={() => setRemoteDeleteConfirm(null)}
+              >
+                Cancel
+              </button>
+              <ConfirmDialogActionButton
+                ref={remoteDeleteConfirmButtonRef}
+                type="button"
+                className="danger"
+                autoFocus
+                pending={remoteSettingsSaving}
+                pendingLabel="Removing…"
+                onClick={() => void removeRemoteSettings(remoteDeleteConfirm.id)}
+              >
+                Remove remote
+              </ConfirmDialogActionButton>
+            </div>
+          </div>
         </div>
       ) : null}
 

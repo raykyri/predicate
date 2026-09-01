@@ -1526,6 +1526,12 @@ pub struct PaneInfo {
     /// Live attachment health for a remote pane. Local panes leave it absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote_connection: Option<RemoteConnectionInfo>,
+    /// Host passed to a client `ssh` process that lives in a group which is
+    /// not itself bound to that machine. Restart re-runs `ssh` instead of a
+    /// local login shell. Absent for ordinary shells and qmux-managed remote
+    /// panes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_target: Option<String>,
     pub cols: u16,
     pub rows: u16,
     pub status: PaneStatus,
@@ -12980,6 +12986,7 @@ mod tests {
             status: PaneStatus::Running,
             last_active_at: 0,
             recovered: false,
+            ssh_target: None,
             depth: 0,
         }
     }

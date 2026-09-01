@@ -82,6 +82,9 @@ export interface PaneInfo {
   remoteSession?: RemoteSessionIdentity | null;
   /** Health of the disposable SSH attachment to a durable remote session. */
   remoteConnection?: RemoteConnectionInfo | null;
+  /** SSH destination for a client session opened inside a local (or other)
+   * group. Restart re-runs `ssh` to this host. */
+  sshTarget?: string | null;
   cols: number;
   rows: number;
   status: "starting" | "running" | "exited" | "killed" | "failed";
@@ -180,15 +183,38 @@ export interface InitialPaneSize {
 
 export type RemoteMultiplexer = "tmux" | "herdr";
 
-/** A machine declared under `remotes` in qmux.config.json. */
+/** An effective saved machine, from config or the UI-owned preferences store. */
 export interface RemoteChoice {
   id: string;
   label: string;
   host: string;
   multiplexer: RemoteMultiplexer;
+  qmuxCli?: string | null;
+  workspaceRoot?: string | null;
+  source: "config" | "preferences";
   /** False for a multiplexer qmux cannot drive yet — list it, but don't offer
    * a launch that is going to fail. */
   usable: boolean;
+}
+
+export interface SavedRemote {
+  host: string;
+  label?: string | null;
+  multiplexer: RemoteMultiplexer;
+  qmuxCli?: string | null;
+  workspaceRoot?: string | null;
+}
+
+export interface RemoteProbeCheck {
+  id: "ssh" | "tmux" | "qmuxCli";
+  label: string;
+  status: "passed" | "failed" | "skipped";
+  message: string;
+}
+
+export interface RemoteProbeResult {
+  checks: RemoteProbeCheck[];
+  adapters: AgentAdapterMetadata[];
 }
 
 /** The remote host a group is bound to. Mirrors Rust's `RemoteRef`. */

@@ -180,6 +180,10 @@ pub enum WorktreeLocation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppPreferences {
+    /// Remotes created and managed through the settings UI. Explicit entries
+    /// in `qmux.config.json` remain authoritative on an id collision.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub remotes: std::collections::BTreeMap<String, crate::config::SavedRemote>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launcher_adapter_id: Option<String>,
     /// Whether new and recovered shells run as login shells (sourcing the user's
@@ -233,6 +237,7 @@ fn is_true(value: &bool) -> bool {
 impl Default for AppPreferences {
     fn default() -> Self {
         Self {
+            remotes: std::collections::BTreeMap::new(),
             launcher_adapter_id: None,
             use_login_shell: None,
             worktree_location: None,
@@ -1219,6 +1224,34 @@ mod tests {
     }
 
     #[test]
+    fn preferences_round_trip_saved_remotes() {
+        let root = temp_root();
+        let remote = crate::config::SavedRemote {
+            host: "user@devbox".to_string(),
+            label: Some("Dev box".to_string()),
+            workspace_root: Some("/srv/qmux".to_string()),
+            ..Default::default()
+        };
+        save_preferences(
+            &root,
+            &AppPreferences {
+                remotes: std::collections::BTreeMap::from([("devbox".to_string(), remote.clone())]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_preferences_from_disk(&preferences_path(&root))
+                .unwrap()
+                .remotes
+                .get("devbox"),
+            Some(&remote)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn preferences_round_trip_open_router_key() {
         let root = temp_root();
         // Absent in a fresh preferences file (no key configured).
@@ -1419,6 +1452,7 @@ mod tests {
             status: PaneStatus::Running,
             last_active_at: 0,
             recovered: false,
+            ssh_target: None,
             depth: 0,
         }
     }

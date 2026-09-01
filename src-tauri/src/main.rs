@@ -32,6 +32,7 @@ mod scrollback;
 mod shell_jobs;
 mod show_hide_shortcut;
 mod sleep;
+mod ssh_config;
 mod state;
 mod thread_graph;
 mod title_generation;
@@ -60,7 +61,7 @@ use native_terminal::{
 use pty::{
     InitialPaneSize, PaneActivity, PaneWriteOptions, attach_pane, close_worktree_pane, kill_pane,
     pane_activity as inspect_pane_activity, resize_pane, spawn_shell_pane, spawn_shell_pane_at,
-    write_pane,
+    spawn_ssh_shell_pane, write_pane,
 };
 use research::{
     CreateResearchDocumentRequest, CreateResearchTreeRequest, RecentResearchQueryCursor,
@@ -211,11 +212,319 @@ fn handle_app_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) 
     }
 }
 
-#[tauri::command]
-fn get_runtime_config(state: tauri::State<'_, AppState>) -> RuntimeConfig {
-    let mut runtime = state.config().runtime();
+fn effective_remote_choices(state: &AppState) -> Result<Vec<config::RemoteChoice>, String> {
+    let preferences = persistence::load_preferences(&state.config().workspace_root)?;
+    Ok(state.config().remote_choices_with(&preferences.remotes))
+}
+
+#[tauri::command(async)]
+fn get_runtime_config(state: tauri::State<'_, AppState>) -> Result<RuntimeConfig, String> {
+    // A damaged preferences file should not prevent the entire interface from
+    // booting. Mutations still fail closed in `update_preferences`, so the UI
+    // cannot overwrite it while trying to add a remote.
+    let remotes = persistence::load_preferences(&state.config().workspace_root)
+        .map(|preferences| preferences.remotes)
+        .unwrap_or_default();
+    let mut runtime = state.config().runtime_with(&remotes);
     runtime.file_server_port = state.file_server_port();
-    runtime
+    Ok(runtime)
+}
+
+#[tauri::command(async)]
+fn list_ssh_config_aliases() -> Result<Vec<String>, String> {
+    ssh_config::aliases()
+}
+
+fn validate_ui_remote(id: &str, remote: &config::SavedRemote) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 64
+        || !id.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(
+            "remote id must be 1-64 lowercase ASCII letters, digits, '-' or '_'".to_string(),
+        );
+    }
+    if remote.host.is_empty() {
+        return Err("SSH host is required".to_string());
+    }
+    if remote.host.starts_with('-') || remote.host.chars().any(char::is_control) {
+        return Err("SSH host is invalid".to_string());
+    }
+    if remote
+        .label
+        .as_deref()
+        .is_some_and(|label| label.chars().any(char::is_control))
+    {
+        return Err("remote label is invalid".to_string());
+    }
+    if remote
+        .qmux_cli
+        .as_deref()
+        .is_some_and(|path| path.chars().any(char::is_control))
+    {
+        return Err("qmux CLI path is invalid".to_string());
+    }
+    if let Some(root) = remote.workspace_root.as_deref()
+        && (!root.starts_with('/') && !root.starts_with("~/"))
+    {
+        return Err("workspace root must be an absolute path or start with ~/".to_string());
+    }
+    Ok(())
+}
+
+fn normalize_ui_remote(mut remote: config::SavedRemote) -> config::SavedRemote {
+    remote.host = remote.host.trim().to_string();
+    remote.label = remote
+        .label
+        .take()
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
+    remote.qmux_cli = remote
+        .qmux_cli
+        .take()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+    remote.workspace_root = remote
+        .workspace_root
+        .take()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty());
+    remote
+}
+
+#[tauri::command(async)]
+fn upsert_remote(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    remote: config::SavedRemote,
+) -> Result<Vec<config::RemoteChoice>, String> {
+    let id = id.trim().to_string();
+    let remote = normalize_ui_remote(remote);
+    validate_ui_remote(&id, &remote)?;
+    if state.config().remotes.contains_key(&id) {
+        return Err(format!(
+            "remote '{id}' is declared in qmux.config.json and cannot be changed here"
+        ));
+    }
+    persistence::update_preferences(&state.config().workspace_root, move |preferences| {
+        preferences.remotes.insert(id, remote);
+    })?;
+    effective_remote_choices(&state)
+}
+
+#[tauri::command(async)]
+fn delete_remote(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<config::RemoteChoice>, String> {
+    let id = id.trim().to_string();
+    if state.config().remotes.contains_key(&id) {
+        return Err(format!(
+            "remote '{id}' is declared in qmux.config.json and cannot be removed here"
+        ));
+    }
+    let mut removed = false;
+    persistence::update_preferences(&state.config().workspace_root, |preferences| {
+        removed = preferences.remotes.remove(&id).is_some();
+    })?;
+    if !removed {
+        return Err(format!("remote '{}' was not found", id));
+    }
+    effective_remote_choices(&state)
+}
+
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+enum RemoteProbeStatus {
+    Passed,
+    Failed,
+    Skipped,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeCheck {
+    id: &'static str,
+    label: &'static str,
+    status: RemoteProbeStatus,
+    message: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteProbeResult {
+    checks: Vec<RemoteProbeCheck>,
+    adapters: Vec<adapters::AdapterMetadata>,
+}
+
+fn remote_probe_output(
+    host: &host::Host,
+    program: &str,
+    args: Vec<String>,
+) -> Result<std::process::Output, String> {
+    use std::process::Stdio;
+    host.command(host::RemoteCommand {
+        program,
+        args,
+        ..Default::default()
+    })
+    .stdin(Stdio::null())
+    .output()
+    .map_err(|err| format!("failed to run remote check: {err}"))
+}
+
+fn remote_probe_failure(output: &std::process::Output, fallback: &str) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.is_empty() {
+        fallback.to_string()
+    } else {
+        stderr
+    }
+}
+
+#[tauri::command(async)]
+fn probe_remote(
+    state: tauri::State<'_, AppState>,
+    remote: config::SavedRemote,
+) -> Result<RemoteProbeResult, String> {
+    let remote = normalize_ui_remote(remote);
+    validate_ui_remote("probe", &remote)?;
+    let remote_ref = remote.to_ref("probe");
+    let host = host::for_group(Some(&remote_ref));
+    let mut checks = Vec::with_capacity(3);
+
+    let connection = remote_probe_output(&host, "true", Vec::new());
+    let connection_ok = connection
+        .as_ref()
+        .is_ok_and(|output| output.status.success());
+    checks.push(match connection {
+        Ok(output) if output.status.success() => RemoteProbeCheck {
+            id: "ssh",
+            label: "SSH connection",
+            status: RemoteProbeStatus::Passed,
+            message: format!(
+                "Connected to {} without an interactive prompt.",
+                remote_ref.host
+            ),
+        },
+        Ok(output) => RemoteProbeCheck {
+            id: "ssh",
+            label: "SSH connection",
+            status: RemoteProbeStatus::Failed,
+            message: remote_probe_failure(
+                &output,
+                "Non-interactive SSH authentication was rejected.",
+            ),
+        },
+        Err(error) => RemoteProbeCheck {
+            id: "ssh",
+            label: "SSH connection",
+            status: RemoteProbeStatus::Failed,
+            message: error,
+        },
+    });
+
+    if !connection_ok {
+        checks.extend([
+            RemoteProbeCheck {
+                id: "tmux",
+                label: "tmux 3.2+",
+                status: RemoteProbeStatus::Skipped,
+                message: "Connect successfully before checking tmux.".to_string(),
+            },
+            RemoteProbeCheck {
+                id: "qmuxCli",
+                label: "qmux CLI",
+                status: RemoteProbeStatus::Skipped,
+                message: "Connect successfully before checking qmux-cli.".to_string(),
+            },
+        ]);
+        return Ok(RemoteProbeResult {
+            checks,
+            adapters: Vec::new(),
+        });
+    }
+
+    let tmux = remote_probe_output(&host, "tmux", vec!["-V".to_string()]);
+    checks.push(match tmux {
+        Ok(output) if output.status.success() => {
+            let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            match pty::validate_remote_tmux_version(&version) {
+                Ok(()) => RemoteProbeCheck {
+                    id: "tmux",
+                    label: "tmux 3.2+",
+                    status: RemoteProbeStatus::Passed,
+                    message: version,
+                },
+                Err(error) => RemoteProbeCheck {
+                    id: "tmux",
+                    label: "tmux 3.2+",
+                    status: RemoteProbeStatus::Failed,
+                    message: error,
+                },
+            }
+        }
+        Ok(output) => RemoteProbeCheck {
+            id: "tmux",
+            label: "tmux 3.2+",
+            status: RemoteProbeStatus::Failed,
+            message: remote_probe_failure(&output, "tmux was not found on the remote machine."),
+        },
+        Err(error) => RemoteProbeCheck {
+            id: "tmux",
+            label: "tmux 3.2+",
+            status: RemoteProbeStatus::Failed,
+            message: error,
+        },
+    });
+
+    let qmux_cli = host
+        .remote()
+        .map(|target| target.qmux_cli.clone())
+        .unwrap_or_else(|| "qmux-cli".to_string());
+    let cli = remote_probe_output(
+        &host,
+        "sh",
+        vec![
+            "-c".to_string(),
+            "command -v \"$1\"".to_string(),
+            "qmux-remote-probe".to_string(),
+            qmux_cli.clone(),
+        ],
+    );
+    let cli_ok = cli.as_ref().is_ok_and(|output| output.status.success());
+    checks.push(match cli {
+        Ok(output) if output.status.success() => RemoteProbeCheck {
+            id: "qmuxCli",
+            label: "qmux CLI",
+            status: RemoteProbeStatus::Passed,
+            message: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        },
+        Ok(output) => RemoteProbeCheck {
+            id: "qmuxCli",
+            label: "qmux CLI",
+            status: RemoteProbeStatus::Failed,
+            message: remote_probe_failure(
+                &output,
+                &format!("'{qmux_cli}' was not found on the remote machine."),
+            ),
+        },
+        Err(error) => RemoteProbeCheck {
+            id: "qmuxCli",
+            label: "qmux CLI",
+            status: RemoteProbeStatus::Failed,
+            message: error,
+        },
+    });
+
+    let adapters = if cli_ok {
+        adapters::probe_adapter_metadata_for_config(state.config(), Some(&remote_ref), true)?
+    } else {
+        Vec::new()
+    };
+    Ok(RemoteProbeResult { checks, adapters })
 }
 
 #[tauri::command(async)]
@@ -2210,8 +2519,8 @@ fn group_set_collapsed(
 // other command, including pane writes and turn submits.
 //
 // The group-creation folder picker is split from creation itself so the
-// frontend can compose directory sources — a picked local folder today, a
-// saved remote's path prompt later — before committing to the atomic
+// frontend can compose directory sources — a picked local folder, or `~`
+// for a remote group's home directory — before committing to the atomic
 // create-with-shell command below.
 #[tauri::command]
 async fn group_pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
@@ -2302,15 +2611,29 @@ async fn spawn_shell(
     initial_size: Option<InitialPaneSize>,
     source_pane_id: Option<String>,
     group_id: Option<String>,
+    remote_id: Option<String>,
 ) -> Result<PaneInfo, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         validate_launch_workspace(&state, group_id.as_deref(), LaunchOrigin::Terminal)?;
-        spawn_shell_pane(
+        let Some(remote_id) = remote_id.as_deref() else {
+            return spawn_shell_pane(
+                &state,
+                initial_size,
+                source_pane_id.as_deref(),
+                group_id.as_deref(),
+            );
+        };
+        let preferences = persistence::load_preferences(&state.config().workspace_root)?;
+        let remote = state
+            .config()
+            .saved_remote_with(remote_id, &preferences.remotes)?;
+        spawn_ssh_shell_pane(
             &state,
             initial_size,
             source_pane_id.as_deref(),
             group_id.as_deref(),
+            &remote,
         )
     })
     .await
@@ -3458,6 +3781,10 @@ fn main() {
             app_window_ready,
             acknowledge_interface_health_probe,
             get_runtime_config,
+            list_ssh_config_aliases,
+            upsert_remote,
+            delete_remote,
+            probe_remote,
             probe_agent_adapters,
             launcher_adapter_preference_get,
             launcher_adapter_preference_set,
@@ -3738,6 +4065,41 @@ mod interface_health_tests {
         assert!(tracker.claim_reload(generation));
         assert!(!tracker.claim_reload(generation));
         assert!(!tracker.claim_unanswered_reload(generation));
+    }
+}
+
+#[cfg(test)]
+mod remote_settings_tests {
+    use super::{normalize_ui_remote, validate_ui_remote};
+    use crate::config::SavedRemote;
+
+    #[test]
+    fn ui_remote_normalization_trims_optional_fields() {
+        let remote = normalize_ui_remote(SavedRemote {
+            host: "  user@devbox  ".to_string(),
+            label: Some("  Dev box  ".to_string()),
+            qmux_cli: Some("   ".to_string()),
+            workspace_root: Some("  ~/.qmux/workspaces  ".to_string()),
+            ..Default::default()
+        });
+        assert_eq!(remote.host, "user@devbox");
+        assert_eq!(remote.label.as_deref(), Some("Dev box"));
+        assert_eq!(remote.qmux_cli, None);
+        assert_eq!(remote.workspace_root.as_deref(), Some("~/.qmux/workspaces"));
+        validate_ui_remote("devbox", &remote).unwrap();
+    }
+
+    #[test]
+    fn ui_remote_validation_rejects_ssh_options_and_relative_roots() {
+        let mut remote = SavedRemote {
+            host: "-oProxyCommand=bad".to_string(),
+            ..Default::default()
+        };
+        assert!(validate_ui_remote("devbox", &remote).is_err());
+        remote.host = "devbox".to_string();
+        remote.workspace_root = Some("relative/workspaces".to_string());
+        assert!(validate_ui_remote("devbox", &remote).is_err());
+        assert!(validate_ui_remote("Dev Box", &SavedRemote::default()).is_err());
     }
 }
 

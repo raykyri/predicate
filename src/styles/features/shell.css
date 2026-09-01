@@ -1056,38 +1056,15 @@
 }
 
 .settings-context-menu {
-  width: min(180px, calc(100vw - 16px));
+  width: min(240px, calc(100vw - 16px));
 }
 
-/* The remote-directory prompt replaces the remote list in place, so it has to
-   sit inside the same narrow popover without widening it. */
-.settings-remote-group-form {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px 6px 6px;
-}
-
-.settings-remote-group-form label {
-  font-size: 11px;
-  opacity: 0.7;
-}
-
-.settings-remote-group-form input {
-  width: 100%;
-  box-sizing: border-box;
-  font: inherit;
-  font-size: 12px;
-  padding: 3px 5px;
-  color: inherit;
-  background: var(--surface-input-bg, rgba(127, 127, 127, 0.12));
-  border: 1px solid var(--surface-input-border, rgba(127, 127, 127, 0.3));
-  border-radius: 4px;
-}
-
-.settings-remote-group-form input:focus-visible {
-  outline: 1px solid var(--accent, #6aa9ff);
-  outline-offset: 0;
+.settings-context-menu-label {
+  padding: 5px 8px 3px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 
 /* Unchecked research filters intentionally have no icon; keep their labels in
@@ -1815,9 +1792,9 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 .settings-panel {
   display: flex;
   flex-direction: column;
-  width: min(420px, 100%);
-  min-height: min(600px, 90vh);
-  max-height: min(760px, calc(100vh - 36px));
+  width: min(500px, 100%);
+  min-height: min(800px, 95vh);
+  max-height: min(960px, 95vh);
   gap: 14px;
   border: 1px solid var(--dialog-border);
   border-radius: 10px;
@@ -1859,7 +1836,7 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 .settings-tabs {
   display: grid;
   flex: 0 0 auto;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   overflow: hidden;
   border: 1px solid var(--control-border);
   border-radius: var(--radius-md);
@@ -1934,6 +1911,310 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 
 .settings-agent-refresh .is-spinning {
   animation: spin 0.9s linear infinite;
+}
+
+.settings-agent-refresh {
+  justify-content: center;
+  width: 27px;
+  padding: 0;
+}
+
+.settings-remotes {
+  gap: 12px;
+}
+
+.settings-remote-add,
+.settings-remote-actions .control-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 27px;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--control-border);
+  border-radius: var(--radius-md);
+  color: var(--control-fg-muted);
+  background: var(--control-bg);
+  font-size: var(--fs-sm);
+}
+
+.settings-remote-add-group {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+}
+
+.settings-remote-add-group > button {
+  position: relative;
+}
+
+.settings-remote-add-group > button:focus-visible {
+  z-index: 1;
+}
+
+.settings-remote-add-main {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.settings-remote-add-menu-button {
+  min-width: 24px;
+  margin-left: -1px;
+  padding: 0 5px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.settings-remote-add-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: var(--z-context-menu);
+  width: min(280px, calc(100vw - 32px));
+  padding: 4px;
+  /* Buttons inherit this; without it they take the 16px UA default. */
+  color: var(--text-body-soft);
+  font-size: 13.5px;
+  user-select: none;
+}
+
+.settings-remote-add-menu-label {
+  padding: 5px 8px 3px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.settings-remote-add-menu-aliases {
+  display: grid;
+  max-height: clamp(96px, calc(100vh - 240px), 260px);
+  gap: 1px;
+  overflow-y: auto;
+}
+
+.settings-remote-add-menu-aliases button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-remote-add-menu-empty {
+  padding: 7px 8px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.settings-remote-list {
+  flex: 0 0 auto;
+}
+
+.settings-remote-summary {
+  grid-template-columns: 16px minmax(0, 1fr) auto 13px;
+}
+
+.settings-remote-icon {
+  color: var(--control-fg-muted);
+}
+
+.settings-remote-source {
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: var(--control-fg-muted);
+  background: var(--surface-fill-subtle);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.settings-remote-new-heading {
+  display: flex;
+  align-items: center;
+  min-height: 42px;
+  gap: 8px;
+  padding: 8px 10px 0;
+  color: var(--text-primary);
+  font-size: var(--fs-base);
+}
+
+.settings-remote-detail {
+  padding: 2px 10px 10px 34px;
+  background: var(--surface-fill-subtle);
+}
+
+.settings-remote-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.55fr);
+  gap: 9px;
+}
+
+.settings-remote-fields label {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--control-fg-muted);
+  font-size: var(--fs-xs);
+}
+
+.settings-remote-fields label:nth-child(n + 3) {
+  grid-column: 1 / -1;
+}
+
+.settings-remote-fields small {
+  color: var(--text-faint);
+  font-size: inherit;
+}
+
+.settings-remote-fields input {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-h-md);
+  padding: 0 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.settings-remote-fields input:disabled {
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+.settings-remote-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.settings-remote-remove {
+  margin-right: 0;
+}
+
+.settings-remote-test {
+  margin-right: auto;
+}
+
+.settings-remote-save {
+  color: var(--button-primary-fg, white) !important;
+  border-color: var(--accent-strong) !important;
+  background: var(--accent-strong) !important;
+}
+
+/* Stacked over the settings modal, which already occupies --z-dialog. */
+.settings-remote-delete-dialog {
+  z-index: calc(var(--z-dialog) + 1);
+}
+
+.settings-remote-readonly {
+  padding-top: 8px;
+}
+
+.settings-remote-readonly .settings-agent-details {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-remote-readonly .settings-hint {
+  margin: 10px 0 0;
+}
+
+.settings-remote-probe-loading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  color: var(--control-fg-muted);
+  font-size: var(--fs-sm);
+}
+
+.settings-remote-probe-loading .is-spinning {
+  animation: spin 0.9s linear infinite;
+}
+
+.settings-remote-probe-result {
+  display: grid;
+  gap: 9px;
+  margin-top: 10px;
+  padding: 8px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--field-bg);
+}
+
+.settings-remote-checks {
+  display: grid;
+  gap: 7px;
+}
+
+.settings-remote-check {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  color: var(--status-success-fg);
+}
+
+.settings-remote-check.is-failed {
+  color: var(--status-attention-fg);
+}
+
+.settings-remote-check.is-skipped {
+  color: var(--text-faint);
+}
+
+.settings-remote-check > svg {
+  margin-top: 2px;
+}
+
+.settings-remote-check > span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.settings-remote-check strong,
+.settings-remote-provider-results strong {
+  color: var(--text-primary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.settings-remote-check small {
+  overflow-wrap: anywhere;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.settings-remote-provider-results {
+  display: grid;
+  gap: 5px;
+  padding-top: 8px;
+  border-top: 1px solid var(--surface-border-subtle);
+}
+
+.settings-remote-provider-results > span {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.settings-remote-provider-results > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-remote-empty {
+  display: flex;
+  min-height: 104px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
 }
 
 .settings-agent-list {

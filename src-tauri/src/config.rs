@@ -127,7 +127,8 @@ pub struct DevinAdapterConfig {
     pub binary: Option<String>,
 }
 
-/// A machine declared in `qmux.config.json` that workspaces can be created on.
+/// A saved machine that workspaces can be created on. Entries can come from
+/// `qmux.config.json` or the UI-owned preferences store.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SavedRemote {
@@ -170,9 +171,23 @@ pub struct RemoteChoice {
     pub label: String,
     pub host: String,
     pub multiplexer: RemoteMultiplexer,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qmux_cli: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    /// Config-file entries are explicit, read-only declarations. Preference
+    /// entries are owned by the settings UI and can be edited or removed.
+    pub source: RemoteSource,
     /// False for a multiplexer qmux cannot drive yet, so a picker can list the
     /// entry without offering a launch that is going to fail.
     pub usable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteSource {
+    Config,
+    Preferences,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -200,6 +215,25 @@ pub struct RuntimeConfig {
 #[serde(rename_all = "camelCase")]
 pub struct TabTitleGenerationRuntimeConfig {
     pub apple_foundation_models_available: bool,
+}
+
+fn remote_choices_from(
+    remotes: &BTreeMap<String, SavedRemote>,
+    source: RemoteSource,
+) -> Vec<RemoteChoice> {
+    remotes
+        .iter()
+        .map(|(id, remote)| RemoteChoice {
+            id: id.clone(),
+            label: remote.label.clone().unwrap_or_else(|| id.clone()),
+            host: remote.host.clone(),
+            multiplexer: remote.multiplexer,
+            qmux_cli: remote.qmux_cli.clone(),
+            workspace_root: remote.workspace_root.clone(),
+            source,
+            usable: remote.multiplexer == RemoteMultiplexer::Tmux,
+        })
+        .collect()
 }
 
 impl QmuxConfig {
@@ -293,32 +327,63 @@ impl QmuxConfig {
         Ok(config)
     }
 
-    /// The declared remotes, for a picker.
+    /// The config-declared remotes, for a picker.
     pub fn remote_choices(&self) -> Vec<RemoteChoice> {
-        self.remotes
-            .iter()
-            .map(|(id, remote)| RemoteChoice {
-                id: id.clone(),
-                label: remote.label.clone().unwrap_or_else(|| id.clone()),
-                host: remote.host.clone(),
-                multiplexer: remote.multiplexer,
-                usable: remote.multiplexer == RemoteMultiplexer::Tmux,
-            })
-            .collect()
+        remote_choices_from(&self.remotes, RemoteSource::Config)
+    }
+
+    /// The effective remote set. UI-owned preferences are merged underneath
+    /// explicit config declarations, which win on an id collision.
+    pub fn remote_choices_with(
+        &self,
+        preference_remotes: &BTreeMap<String, SavedRemote>,
+    ) -> Vec<RemoteChoice> {
+        let mut choices: BTreeMap<String, RemoteChoice> =
+            remote_choices_from(preference_remotes, RemoteSource::Preferences)
+                .into_iter()
+                .map(|choice| (choice.id.clone(), choice))
+                .collect();
+        choices.extend(
+            self.remote_choices()
+                .into_iter()
+                .map(|choice| (choice.id.clone(), choice)),
+        );
+        choices.into_values().collect()
     }
 
     /// Resolves a `remotes` id into the binding a new group will carry.
+    #[cfg(test)]
     pub fn saved_remote(&self, id: &str) -> Result<RemoteRef, String> {
-        let remote = self.remotes.get(id).ok_or_else(|| {
-            if self.remotes.is_empty() {
-                format!("unknown remote '{id}'; no remotes are declared in qmux.config.json")
-            } else {
-                format!(
-                    "unknown remote '{id}'; declared remotes: {}",
-                    self.remotes.keys().cloned().collect::<Vec<_>>().join(", ")
-                )
-            }
-        })?;
+        self.saved_remote_with(id, &BTreeMap::new())
+    }
+
+    /// Resolves an id from the effective config-plus-preferences set. Config
+    /// entries win on collisions, matching `remote_choices_with`.
+    pub fn saved_remote_with(
+        &self,
+        id: &str,
+        preference_remotes: &BTreeMap<String, SavedRemote>,
+    ) -> Result<RemoteRef, String> {
+        let remote = self
+            .remotes
+            .get(id)
+            .or_else(|| preference_remotes.get(id))
+            .ok_or_else(|| {
+                let ids = self
+                    .remotes
+                    .keys()
+                    .chain(preference_remotes.keys())
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
+                if ids.is_empty() {
+                    format!("unknown remote '{id}'; no remotes are configured")
+                } else {
+                    format!(
+                        "unknown remote '{id}'; configured remotes: {}",
+                        ids.into_iter().collect::<Vec<_>>().join(", ")
+                    )
+                }
+            })?;
         if remote.host.trim().is_empty() {
             return Err(format!("remote '{id}' has no ssh host"));
         }
@@ -326,11 +391,18 @@ impl QmuxConfig {
     }
 
     pub fn runtime(&self) -> RuntimeConfig {
+        self.runtime_with(&BTreeMap::new())
+    }
+
+    pub fn runtime_with(
+        &self,
+        preference_remotes: &BTreeMap<String, SavedRemote>,
+    ) -> RuntimeConfig {
         RuntimeConfig {
             workspace_root: self.workspace_root.display().to_string(),
             socket_path: self.socket_path.display().to_string(),
             adapters: adapter_registry(self).metadata(),
-            remotes: self.remote_choices(),
+            remotes: self.remote_choices_with(preference_remotes),
             home_dir: env::var("HOME").unwrap_or_default(),
             tab_title_generation: TabTitleGenerationRuntimeConfig {
                 apple_foundation_models_available: title_generation::foundation_models_available(),
@@ -741,7 +813,7 @@ mod remote_tests {
         let err = config(&[])
             .saved_remote("devbox")
             .expect_err("none declared");
-        assert!(err.contains("no remotes are declared"), "{err}");
+        assert!(err.contains("no remotes are configured"), "{err}");
     }
 
     #[test]
@@ -763,6 +835,38 @@ mod remote_tests {
         assert!(
             !choices[1].usable,
             "a picker should show herdr without offering a launch that will fail"
+        );
+    }
+
+    #[test]
+    fn preference_remotes_merge_under_config_declarations() {
+        let config = config(&[("shared", saved("config-host"))]);
+        let preferences = BTreeMap::from([
+            ("shared".to_string(), saved("preference-host")),
+            ("ui".to_string(), saved("ui-host")),
+        ]);
+
+        let choices = config.remote_choices_with(&preferences);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[0].id, "shared");
+        assert_eq!(choices[0].host, "config-host");
+        assert_eq!(choices[0].source, RemoteSource::Config);
+        assert_eq!(choices[1].id, "ui");
+        assert_eq!(choices[1].source, RemoteSource::Preferences);
+
+        assert_eq!(
+            config
+                .saved_remote_with("shared", &preferences)
+                .expect("config wins")
+                .host,
+            "config-host"
+        );
+        assert_eq!(
+            config
+                .saved_remote_with("ui", &preferences)
+                .expect("preference resolves")
+                .host,
+            "ui-host"
         );
     }
 

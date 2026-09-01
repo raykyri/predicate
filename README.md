@@ -455,8 +455,17 @@ shells, and supported agents all run there; the qmux UI and terminal renderer
 stay local. Binding the machine to the group keeps an agent on the same host as
 the code it edits.
 
-Machines are declared under `remotes` in `qmux.config.json` and a group is
-created against one by passing its id:
+Add machines in **Settings → Remotes**. qmux stores those UI-managed entries in
+`<workspaceRoot>/.qmux/preferences.json`; they appear in the Terminal settings
+menu immediately, without an app restart. The settings row can also test
+non-interactive SSH, tmux, qmux-cli, and supported agent providers before a
+group exists.
+
+The SSH host field suggests concrete aliases from `~/.ssh/config`, including
+aliases declared in common `Include` files. Wildcard and negated `Host`
+patterns are omitted because they are matching rules rather than destinations.
+
+Machines can still be declared under `remotes` in `qmux.config.json`:
 
 ```json
 {
@@ -471,6 +480,11 @@ created against one by passing its id:
   }
 }
 ```
+
+Config-file entries appear read-only in Settings. **Copy to my remotes** opens
+an editable duplicate with a new id; saving it leaves the config declaration
+untouched. The effective list merges both stores, with an explicit
+`qmux.config.json` entry winning if the same id also exists in preferences.
 
 `host` is passed to the system `ssh` client, so `~/.ssh/config` aliases,
 ProxyJump, agents, and hardware-backed keys work normally. Everything else is
@@ -491,12 +505,15 @@ Before creating a remote group:
   adapters will be used. The launcher probes the remote binaries and auth state;
   it never reuses the Mac's readiness result.
 
-In Terminal mode, choose **New group on _Remote_…**, enter an absolute directory
-on that host, and qmux atomically creates the group plus its first shell. A
-failed SSH/tmux launch rolls the group back instead of leaving an empty entry.
+In Terminal mode, the sidebar menu lists each saved remote above **New group…**.
+**New remote group** atomically creates a group plus its first shell in that
+account's home directory. **New remote shell** opens an `ssh` session to that
+host as a tab in the current group; if the group is already bound to the
+machine, it is an ordinary remote shell. A failed SSH/tmux launch rolls the
+group back instead of leaving an empty entry.
 
-The group **snapshots** the entry it was created against rather than referencing
-it, keeping the id only as provenance. Editing or deleting a `remotes` entry
+The group **snapshots** the saved remote it was created against rather than referencing
+it, keeping the id only as provenance. Editing or deleting a remote
 therefore never moves or disables a workspace whose worktrees already live on
 the old machine. Readiness checks also use that snapshot.
 

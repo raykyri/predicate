@@ -60,6 +60,9 @@ import type {
   UpdateResearchDocumentResult,
   SendNextQueuedAgentTurnResult,
   RuntimeConfig,
+  RemoteChoice,
+  RemoteProbeResult,
+  SavedRemote,
   SpawnAgentRequest,
   SubmitAgentTurnMode,
   SubmitAgentTurnResult,
@@ -71,6 +74,22 @@ import type {
 
 export function getRuntimeConfig() {
   return invoke<RuntimeConfig>("get_runtime_config");
+}
+
+export function listSshConfigAliases() {
+  return invoke<string[]>("list_ssh_config_aliases");
+}
+
+export function upsertRemote(id: string, remote: SavedRemote) {
+  return invoke<RemoteChoice[]>("upsert_remote", { id, remote });
+}
+
+export function deleteRemote(id: string) {
+  return invoke<RemoteChoice[]>("delete_remote", { id });
+}
+
+export function probeRemote(remote: SavedRemote) {
+  return invoke<RemoteProbeResult>("probe_remote", { remote });
 }
 
 export function probeAgentAdapters(options?: { groupId?: string | null; force?: boolean }) {
@@ -784,11 +803,13 @@ export function spawnShell(
   initialSize?: InitialPaneSize | null,
   sourcePaneId?: string | null,
   groupId?: string | null,
+  remoteId?: string | null,
 ) {
   return invoke<PaneInfo>("spawn_shell", {
     initialSize: initialSize ?? null,
     sourcePaneId: sourcePaneId ?? null,
     groupId: groupId ?? null,
+    remoteId: remoteId ?? null,
   });
 }
 
