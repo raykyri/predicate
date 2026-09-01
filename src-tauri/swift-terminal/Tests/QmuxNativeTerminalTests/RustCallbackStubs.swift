@@ -5,10 +5,12 @@ final class NativeTerminalCallbackRecorder: @unchecked Sendable {
 
     private let lock = NSLock()
     private var resizeValues: [(columns: Int32, rows: Int32)] = []
+    private var annotationViewportValues: [String] = []
 
     func reset() {
         lock.lock()
         resizeValues.removeAll()
+        annotationViewportValues.removeAll()
         lock.unlock()
     }
 
@@ -22,6 +24,18 @@ final class NativeTerminalCallbackRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return resizeValues
+    }
+
+    func recordAnnotationViewport(_ json: String) {
+        lock.lock()
+        annotationViewportValues.append(json)
+        lock.unlock()
+    }
+
+    var annotationViewports: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return annotationViewportValues
     }
 }
 
@@ -50,6 +64,14 @@ func nativeTerminalDidResizeStub(
     _ rows: Int32
 ) {
     NativeTerminalCallbackRecorder.shared.recordResize(columns: columns, rows: rows)
+}
+
+@_cdecl("qmux_native_terminal_did_change_annotation_viewport")
+func nativeTerminalDidChangeAnnotationViewportStub(
+    _: UnsafePointer<CChar>,
+    _ json: UnsafePointer<CChar>
+) {
+    NativeTerminalCallbackRecorder.shared.recordAnnotationViewport(String(cString: json))
 }
 
 @_cdecl("qmux_native_terminal_did_write")

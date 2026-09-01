@@ -1436,6 +1436,11 @@ export function setNativeTerminalBrowserOverlayOpen(active: boolean) {
   return nativeTerminalBrowserOverlayUpdate;
 }
 
+/** Enables viewport/content events only while a visible pane has annotations. */
+export function setNativeTerminalAnnotationMonitoring(paneId: string, enabled: boolean) {
+  return invoke<void>("native_terminal_set_annotation_monitoring", { paneId, enabled });
+}
+
 export interface NativeWebOverlayRegion {
   regionId: string;
   x: number;
@@ -1624,6 +1629,53 @@ export async function listNativeTerminalThemes(): Promise<NativeTerminalTheme[]>
  */
 export function readNativeTerminalViewportText(paneId: string) {
   return invoke<string>("native_terminal_read_viewport_text", { paneId });
+}
+
+export interface NativeTerminalAnnotationSelectionSnapshot {
+  selectedText: string;
+  viewportCellStart: number;
+  viewportCellLength: number;
+  selectionStartXPoints: number;
+  selectionBaselineYPoints: number;
+  scrollbar: {
+    totalRows: number;
+    offsetRows: number;
+    visibleRows: number;
+  };
+  scrollbarIsInitialized: boolean;
+  columns: number;
+  rows: number;
+  cellWidthPoints: number;
+  cellHeightPoints: number;
+  gridOriginXPoints: number;
+  gridOriginYPoints: number;
+  backingScaleFactor: number;
+  viewportRevision: number;
+  contentGeneration: number;
+  viewportFullyContained: boolean;
+}
+
+export type NativeTerminalAnnotationViewportSnapshot = Omit<
+  NativeTerminalAnnotationSelectionSnapshot,
+  | "selectedText"
+  | "viewportCellStart"
+  | "viewportCellLength"
+  | "selectionStartXPoints"
+  | "selectionBaselineYPoints"
+  | "viewportFullyContained"
+>;
+
+/**
+ * Current native selection and geometry. A false `viewportFullyContained`
+ * allows quote capture but must never be used to paint a cell anchor.
+ */
+export async function readNativeTerminalAnnotationSelection(
+  paneId: string,
+): Promise<NativeTerminalAnnotationSelectionSnapshot> {
+  const snapshot = await invoke<string>("native_terminal_annotation_selection_snapshot", {
+    paneId,
+  });
+  return JSON.parse(snapshot) as NativeTerminalAnnotationSelectionSnapshot;
 }
 
 export function paneActivity(paneId: string) {

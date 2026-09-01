@@ -179,7 +179,11 @@ public func qmuxNativeTerminalReceive(
     // is not serialized behind whatever the main thread is currently doing.
     guard let session = TerminalSessionRegistry.shared.session(for: paneID)
     else { return 0 }
-    return session.receive(data) ? 1 : 0
+    let contentRegistry = TerminalAnnotationContentRegistry.shared
+    contentRegistry.beginContentMutation(for: paneID)
+    let received = session.receive(data)
+    contentRegistry.endContentMutation(for: paneID)
+    return received ? 1 : 0
 }
 
 @_cdecl("qmux_native_terminal_is_ready_for_replay")
@@ -305,6 +309,20 @@ public func qmuxNativeTerminalSetIframeShortcutFallback(_ active: Int32) -> Int3
 public func qmuxNativeTerminalSetBrowserOverlayOpen(_ active: Int32) -> Int32 {
     onTerminalMain {
         NativeTerminalHost.shared.setBrowserOverlayOpen(active == 1) ? 1 : 0
+    }
+}
+
+@_cdecl("qmux_native_terminal_set_annotation_monitoring")
+public func qmuxNativeTerminalSetAnnotationMonitoring(
+    _ paneID: UnsafePointer<CChar>?,
+    _ enabled: Int32
+) -> Int32 {
+    guard let paneID = terminalString(paneID) else { return 0 }
+    return onTerminalMain {
+        NativeTerminalHost.shared.setAnnotationMonitoring(
+            id: paneID,
+            enabled: enabled == 1
+        ) ? 1 : 0
     }
 }
 
@@ -548,6 +566,25 @@ public func qmuxNativeTerminalReadViewportText(
         return nil
     }
     return text.withCString { strdup($0) }
+}
+
+/// Selection text plus native viewport/grid geometry as JSON. The containment
+/// flag is false when qmux cannot prove that Ghostty's viewport-relative cell
+/// offsets describe the complete selection.
+@_cdecl("qmux_native_terminal_annotation_selection_snapshot")
+public func qmuxNativeTerminalAnnotationSelectionSnapshot(
+    _ paneID: UnsafePointer<CChar>?
+) -> UnsafeMutablePointer<CChar>? {
+    guard let paneID = terminalString(paneID) else { return nil }
+    let json: String? = onTerminalMain {
+        guard let snapshot = NativeTerminalHost.shared
+            .annotationSelectionSnapshot(id: paneID),
+            let data = try? JSONEncoder().encode(snapshot),
+            let json = String(data: data, encoding: .utf8)
+        else { return nil }
+        return json
+    }
+    return json?.withCString { strdup($0) }
 }
 
 @_cdecl("qmux_native_terminal_free_string")

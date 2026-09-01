@@ -13,6 +13,102 @@ final class QmuxTerminalView: TerminalView {
     /// keyboard owner while the actual responder cannot deliver keys to the
     /// DOM (see performKeyEquivalent below).
     var shouldOfferAppShortcutFallback: (() -> Bool)?
+    var annotationViewportState: (() -> (
+        revision: UInt64,
+        contentGeneration: UInt64,
+        offsetRows: UInt64,
+        scrollbarIsInitialized: Bool
+    ))?
+    private var annotationGestureStart: (
+        point: CGPoint,
+        revision: UInt64,
+        contentGeneration: UInt64,
+        offsetRows: UInt64
+    )?
+    private(set) var annotationGestureWasFullyContained = false
+    private(set) var annotationGestureRevision: UInt64?
+    private var annotationGestureContentGeneration: UInt64?
+    private var annotationGestureSelectionFingerprint: (text: String, start: UInt32, length: UInt32)?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = annotationPoint(from: event)
+        let state = annotationViewportState?()
+        annotationGestureStart = Self.annotationGestureCanProveLinearSelection(
+            event.modifierFlags
+        )
+            ? state.map { (point, $0.revision, $0.contentGeneration, $0.offsetRows) }
+            : nil
+        annotationGestureWasFullyContained = false
+        annotationGestureRevision = nil
+        annotationGestureContentGeneration = nil
+        annotationGestureSelectionFingerprint = nil
+        super.mouseDown(with: event)
+    }
+
+    static func annotationGestureCanProveLinearSelection(
+        _ modifiers: NSEvent.ModifierFlags
+    ) -> Bool {
+        modifiers.intersection([.shift, .control, .option, .command]).isEmpty
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        super.mouseUp(with: event)
+        guard let start = annotationGestureStart,
+              let state = annotationViewportState?(),
+              let metrics = terminalGridMetrics(),
+              let scale = window?.backingScaleFactor
+        else {
+            annotationGestureStart = nil
+            return
+        }
+        annotationGestureWasFullyContained = TerminalAnnotationGeometry.fullyContainsGesture(
+            start: start.point,
+            end: annotationPoint(from: event),
+            bounds: bounds,
+            metrics: metrics,
+            backingScaleFactor: scale,
+            gridPaddingPoints: NativeTerminalPane.gridPaddingPoints,
+            startRevision: start.revision,
+            endRevision: state.revision,
+            startContentGeneration: start.contentGeneration,
+            endContentGeneration: state.contentGeneration,
+            startScrollbarOffset: start.offsetRows,
+            endScrollbarOffset: state.offsetRows,
+            scrollbarIsInitialized: state.scrollbarIsInitialized
+        )
+        annotationGestureRevision = state.revision
+        annotationGestureContentGeneration = state.contentGeneration
+        if annotationGestureWasFullyContained,
+           let selected = readSelectionSnapshot()
+        {
+            annotationGestureSelectionFingerprint = (
+                selected.text,
+                selected.viewportOffsetStart,
+                selected.viewportOffsetLength
+            )
+        }
+        annotationGestureStart = nil
+    }
+
+    func annotationGestureProvesContainment(
+        of selection: TerminalSelectionSnapshot,
+        viewportRevision: UInt64,
+        contentGeneration: UInt64
+    ) -> Bool {
+        guard annotationGestureWasFullyContained,
+              annotationGestureRevision == viewportRevision,
+              annotationGestureContentGeneration == contentGeneration,
+              let fingerprint = annotationGestureSelectionFingerprint
+        else { return false }
+        return fingerprint.text == selection.text
+            && fingerprint.start == selection.viewportOffsetStart
+            && fingerprint.length == selection.viewportOffsetLength
+    }
+
+    private func annotationPoint(from event: NSEvent) -> CGPoint {
+        let point = convert(event.locationInWindow, from: nil)
+        return CGPoint(x: point.x, y: bounds.height - point.y)
+    }
 
     override func paste(_: Any?) {
         onPasteRequest?()

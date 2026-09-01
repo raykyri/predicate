@@ -20,6 +20,12 @@ private func nativeTerminalDidChangeCwd(
 @_silgen_name("qmux_native_terminal_did_resize")
 private func nativeTerminalDidResize(_ paneID: UnsafePointer<CChar>, _ columns: Int32, _ rows: Int32)
 
+@_silgen_name("qmux_native_terminal_did_change_annotation_viewport")
+private func nativeTerminalDidChangeAnnotationViewport(
+    _ paneID: UnsafePointer<CChar>,
+    _ json: UnsafePointer<CChar>
+)
+
 @_silgen_name("qmux_native_terminal_did_write")
 private func nativeTerminalDidWrite(
     _ paneID: UnsafePointer<CChar>,
@@ -75,8 +81,11 @@ final class NativeTerminalPane: NSObject,
     TerminalSurfaceTitleDelegate,
     TerminalSurfacePwdDelegate,
     TerminalSurfaceResizeDelegate,
+    TerminalSurfaceScrollbarDelegate,
     TerminalSurfaceOpenURLDelegate
 {
+    static let gridPadding = 10
+    static let gridPaddingPoints = CGPoint(x: gridPadding, y: gridPadding)
     let paneID: String
     let view: QmuxTerminalView
     let controller: TerminalController
@@ -114,6 +123,15 @@ final class NativeTerminalPane: NSObject,
     private var flushedPtyRows: Int32?
     private var ptyResizeFlushGeneration: UInt64 = 0
     private var ptyResizeFlushScheduled = false
+    private var annotationScrollbar = TerminalAnnotationScrollbar(
+        totalRows: 0,
+        offsetRows: 0,
+        visibleRows: 0
+    )
+    private var annotationViewportRevision: UInt64 = 0
+    private var annotationViewportReportScheduled = false
+    private var annotationScrollbarIsInitialized = false
+    private var annotationMonitoringEnabled = false
 
     init(
         paneID: String,
@@ -154,8 +172,8 @@ final class NativeTerminalPane: NSObject,
         controller = TerminalController(
             theme: QmuxTerminalTheme.theme(named: themeName)
         ) { builder in
-            builder.withWindowPaddingX(10)
-            builder.withWindowPaddingY(10)
+            builder.withWindowPaddingX(Self.gridPadding)
+            builder.withWindowPaddingY(Self.gridPadding)
             builder.withCustom("shell-integration", "none")
             builder.withCustom("confirm-close-surface", "false")
             // Keep Shift as an unconditional escape hatch from application
@@ -262,6 +280,15 @@ final class NativeTerminalPane: NSObject,
             guard let self else { return false }
             return NativeTerminalHost.shared.shouldOfferKeyEquivalentFallback(for: self)
         }
+        view.annotationViewportState = { [weak self] in
+            guard let self else { return (0, 0, 0, false) }
+            return (
+                self.annotationViewportRevision,
+                TerminalAnnotationContentRegistry.shared.generation(for: self.paneID),
+                self.annotationScrollbar.offsetRows,
+                self.annotationScrollbarIsInitialized
+            )
+        }
     }
 
     func terminalDidClose(processAlive: Bool) {
@@ -287,12 +314,103 @@ final class NativeTerminalPane: NSObject,
     }
 
     func terminalDidResize(columns: Int, rows: Int) {
+        annotationViewportRevision &+= 1
+        scheduleAnnotationViewportReport()
         guard let columns = Int32(exactly: columns),
               let rows = Int32(exactly: rows)
         else {
             return
         }
         enqueuePtyResize(columns: columns, rows: rows)
+    }
+
+    func terminalDidChangeScrollbar(_ metrics: TerminalScrollbarMetrics) {
+        let next = TerminalAnnotationScrollbar(
+            totalRows: metrics.total,
+            offsetRows: metrics.offset,
+            visibleRows: metrics.length
+        )
+        let wasInitialized = annotationScrollbarIsInitialized
+        annotationScrollbarIsInitialized = true
+        if next != annotationScrollbar || !wasInitialized {
+            annotationScrollbar = next
+            annotationViewportRevision &+= 1
+            scheduleAnnotationViewportReport()
+        }
+    }
+
+    /// Scrollbar actions can arrive once per streamed row. Keep the native
+    /// revision exact, but cross the Swift/Rust/WebKit boundary at most once
+    /// per display interval.
+    private func scheduleAnnotationViewportReport() {
+        guard annotationMonitoringEnabled, !annotationViewportReportScheduled else { return }
+        annotationViewportReportScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / 60.0) { [weak self] in
+            guard let self else { return }
+            self.annotationViewportReportScheduled = false
+            guard self.annotationMonitoringEnabled else { return }
+            guard let metrics = self.view.terminalGridMetrics() else { return }
+            guard let scale = self.view.window?.backingScaleFactor else { return }
+            guard let snapshot = TerminalAnnotationGeometry.viewportSnapshot(
+                scrollbar: self.annotationScrollbar,
+                scrollbarIsInitialized: self.annotationScrollbarIsInitialized,
+                metrics: metrics,
+                bounds: self.view.bounds,
+                backingScaleFactor: scale,
+                gridPaddingPoints: Self.gridPaddingPoints,
+                viewportRevision: self.annotationViewportRevision,
+                contentGeneration: TerminalAnnotationContentRegistry.shared
+                    .generation(for: self.paneID)
+            ),
+            let data = try? JSONEncoder().encode(snapshot),
+            let json = String(data: data, encoding: .utf8)
+            else { return }
+            self.paneID.withCString { paneID in
+                json.withCString { nativeTerminalDidChangeAnnotationViewport(paneID, $0) }
+            }
+        }
+    }
+
+    func setAnnotationMonitoring(_ enabled: Bool) {
+        annotationMonitoringEnabled = enabled
+        TerminalAnnotationContentRegistry.shared.setMonitoring(enabled, for: paneID)
+        if enabled {
+            scheduleAnnotationViewportReport()
+        }
+    }
+
+    func annotationContentDidChange() {
+        scheduleAnnotationViewportReport()
+    }
+
+    func annotationSelectionSnapshot() -> TerminalAnnotationSelectionSnapshot? {
+        let contentRegistry = TerminalAnnotationContentRegistry.shared
+        let generationBefore = contentRegistry.generation(for: paneID)
+        guard generationBefore.isMultiple(of: 2) else { return nil }
+        guard let selection = view.readSelectionSnapshot(),
+              let metrics = view.terminalGridMetrics()
+        else { return nil }
+        let generationAfter = contentRegistry.generation(for: paneID)
+        let surfaceSnapshotWasStable = generationBefore == generationAfter
+            && generationAfter.isMultiple(of: 2)
+        guard let scale = view.window?.backingScaleFactor else { return nil }
+        let gestureIsCurrent = surfaceSnapshotWasStable && view.annotationGestureProvesContainment(
+            of: selection,
+            viewportRevision: annotationViewportRevision,
+            contentGeneration: generationAfter
+        )
+        return TerminalAnnotationGeometry.snapshot(
+            selection: selection,
+            scrollbar: annotationScrollbar,
+            metrics: metrics,
+            bounds: view.bounds,
+            backingScaleFactor: scale,
+            gridPaddingPoints: Self.gridPaddingPoints,
+            viewportRevision: annotationViewportRevision,
+            contentGeneration: generationAfter,
+            scrollbarIsInitialized: annotationScrollbarIsInitialized,
+            gestureWasFullyContained: gestureIsCurrent
+        )
     }
 
     /// Record a Ghostty grid change without TIOCSWINSZ yet. `fitToSize` /

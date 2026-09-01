@@ -467,6 +467,10 @@ mod imp {
         ) -> i32;
         fn qmux_native_terminal_set_iframe_shortcut_fallback(active: i32) -> i32;
         fn qmux_native_terminal_set_browser_overlay_open(active: i32) -> i32;
+        fn qmux_native_terminal_set_annotation_monitoring(
+            pane_id: *const c_char,
+            enabled: i32,
+        ) -> i32;
         fn qmux_native_terminal_set_human_browser_webview(
             native_view: *mut c_void,
             active: i32,
@@ -519,6 +523,9 @@ mod imp {
         ) -> i32;
         fn qmux_native_terminal_theme_catalog() -> *const c_char;
         fn qmux_native_terminal_read_viewport_text(pane_id: *const c_char) -> *mut c_char;
+        fn qmux_native_terminal_annotation_selection_snapshot(
+            pane_id: *const c_char,
+        ) -> *mut c_char;
         fn qmux_native_terminal_free_string(pointer: *mut c_char);
         fn qmux_native_terminal_shutdown();
     }
@@ -846,6 +853,19 @@ mod imp {
         }
     }
 
+    pub fn set_annotation_monitoring(pane_id: &str, enabled: bool) -> Result<(), String> {
+        let pane_id = cstring(pane_id, "pane id")?;
+        // SAFETY: Swift copies the string and scalar synchronously on main.
+        if unsafe {
+            qmux_native_terminal_set_annotation_monitoring(pane_id.as_ptr(), i32::from(enabled))
+        } == 1
+        {
+            Ok(())
+        } else {
+            Err("native terminal pane was not found".to_string())
+        }
+    }
+
     /// Registers the separately hosted WKWebView used by human-browser mode.
     /// Its descendants need native app-shortcut routing because they are not
     /// part of the privileged application's DOM responder tree.
@@ -1122,6 +1142,22 @@ mod imp {
         Ok(text)
     }
 
+    pub fn annotation_selection_snapshot(pane_id: &str) -> Result<String, String> {
+        let pane_id = cstring(pane_id, "pane id")?;
+        // SAFETY: Swift returns an owned, NUL-terminated JSON buffer. It is
+        // copied before being released through the matching Swift allocator.
+        let pointer =
+            unsafe { qmux_native_terminal_annotation_selection_snapshot(pane_id.as_ptr()) };
+        if pointer.is_null() {
+            return Err("native terminal has no readable selection snapshot".to_string());
+        }
+        let json = unsafe { std::ffi::CStr::from_ptr(pointer) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { qmux_native_terminal_free_string(pointer) };
+        Ok(json)
+    }
+
     pub fn shutdown() {
         // SAFETY: shutdown is idempotent and synchronously tears down Swift-owned
         // views on the main thread.
@@ -1218,6 +1254,10 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn set_annotation_monitoring(_pane_id: &str, _enabled: bool) -> Result<(), String> {
+        Err("native terminals are only available on macOS".to_string())
+    }
+
     pub fn set_human_browser_webview(
         _native_view: *mut c_void,
         _active: bool,
@@ -1278,15 +1318,19 @@ mod imp {
         Err("native terminals are only available on macOS".to_string())
     }
 
+    pub fn annotation_selection_snapshot(_pane_id: &str) -> Result<String, String> {
+        Err("native terminals are only available on macOS".to_string())
+    }
+
     pub fn shutdown() {}
 }
 
 #[allow(unused_imports)]
 pub use imp::{
-    action, application_is_active, available, create_host_managed, focus,
-    human_browser_history_state, initialize, is_ready_for_replay, paste_approved_text,
+    action, annotation_selection_snapshot, application_is_active, available, create_host_managed,
+    focus, human_browser_history_state, initialize, is_ready_for_replay, paste_approved_text,
     play_bundled_sound, play_system_sound, prepare_for_webview_reload, read_viewport_text, receive,
-    remove, seed_settings, send_text, set_browser_overlay_open,
+    remove, seed_settings, send_text, set_annotation_monitoring, set_browser_overlay_open,
     set_human_browser_loading_background, set_human_browser_webview, set_iframe_shortcut_fallback,
     set_layout, set_stage_backstop, set_web_overlay_region, set_web_pointer_claimed, shutdown,
     submit, update_settings,
@@ -1384,6 +1428,27 @@ pub extern "C" fn qmux_native_terminal_did_resize(
         // Cheap when nothing is parked (a set lookup), and safe on the main
         // thread — the flush itself is handed to a worker.
         crate::pty::complete_pending_attach(state, &pane_id);
+    });
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_did_change_annotation_viewport(
+    pane_id: *const std::ffi::c_char,
+    json: *const std::ffi::c_char,
+) {
+    let (Some(pane_id), Some(json)) = (callback_string(pane_id), callback_string(json)) else {
+        return;
+    };
+    let Ok(payload) = serde_json::from_str::<serde_json::Value>(&json) else {
+        return;
+    };
+    with_app_state(|state| {
+        state.emit(QmuxEvent::new(
+            "terminal.annotation_viewport_changed",
+            Some(pane_id),
+            None,
+            payload,
+        ));
     });
 }
 
@@ -1713,6 +1778,14 @@ pub fn native_terminal_set_browser_overlay_open(active: bool) -> Result<(), Stri
 }
 
 #[tauri::command]
+pub fn native_terminal_set_annotation_monitoring(
+    pane_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    set_annotation_monitoring(&pane_id, enabled)
+}
+
+#[tauri::command]
 pub fn native_terminal_set_stage_backstop(
     x: f64,
     y: f64,
@@ -1785,6 +1858,11 @@ pub fn native_terminal_theme_catalog() -> Result<String, String> {
 #[tauri::command]
 pub fn native_terminal_read_viewport_text(pane_id: String) -> Result<String, String> {
     imp::read_viewport_text(&pane_id)
+}
+
+#[tauri::command]
+pub fn native_terminal_annotation_selection_snapshot(pane_id: String) -> Result<String, String> {
+    imp::annotation_selection_snapshot(&pane_id)
 }
 
 #[cfg(all(test, target_os = "macos"))]

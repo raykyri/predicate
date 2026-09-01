@@ -394,3 +394,121 @@ index ea59c3c..042cad6 100644
          )
          #expect(
              TerminalHardwareKeyRouter.routeAppKit(
+diff --git a/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift b/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
+--- a/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
++++ b/Sources/GhosttyTerminal/InMemory/TerminalCallbackBridge.swift
+@@ -52,1 +52,15 @@ final class TerminalCallbackBridge {
+-        case GHOSTTY_ACTION_RING_BELL:
++        case GHOSTTY_ACTION_SCROLLBAR:
++            let scrollbar = action.action.scrollbar
++            let metrics = TerminalScrollbarMetrics(
++                total: scrollbar.total,
++                offset: scrollbar.offset,
++                length: scrollbar.len
++            )
++            TerminalDebugLog.log(
++                .actions,
++                "callback action=scrollbar total=\(metrics.total) offset=\(metrics.offset) len=\(metrics.length)"
++            )
++            (delegate as? any TerminalSurfaceScrollbarDelegate)?
++                .terminalDidChangeScrollbar(metrics)
++
++        case GHOSTTY_ACTION_RING_BELL:
+diff --git a/Sources/GhosttyTerminal/Surface/TerminalSurface.swift b/Sources/GhosttyTerminal/Surface/TerminalSurface.swift
+--- a/Sources/GhosttyTerminal/Surface/TerminalSurface.swift
++++ b/Sources/GhosttyTerminal/Surface/TerminalSurface.swift
+@@ -202,4 +202,6 @@ public final class TerminalSurface: @unchecked Sendable {
+         let text: String
+         let offsetStart: UInt32
+         let offsetLength: UInt32
++        let startPointX: Double
++        let baselinePointY: Double
+     }
+@@ -237,4 +239,6 @@ public final class TerminalSurface: @unchecked Sendable {
+                 text: "",
+                 offsetStart: out.offset_start,
+-                offsetLength: out.offset_len
++                offsetLength: out.offset_len,
++                startPointX: Double(out.tl_px_x),
++                baselinePointY: Double(out.tl_px_y)
+             )
+@@ -251,4 +255,6 @@ public final class TerminalSurface: @unchecked Sendable {
+             text: text,
+             offsetStart: out.offset_start,
+-            offsetLength: out.offset_len
++            offsetLength: out.offset_len,
++            startPointX: Double(out.tl_px_x),
++            baselinePointY: Double(out.tl_px_y)
+         )
+diff --git a/Sources/GhosttyTerminal/QmuxAnnotationPublic.swift b/Sources/GhosttyTerminal/QmuxAnnotationPublic.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/GhosttyTerminal/QmuxAnnotationPublic.swift
+@@ -0,0 +1,67 @@
++import Foundation
++
++/// Ghostty's absolute scrollback geometry. `offset` is the first visible row
++/// measured from the top of retained history and `len` is the visible row count.
++public struct TerminalScrollbarMetrics: Sendable, Equatable {
++    public let total: UInt64
++    public let offset: UInt64
++    public let length: UInt64
++
++    public init(total: UInt64, offset: UInt64, length: UInt64) {
++        self.total = total
++        self.offset = offset
++        self.length = length
++    }
++}
++
++@MainActor
++public protocol TerminalSurfaceScrollbarDelegate: TerminalSurfaceViewDelegate {
++    func terminalDidChangeScrollbar(_ metrics: TerminalScrollbarMetrics)
++}
++
++#if canImport(AppKit) && !canImport(UIKit)
++    import AppKit
++
++    public struct TerminalSelectionSnapshot: Sendable, Equatable {
++        public let text: String
++        public let viewportOffsetStart: UInt32
++        public let viewportOffsetLength: UInt32
++        public let startPointX: Double
++        public let baselinePointY: Double
++
++        public init(
++            text: String,
++            viewportOffsetStart: UInt32,
++            viewportOffsetLength: UInt32,
++            startPointX: Double,
++            baselinePointY: Double
++        ) {
++            self.text = text
++            self.viewportOffsetStart = viewportOffsetStart
++            self.viewportOffsetLength = viewportOffsetLength
++            self.startPointX = startPointX
++            self.baselinePointY = baselinePointY
++        }
++    }
++
++    extension AppTerminalView {
++        /// Selection text and viewport-relative cell geometry. The offset is
++        /// trustworthy only when the embedding host observed a fully-contained
++        /// gesture; this API intentionally makes no containment claim.
++        public func readSelectionSnapshot() -> TerminalSelectionSnapshot? {
++            guard let selected = surface?.readSelectionResult() else { return nil }
++            return TerminalSelectionSnapshot(
++                text: selected.text,
++                viewportOffsetStart: selected.offsetStart,
++                viewportOffsetLength: selected.offsetLength,
++                startPointX: selected.startPointX,
++                baselinePointY: selected.baselinePointY
++            )
++        }
++
++        /// Current grid and cell dimensions in backing pixels.
++        public func terminalGridMetrics() -> TerminalGridMetrics? {
++            surface?.size()
++        }
++    }
++#endif

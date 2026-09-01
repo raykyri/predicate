@@ -222,9 +222,24 @@ final class NativeTerminalHost {
         return pane.hasCommittedGeometry && pane.view.isSurfaceLive
     }
 
+    func annotationSelectionSnapshot(id: String) -> TerminalAnnotationSelectionSnapshot? {
+        panes[id]?.annotationSelectionSnapshot()
+    }
+
+    func setAnnotationMonitoring(id: String, enabled: Bool) -> Bool {
+        guard let pane = panes[id] else { return false }
+        pane.setAnnotationMonitoring(enabled)
+        return true
+    }
+
+    func annotationContentDidChange(id: String) {
+        panes[id]?.annotationContentDidChange()
+    }
+
     func removePane(id: String) {
         guard let pane = panes.removeValue(forKey: id) else { return }
         TerminalSessionRegistry.shared.unregister(id)
+        TerminalAnnotationContentRegistry.shared.remove(id)
         if desiredKeyboardOwnerPaneID == id {
             desiredKeyboardOwnerPaneID = nil
         }
