@@ -17,6 +17,8 @@
 
 use std::time::Duration;
 
+use crate::research::RecentResearchQuery;
+use chrono::DateTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,6 +69,56 @@ pub fn normalize_journal_state(state: &mut JournalState) {
             .is_some_and(|id| seen.insert(id.to_string()))
     });
     state.version = JOURNAL_STATE_VERSION;
+}
+
+pub fn entry_id(entry: &Value) -> Option<&str> {
+    entry
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+/// Millisecond ordering key shared with research nodes. Invalid legacy dates
+/// remain addressable, but sort behind every valid activity item just as the
+/// frontend's former `Date.parse` implementation did.
+pub fn entry_occurred_at(entry: &Value) -> u128 {
+    entry
+        .get("createdAt")
+        .and_then(Value::as_str)
+        .and_then(|created_at| DateTime::parse_from_rfc3339(created_at).ok())
+        .and_then(|created_at| u128::try_from(created_at.timestamp_millis()).ok())
+        .unwrap_or_default()
+}
+
+pub const JOURNAL_ACTIVITY_SOURCE_RANK: u8 = 0;
+pub const RESEARCH_ACTIVITY_SOURCE_RANK: u8 = 1;
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentActivityCursor {
+    pub occurred_at: u128,
+    pub source_rank: u8,
+    pub id: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RecentActivityItem {
+    Journal {
+        occurred_at: u128,
+        entry: Value,
+    },
+    ResearchQuery {
+        occurred_at: u128,
+        query: RecentResearchQuery,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentActivityPage {
+    pub items: Vec<RecentActivityItem>,
+    pub next_cursor: Option<RecentActivityCursor>,
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
@@ -157,6 +209,15 @@ mod tests {
     #[test]
     fn empty_journal_state_is_empty() {
         assert!(JournalState::default().is_empty());
+    }
+
+    #[test]
+    fn activity_metadata_parses_iso_dates_and_keeps_invalid_legacy_dates_last() {
+        let valid = json!({"id": "a", "createdAt": "1970-01-01T00:00:00.250Z"});
+        let invalid = json!({"id": "b", "createdAt": "not-a-date"});
+        assert_eq!(entry_id(&valid), Some("a"));
+        assert_eq!(entry_occurred_at(&valid), 250);
+        assert_eq!(entry_occurred_at(&invalid), 0);
     }
 
     #[test]

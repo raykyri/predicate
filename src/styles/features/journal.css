@@ -48,7 +48,21 @@
 .journal-feed {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  min-height: 0;
+}
+
+.recent-activity-virtual-canvas {
+  position: relative;
+  width: 100%;
+}
+
+.recent-activity-virtual-row {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  padding-bottom: 10px;
+  will-change: transform;
 }
 
 .recent-activity-day {
@@ -70,6 +84,26 @@
   display: flex;
   flex-direction: column;
   gap: 5px;
+}
+
+.recent-activity-new-status {
+  position: sticky;
+  z-index: 2;
+  top: 10px;
+  display: flex;
+  height: 0;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.recent-activity-new {
+  padding: 5px 10px;
+  border: 1px solid var(--surface-border-default);
+  border-radius: 999px;
+  color: var(--text-interactive);
+  background: var(--popover-bg);
+  box-shadow: var(--shadow-sm);
+  pointer-events: auto;
 }
 
 /* Event metadata is intentionally outside the content surface. All activity
@@ -200,6 +234,23 @@
   border-radius: 7px;
   color: var(--text-subtle);
   font-size: 12px;
+}
+
+.recent-activity-load-boundary {
+  display: flex;
+  min-height: 1px;
+  margin-top: 8px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.recent-activity-load-error {
+  margin: 0;
+  color: var(--text-subtle);
+  font-size: 11px;
+  line-height: 1.35;
+  text-align: center;
 }
 
 .journal-entry.is-tweet {

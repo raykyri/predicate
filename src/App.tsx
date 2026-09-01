@@ -160,17 +160,15 @@ import {
   type NotificationLogEntry,
 } from "./lib/notificationLog";
 import {
-  appendJournalEntry,
+  applyJournalTweetHydration,
+  activityCursorIsBefore,
   classifyJournalInput,
   createJournalEntry,
-  emptyJournalState,
-  insertJournalEntryAt,
   newJournalEntryId,
-  normalizeJournalState,
-  removeJournalEntry as removeEntryFromJournal,
-  setJournalTweetHydration,
+  normalizeRecentActivityPage,
+  recentActivityItemCursor,
   type JournalEntry,
-  type JournalState,
+  type RecentActivityItem,
 } from "./lib/journal";
 import { syndicationToken, tweetSnapshotFromSyndication } from "./lib/journalTweets";
 import NewDocumentPane from "./components/research/NewDocumentPane";
@@ -384,8 +382,12 @@ import {
   saveResearchNavigation,
 } from "./lib/researchNavigation";
 import {
+  mergeRecentActivityItems,
+  reconcileRecentActivityHead,
+  recentActivityItemFromJournalEntry,
+  recentActivityItemFromResearchQuery,
   recentResearchQueryFromNode,
-  upsertRecentResearchQuery,
+  upsertRecentActivityItem,
 } from "./lib/activity";
 import { isActiveResearchStatus } from "./lib/researchThreads";
 import {
@@ -536,12 +538,14 @@ import {
   listPanes,
   listPublications,
   listResearchActivity,
-  listRecentResearchQueries,
+  listRecentActivity,
   listResearchFolders,
   listResearchTrees,
   setResearchFolders,
-  getJournalState,
-  setJournalState as persistJournalState,
+  appendJournalEntry as persistNewJournalEntry,
+  restoreJournalEntry as persistRestoredJournalEntry,
+  updateJournalEntry as persistUpdatedJournalEntry,
+  deleteJournalEntry as persistDeletedJournalEntry,
   fetchJournalTweet,
   getNotificationLog,
   markNotificationRead,
@@ -624,8 +628,8 @@ import type {
   PaneSplitInfo,
   QmuxEvent,
   QueuedTurn,
+  RecentActivityCursor,
   RecentResearchQuery,
-  RecentResearchQueryCursor,
   ResearchHighlightAnchor,
   ResearchNode,
   ResearchTreeDetail,
@@ -2083,7 +2087,8 @@ function MainApp() {
   const researchDetailRequestSeqRef = useRef(0);
   const researchNavRefreshSeqRef = useRef(0);
   const researchNavRefreshInFlightRef = useRef(0);
-  const recentResearchPageRequestSeqRef = useRef(0);
+  const recentActivityPageRequestSeqRef = useRef(0);
+  const recentActivityHeadRequestSeqRef = useRef(0);
   const researchViewAckInFlightRef = useRef(new Set<string>());
   const researchViewAckPendingRef = useRef(new Set<string>());
   const markVisibleResearchTreeViewedRef = useRef<
@@ -2097,10 +2102,14 @@ function MainApp() {
   activeResearchPaneIdRef.current = activeResearchPaneId;
   const [researchTrees, setResearchTrees] = useState<ResearchTreeSummary[]>([]);
   const [archivedResearchTrees, setArchivedResearchTrees] = useState<ResearchTreeSummary[]>([]);
-  const [recentResearchQueries, setRecentResearchQueries] = useState<RecentResearchQuery[]>([]);
-  const [recentResearchCursor, setRecentResearchCursor] =
-    useState<RecentResearchQueryCursor | null>(null);
-  const [loadingOlderResearchQueries, setLoadingOlderResearchQueries] = useState(false);
+  const [recentActivityItems, setRecentActivityItems] = useState<RecentActivityItem[]>([]);
+  const recentActivityItemsRef = useRef(recentActivityItems);
+  recentActivityItemsRef.current = recentActivityItems;
+  const [recentActivityCursor, setRecentActivityCursor] =
+    useState<RecentActivityCursor | null>(null);
+  const [loadingOlderActivity, setLoadingOlderActivity] = useState(false);
+  const loadingOlderActivityRef = useRef(false);
+  const [olderActivityError, setOlderActivityError] = useState<string | null>(null);
   // Sidebar multi-selection (shift/meta click). Pruned against the scoped
   // active list where it is consumed, so stale ids drop out on their own.
   const [researchMultiSelectIds, setResearchMultiSelectIds] = useState<string[]>([]);
@@ -2137,24 +2146,35 @@ function MainApp() {
         console.error("failed to persist research folders", err);
       });
   }, []);
-  // The journal feed, mirroring the research-folder ownership model: the
-  // durable copy is backend-owned (state.json), edits are optimistic locally
-  // and persisted through a serialized last-write-wins chain.
-  const [journal, setJournal] = useState<JournalState>(emptyJournalState);
-  const journalRef = useRef(journal);
-  journalRef.current = journal;
+  // Journal edits are optimistic locally and serialized as incremental backend
+  // mutations. Unlike the old whole-state replacement chain, hydration cannot
+  // overwrite an unrelated add/remove that landed while its network request ran.
   const journalPersistChainRef = useRef<Promise<unknown>>(Promise.resolve());
-  const commitJournal = useCallback((next: JournalState) => {
-    if (next === journalRef.current) {
-      return;
-    }
-    journalRef.current = next;
-    setJournal(next);
-    journalPersistChainRef.current = journalPersistChainRef.current
+  const journalMutationGenerationRef = useRef(0);
+  const pendingJournalMutationsRef = useRef(
+    new Map<string, { generation: number; intent: "present" | "deleted" }>(),
+  );
+  const persistJournalMutation = useCallback((
+    entryId: string,
+    intent: "present" | "deleted",
+    mutation: () => Promise<unknown>,
+  ) => {
+    const generation = journalMutationGenerationRef.current + 1;
+    journalMutationGenerationRef.current = generation;
+    pendingJournalMutationsRef.current.set(entryId, { generation, intent });
+    recentActivityHeadRequestSeqRef.current += 1;
+    const request = journalPersistChainRef.current
       .catch(() => undefined)
-      .then(() => persistJournalState(next))
+      .then(mutation);
+    journalPersistChainRef.current = request
       .catch((err) => {
         console.error("failed to persist journal", err);
+      })
+      .finally(() => {
+        recentActivityHeadRequestSeqRef.current += 1;
+        if (pendingJournalMutationsRef.current.get(entryId)?.generation === generation) {
+          pendingJournalMutationsRef.current.delete(entryId);
+        }
       });
   }, []);
   const [journalOpen, setJournalOpenState] = useState(
@@ -7409,11 +7429,10 @@ function MainApp() {
           existingAgents,
           existingResearchTrees,
           existingResearchActivity,
-          existingRecentResearchQueries,
+          existingRecentActivity,
           existingResearchFolders,
           existingPublications,
           existingArtifacts,
-          existingJournal,
           existingNotificationLog,
         ] = await Promise.all([
           getRuntimeConfig(),
@@ -7425,11 +7444,12 @@ function MainApp() {
           listAgents(),
           listResearchTrees(true).catch((): ResearchTreeSummary[] => []),
           listResearchActivity().catch((): ResearchNode[] => []),
-          listRecentResearchQueries().catch(() => ({ items: [], nextCursor: null })),
+          listRecentActivity()
+            .then(normalizeRecentActivityPage)
+            .catch(() => ({ items: [], nextCursor: null })),
           listResearchFolders().catch(emptyResearchFolderState),
           listPublications().catch((): PublicationBinding[] => []),
           artifactList().catch((): ArtifactInfo[] => []),
-          getJournalState().catch((): unknown => null),
           getNotificationLog().catch((): unknown => null),
         ]);
         if (cancelled) {
@@ -7452,8 +7472,9 @@ function MainApp() {
         setResearchTrees(partitionedResearchTrees.active);
         setArchivedResearchTrees(partitionedResearchTrees.archived);
         setResearchActivity(existingResearchActivity);
-        setRecentResearchQueries(existingRecentResearchQueries.items);
-        setRecentResearchCursor(existingRecentResearchQueries.nextCursor ?? null);
+        recentActivityItemsRef.current = existingRecentActivity.items;
+        setRecentActivityItems(existingRecentActivity.items);
+        setRecentActivityCursor(existingRecentActivity.nextCursor ?? null);
         // Adopt the backend-owned grouping. One-time migration: earlier builds
         // kept folders in localStorage. If the backend has none yet but a
         // localStorage copy survives, push it up once and clear the local key so
@@ -7480,9 +7501,6 @@ function MainApp() {
             localStorage.removeItem(RESEARCH_FOLDERS_STORAGE_KEY);
           }
         }
-        const bootJournal = normalizeJournalState(existingJournal);
-        journalRef.current = bootJournal;
-        setJournal(bootJournal);
         setNotificationLog(normalizeNotificationLog(existingNotificationLog));
         setPublicationBindings(existingPublications);
         void hydrateSecondaryFast(existingAgents);
@@ -8050,14 +8068,18 @@ function MainApp() {
     // next research event.
     const requestSeq = researchNavRefreshSeqRef.current + 1;
     researchNavRefreshSeqRef.current = requestSeq;
-    recentResearchPageRequestSeqRef.current += 1;
-    setLoadingOlderResearchQueries(false);
+    const activityRequestSeq = recentActivityHeadRequestSeqRef.current + 1;
+    recentActivityHeadRequestSeqRef.current = activityRequestSeq;
+    recentActivityPageRequestSeqRef.current += 1;
+    loadingOlderActivityRef.current = false;
+    setLoadingOlderActivity(false);
+    setOlderActivityError(null);
     researchNavRefreshInFlightRef.current += 1;
     try {
-      const [trees, activity, recentQueries] = await Promise.all([
+      const [trees, activity, recentActivity] = await Promise.all([
         listResearchTrees(true),
         listResearchActivity(),
-        listRecentResearchQueries(),
+        listRecentActivity().then(normalizeRecentActivityPage),
       ]);
       if (researchNavRefreshSeqRef.current !== requestSeq) {
         return null;
@@ -8070,8 +8092,34 @@ function MainApp() {
         reconcileResearchTreeSummaries(current, partitioned.archived),
       );
       setResearchActivity((current) => reconcileResearchActivity(current, activity));
-      setRecentResearchQueries(recentQueries.items);
-      setRecentResearchCursor(recentQueries.nextCursor ?? null);
+      if (recentActivityHeadRequestSeqRef.current === activityRequestSeq) {
+        const headCursor = recentActivity.nextCursor ?? null;
+        const preserveLoadedTail =
+          headCursor !== null &&
+          recentActivityItemsRef.current.some((item) =>
+            activityCursorIsBefore(recentActivityItemCursor(item), headCursor),
+          );
+        setRecentActivityItems((current) => {
+          const authoritativeHead = recentActivity.items.filter((item) => {
+            if (item.kind !== "journal") return true;
+            return pendingJournalMutationsRef.current.get(item.entry.id)?.intent !== "deleted";
+          });
+          const pendingPresent = current.filter(
+            (item) =>
+              item.kind === "journal" &&
+              pendingJournalMutationsRef.current.get(item.entry.id)?.intent === "present",
+          );
+          const next = mergeRecentActivityItems(
+            reconcileRecentActivityHead(current, authoritativeHead, headCursor),
+            pendingPresent,
+          );
+          recentActivityItemsRef.current = next;
+          return next;
+        });
+        if (!preserveLoadedTail) {
+          setRecentActivityCursor(headCursor);
+        }
+      }
       // The backend can remove the selected tree out from under the UI (a root
       // launch that failed removes its never-launched tree). Left selected, the
       // document would spin on a tree that no longer exists with nothing able to
@@ -8344,35 +8392,36 @@ function MainApp() {
     },
     [changeResearchVisibilityFilter, selectResearchTree],
   );
-  const loadOlderResearchQueries = useCallback(() => {
-    if (!recentResearchCursor || loadingOlderResearchQueries) return;
-    const requestSeq = recentResearchPageRequestSeqRef.current + 1;
-    recentResearchPageRequestSeqRef.current = requestSeq;
-    setLoadingOlderResearchQueries(true);
-    void listRecentResearchQueries(50, recentResearchCursor)
+  const loadOlderActivity = useCallback(() => {
+    if (!recentActivityCursor || loadingOlderActivityRef.current) return;
+    const requestSeq = recentActivityPageRequestSeqRef.current + 1;
+    recentActivityPageRequestSeqRef.current = requestSeq;
+    loadingOlderActivityRef.current = true;
+    setLoadingOlderActivity(true);
+    setOlderActivityError(null);
+    void listRecentActivity(50, recentActivityCursor)
+      .then(normalizeRecentActivityPage)
       .then((page) => {
-        if (recentResearchPageRequestSeqRef.current !== requestSeq) return;
-        setRecentResearchQueries((current) => {
-          const byId = new Map(current.map((query) => [query.nodeId, query]));
-          for (const query of page.items) byId.set(query.nodeId, query);
-          return [...byId.values()].sort(
-            (left, right) =>
-              right.createdAt - left.createdAt || right.nodeId.localeCompare(left.nodeId),
-          );
+        if (recentActivityPageRequestSeqRef.current !== requestSeq) return;
+        setRecentActivityItems((current) => {
+          const next = mergeRecentActivityItems(current, page.items);
+          recentActivityItemsRef.current = next;
+          return next;
         });
-        setRecentResearchCursor(page.nextCursor ?? null);
+        setRecentActivityCursor(page.nextCursor ?? null);
       })
       .catch((err) => {
-        if (recentResearchPageRequestSeqRef.current === requestSeq) {
-          setError(err instanceof Error ? err.message : String(err));
+        if (recentActivityPageRequestSeqRef.current === requestSeq) {
+          setOlderActivityError(err instanceof Error ? err.message : String(err));
         }
       })
       .finally(() => {
-        if (recentResearchPageRequestSeqRef.current === requestSeq) {
-          setLoadingOlderResearchQueries(false);
+        if (recentActivityPageRequestSeqRef.current === requestSeq) {
+          loadingOlderActivityRef.current = false;
+          setLoadingOlderActivity(false);
         }
       });
-  }, [loadingOlderResearchQueries, recentResearchCursor]);
+  }, [recentActivityCursor]);
   const retryActiveResearchDetail = useCallback(() => {
     const treeId = activeResearchTreeIdRef.current;
     if (treeId) {
@@ -8422,6 +8471,16 @@ function MainApp() {
   // In-flight tweet hydrations by entry id, so a re-render or a second
   // journal open can't double-fetch the same entry.
   const journalHydrationsRef = useRef(new Set<string>());
+  const upsertLoadedJournalEntry = useCallback((entry: JournalEntry) => {
+    setRecentActivityItems((current) => {
+      const next = upsertRecentActivityItem(
+        current,
+        recentActivityItemFromJournalEntry(entry),
+      );
+      recentActivityItemsRef.current = next;
+      return next;
+    });
+  }, []);
   const hydrateJournalTweet = useCallback(
     (entryId: string, tweetId: string) => {
       if (journalHydrationsRef.current.has(entryId)) {
@@ -8455,10 +8514,20 @@ function MainApp() {
         } finally {
           journalHydrationsRef.current.delete(entryId);
         }
-        commitJournal(setJournalTweetHydration(journalRef.current, entryId, result));
+        const current = recentActivityItemsRef.current.find(
+          (item) => item.kind === "journal" && item.entry.id === entryId,
+        );
+        if (current?.kind !== "journal" || current.entry.kind !== "tweet") {
+          return;
+        }
+        const entry = applyJournalTweetHydration(current.entry, result);
+        upsertLoadedJournalEntry(entry);
+        persistJournalMutation(entry.id, "present", () =>
+          persistUpdatedJournalEntry(entry.id, entry),
+        );
       })();
     },
-    [commitJournal],
+    [persistJournalMutation, upsertLoadedJournalEntry],
   );
   const addJournalEntry = useCallback(
     (input: string) => {
@@ -8471,19 +8540,19 @@ function MainApp() {
         newJournalEntryId(),
         new Date().toISOString(),
       );
-      commitJournal(appendJournalEntry(journalRef.current, entry));
+      upsertLoadedJournalEntry(entry);
+      persistJournalMutation(entry.id, "present", () => persistNewJournalEntry(entry));
       if (entry.kind === "tweet") {
         hydrateJournalTweet(entry.id, entry.tweetId);
       }
     },
-    [commitJournal, hydrateJournalTweet],
+    [hydrateJournalTweet, persistJournalMutation, upsertLoadedJournalEntry],
   );
   // The last journal removal, restorable for a grace window. Single-slot: a
   // second removal replaces the first (the feed is a stream of small items,
   // not a document worth a real history).
   const [journalUndo, setJournalUndo] = useState<{
     entry: JournalEntry;
-    index: number;
   } | null>(null);
   const journalUndoRef = useRef(journalUndo);
   journalUndoRef.current = journalUndo;
@@ -8498,17 +8567,25 @@ function MainApp() {
   }, []);
   const removeJournalEntry = useCallback(
     (entryId: string) => {
-      const state = journalRef.current;
-      const index = state.entries.findIndex((entry) => entry.id === entryId);
-      if (index < 0) {
+      const item = recentActivityItemsRef.current.find(
+        (candidate) => candidate.kind === "journal" && candidate.entry.id === entryId,
+      );
+      if (item?.kind !== "journal") {
         return;
       }
-      const entry = state.entries[index];
-      commitJournal(removeEntryFromJournal(state, entryId));
+      const entry = item.entry;
+      setRecentActivityItems((current) => {
+        const next = current.filter(
+          (candidate) => candidate.kind !== "journal" || candidate.entry.id !== entryId,
+        );
+        recentActivityItemsRef.current = next;
+        return next;
+      });
+      persistJournalMutation(entryId, "deleted", () => persistDeletedJournalEntry(entryId));
       if (journalUndoTimerRef.current !== null) {
         window.clearTimeout(journalUndoTimerRef.current);
       }
-      const undo = { entry, index };
+      const undo = { entry };
       journalUndoRef.current = undo;
       setJournalUndo(undo);
       journalUndoTimerRef.current = window.setTimeout(() => {
@@ -8517,7 +8594,7 @@ function MainApp() {
         setJournalUndo(null);
       }, 10_000);
     },
-    [commitJournal],
+    [persistJournalMutation],
   );
   const undoJournalRemove = useCallback(() => {
     const undo = journalUndoRef.current;
@@ -8525,26 +8602,31 @@ function MainApp() {
       return;
     }
     dismissJournalUndo();
-    commitJournal(insertJournalEntryAt(journalRef.current, undo.entry, undo.index));
+    upsertLoadedJournalEntry(undo.entry);
+    persistJournalMutation(undo.entry.id, "present", () =>
+      persistRestoredJournalEntry(undo.entry),
+    );
     // A restored tweet that never finished hydrating re-enters the fetch.
     if (undo.entry.kind === "tweet" && undo.entry.hydration === "pending") {
       hydrateJournalTweet(undo.entry.id, undo.entry.tweetId);
     }
-  }, [commitJournal, dismissJournalUndo, hydrateJournalTweet]);
+  }, [dismissJournalUndo, hydrateJournalTweet, persistJournalMutation, upsertLoadedJournalEntry]);
   const retryJournalTweet = useCallback(
     (entryId: string) => {
-      const entry = journalRef.current.entries.find(
-        (candidate) => candidate.id === entryId,
+      const item = recentActivityItemsRef.current.find(
+        (candidate) => candidate.kind === "journal" && candidate.entry.id === entryId,
       );
-      if (entry?.kind !== "tweet") {
+      if (item?.kind !== "journal" || item.entry.kind !== "tweet") {
         return;
       }
-      commitJournal(
-        setJournalTweetHydration(journalRef.current, entryId, { hydration: "pending" }),
+      const entry = applyJournalTweetHydration(item.entry, { hydration: "pending" });
+      upsertLoadedJournalEntry(entry);
+      persistJournalMutation(entry.id, "present", () =>
+        persistUpdatedJournalEntry(entry.id, entry),
       );
       hydrateJournalTweet(entryId, entry.tweetId);
     },
-    [commitJournal, hydrateJournalTweet],
+    [hydrateJournalTweet, persistJournalMutation, upsertLoadedJournalEntry],
   );
   // Entries stranded mid-hydration (the app quit before the fetch landed, or
   // the persist raced the result) re-enter hydration whenever the journal is
@@ -8553,12 +8635,16 @@ function MainApp() {
     if (!journalOpen) {
       return;
     }
-    for (const entry of journal.entries) {
-      if (entry.kind === "tweet" && entry.hydration === "pending") {
-        hydrateJournalTweet(entry.id, entry.tweetId);
+    for (const item of recentActivityItems) {
+      if (
+        item.kind === "journal" &&
+        item.entry.kind === "tweet" &&
+        item.entry.hydration === "pending"
+      ) {
+        hydrateJournalTweet(item.entry.id, item.entry.tweetId);
       }
     }
-  }, [hydrateJournalTweet, journal, journalOpen]);
+  }, [hydrateJournalTweet, journalOpen, recentActivityItems]);
   const changeSidebarMode = useCallback(
     (mode: SidebarMode) => {
       setPaneContextMenu(null);
@@ -9084,8 +9170,9 @@ function MainApp() {
           researchNavRefreshInFlightRef.current > 0 ||
           researchNavigationRecoveryTimerRef.current !== null;
         researchNavRefreshSeqRef.current += 1;
-        recentResearchPageRequestSeqRef.current += 1;
-        setLoadingOlderResearchQueries(false);
+        recentActivityPageRequestSeqRef.current += 1;
+        loadingOlderActivityRef.current = false;
+        setLoadingOlderActivity(false);
         if (needsRecovery) {
           // An event invalidated a pre-event collection snapshot. Retry once
           // after the event stream goes quiet; resetting this timer prevents a
@@ -9128,7 +9215,14 @@ function MainApp() {
         setResearchActivity((current) => upsertResearchActivity(current, node));
         const recentQuery = recentResearchQueryFromNode(node);
         if (recentQuery) {
-          setRecentResearchQueries((current) => upsertRecentResearchQuery(current, recentQuery));
+          setRecentActivityItems((current) => {
+            const next = upsertRecentActivityItem(
+              current,
+              recentActivityItemFromResearchQuery(recentQuery),
+            );
+            recentActivityItemsRef.current = next;
+            return next;
+          });
         }
         if (previous) {
           const patchSummary = (summary: ResearchTreeSummary) =>
@@ -9154,9 +9248,14 @@ function MainApp() {
           setResearchActivity((current) => upsertResearchActivity(current, event.node));
           const recentQuery = recentResearchQueryFromNode(event.node);
           if (recentQuery) {
-            setRecentResearchQueries((current) =>
-              upsertRecentResearchQuery(current, recentQuery),
-            );
+            setRecentActivityItems((current) => {
+              const next = upsertRecentActivityItem(
+                current,
+                recentActivityItemFromResearchQuery(recentQuery),
+              );
+              recentActivityItemsRef.current = next;
+              return next;
+            });
           }
           break;
         }
@@ -9276,9 +9375,13 @@ function MainApp() {
             removeResearchDetailNodes(current, event.treeId, removedIds),
           );
           setResearchActivity((current) => removeResearchNodes(current, removedIds));
-          setRecentResearchQueries((current) =>
-            current.filter((query) => !removedIds.has(query.nodeId)),
-          );
+          setRecentActivityItems((current) => {
+            const next = current.filter(
+              (item) => item.kind !== "research-query" || !removedIds.has(item.query.nodeId),
+            );
+            recentActivityItemsRef.current = next;
+            return next;
+          });
           patchSummaryState(event.treeId, (summary) =>
             patchResearchSummaryForRemovedNodes(
               summary,
@@ -9308,9 +9411,13 @@ function MainApp() {
               .map((node) => node.id);
             return removeResearchNodes(current, removedIds);
           });
-          setRecentResearchQueries((current) =>
-            current.filter((query) => query.treeId !== event.treeId),
-          );
+          setRecentActivityItems((current) => {
+            const next = current.filter(
+              (item) => item.kind !== "research-query" || item.query.treeId !== event.treeId,
+            );
+            recentActivityItemsRef.current = next;
+            return next;
+          });
           for (const [nodeId, node] of researchNodeEventCacheRef.current) {
             if (node.treeId === event.treeId) {
               researchNodeEventCacheRef.current.delete(nodeId);
@@ -17491,11 +17598,11 @@ function MainApp() {
           ) : null}
           {researchStageView === "journal" ? (
             <RecentActivityPane
-              entries={journal.entries}
-              researchQueries={recentResearchQueries}
+              items={recentActivityItems}
               researchTrees={[...researchTrees, ...archivedResearchTrees]}
-              nextResearchCursor={recentResearchCursor}
-              loadingOlderQueries={loadingOlderResearchQueries}
+              nextCursor={recentActivityCursor}
+              loadingOlder={loadingOlderActivity}
+              olderError={olderActivityError}
               pendingUndo={journalUndo ? { entry: journalUndo.entry } : null}
               onAddEntry={addJournalEntry}
               onRemoveEntry={removeJournalEntry}
@@ -17503,7 +17610,7 @@ function MainApp() {
               onUndoRemove={undoJournalRemove}
               onDismissUndo={dismissJournalUndo}
               onOpenResearchQuery={openRecentResearchQuery}
-              onLoadOlderQueries={loadOlderResearchQueries}
+              onLoadOlder={loadOlderActivity}
             />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to

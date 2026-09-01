@@ -401,6 +401,14 @@ export interface RecentResearchQueryPage {
   nextCursor?: RecentResearchQueryCursor | null;
 }
 
+/** Stable keyset cursor for the mixed Recent Activity feed. Source rank is a
+ * deterministic tie-breaker: research (1) sorts ahead of journal (0). */
+export interface RecentActivityCursor {
+  occurredAt: number;
+  sourceRank: number;
+  id: string;
+}
+
 export interface ResearchHighlight {
   id: string;
   anchor: ResearchHighlightAnchor;

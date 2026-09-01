@@ -1189,16 +1189,33 @@ fn list_research_folders(state: tauri::State<'_, AppState>) -> Result<ResearchFo
 }
 
 #[tauri::command]
-fn journal_get(state: tauri::State<'_, AppState>) -> Result<journal::JournalState, String> {
-    state.journal()
+fn journal_append(
+    state: tauri::State<'_, AppState>,
+    entry: serde_json::Value,
+) -> Result<bool, String> {
+    state.append_journal_entry(entry)
 }
 
 #[tauri::command]
-fn journal_set(
+fn journal_restore(
     state: tauri::State<'_, AppState>,
-    journal: journal::JournalState,
-) -> Result<journal::JournalState, String> {
-    state.set_journal(journal)
+    entry: serde_json::Value,
+) -> Result<bool, String> {
+    state.restore_journal_entry(entry)
+}
+
+#[tauri::command]
+fn journal_update(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    entry: serde_json::Value,
+) -> Result<bool, String> {
+    state.update_journal_entry(&id, entry)
+}
+
+#[tauri::command]
+fn journal_remove(state: tauri::State<'_, AppState>, id: String) -> Result<bool, String> {
+    state.remove_journal_entry(&id)
 }
 
 #[tauri::command]
@@ -1228,6 +1245,15 @@ async fn list_recent_research_queries(
     before: Option<RecentResearchQueryCursor>,
 ) -> Result<RecentResearchQueryPage, String> {
     state.list_recent_research_queries(limit.unwrap_or(50), before)
+}
+
+#[tauri::command]
+async fn list_recent_activity(
+    state: tauri::State<'_, AppState>,
+    limit: Option<usize>,
+    before: Option<journal::RecentActivityCursor>,
+) -> Result<journal::RecentActivityPage, String> {
+    state.list_recent_activity(limit.unwrap_or(50), before)
 }
 
 #[tauri::command]
@@ -3454,11 +3480,14 @@ fn main() {
             reorder_research_trees,
             list_research_folders,
             set_research_folders,
-            journal_get,
-            journal_set,
+            journal_append,
+            journal_restore,
+            journal_update,
+            journal_remove,
             journal_fetch_tweet,
             list_research_activity,
             list_recent_research_queries,
+            list_recent_activity,
             get_research_tree,
             create_research_tree,
             create_research_document,

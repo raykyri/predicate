@@ -1,5 +1,19 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent, MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import type {
+  FocusEvent,
+  FormEvent,
+  KeyboardEvent,
+  MouseEvent,
+  ReactNode,
+} from "react";
 import { createPortal } from "react-dom";
 import {
   ChevronDown,
@@ -13,15 +27,20 @@ import {
   Undo2,
   X,
 } from "lucide-react";
-import type { JournalEntry, JournalTweetEntry } from "../../lib/journal";
+import {
+  recentActivityItemId,
+  type JournalEntry,
+  type JournalTweetEntry,
+  type RecentActivityItem,
+} from "../../lib/journal";
 import {
   activityDayLabel,
-  buildRecentActivity,
+  buildRecentActivityFromItems,
   type RecentActivityEvent,
 } from "../../lib/activity";
 import type {
+  RecentActivityCursor,
   RecentResearchQuery,
-  RecentResearchQueryCursor,
   ResearchTreeSummary,
 } from "../../types";
 import type {
@@ -35,12 +54,11 @@ import { ResearchDocumentFrame } from "./ResearchDocumentChrome";
 import ActivityMetadataLine from "../ActivityMetadataLine";
 
 interface RecentActivityPaneProps {
-  /** Oldest first (storage order); the feed renders newest first. */
-  entries: JournalEntry[];
-  researchQueries: RecentResearchQuery[];
+  items: RecentActivityItem[];
   researchTrees: ResearchTreeSummary[];
-  nextResearchCursor: RecentResearchQueryCursor | null;
-  loadingOlderQueries: boolean;
+  nextCursor: RecentActivityCursor | null;
+  loadingOlder: boolean;
+  olderError: string | null;
   /** The most recently removed entry, still restorable. */
   pendingUndo: { entry: JournalEntry } | null;
   onAddEntry: (input: string) => void;
@@ -49,7 +67,7 @@ interface RecentActivityPaneProps {
   onUndoRemove: () => void;
   onDismissUndo: () => void;
   onOpenResearchQuery: (query: RecentResearchQuery) => void;
-  onLoadOlderQueries: () => void;
+  onLoadOlder: () => void;
 }
 
 const JOURNAL_MENU_WIDTH = 180;
@@ -631,12 +649,114 @@ function ResearchQueryCard({
   );
 }
 
+type VirtualActivityRow =
+  | { kind: "day"; key: string; label: string }
+  | { kind: "event"; key: string; event: RecentActivityEvent; position: number };
+
+export function buildRecentActivityVirtualRows(
+  feed: RecentActivityEvent[],
+): VirtualActivityRow[] {
+  const rows: VirtualActivityRow[] = [];
+  let previousDay: string | null = null;
+  for (const [index, event] of feed.entries()) {
+    const label = activityDayLabel(event.occurredAt);
+    if (label !== previousDay) {
+      rows.push({ kind: "day", key: `day:${label}`, label });
+      previousDay = label;
+    }
+    rows.push({ kind: "event", key: event.id, event, position: index + 1 });
+  }
+  return rows;
+}
+
+function estimatedActivityRowHeight(row: VirtualActivityRow): number {
+  if (row.kind === "day") return 29;
+  if (row.event.source.kind === "research-query") return 84;
+  const entry = row.event.source.entry;
+  if (entry.kind === "tweet" && entry.hydration === "ok") return 320;
+  return entry.kind === "note" ? 105 : 92;
+}
+
+export interface VirtualActivityRange {
+  start: number;
+  end: number;
+}
+
+/** Binary-searches cumulative row geometry, keeping scroll work logarithmic
+ * even when the feed contains many thousands of loaded records. */
+export function virtualActivityRange(
+  offsets: number[],
+  sizes: number[],
+  scrollTop: number,
+  viewportHeight: number,
+  overscan = 700,
+): VirtualActivityRange {
+  if (offsets.length === 0) return { start: 0, end: 0 };
+  const minimum = Math.max(0, scrollTop - overscan);
+  const maximum = scrollTop + viewportHeight + overscan;
+  let low = 0;
+  let high = offsets.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (offsets[middle] + sizes[middle] < minimum) low = middle + 1;
+    else high = middle;
+  }
+  const start = low;
+  low = start;
+  high = offsets.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (offsets[middle] <= maximum) low = middle + 1;
+    else high = middle;
+  }
+  return { start, end: low };
+}
+
+function MeasuredActivityRow({
+  rowKey,
+  top,
+  onMeasure,
+  onFocusCapture,
+  onBlurCapture,
+  children,
+}: {
+  rowKey: string;
+  top: number;
+  onMeasure: (key: string, height: number) => void;
+  onFocusCapture?: () => void;
+  onBlurCapture?: (event: FocusEvent<HTMLDivElement>) => void;
+  children: ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => onMeasure(rowKey, element.getBoundingClientRect().height);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [onMeasure, rowKey]);
+  return (
+    <div
+      ref={ref}
+      className="recent-activity-virtual-row"
+      style={{ transform: `translateY(${top}px)` }}
+      onFocusCapture={onFocusCapture}
+      onBlurCapture={onBlurCapture}
+    >
+      {children}
+    </div>
+  );
+}
+
 function RecentActivityPane({
-  entries,
-  researchQueries,
+  items,
   researchTrees,
-  nextResearchCursor,
-  loadingOlderQueries,
+  nextCursor,
+  loadingOlder,
+  olderError,
   pendingUndo,
   onAddEntry,
   onRemoveEntry,
@@ -644,33 +764,216 @@ function RecentActivityPane({
   onUndoRemove,
   onDismissUndo,
   onOpenResearchQuery,
-  onLoadOlderQueries,
+  onLoadOlder,
 }: RecentActivityPaneProps) {
   const [draft, setDraft] = useState("");
   const [menu, setMenu] = useState<{ entryId: string; left: number; top: number } | null>(
     null,
   );
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const virtualCanvasRef = useRef<HTMLDivElement | null>(null);
+  const loadSentinelRef = useRef<HTMLDivElement | null>(null);
   const feed = useMemo(
-    () => buildRecentActivity(entries, researchQueries, researchTrees),
-    [entries, researchQueries, researchTrees],
+    () => buildRecentActivityFromItems(items, researchTrees),
+    [items, researchTrees],
   );
-  const groupedFeed = useMemo(() => {
-    const groups: { label: string; events: RecentActivityEvent[] }[] = [];
-    for (const event of feed) {
-      const label = activityDayLabel(event.occurredAt);
-      const last = groups[groups.length - 1];
-      if (last?.label === label) {
-        last.events.push(event);
-      } else {
-        groups.push({ label, events: [event] });
-      }
+  const [dayBoundaryVersion, setDayBoundaryVersion] = useState(0);
+  useEffect(() => {
+    const nextMidnight = new Date();
+    nextMidnight.setHours(24, 0, 0, 25);
+    const timer = window.setTimeout(
+      () => setDayBoundaryVersion((version) => version + 1),
+      nextMidnight.getTime() - Date.now(),
+    );
+    return () => window.clearTimeout(timer);
+  }, [dayBoundaryVersion]);
+  const rows = useMemo(
+    () => buildRecentActivityVirtualRows(feed),
+    [dayBoundaryVersion, feed],
+  );
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const measuredHeightsRef = useRef(new Map<string, number>());
+  const [measurementVersion, setMeasurementVersion] = useState(0);
+  const measurementFrameRef = useRef(0);
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 800 });
+  const metrics = useMemo(() => {
+    const offsets: number[] = [];
+    const sizes: number[] = [];
+    const indexByKey = new Map<string, number>();
+    let totalSize = 0;
+    for (const [index, row] of rows.entries()) {
+      indexByKey.set(row.key, index);
+      offsets.push(totalSize);
+      const size = measuredHeightsRef.current.get(row.key) ?? estimatedActivityRowHeight(row);
+      sizes.push(size);
+      totalSize += size;
     }
-    return groups;
-  }, [feed]);
-  const menuEntry = menu
-    ? entries.find((entry) => entry.id === menu.entryId) ?? null
+    return { offsets, sizes, totalSize, indexByKey };
+  }, [measurementVersion, rows]);
+  const metricsRef = useRef(metrics);
+  metricsRef.current = metrics;
+  const range = virtualActivityRange(
+    metrics.offsets,
+    metrics.sizes,
+    viewport.scrollTop,
+    viewport.height,
+  );
+  const [focusedRowKey, setFocusedRowKey] = useState<string | null>(null);
+  const visibleRowEntries = useMemo(() => {
+    const entries = rows
+      .slice(range.start, range.end)
+      .map((row, localIndex) => ({ row, index: range.start + localIndex }));
+    const focusedIndex = focusedRowKey ? metrics.indexByKey.get(focusedRowKey) : undefined;
+    if (
+      focusedIndex !== undefined &&
+      (focusedIndex < range.start || focusedIndex >= range.end)
+    ) {
+      entries.push({ row: rows[focusedIndex], index: focusedIndex });
+      entries.sort((left, right) => left.index - right.index);
+    }
+    return entries;
+  }, [focusedRowKey, metrics.indexByKey, range.end, range.start, rows]);
+  const [newActivityCount, setNewActivityCount] = useState(0);
+  const anchorRef = useRef<{ key: string; offset: number } | null>(null);
+  const knownItemIdsRef = useRef(new Set(items.map(recentActivityItemId)));
+  const previousTopItemIdRef = useRef(items[0] ? recentActivityItemId(items[0]) : null);
+
+  const captureScrollState = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const geometry = metricsRef.current;
+    const currentRows = rowsRef.current;
+    const canvasTop = virtualCanvasRef.current?.offsetTop ?? 0;
+    const feedScrollTop = Math.max(0, scroller.scrollTop - canvasTop);
+    const visible = virtualActivityRange(
+      geometry.offsets,
+      geometry.sizes,
+      feedScrollTop,
+      scroller.clientHeight,
+      0,
+    ).start;
+    const row = currentRows[visible];
+    anchorRef.current = row
+      ? { key: row.key, offset: canvasTop + geometry.offsets[visible] - scroller.scrollTop }
+      : null;
+    setViewport({ scrollTop: feedScrollTop, height: scroller.clientHeight });
+    if (scroller.scrollTop <= 60) setNewActivityCount(0);
+  }, []);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    let frame = 0;
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(captureScrollState);
+    };
+    captureScrollState();
+    scroller.addEventListener("scroll", schedule, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    observer?.observe(scroller);
+    return () => {
+      cancelAnimationFrame(frame);
+      scroller.removeEventListener("scroll", schedule);
+      observer?.disconnect();
+    };
+  }, [captureScrollState]);
+
+  // Keep the first visible row at the same pixel when a live item is inserted
+  // above it or a measured tweet replaces its estimate.
+  useLayoutEffect(() => {
+    const scroller = scrollRef.current;
+    const anchor = anchorRef.current;
+    const canvasTop = virtualCanvasRef.current?.offsetTop ?? 0;
+    if (!scroller || !anchor || scroller.scrollTop <= Math.max(60, canvasTop)) return;
+    const index = metrics.indexByKey.get(anchor.key);
+    if (index === undefined) return;
+    const desired = canvasTop + metrics.offsets[index] - anchor.offset;
+    if (Math.abs(scroller.scrollTop - desired) > 0.5) {
+      scroller.scrollTop = desired;
+      setViewport({
+        scrollTop: Math.max(0, desired - canvasTop),
+        height: scroller.clientHeight,
+      });
+    }
+    captureScrollState();
+  }, [captureScrollState, metrics, rows]);
+
+  useEffect(() => {
+    const previousTopId = previousTopItemIdRef.current;
+    const previousTopIndex = previousTopId
+      ? items.findIndex((item) => recentActivityItemId(item) === previousTopId)
+      : -1;
+    const candidates = previousTopIndex >= 0 ? items.slice(0, previousTopIndex) : [];
+    const addedAbove = candidates.filter(
+      (item) => !knownItemIdsRef.current.has(recentActivityItemId(item)),
+    ).length;
+    if (addedAbove > 0 && (scrollRef.current?.scrollTop ?? 0) > 60) {
+      setNewActivityCount((count) => count + addedAbove);
+    }
+    knownItemIdsRef.current = new Set(items.map(recentActivityItemId));
+    previousTopItemIdRef.current = items[0] ? recentActivityItemId(items[0]) : null;
+  }, [items]);
+
+  const measureRow = useCallback((key: string, height: number) => {
+    if (!Number.isFinite(height) || height <= 0) return;
+    const previous = measuredHeightsRef.current.get(key);
+    if (previous !== undefined && Math.abs(previous - height) < 0.5) return;
+    measuredHeightsRef.current.set(key, height);
+    if (measurementFrameRef.current === 0) {
+      measurementFrameRef.current = requestAnimationFrame(() => {
+        measurementFrameRef.current = 0;
+        setMeasurementVersion((version) => version + 1);
+      });
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(measurementFrameRef.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const liveKeys = new Set(rows.map((row) => row.key));
+    for (const key of measuredHeightsRef.current.keys()) {
+      if (!liveKeys.has(key)) measuredHeightsRef.current.delete(key);
+    }
+  }, [rows]);
+
+  useEffect(() => {
+    const sentinel = loadSentinelRef.current;
+    const scroller = scrollRef.current;
+    if (
+      !sentinel ||
+      !scroller ||
+      !nextCursor ||
+      loadingOlder ||
+      olderError ||
+      typeof IntersectionObserver === "undefined"
+    ) {
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) onLoadOlder();
+      },
+      { root: scroller, rootMargin: "700px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [loadingOlder, nextCursor, olderError, onLoadOlder]);
+
+  const menuActivityItem = menu
+    ? items.find(
+        (item) => item.kind === "journal" && item.entry.id === menu.entryId,
+      )
     : null;
+  const menuEntry = menuActivityItem?.kind === "journal" ? menuActivityItem.entry : null;
   const menuItems = menuEntry ? journalEntryMenuItems(menuEntry) : [];
 
   function runMenuAction(entry: JournalEntry, action: JournalMenuAction) {
@@ -751,7 +1054,10 @@ function RecentActivityPane({
       if (event.metaKey || event.ctrlKey || event.altKey) {
         return;
       }
-      const entry = entries.find((candidate) => candidate.id === menu.entryId);
+      const activityItem = items.find(
+        (candidate) => candidate.kind === "journal" && candidate.entry.id === menu.entryId,
+      );
+      const entry = activityItem?.kind === "journal" ? activityItem.entry : null;
       if (!entry) {
         return;
       }
@@ -776,7 +1082,7 @@ function RecentActivityPane({
       window.removeEventListener("resize", closeOnReflow);
       window.removeEventListener("scroll", closeOnReflow, true);
     };
-    // runMenuAction and entries are stable enough per menu lifetime; the menu
+    // runMenuAction and items are stable enough per menu lifetime; the menu
     // closes on any entry mutation the actions cause.
   });
 
@@ -840,7 +1146,7 @@ function RecentActivityPane({
 
   return (
     <ResearchDocumentFrame title="Recent Activity">
-      <div className="research-document-scroll journal-scroll">
+      <div ref={scrollRef} className="research-document-scroll journal-scroll">
         <div className="journal-column">
           <form className="journal-composer" onSubmit={handleSubmit}>
             <textarea
@@ -878,51 +1184,119 @@ function RecentActivityPane({
               </button>
             </div>
           ) : null}
-          <div className="journal-feed" role="feed" aria-label="Recent activity">
-            {groupedFeed.map((group) => (
-              <section className="recent-activity-day" key={group.label} aria-label={group.label}>
-                <h2 className="recent-activity-day-label">{group.label}</h2>
-                {group.events.map((event) => (
-                  <div className="recent-activity-unit" key={event.id}>
-                    <ActivityMetadataLine event={event} />
-                    {event.source.kind === "journal" ? (
-                      <JournalEntryCard
-                        entry={event.source.entry}
-                        menuOpen={menu?.entryId === event.source.entry.id}
-                        onOpenMenu={openMenuFromTrigger}
-                        onOpenContextMenu={openContextMenu}
-                        onRetryTweet={onRetryTweet}
-                      />
+          {newActivityCount > 0 ? (
+            <div className="recent-activity-new-status" role="status" aria-live="polite">
+              <button
+                className="control-button recent-activity-new"
+                type="button"
+                onClick={() => {
+                  setNewActivityCount(0);
+                  const reduceMotion = window.matchMedia?.(
+                    "(prefers-reduced-motion: reduce)",
+                  ).matches;
+                  scrollRef.current?.scrollTo({
+                    top: 0,
+                    behavior: reduceMotion ? "auto" : "smooth",
+                  });
+                }}
+              >
+                {newActivityCount} new {newActivityCount === 1 ? "activity" : "activities"}
+              </button>
+            </div>
+          ) : null}
+          <div
+            className="journal-feed"
+            role="feed"
+            aria-label="Recent activity"
+            aria-busy={loadingOlder}
+          >
+            <div
+              ref={virtualCanvasRef}
+              className="recent-activity-virtual-canvas"
+              style={{ height: metrics.totalSize }}
+            >
+              {visibleRowEntries.map(({ row, index }) => {
+                return (
+                  <MeasuredActivityRow
+                    key={row.key}
+                    rowKey={row.key}
+                    top={metrics.offsets[index]}
+                    onMeasure={measureRow}
+                    onFocusCapture={() => setFocusedRowKey(row.key)}
+                    onBlurCapture={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                        setFocusedRowKey((current) => (current === row.key ? null : current));
+                      }
+                    }}
+                  >
+                    {row.kind === "day" ? (
+                      <h2 className="recent-activity-day-label">{row.label}</h2>
                     ) : (
-                      <ResearchQueryCard
-                        query={event.source.query}
-                        onOpen={() => {
-                          if (event.source.kind === "research-query") {
-                            onOpenResearchQuery(event.source.query);
-                          }
-                        }}
-                      />
+                      <div
+                        className="recent-activity-unit"
+                        role="article"
+                        aria-posinset={row.position}
+                        aria-setsize={nextCursor ? -1 : feed.length}
+                      >
+                        <ActivityMetadataLine event={row.event} />
+                        {row.event.source.kind === "journal" ? (
+                          <JournalEntryCard
+                            entry={row.event.source.entry}
+                            menuOpen={menu?.entryId === row.event.source.entry.id}
+                            onOpenMenu={openMenuFromTrigger}
+                            onOpenContextMenu={openContextMenu}
+                            onRetryTweet={onRetryTweet}
+                          />
+                        ) : (
+                          <ResearchQueryCard
+                            query={row.event.source.query}
+                            onOpen={() => {
+                              if (row.event.source.kind === "research-query") {
+                                onOpenResearchQuery(row.event.source.query);
+                              }
+                            }}
+                          />
+                        )}
+                      </div>
                     )}
-                  </div>
-                ))}
-              </section>
-            ))}
+                  </MeasuredActivityRow>
+                );
+              })}
+            </div>
             {feed.length === 0 ? (
               <p className="journal-empty">
                 Notes, links, posts, and research queries appear here, newest first.
               </p>
             ) : null}
-            {nextResearchCursor ? (
-              <button
-                className="control-button recent-activity-load-older"
-                type="button"
-                disabled={loadingOlderQueries}
-                onClick={onLoadOlderQueries}
-              >
-                <ChevronDown size={13} aria-hidden="true" />
-                <span>{loadingOlderQueries ? "Loading…" : "Load older activity"}</span>
-              </button>
-            ) : null}
+            <div
+              ref={loadSentinelRef}
+              className="recent-activity-load-boundary"
+              aria-live="polite"
+              aria-atomic="true"
+            >
+              {nextCursor ? (
+                <button
+                  className="control-button recent-activity-load-older"
+                  type="button"
+                  disabled={loadingOlder}
+                  onClick={onLoadOlder}
+                >
+                  <ChevronDown size={13} aria-hidden="true" />
+                  <span>
+                    {loadingOlder
+                      ? "Loading…"
+                      : olderError
+                        ? "Retry older activity"
+                        : "Load older activity"}
+                  </span>
+                </button>
+              ) : null}
+              {olderError ? (
+                <p className="recent-activity-load-error" role="alert">
+                  Couldn’t load older activity. {olderError}
+                </p>
+              ) : null}
+            </div>
           </div>
         </div>
       </div>

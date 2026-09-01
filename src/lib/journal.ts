@@ -16,6 +16,7 @@
 //   from what hydration fetched (tweet: TweetSnapshot — replaceable), so a
 //   re-fetch or a failed fetch never loses the entry itself.
 
+import type { RecentActivityCursor, RecentResearchQuery } from "../types";
 import type { TweetSnapshot } from "./journalTweets";
 import { tweetIdFromUrl } from "./journalTweets";
 
@@ -69,7 +70,7 @@ export function isEmptyJournalState(state: JournalState): boolean {
   return state.entries.length === 0;
 }
 
-function sanitizeEntry(value: unknown): JournalEntry | null {
+export function normalizeJournalEntry(value: unknown): JournalEntry | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
@@ -127,7 +128,7 @@ export function normalizeJournalState(value: unknown): JournalState {
   const seen = new Set<string>();
   if (Array.isArray(raw.entries)) {
     for (const candidate of raw.entries) {
-      const entry = sanitizeEntry(candidate);
+      const entry = normalizeJournalEntry(candidate);
       if (entry && !seen.has(entry.id)) {
         seen.add(entry.id);
         entries.push(entry);
@@ -135,6 +136,78 @@ export function normalizeJournalState(value: unknown): JournalState {
     }
   }
   return { version: JOURNAL_STATE_VERSION, entries };
+}
+
+export type RecentActivityItem =
+  | { kind: "journal"; occurredAt: number; entry: JournalEntry }
+  | { kind: "research-query"; occurredAt: number; query: RecentResearchQuery };
+
+export interface RecentActivityPage {
+  items: RecentActivityItem[];
+  nextCursor?: RecentActivityCursor | null;
+}
+
+export const JOURNAL_ACTIVITY_SOURCE_RANK = 0;
+export const RESEARCH_ACTIVITY_SOURCE_RANK = 1;
+
+export function recentActivityItemId(item: RecentActivityItem): string {
+  return item.kind === "journal"
+    ? `journal:${item.entry.id}`
+    : `research:${item.query.nodeId}`;
+}
+
+export function recentActivityItemCursor(item: RecentActivityItem): RecentActivityCursor {
+  return {
+    occurredAt: item.occurredAt,
+    sourceRank:
+      item.kind === "journal"
+        ? JOURNAL_ACTIVITY_SOURCE_RANK
+        : RESEARCH_ACTIVITY_SOURCE_RANK,
+    id: item.kind === "journal" ? item.entry.id : item.query.nodeId,
+  };
+}
+
+export function activityCursorIsBefore(
+  candidate: RecentActivityCursor,
+  boundary: RecentActivityCursor,
+): boolean {
+  return (
+    candidate.occurredAt < boundary.occurredAt ||
+    (candidate.occurredAt === boundary.occurredAt &&
+      (candidate.sourceRank < boundary.sourceRank ||
+        (candidate.sourceRank === boundary.sourceRank && candidate.id < boundary.id)))
+  );
+}
+
+export function compareRecentActivityItems(
+  left: RecentActivityItem,
+  right: RecentActivityItem,
+): number {
+  const leftCursor = recentActivityItemCursor(left);
+  const rightCursor = recentActivityItemCursor(right);
+  return (
+    rightCursor.occurredAt - leftCursor.occurredAt ||
+    rightCursor.sourceRank - leftCursor.sourceRank ||
+    rightCursor.id.localeCompare(leftCursor.id)
+  );
+}
+
+/** Defensive boundary around the backend's opaque journal values. A malformed
+ * legacy entry is skipped while the server cursor still advances past it. */
+export function normalizeRecentActivityPage(page: RecentActivityPage): RecentActivityPage {
+  const items: RecentActivityItem[] = [];
+  for (const item of page.items) {
+    if (item.kind === "research-query") {
+      items.push(item);
+      continue;
+    }
+    const entry = normalizeJournalEntry(item.entry);
+    if (entry) items.push({ ...item, entry });
+  }
+  return {
+    items,
+    nextCursor: page.nextCursor ?? null,
+  };
 }
 
 /** What a submitted composer input becomes: a lone URL becomes a link (or a
@@ -240,14 +313,24 @@ export function setJournalTweetHydration(
       return entry;
     }
     changed = true;
-    if (result.hydration === "ok") {
-      const { error: _dropped, ...rest } = entry;
-      return { ...rest, hydration: "ok" as const, tweet: result.tweet };
-    }
-    if (result.hydration === "failed") {
-      return { ...entry, hydration: "failed" as const, error: result.error };
-    }
-    return { ...entry, hydration: "pending" as const };
+    return applyJournalTweetHydration(entry, result);
   });
   return changed ? { ...state, entries } : state;
+}
+
+export function applyJournalTweetHydration(
+  entry: JournalTweetEntry,
+  result:
+    | { hydration: "pending" }
+    | { hydration: "ok"; tweet: TweetSnapshot }
+    | { hydration: "failed"; error: string },
+): JournalTweetEntry {
+  if (result.hydration === "ok") {
+    const { error: _dropped, ...rest } = entry;
+    return { ...rest, hydration: "ok", tweet: result.tweet };
+  }
+  if (result.hydration === "failed") {
+    return { ...entry, hydration: "failed", error: result.error };
+  }
+  return { ...entry, hydration: "pending" };
 }

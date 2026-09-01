@@ -1,4 +1,12 @@
-import type { JournalEntry } from "./journal";
+import {
+  compareRecentActivityItems,
+  activityCursorIsBefore,
+  recentActivityItemId,
+  recentActivityItemCursor,
+  type JournalEntry,
+  type RecentActivityItem,
+} from "./journal";
+import type { RecentActivityCursor } from "../types";
 import type {
   RecentResearchQuery,
   ResearchNodeStatus,
@@ -149,6 +157,77 @@ export function buildRecentActivity(
     ...entries.map(activityEventFromJournalEntry),
     ...queries.map((query) => activityEventFromResearchQuery(query, treeById.get(query.treeId))),
   ].sort((left, right) => right.occurredAt - left.occurredAt || right.id.localeCompare(left.id));
+}
+
+export function recentActivityItemFromJournalEntry(entry: JournalEntry): RecentActivityItem {
+  const occurredAt = Date.parse(entry.createdAt);
+  return {
+    kind: "journal",
+    occurredAt: Number.isFinite(occurredAt) ? occurredAt : 0,
+    entry,
+  };
+}
+
+export function recentActivityItemFromResearchQuery(
+  query: RecentResearchQuery,
+): RecentActivityItem {
+  return { kind: "research-query", occurredAt: query.createdAt, query };
+}
+
+export function upsertRecentActivityItem(
+  items: RecentActivityItem[],
+  item: RecentActivityItem,
+): RecentActivityItem[] {
+  const id = recentActivityItemId(item);
+  const next = items.filter((candidate) => recentActivityItemId(candidate) !== id);
+  let low = 0;
+  let high = next.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareRecentActivityItems(next[middle], item) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  next.splice(low, 0, item);
+  return next;
+}
+
+export function mergeRecentActivityItems(
+  current: RecentActivityItem[],
+  incoming: RecentActivityItem[],
+): RecentActivityItem[] {
+  const byId = new Map(current.map((item) => [recentActivityItemId(item), item]));
+  for (const item of incoming) {
+    byId.set(recentActivityItemId(item), item);
+  }
+  return [...byId.values()].sort(compareRecentActivityItems);
+}
+
+export function reconcileRecentActivityHead(
+  current: RecentActivityItem[],
+  head: RecentActivityItem[],
+  nextCursor: RecentActivityCursor | null,
+): RecentActivityItem[] {
+  if (!nextCursor) {
+    return [...head].sort(compareRecentActivityItems);
+  }
+  const olderTail = current.filter((item) =>
+    activityCursorIsBefore(recentActivityItemCursor(item), nextCursor),
+  );
+  return mergeRecentActivityItems(olderTail, head);
+}
+
+export function buildRecentActivityFromItems(
+  items: RecentActivityItem[],
+  trees: ResearchTreeSummary[],
+): RecentActivityEvent[] {
+  const treeById = new Map(trees.map((tree) => [tree.id, tree]));
+  return items
+    .map((item) =>
+      item.kind === "journal"
+        ? activityEventFromJournalEntry(item.entry)
+        : activityEventFromResearchQuery(item.query, treeById.get(item.query.treeId)),
+    )
+    .sort((left, right) => right.occurredAt - left.occurredAt || right.id.localeCompare(left.id));
 }
 
 export function activityDayLabel(timestamp: number, now = Date.now()): string {
