@@ -250,7 +250,8 @@ export interface AgentInfo {
   model?: string | null;
   /** Reasoning effort the session was launched with; absent for the default. */
   effort?: string | null;
-  // True when the queue has paused after a pause-after turn finished.
+  // True when auto-drain is held: pause-after, or the last turn failed /
+  // interrupted / disconnected. Clears when the user unpauses.
   paused?: boolean;
   createdAt: number;
 }

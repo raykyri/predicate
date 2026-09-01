@@ -2736,8 +2736,11 @@ impl AppState {
                     }
                     agent.pane_id = None;
                     agent.status = AgentStatus::Idle;
-                    agent.orphaned_queue_pane_id =
-                        queued_agent_ids.contains(&agent.id).then_some(pane_id);
+                    let has_queue = queued_agent_ids.contains(&agent.id);
+                    agent.orphaned_queue_pane_id = has_queue.then_some(pane_id);
+                    if has_queue {
+                        agent.paused = true;
+                    }
                 } else if !queued_agent_ids.contains(&agent.id) {
                     agent.orphaned_queue_pane_id = None;
                 }
@@ -7983,6 +7986,7 @@ impl AppState {
                         agent.orphaned_queue_pane_id =
                             Some(surviving_sibling.unwrap_or_else(|| pane_id.to_string()));
                         agent.status = AgentStatus::Idle;
+                        agent.paused = true;
                     }
                 }
             }
@@ -11829,6 +11833,9 @@ fn restore_closed_agent_snapshot_locked(
         agent.pane_id = None;
         agent.orphaned_queue_pane_id = has_queue.then(|| pane.id.clone());
         agent.status = AgentStatus::Idle;
+        if has_queue {
+            agent.paused = true;
+        }
     }
 
     if queue_shell_resume && let Some(resume) = shell_agent_resume(&agent) {

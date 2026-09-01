@@ -829,7 +829,8 @@ fn send_claimed_turn(
 pub enum IdleResolution {
     /// A queued turn was sent; the agent is running again.
     Drained,
-    /// The just-finished turn requested a pause; the agent is now paused.
+    /// The queue is paused (pause-after, or a failed/interrupted/disconnected
+    /// turn); nothing was sent.
     Paused,
     /// Nothing to send (empty queue or already paused); the agent is idle.
     Idle,
@@ -843,14 +844,51 @@ pub fn advance_after_idle(state: &AppState, agent_id: &str) -> Result<IdleResolu
     advance_after_settlement(state, agent_id, AgentStatus::Done, true)
 }
 
-/// Handles an interrupted turn without presenting it as completed work. Queue draining
-/// remains identical to a normal idle boundary, but an agent with nothing to send waits
-/// for input and does not release dependents that asked to wait for actual completion.
+/// Handles an interrupted turn without presenting it as completed work. Queued
+/// follow-ups stay put — they were written assuming this turn would finish — and
+/// dependents that asked to wait for actual completion stay blocked. The agent
+/// waits for input.
 pub fn advance_after_interruption(
     state: &AppState,
     agent_id: &str,
 ) -> Result<IdleResolution, String> {
-    advance_after_settlement(state, agent_id, AgentStatus::AwaitingInput, false)
+    hold_queue_and_settle(state, agent_id, AgentStatus::AwaitingInput, false)
+}
+
+/// Holds the queue after a failed or disconnected turn. The agent settles to Done
+/// without sending the next queued message; later idle signals (`idle_prompt`,
+/// resume, typing-clear) honor the pause until the user unpauses. Dependents stay
+/// blocked — the target did not finish.
+pub fn advance_after_failure(state: &AppState, agent_id: &str) -> Result<IdleResolution, String> {
+    hold_queue_and_settle(state, agent_id, AgentStatus::Done, false)
+}
+
+/// Pauses a non-empty queue (or consumes a pending pause-after) and settles status
+/// without draining. Shared by failure and interruption so a later idle hook cannot
+/// treat the bad ending as a successful turn boundary.
+fn hold_queue_and_settle(
+    state: &AppState,
+    agent_id: &str,
+    settled_status: AgentStatus,
+    release_waiters: bool,
+) -> Result<IdleResolution, String> {
+    // This is not a successful completion, so a stale queued-send record must not
+    // look like "already drained" to a later idle, and must not block Unpause.
+    let _ = state.clear_agent_outstanding_sends(agent_id);
+    let pending_pause = state.take_agent_pending_pause(agent_id)?;
+    let has_queue = !state.agent_queued_turns(agent_id)?.is_empty();
+    if pending_pause || has_queue {
+        state.set_agent_paused(agent_id, true)?;
+    }
+    state.set_agent_status(agent_id, settled_status)?;
+    if release_waiters {
+        release_waiters_for_agent(state, agent_id)?;
+    }
+    if pending_pause || has_queue {
+        Ok(IdleResolution::Paused)
+    } else {
+        Ok(IdleResolution::Idle)
+    }
 }
 
 fn advance_after_settlement(
@@ -3220,6 +3258,67 @@ mod tests {
             state.agent("source").unwrap().unwrap().status,
             AgentStatus::Done
         ));
+    }
+
+    #[test]
+    fn interruption_holds_queued_turns() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent(AgentStatus::Running))
+            .unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let resolution = advance_after_interruption(&state, "agent-1").unwrap();
+
+        assert!(matches!(resolution, IdleResolution::Paused));
+        let agent = state.agent("agent-1").unwrap().unwrap();
+        assert!(agent.paused);
+        assert!(matches!(agent.status, AgentStatus::AwaitingInput));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+
+        // A later idle must not treat the interrupt as a successful turn boundary.
+        let idle = advance_after_idle(&state, "agent-1").unwrap();
+        assert!(matches!(idle, IdleResolution::Idle));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+    }
+
+    #[test]
+    fn failure_holds_queued_turns_until_unpaused() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent(AgentStatus::Running))
+            .unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let resolution = advance_after_failure(&state, "agent-1").unwrap();
+
+        assert!(matches!(resolution, IdleResolution::Paused));
+        let agent = state.agent("agent-1").unwrap().unwrap();
+        assert!(agent.paused);
+        assert!(matches!(agent.status, AgentStatus::Done));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+
+        // idle_prompt / resume after a disconnect must not auto-send.
+        let idle = advance_after_idle(&state, "agent-1").unwrap();
+        assert!(matches!(idle, IdleResolution::Idle));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+        assert!(state.agent("agent-1").unwrap().unwrap().paused);
     }
 
     #[test]

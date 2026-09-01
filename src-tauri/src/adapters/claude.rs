@@ -23,7 +23,9 @@ use crate::transcript::{
 
 #[cfg(test)]
 use crate::transcript::TurnBlock;
-use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
+use crate::turn_queue::{
+    IdleResolution, advance_after_failure, advance_after_idle, is_shell_escape_turn,
+};
 use crate::workspace::{
     ActiveWorkspaceSource, AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane,
     mark_agent_failed, mark_agent_spawn_failed, prepare_agent_workspace,
@@ -1194,7 +1196,15 @@ impl ClaudeAdapter {
                     notification_event_type(notification_kind)
                 }
             }
-            "Stop" | "StopFailure" => {
+            "StopFailure" => {
+                // A failed stop is not a successful turn boundary: hold any queued
+                // follow-ups so they are not pasted into a dead or recovering TUI.
+                if let Some(agent) = agent.as_mut() {
+                    finish_agent_after_failure(state, agent)?;
+                }
+                "agent.done"
+            }
+            "Stop" => {
                 let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
                     // Claude 2.1.145+ reports its live task registry directly on
                     // Stop. This closes the race where a background agent is
@@ -1272,6 +1282,12 @@ impl ClaudeAdapter {
                 if let Some(agent) = agent.as_ref() {
                     state.clear_agent_subagents(&agent.id);
                     state.set_agent_background_tasks_reported(&agent.id, false)?;
+                    if matches!(agent.status, AgentStatus::Starting | AgentStatus::Running) {
+                        // The session died mid-turn. Hold the queue; a later resume
+                        // or idle_prompt must not auto-send follow-ups written for
+                        // the turn that just disappeared.
+                        let _ = advance_after_failure(state, &agent.id);
+                    }
                 }
                 "agent.session_end"
             }
@@ -1981,6 +1997,19 @@ fn finish_agent_after_idle(state: &AppState, agent: &AgentInfo) -> Result<bool, 
             Ok(false)
         }
     }
+}
+
+/// Holds queued follow-ups after a failed stop. Never drains.
+fn finish_agent_after_failure(state: &AppState, agent: &AgentInfo) -> Result<bool, String> {
+    if let Err(err) = advance_after_failure(state, &agent.id) {
+        state.emit(QmuxEvent::new(
+            "agent.queue_error",
+            agent.pane_id.clone(),
+            Some(agent.id.clone()),
+            json!({ "error": err }),
+        ));
+    }
+    Ok(false)
 }
 
 fn notification_event_type(notification_kind: NotificationKind) -> &'static str {
@@ -3908,6 +3937,69 @@ mod tests {
             state.agent("agent-1").unwrap().unwrap().status,
             AgentStatus::Done
         ));
+    }
+
+    #[test]
+    fn stop_failure_holds_queued_turns() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let event = ingest(&state, hook("StopFailure", json!({})));
+
+        assert_eq!(event.event_type, "agent.done");
+        assert_eq!(event.payload["agent"]["paused"], json!(true));
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(agent.paused);
+        assert!(matches!(agent.status, AgentStatus::Done));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+        assert!(!written_text(&bytes).contains("follow up"));
+
+        // A later idle_prompt (TUI recovered and sitting at the prompt) must not send.
+        let event = ingest(
+            &state,
+            hook(
+                "Notification.idle_prompt",
+                json!({ "hook_event_name": "Notification" }),
+            ),
+        );
+        assert_eq!(event.event_type, "agent.done");
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+        assert!(!written_text(&bytes).contains("follow up"));
+
+        let result = crate::turn_queue::unpause_agent(&state, "agent-1").unwrap();
+        assert!(result.sent);
+        assert!(state.list_agent_turn_queue("agent-1").unwrap().is_empty());
+        assert!(written_text(&bytes).contains("follow up"));
+    }
+
+    #[test]
+    fn session_end_while_running_holds_queued_turns() {
+        let state = test_state();
+        let bytes = install_agent_pane(&state);
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let event = ingest(&state, hook("SessionEnd", json!({})));
+
+        assert_eq!(event.event_type, "agent.session_end");
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(agent.paused);
+        assert!(matches!(agent.status, AgentStatus::Done));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
+        assert!(!written_text(&bytes).contains("follow up"));
     }
 
     #[test]

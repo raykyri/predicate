@@ -14,7 +14,9 @@ use crate::pty::{
 };
 use crate::state::{AppState, PaneInfo, PaneKind};
 use crate::transcript::{Turn, TurnBlock, start_transcript_tail};
-use crate::turn_queue::{IdleResolution, advance_after_idle, is_shell_escape_turn};
+use crate::turn_queue::{
+    IdleResolution, advance_after_failure, advance_after_idle, is_shell_escape_turn,
+};
 use crate::workspace::{
     AgentInfo, AgentStatus, PrepareAgentWorkspaceRequest, attach_agent_pane, mark_agent_failed,
     mark_agent_spawn_failed, prepare_agent_workspace, prepare_agent_workspace_with_parent,
@@ -828,10 +830,19 @@ impl GrokAdapter {
             "SessionEnd" => {
                 if let Some(agent) = agent.as_ref() {
                     state.clear_agent_subagents(&agent.id);
+                    if matches!(agent.status, AgentStatus::Starting | AgentStatus::Running) {
+                        let _ = advance_after_failure(state, &agent.id);
+                    }
                 }
                 "agent.session_end"
             }
-            "Stop" | "StopFailure" => {
+            "StopFailure" => {
+                if let Some(agent) = agent.as_mut() {
+                    finish_agent_after_failure(state, agent)?;
+                }
+                "agent.done"
+            }
+            "Stop" => {
                 let waiting_on_subagents = if let Some(agent) = agent.as_mut() {
                     let reported_active = grok_stop_active_subagents(&notification.payload);
                     if reported_active == Some(false) {
@@ -1695,6 +1706,18 @@ fn finish_agent_after_stop(state: &AppState, agent: &AgentInfo) -> Result<bool, 
     }
 }
 
+fn finish_agent_after_failure(state: &AppState, agent: &AgentInfo) -> Result<bool, String> {
+    if let Err(err) = advance_after_failure(state, &agent.id) {
+        state.emit(QmuxEvent::new(
+            "agent.queue_error",
+            agent.pane_id.clone(),
+            Some(agent.id.clone()),
+            json!({ "error": err }),
+        ));
+    }
+    Ok(false)
+}
+
 /// Parses a transcript line for a Grok agent.
 ///
 /// Grok Build uses Claude-compatible rollout transcripts (the path it reports in
@@ -2490,6 +2513,29 @@ mod tests {
         assert_eq!(event.event_type, "agent.done");
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
         assert!(matches!(agent.status, AgentStatus::Done));
+        assert!(!agent.paused);
+    }
+
+    #[test]
+    fn stop_failure_holds_queued_turns() {
+        let state = test_state();
+        let mut agent = sample_agent();
+        agent.status = AgentStatus::Running;
+        state.insert_agent(agent).unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let event = ingest(&state, hook_for_agent("StopFailure", "agent-1", json!({})));
+
+        assert_eq!(event.event_type, "agent.done");
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(agent.paused);
+        assert!(matches!(agent.status, AgentStatus::Done));
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
     }
 
     #[test]

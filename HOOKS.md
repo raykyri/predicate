@@ -152,14 +152,26 @@ that early) is not swept by a concurrent one.
 - `Notification.idle_prompt`: treats the agent as idle. qmux clears
   outstanding send tracking, respects pause and typing state, drains the
   next queued turn if allowed, and emits either `agent.running` or
-  `agent.done`.
+  `agent.done`. A queue paused by a failed/interrupted/disconnected turn
+  is not drained.
 - `Notification.elicitation_dialog`: marks the agent `AwaitingInput`
   and emits `agent.awaiting_input`.
 - Other `Notification` events: mark the agent `AwaitingInput` and emit
   `agent.notification`.
 - `Stop`: uses the same idle handling as `Notification.idle_prompt`,
   including queue draining and the `agent.running` or `agent.done`
-  result.
+  result. This is the only automatic "send the next queued message"
+  signal.
+- `StopFailure`: the current turn failed. qmux pauses a non-empty queue
+  and settles the agent to `Done` without draining, so a recovering TUI
+  cannot auto-send follow-ups written for the failed turn. Unpause (or
+  send the top queued turn) to continue.
+- `SessionEnd` while the agent is still `Starting` or `Running`: same
+  hold as `StopFailure`. A session that already settled does not change
+  the queue.
+- Transcript interrupt (`[Request interrupted by user]`) and Claude's
+  lone-Esc watch: settle to `AwaitingInput` and hold the queue the same
+  way. Dependents waiting on actual completion stay blocked.
 - `SubagentStop`: emits `agent.subagent_stopped` without changing the
   main agent status.
 - Unknown Claude hook events: forwarded as `agent.hook.<event>` with
@@ -263,6 +275,10 @@ already-bound rollout before selecting a session to resume.
 - `Stop`: treats the agent as idle. qmux clears outstanding send
   tracking, respects pause and typing state, drains the next queued turn
   if allowed, and emits either `agent.running` or `agent.done`.
+- `StopFailure`: pauses a non-empty queue and settles to `Done` without
+  draining, matching Claude.
+- `SessionEnd` while the agent is still `Starting` or `Running`: same
+  hold as `StopFailure`.
 - Grok does not fire Claude's `PermissionRequest` event (its closest
   event is `PermissionDenied`, after a denial). The adapter still
   understands `PermissionRequest` if it arrives, but does not install

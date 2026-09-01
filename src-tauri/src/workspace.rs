@@ -205,8 +205,9 @@ pub struct AgentInfo {
     /// branch and must remain stable when an agent rewinds or switches leaves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_leaf_id: Option<String>,
-    /// True when the queue has paused after a pause-after turn finished; the backend
-    /// stops auto-draining until the user unpauses.
+    /// True when auto-drain is held: a pause-after turn finished, or the last
+    /// turn failed/interrupted/disconnected. The backend stops draining until
+    /// the user unpauses.
     #[serde(default)]
     pub paused: bool,
     pub created_at: u128,
@@ -1350,6 +1351,9 @@ pub fn attach_agent_pane(
                 agent.pane_id = None;
                 agent.orphaned_queue_pane_id = orphaned_queue_pane_id;
                 agent.status = AgentStatus::Idle;
+                if has_queue {
+                    agent.paused = true;
+                }
             })?;
             if let Some(detached) = detached {
                 let detached_id = detached.id.clone();
@@ -1392,8 +1396,9 @@ pub fn attach_agent_pane(
 /// would keep showing its last status (e.g. a freshly launched, never-used agent's
 /// synthetic "Awaiting input") indefinitely. Mirrors the rebind detach in
 /// `attach_agent_pane`: the binding is cleared and the agent goes Idle, but an agent
-/// with queued turns keeps them parked as an orphaned queue so they stay
-/// restart-recoverable. Emits `agent.detached` with the updated agent and returns it;
+/// with queued turns keeps them parked as an orphaned queue (and paused, so a
+/// later resume or idle_prompt cannot auto-send them). Emits `agent.detached`
+/// with the updated agent and returns it;
 /// a no-op (`Ok(None)`) when no agent owns the pane.
 pub fn detach_pane_agent(state: &AppState, pane_id: &str) -> Result<Option<AgentInfo>, String> {
     let Some(current) = state.agent_by_pane(pane_id)? else {
@@ -1413,6 +1418,9 @@ fn detach_known_pane_agent(
         agent.pane_id = None;
         agent.orphaned_queue_pane_id = orphaned_queue_pane_id;
         agent.status = AgentStatus::Idle;
+        if has_queue {
+            agent.paused = true;
+        }
     })?;
     if let Some(detached) = &detached {
         // Make the source visibly detached before removing its barrier so neither the
@@ -1472,6 +1480,7 @@ pub fn mark_agent_spawn_failed(
     // No release of waiters here: a failed target intentionally keeps its waiters
     // blocked (see `queued_turn_wait_is_resolved_locked`), so a dependent turn doesn't
     // silently fire when the agent it was waiting on errored out instead of finishing.
+    let has_queue = !state.list_agent_turn_queue(agent_id)?.is_empty();
     state
         .mutate_agent(agent_id, |agent| {
             if agent.pane_id.as_deref() == Some(reserved_pane_id) {
@@ -1479,6 +1488,9 @@ pub fn mark_agent_spawn_failed(
                 agent.orphaned_queue_pane_id = None;
             }
             agent.status = AgentStatus::Failed;
+            if has_queue {
+                agent.paused = true;
+            }
         })?
         .ok_or_else(|| format!("agent {agent_id} was not found"))
 }
@@ -1489,9 +1501,14 @@ pub fn mark_agent_failed(state: &AppState, agent_id: &str) -> Result<AgentInfo, 
     // Field-scoped write (only status): a full-struct `update_agent` drops the lock
     // between read and write and could clobber a concurrent SessionStart hook's
     // session_id/transcript_path, leaving the session unresumable.
+    // Pause a pending queue so acknowledging Failed → Idle cannot auto-send it.
+    let has_queue = !state.list_agent_turn_queue(agent_id)?.is_empty();
     state
         .mutate_agent(agent_id, |agent| {
             agent.status = AgentStatus::Failed;
+            if has_queue {
+                agent.paused = true;
+            }
         })?
         .ok_or_else(|| format!("agent {agent_id} was not found"))
 }
@@ -1585,12 +1602,12 @@ fn adapter_interrupts_on_lone_escape(adapter: &str) -> bool {
 /// show "Working…" forever.
 ///
 /// Watch the agent for a short grace window; if no hook or transcript activity lands,
-/// mark it AwaitingInput. The watch itself does not drain the queue (unlike the hard
-/// idle signals routed through advance_after_idle) — but AwaitingInput is a ready
-/// status, so a later drain trigger can still send a queued turn. That is correct
-/// after a real interrupt; the residual risk is a *wrong* demotion (an Esc that
-/// dismissed a menu mid-run), which the activity-counter guard makes rare and which
-/// the next hook/transcript event self-corrects by re-promoting to Running.
+/// mark it AwaitingInput and hold any queued follow-ups (same as a transcript
+/// interrupt). AwaitingInput is a ready status, so without the pause a later
+/// typing-clear or idle_prompt would auto-send. The residual risk is a *wrong*
+/// demotion (an Esc that dismissed a menu mid-run), which the activity-counter
+/// guard makes rare and which the next hook/transcript event self-corrects by
+/// re-promoting to Running.
 pub fn watch_agent_after_escape(state: &AppState, pane_id: &str) {
     let Ok(Some(agent)) = state.agent_by_pane(pane_id) else {
         return;
@@ -1643,10 +1660,8 @@ fn resolve_agent_escape_watch(
     if state.agent_activity_seq(agent_id).ok() != Some(baseline) {
         return None;
     }
-    state
-        .set_agent_status(agent_id, AgentStatus::AwaitingInput)
-        .ok()
-        .flatten()
+    let _ = crate::turn_queue::advance_after_interruption(state, agent_id);
+    state.agent(agent_id).ok().flatten()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -4688,6 +4703,7 @@ mod tests {
 
         assert_eq!(detached.pane_id, None);
         assert_eq!(detached.orphaned_queue_pane_id.as_deref(), Some("pane-1"));
+        assert!(detached.paused);
         assert_eq!(
             state.list_agent_turn_queue("agent-shell").unwrap(),
             vec!["queued turn".to_string()]
@@ -4761,9 +4777,10 @@ mod tests {
         let demoted = resolve_agent_escape_watch(&state, "agent-1", baseline)
             .expect("quiet working agent is demoted");
         assert!(matches!(demoted.status, AgentStatus::AwaitingInput));
-        // Unlike the hard idle signals, the demotion must not auto-drain the queue:
-        // if the Esc didn't actually interrupt, a drained turn would steer a busy
-        // agent.
+        assert!(demoted.paused);
+        // Unlike a successful Stop, the demotion must not auto-drain the queue:
+        // follow-ups were written for a finished turn. Pause so idle_prompt /
+        // typing-clear cannot send them either.
         assert_eq!(
             state.list_agent_turn_queue("agent-1").unwrap(),
             vec!["queued turn".to_string()]

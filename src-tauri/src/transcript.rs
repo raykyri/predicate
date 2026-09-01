@@ -2401,6 +2401,36 @@ mod tests {
         assert_eq!(event.payload["transcriptLifecycleEvent"], "interrupted");
         let agent = state.agent("agent-1").unwrap().expect("agent exists");
         assert!(matches!(agent.status, AgentStatus::AwaitingInput));
+        assert!(!agent.paused);
+    }
+
+    #[test]
+    fn transcript_lifecycle_interruption_holds_queued_turns() {
+        let state = test_state();
+        state
+            .insert_agent(sample_agent(AgentStatus::Running))
+            .unwrap();
+        state
+            .enqueue_agent_turn("agent-1", "follow up".to_string())
+            .unwrap();
+
+        let event = transcript_lifecycle_agent_event(
+            &state,
+            "agent-1",
+            "/tmp/session.jsonl",
+            TranscriptLifecycleEvent::Interrupted,
+        )
+        .unwrap()
+        .expect("interruption should emit an agent event");
+
+        assert_eq!(event.event_type, "agent.interrupted");
+        let agent = state.agent("agent-1").unwrap().expect("agent exists");
+        assert!(matches!(agent.status, AgentStatus::AwaitingInput));
+        assert!(agent.paused);
+        assert_eq!(
+            state.list_agent_turn_queue("agent-1").unwrap(),
+            vec!["follow up".to_string()]
+        );
     }
 
     #[test]
