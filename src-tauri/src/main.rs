@@ -602,19 +602,41 @@ fn resolve_local_link_target(
     control_socket::resolve_browser_target(state, pane_id, trimmed, None)
 }
 
-/// Open a validated local link using the safest useful default: known
-/// browser-renderable files get a token-scoped sandboxed preview, while
-/// directories and unknown/binary formats are only revealed in the OS file
-/// manager. In particular, clicking an installer or disk image never mounts or
-/// launches it.
-#[tauri::command(async)]
-fn browser_open_local_path(
-    state: tauri::State<'_, AppState>,
-    pane_id: String,
-    path: String,
+fn resolve_terminal_link_target(
+    state: &AppState,
+    pane_id: &str,
+    path: &str,
+) -> Result<control_socket::ResolvedBrowserTarget, String> {
+    if !state.pane_exists(pane_id)? {
+        return Err(format!("pane {pane_id} was not found"));
+    }
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("nothing to open".to_string());
+    }
+    let cwd = if std::path::Path::new(trimmed).is_absolute() {
+        None
+    } else {
+        Some(
+            state
+                .inheritable_pane_cwd(pane_id)
+                .ok_or_else(|| format!("pane {pane_id} has no usable working directory"))?,
+        )
+    };
+    control_socket::resolve_browser_target(
+        state,
+        pane_id,
+        trimmed,
+        cwd.as_deref().and_then(std::path::Path::to_str),
+    )
+}
+
+fn open_local_link(
+    state: &AppState,
+    pane_id: &str,
+    resolved: control_socket::ResolvedBrowserTarget,
     artifact_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
     let source = resolved
         .path
         .as_deref()
@@ -629,7 +651,7 @@ fn browser_open_local_path(
     }
     state.emit(events::QmuxEvent::new(
         "browser.open",
-        Some(pane_id),
+        Some(pane_id.to_string()),
         None,
         serde_json::json!({
             "url": resolved.url,
@@ -642,6 +664,36 @@ fn browser_open_local_path(
         "url": resolved.url,
         "sandbox": resolved.sandbox,
     }))
+}
+
+/// Open a validated local link using the safest useful default: known
+/// browser-renderable files get a token-scoped sandboxed preview, while
+/// directories and unknown/binary formats are only revealed in the OS file
+/// manager. In particular, clicking an installer or disk image never mounts or
+/// launches it.
+#[tauri::command(async)]
+fn browser_open_local_path(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+    artifact_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
+    open_local_link(&state, &pane_id, resolved, artifact_id)
+}
+
+/// Open a filesystem path activated from the native terminal. Unlike transcript
+/// markdown links, Ghostty can recognize relative paths, so resolve those against
+/// the clicked pane's live cwd before applying the normal root confinement and
+/// safe preview/reveal disposition.
+#[tauri::command(async)]
+fn browser_open_terminal_path(
+    state: tauri::State<'_, AppState>,
+    pane_id: String,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    let resolved = resolve_terminal_link_target(&state, &pane_id, &path)?;
+    open_local_link(&state, &pane_id, resolved, None)
 }
 
 /// Reveal a validated local link without opening or executing it.
@@ -3442,6 +3494,7 @@ fn main() {
             open_external_url,
             browser_open_preview_external,
             browser_open_local_path,
+            browser_open_terminal_path,
             browser_reveal_local_path,
             browser_open_local_path_external,
             browser_open_codex_inline_visualization,

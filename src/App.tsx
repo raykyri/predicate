@@ -373,6 +373,7 @@ import {
   canRenderInInternalBrowser,
   isFileServerUrl,
   pathFromQmuxFileHref,
+  terminalLinkTarget,
 } from "./lib/links";
 import {
   isResearchTreeSelectionChange,
@@ -464,6 +465,7 @@ import {
   artifactReveal,
   attachPane,
   browserOpenLocalPathExternal,
+  browserOpenTerminalPath,
   browserOpenPreviewExternal,
   browserRevealLocalPath,
   claimNativeTerminalPointerForWebDrag,
@@ -4932,8 +4934,21 @@ function MainApp() {
   );
 
   const openPaneLink = useCallback(
-    (_paneId: string, url: string) => {
-      void openExternalUrl(url);
+    (paneId: string, rawTarget: string, _kind: "unknown" | "text" | "html") => {
+      const target = terminalLinkTarget(rawTarget);
+      if (!target) {
+        setError(`Cannot open terminal link: ${rawTarget}`);
+        return;
+      }
+      if (target.kind === "externalUrl") {
+        void openExternalUrl(target.url).catch((err) => {
+          setError(err instanceof Error ? err.message : String(err));
+        });
+        return;
+      }
+      void browserOpenTerminalPath(paneId, target.path).catch((err) => {
+        setError(err instanceof Error ? err.message : String(err));
+      });
     },
     [],
   );

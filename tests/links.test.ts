@@ -9,6 +9,7 @@ import {
   loopbackHtmlUrl,
   pathFromQmuxFileHref,
   safeHref,
+  terminalLinkTarget,
 } from "../src/lib/links";
 
 test("loopbackHtmlUrl recognizes only loopback HTML documents", () => {
@@ -144,4 +145,42 @@ test("isFileServerUrl recognizes token-bearing loopback paths", () => {
   // Dev-server URLs without a token segment are not file-server URLs.
   assert.equal(isFileServerUrl("http://localhost:5173/", null), false);
   assert.equal(isFileServerUrl("http://localhost:5173/app", 8123), false);
+});
+
+test("terminal links keep ordinary web URLs external", () => {
+  assert.deepEqual(terminalLinkTarget("https://example.com/report.html#result"), {
+    kind: "externalUrl",
+    url: "https://example.com/report.html#result",
+  });
+  assert.deepEqual(terminalLinkTarget("mailto:hello@example.com"), {
+    kind: "externalUrl",
+    url: "mailto:hello@example.com",
+  });
+});
+
+test("terminal links recognize absolute, file URL, and relative paths", () => {
+  assert.deepEqual(terminalLinkTarget("/tmp/report.html:36:8"), {
+    kind: "localPath",
+    path: "/tmp/report.html",
+  });
+  assert.deepEqual(terminalLinkTarget("file:///tmp/report%20one.html"), {
+    kind: "localPath",
+    path: "/tmp/report one.html",
+  });
+  assert.deepEqual(terminalLinkTarget("dist/report.html:42"), {
+    kind: "localPath",
+    path: "dist/report.html",
+  });
+  assert.deepEqual(terminalLinkTarget("report.html:42"), {
+    kind: "localPath",
+    path: "report.html",
+  });
+});
+
+test("terminal links reject unknown schemes and malformed targets", () => {
+  assert.equal(terminalLinkTarget("javascript:alert(1)"), undefined);
+  assert.equal(terminalLinkTarget("ssh://example.com/path"), undefined);
+  assert.equal(terminalLinkTarget("//example.com/report.html"), undefined);
+  assert.equal(terminalLinkTarget(" report.html"), undefined);
+  assert.equal(terminalLinkTarget("report\n.html"), undefined);
 });

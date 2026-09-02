@@ -982,6 +982,15 @@ export function browserOpenLocalPath(paneId: string, path: string, artifactId?: 
   });
 }
 
+/** Safely open a path recognized by the native terminal. Relative paths are
+ * resolved against that pane's backend-recorded live cwd. */
+export function browserOpenTerminalPath(paneId: string, path: string) {
+  return invoke<BrowserOpenLocalPathResult>("browser_open_terminal_path", {
+    paneId,
+    path,
+  });
+}
+
 /** Reveal a root-confined local path without opening or executing it. */
 export function browserRevealLocalPath(paneId: string, path: string) {
   return invoke<void>("browser_reveal_local_path", { paneId, path });

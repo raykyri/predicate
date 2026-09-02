@@ -1658,16 +1658,22 @@ pub extern "C" fn qmux_native_terminal_did_activate(pane_id: *const std::ffi::c_
 pub extern "C" fn qmux_native_terminal_did_open_url(
     pane_id: *const std::ffi::c_char,
     url: *const std::ffi::c_char,
+    kind: i32,
 ) {
     let (Some(pane_id), Some(url)) = (callback_string(pane_id), callback_string(url)) else {
         return;
     };
     with_app_state(|state| {
+        let kind = match kind {
+            1 => "text",
+            2 => "html",
+            _ => "unknown",
+        };
         state.emit(QmuxEvent::new(
             "terminal.open_url",
             Some(pane_id),
             None,
-            serde_json::json!({ "url": url }),
+            serde_json::json!({ "url": url, "kind": kind }),
         ));
     });
 }

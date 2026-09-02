@@ -99,7 +99,8 @@ func nativeTerminalDidActivateStub(_: UnsafePointer<CChar>) {}
 @_cdecl("qmux_native_terminal_did_open_url")
 func nativeTerminalDidOpenURLStub(
     _: UnsafePointer<CChar>,
-    _: UnsafePointer<CChar>
+    _: UnsafePointer<CChar>,
+    _: Int32
 ) {}
 
 @_cdecl("qmux_native_terminal_did_receive_app_shortcut")

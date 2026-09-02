@@ -65,7 +65,8 @@ private func nativeTerminalDidActivate(_ paneID: UnsafePointer<CChar>)
 @_silgen_name("qmux_native_terminal_did_open_url")
 private func nativeTerminalDidOpenURL(
     _ paneID: UnsafePointer<CChar>,
-    _ url: UnsafePointer<CChar>
+    _ url: UnsafePointer<CChar>,
+    _ kind: Int32
 )
 
 @MainActor
@@ -335,9 +336,14 @@ final class NativeTerminalPane: NSObject,
         paneID.withCString { nativeTerminalDidResize($0, columns, rows) }
     }
 
-    func terminalDidRequestOpenURL(_ url: String, kind _: TerminalOpenURLKind) {
+    func terminalDidRequestOpenURL(_ url: String, kind: TerminalOpenURLKind) {
+        let rawKind: Int32 = switch kind {
+        case .text: 1
+        case .html: 2
+        case .unknown: 0
+        }
         paneID.withCString { paneID in
-            url.withCString { nativeTerminalDidOpenURL(paneID, $0) }
+            url.withCString { nativeTerminalDidOpenURL(paneID, $0, rawKind) }
         }
     }
 

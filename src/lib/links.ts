@@ -15,6 +15,50 @@ function withoutTrailingSourcePosition(path: string): string {
   return path.replace(/:\d+(?::\d+)?$/u, "");
 }
 
+export type TerminalLinkTarget =
+  | { kind: "externalUrl"; url: string }
+  | { kind: "localPath"; path: string };
+
+/** Classify the raw target Ghostty reports for a Cmd-click. Explicit web and
+ * mail links retain the terminal's external-browser behavior. Filesystem paths
+ * are handed to the pane-scoped backend resolver, including relative paths
+ * whose base must come from the pane's live cwd. Unknown URL schemes are
+ * rejected rather than accidentally interpreted as filenames. */
+export function terminalLinkTarget(value: unknown): TerminalLinkTarget | undefined {
+  if (typeof value !== "string" || value.length === 0 || value !== value.trim()) {
+    return undefined;
+  }
+  const absolutePath = absoluteLocalFilePath(value);
+  if (absolutePath !== undefined) {
+    return { kind: "localPath", path: absolutePath };
+  }
+  if (/[\u0000-\u001f\u007f]/u.test(value)) {
+    return undefined;
+  }
+  const relativePath = withoutTrailingSourcePosition(value);
+  if (relativePath !== value && /^[^/\\]+\.[A-Za-z0-9]{1,16}$/u.test(relativePath)) {
+    return { kind: "localPath", path: relativePath };
+  }
+  try {
+    const parsed = new URL(value);
+    if (
+      parsed.protocol === "http:" ||
+      parsed.protocol === "https:" ||
+      parsed.protocol === "mailto:"
+    ) {
+      return { kind: "externalUrl", url: parsed.href };
+    }
+    return undefined;
+  } catch {
+    // A target without a URL scheme is a relative filesystem path. The backend
+    // resolves it against the clicked pane's cwd and confines the result to that
+    // pane's preview roots.
+  }
+  return relativePath.length > 0 && !relativePath.startsWith("//")
+    ? { kind: "localPath", path: relativePath }
+    : undefined;
+}
+
 // Only let links through that the webview can safely open. Transcript markdown and
 // terminal output can contain arbitrary agent/process text; a javascript:/file:/tauri:
 // URL clicked inside the Tauri webview reaches a JS context with native IPC access.

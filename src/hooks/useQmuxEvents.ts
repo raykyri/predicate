@@ -138,7 +138,11 @@ export interface UseQmuxEventsHandlers {
   onAppShortcut?: (command: AppShortcutCommand, repeat: boolean) => void;
   onBrowserEscapeRequested?: () => void;
   onTerminalCommandModifier?: (paneId: string, active: boolean) => void;
-  onTerminalOpenUrl?: (paneId: string, url: string) => void;
+  onTerminalOpenUrl?: (
+    paneId: string,
+    url: string,
+    kind: "unknown" | "text" | "html",
+  ) => void;
   onTerminalTitleChanged?: (paneId: string, title: string) => void;
   onResearchChanged?: (event: QmuxEvent) => void;
   onUserNotificationRequested?: (event: QmuxEvent) => void;
@@ -419,7 +423,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "terminal.open_url" && event.paneId) {
         const url = stringField(event.payload, "url");
         if (url !== null) {
-          onTerminalOpenUrl?.(event.paneId, url);
+          const rawKind = stringField(event.payload, "kind");
+          const kind = rawKind === "text" || rawKind === "html" ? rawKind : "unknown";
+          onTerminalOpenUrl?.(event.paneId, url, kind);
         }
       }
       if (event.type === "app.exit_confirmation_requested") {
