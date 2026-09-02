@@ -25,6 +25,7 @@ mod prompt_library;
 mod pty;
 mod publishing;
 mod recovery;
+mod remote_cli;
 mod remote_terminal;
 mod research;
 mod research_runtime;
@@ -274,6 +275,22 @@ fn validate_ui_remote(id: &str, remote: &config::SavedRemote) -> Result<(), Stri
     Ok(())
 }
 
+fn prepare_remote_group_request(
+    state: &AppState,
+    mut request: CreateGroupRequest,
+) -> Result<CreateGroupRequest, String> {
+    if request.remote.is_none()
+        && let Some(id) = request.remote_id.as_deref()
+    {
+        let preferences = persistence::load_preferences(&state.config().workspace_root)?;
+        request.remote = Some(state.config().saved_remote_with(id, &preferences.remotes)?);
+    }
+    if let Some(remote) = request.remote.as_mut() {
+        remote_cli::prepare_remote_ref(state, remote)?;
+    }
+    Ok(request)
+}
+
 fn normalize_ui_remote(mut remote: config::SavedRemote) -> config::SavedRemote {
     remote.host = remote.host.trim().to_string();
     remote.label = remote
@@ -384,9 +401,19 @@ fn remote_probe_failure(output: &std::process::Output, fallback: &str) -> String
     }
 }
 
-#[tauri::command(async)]
-fn probe_remote(
+#[tauri::command]
+async fn probe_remote(
     state: tauri::State<'_, AppState>,
+    remote: config::SavedRemote,
+) -> Result<RemoteProbeResult, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || probe_remote_blocking(&state, remote))
+        .await
+        .map_err(|err| format!("probe_remote task failed: {err}"))?
+}
+
+fn probe_remote_blocking(
+    state: &AppState,
     remote: config::SavedRemote,
 ) -> Result<RemoteProbeResult, String> {
     let remote = normalize_ui_remote(remote);
@@ -480,47 +507,82 @@ fn probe_remote(
         },
     });
 
-    let qmux_cli = host
-        .remote()
-        .map(|target| target.qmux_cli.clone())
-        .unwrap_or_else(|| "qmux-cli".to_string());
-    let cli = remote_probe_output(
-        &host,
-        "sh",
-        vec![
-            "-c".to_string(),
-            "command -v \"$1\"".to_string(),
-            "qmux-remote-probe".to_string(),
-            qmux_cli.clone(),
-        ],
-    );
-    let cli_ok = cli.as_ref().is_ok_and(|output| output.status.success());
-    checks.push(match cli {
-        Ok(output) if output.status.success() => RemoteProbeCheck {
-            id: "qmuxCli",
-            label: "qmux CLI",
-            status: RemoteProbeStatus::Passed,
-            message: String::from_utf8_lossy(&output.stdout).trim().to_string(),
-        },
-        Ok(output) => RemoteProbeCheck {
-            id: "qmuxCli",
-            label: "qmux CLI",
-            status: RemoteProbeStatus::Failed,
-            message: remote_probe_failure(
-                &output,
-                &format!("'{qmux_cli}' was not found on the remote machine."),
-            ),
-        },
-        Err(error) => RemoteProbeCheck {
-            id: "qmuxCli",
-            label: "qmux CLI",
-            status: RemoteProbeStatus::Failed,
-            message: error,
-        },
-    });
+    let (cli_ok, cli_remote) = match remote_cli::ensure_cli(&host) {
+        Ok(result)
+            if matches!(
+                result.skipped,
+                Some(remote_cli::EnsureSkip::CustomCli | remote_cli::EnsureSkip::UnsupportedHost)
+            ) =>
+        {
+            let qmux_cli = host
+                .remote()
+                .map(|target| target.qmux_cli.clone())
+                .unwrap_or_else(|| "qmux-cli".to_string());
+            let cli = remote_probe_output(
+                &host,
+                "sh",
+                vec![
+                    "-c".to_string(),
+                    "command -v \"$1\"".to_string(),
+                    "qmux-remote-probe".to_string(),
+                    qmux_cli.clone(),
+                ],
+            );
+            let cli_ok = cli.as_ref().is_ok_and(|output| output.status.success());
+            checks.push(match cli {
+                Ok(output) if output.status.success() => RemoteProbeCheck {
+                    id: "qmuxCli",
+                    label: "qmux CLI",
+                    status: RemoteProbeStatus::Passed,
+                    message: String::from_utf8_lossy(&output.stdout).trim().to_string(),
+                },
+                Ok(output) => RemoteProbeCheck {
+                    id: "qmuxCli",
+                    label: "qmux CLI",
+                    status: RemoteProbeStatus::Failed,
+                    message: remote_probe_failure(
+                        &output,
+                        &format!("'{qmux_cli}' was not found on the remote machine."),
+                    ),
+                },
+                Err(error) => RemoteProbeCheck {
+                    id: "qmuxCli",
+                    label: "qmux CLI",
+                    status: RemoteProbeStatus::Failed,
+                    message: error,
+                },
+            });
+            (cli_ok, remote_ref.clone())
+        }
+        Ok(result) => {
+            let message = if result.installed {
+                format!("Installed qmux-cli {} → {}", result.version, result.path)
+            } else {
+                format!("qmux-cli {} at {}", result.version, result.path)
+            };
+            checks.push(RemoteProbeCheck {
+                id: "qmuxCli",
+                label: "qmux CLI",
+                status: RemoteProbeStatus::Passed,
+                message,
+            });
+            let mut cli_remote = remote_ref.clone();
+            cli_remote.qmux_cli = Some(result.path);
+            (true, cli_remote)
+        }
+        Err(error) => {
+            checks.push(RemoteProbeCheck {
+                id: "qmuxCli",
+                label: "qmux CLI",
+                status: RemoteProbeStatus::Failed,
+                message: error,
+            });
+            (false, remote_ref.clone())
+        }
+    };
 
     let adapters = if cli_ok {
-        adapters::probe_adapter_metadata_for_config(state.config(), Some(&remote_ref), true)?
+        adapters::probe_adapter_metadata_for_config(state.config(), Some(&cli_remote), true)?
     } else {
         Vec::new()
     };
@@ -2467,7 +2529,9 @@ async fn group_create(
     request: CreateGroupRequest,
 ) -> Result<GroupInfo, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || create_group(&state, request))
+    tauri::async_runtime::spawn_blocking(move || {
+        create_group(&state, prepare_remote_group_request(&state, request)?)
+    })
         .await
         .map_err(|err| format!("group_create task failed: {err}"))?
 }
@@ -2556,15 +2620,18 @@ async fn group_create_with_shell(
     tauri::async_runtime::spawn_blocking(move || {
         let group = create_group(
             &state,
-            CreateGroupRequest {
-                remote_id,
-                name: None,
-                dir: Some(dir),
-                after_group_id,
-                base_repo: None,
-                base_ref: None,
-                remote: None,
-            },
+            prepare_remote_group_request(
+                &state,
+                CreateGroupRequest {
+                    remote_id,
+                    name: None,
+                    dir: Some(dir),
+                    after_group_id,
+                    base_repo: None,
+                    base_ref: None,
+                    remote: None,
+                },
+            )?,
         )?;
         match spawn_shell_pane(&state, initial_size, None, Some(&group.id)) {
             Ok(pane) => Ok(GroupWithInitialPane { group, pane }),

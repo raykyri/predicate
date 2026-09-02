@@ -55,6 +55,20 @@ struct PreparedLaunchEnv {
     value: String,
 }
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub fn version_line() -> String {
+    format!("qmux-cli {VERSION}")
+}
+
+/// Parses `qmux-cli 0.3.2` (and trailing noise) into the version token.
+pub fn parse_version_line(line: &str) -> Option<&str> {
+    line.trim()
+        .strip_prefix("qmux-cli ")?
+        .split_whitespace()
+        .next()
+}
+
 pub fn run_cli_if_requested() -> Result<bool, String> {
     let mut args = env::args().skip(1);
     let Some(command) = args.next() else {
@@ -64,6 +78,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         return Ok(false);
     };
+    if command == "--version" || command == "-V" {
+        println!("{}", version_line());
+        return Ok(true);
+    }
     if command == "--skill" {
         print!("{}", public_cli::SKILL);
         return Ok(true);
@@ -819,6 +837,18 @@ mod tests {
             prepared_agent_id(&launch).unwrap().as_deref(),
             Some("agent-1")
         );
+    }
+
+    #[test]
+    fn version_line_matches_package_and_parses() {
+        let line = version_line();
+        assert_eq!(line, format!("qmux-cli {VERSION}"));
+        assert_eq!(parse_version_line(&line), Some(VERSION));
+        assert_eq!(
+            parse_version_line("qmux-cli 0.3.2\n"),
+            Some("0.3.2")
+        );
+        assert_eq!(parse_version_line("not-a-version"), None);
     }
 
     #[test]

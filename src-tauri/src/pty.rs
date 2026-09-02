@@ -2175,7 +2175,7 @@ fn spawn_remote_attachment(
 /// connection and then stops responding. Supplying stdin on its own thread
 /// prevents a large support-file upload from blocking the launch thread before
 /// the deadline can be enforced.
-fn remote_command_output(
+pub(crate) fn remote_command_output(
     command: Command,
     input: Option<Vec<u8>>,
     action: &str,
@@ -2183,7 +2183,7 @@ fn remote_command_output(
     remote_command_output_with_timeout(command, input, action, REMOTE_BATCH_TIMEOUT)
 }
 
-fn remote_command_output_with_timeout(
+pub(crate) fn remote_command_output_with_timeout(
     mut command: Command,
     input: Option<Vec<u8>>,
     action: &str,

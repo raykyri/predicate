@@ -7,7 +7,7 @@ fn main() {
         Ok(true) => {}
         Ok(false) => {
             eprintln!(
-                "usage: qmux-cli [send|ping|notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|devin|muse-notify|cursor-notify|mcp|fork|open]"
+                "usage: qmux-cli [--version|send|ping|notify|pane-write|cwd|agent-exec|agent-detach|claude|codex|grok|devin|muse-notify|cursor-notify|mcp|fork|open]"
             );
             std::process::exit(2);
         }

@@ -128,6 +128,7 @@ if [[ "$build_target" == "universal-apple-darwin" ]] && command -v rustup >/dev/
   rustup target add aarch64-apple-darwin x86_64-apple-darwin
 fi
 
+"$script_dir/build-remote-cli.sh"
 "$script_dir/cleanup-tauri-dmg.sh"
 
 # Tauri's DMG bundler runs an AppleScript step that drives Finder to lay out the

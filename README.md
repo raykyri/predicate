@@ -497,10 +497,13 @@ Before creating a remote group:
 - Configure non-interactive SSH authentication. Launch preparation and health
   checks use `BatchMode=yes`, so password-only authentication is not supported.
 - Install tmux 3.2 or newer on the remote host.
-- Install `qmux-cli` on the remote host and set `qmuxCli` when it is not on the
-  remote PATH. Matching the app's qmux-cli version is recommended. Plain shell
-  transport can run without it, but shell wrappers and agent lifecycle hooks
-  cannot.
+- `qmux-cli` on Linux x86_64/aarch64 remotes is installed automatically (Test
+  connection and New remote group) into `~/.qmux/bin/qmux-cli` from a
+  linux-musl binary bundled in shipping builds. A custom `qmuxCli` path is
+  left alone. Other OS/arch hosts keep using `qmux-cli` on PATH. Matching the
+  app version is recommended. Plain shell transport can run without it, but
+  shell wrappers and agent lifecycle hooks cannot. Shipping builds need Zig
+  (`brew install zig`) and `cargo install cargo-zigbuild`.
 - Install and authenticate Claude Code and/or Codex on the remote host if those
   adapters will be used. The launcher probes the remote binaries and auth state;
   it never reuses the Mac's readiness result.

@@ -14,6 +14,9 @@ set -euo pipefail
 #   updater archive.
 #   Set QMUX_ALLOW_UNNOTARIZED=1 to build a release without notarizing
 #   (downloads will hit Gatekeeper).
+#   Zig and cargo-zigbuild are required to (re)build linux-musl qmux-cli
+#   (`brew install zig`, `cargo install cargo-zigbuild`). This script forces
+#   a rebuild so the DMG does not ship a stale CLI.
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null && pwd)"
 repo_root="$(cd "$script_dir/.." >/dev/null && pwd)"
@@ -144,6 +147,7 @@ fi
 npm run test:pane-splits
 cargo test --manifest-path src-tauri/Cargo.toml
 
+export QMUX_REBUILD_REMOTE_CLI=1
 if have_notary_creds; then
   "$script_dir/build.sh" --notarize
 else

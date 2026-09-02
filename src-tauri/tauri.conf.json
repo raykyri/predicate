@@ -45,6 +45,7 @@
       "minimumSystemVersion": "13.0"
     },
     "resources": {
+      "remote-cli/": "remote-cli",
       "../qmux-claude-plugin/": "qmux-claude-plugin",
       "../qmux-opencode-plugin/plugins/qmux-notify.js": "qmux-opencode-plugin/plugins/qmux-notify.js",
       "../qmux-pi-extension/index.js": "qmux-pi-extension/index.js",
