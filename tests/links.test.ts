@@ -62,7 +62,7 @@ test("safeHref recognizes file: URLs and common filesystem roots", () => {
   );
 });
 
-test("local file links drop trailing source positions before opening", () => {
+test("local file links drop trailing source positions and sentence periods before opening", () => {
   assert.equal(
     safeHref("/Users/raymond/Code/foks/README-FOKS.md:36"),
     `${QMUX_FILE_HREF_PREFIX}/Users/raymond/Code/foks/README-FOKS.md`,
@@ -87,11 +87,28 @@ test("local file links drop trailing source positions before opening", () => {
     absoluteLocalFilePath("C:\\work\\example.ts:36:8"),
     "C:\\work\\example.ts",
   );
+  assert.equal(
+    safeHref("/Users/raymond/Code/foks/example.html."),
+    `${QMUX_FILE_HREF_PREFIX}/Users/raymond/Code/foks/example.html`,
+  );
+  assert.equal(absoluteLocalFilePath("file:///tmp/example.html."), "/tmp/example.html");
+  assert.equal(
+    pathFromQmuxFileHref(`${QMUX_FILE_HREF_PREFIX}/tmp/example.html.`),
+    "/tmp/example.html",
+  );
 });
 
-test("source-position cleanup does not alter web URL ports", () => {
+test("local path cleanup does not alter web URL ports or punctuation", () => {
   assert.equal(safeHref("http://localhost:36"), "http://localhost:36/");
+  assert.equal(
+    safeHref("https://example.com/report.html."),
+    "https://example.com/report.html.",
+  );
   assert.equal(absoluteLocalFilePath("http://localhost:36"), undefined);
+  assert.deepEqual(
+    terminalLinkTarget("https://example.com/report.html."),
+    { kind: "externalUrl", url: "https://example.com/report.html." },
+  );
 });
 
 test("safeHref does not treat ordinary site-relative paths as files", () => {
@@ -174,6 +191,10 @@ test("terminal links recognize absolute, file URL, and relative paths", () => {
   assert.deepEqual(terminalLinkTarget("report.html:42"), {
     kind: "localPath",
     path: "report.html",
+  });
+  assert.deepEqual(terminalLinkTarget("example.html."), {
+    kind: "localPath",
+    path: "example.html",
   });
 });
 

@@ -39,6 +39,16 @@ test("plain loopback HTML URLs receive an adjacent launch button", () => {
   assert.doesNotMatch(html, />Open local HTML in browser</u);
 });
 
+test("transcript file links omit source positions and sentence periods from the href", () => {
+  const withPosition = render("[source](/tmp/example.html:4)");
+  assert.match(withPosition, /href="qmux-file:\/tmp\/example\.html"/u);
+  assert.doesNotMatch(withPosition, /href="[^"]*example\.html:4/u);
+
+  const withPeriod = render("[preview](/tmp/example.html.)");
+  assert.match(withPeriod, /href="qmux-file:\/tmp\/example\.html"/u);
+  assert.doesNotMatch(withPeriod, /href="[^"]*example\.html\./u);
+});
+
 test("an exact inline-code loopback HTML URL receives a launch button", () => {
   const html = render("`http://localhost/mockup.html`");
   assert.equal(artifactButtonCount(html), 1);
