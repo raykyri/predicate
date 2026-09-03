@@ -2659,9 +2659,12 @@ function MainApp() {
     label: string;
   } | null>(null);
   const remoteDeleteConfirmButtonRef = useRef<HTMLButtonElement | null>(null);
-  const [remoteProbeResult, setRemoteProbeResult] = useState<RemoteProbeResult | null>(null);
-  const [remoteProbeLoading, setRemoteProbeLoading] = useState(false);
+  const [remoteProbeResults, setRemoteProbeResults] = useState<
+    Record<string, RemoteProbeResult>
+  >({});
+  const [remoteProbeLoadingId, setRemoteProbeLoadingId] = useState<string | null>(null);
   const remoteProbeRequestRef = useRef(0);
+  const remoteProbeGenerationByKeyRef = useRef<Record<string, number>>({});
   const [sshConfigAliases, setSshConfigAliases] = useState<string[]>([]);
   const [sshConfigAliasesLoading, setSshConfigAliasesLoading] = useState(false);
   const [sshConfigAliasesError, setSshConfigAliasesError] = useState<string | null>(null);
@@ -4300,16 +4303,31 @@ function MainApp() {
     setSettingsOpen(true);
   }
 
-  function resetRemoteProbe() {
-    remoteProbeRequestRef.current += 1;
-    setRemoteProbeLoading(false);
-    setRemoteProbeResult(null);
+  function remoteProbeKey(id: string | null | undefined) {
+    const trimmed = id?.trim();
+    return trimmed && trimmed.length > 0 ? trimmed : "__new__";
+  }
+
+  function resetRemoteProbe(id: string) {
+    const key = remoteProbeKey(id);
+    remoteProbeGenerationByKeyRef.current[key] = ++remoteProbeRequestRef.current;
+    setRemoteProbeResults((current) => {
+      if (!(key in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    setRemoteProbeLoadingId((current) => (current === key ? null : current));
   }
 
   function changeRemoteSettingsDraft(
     update: (current: RemoteSettingsDraft) => RemoteSettingsDraft,
   ) {
-    resetRemoteProbe();
+    if (remoteSettingsDraftState) {
+      resetRemoteProbe(remoteSettingsDraftState.id);
+    }
     setRemoteSettingsError(null);
     setRemoteSettingsDraftState((current) => (current ? update(current) : current));
   }
@@ -4329,7 +4347,6 @@ function MainApp() {
     setRemoteSettingsIdManuallyEdited(false);
     setRemoteSettingsError(null);
     setRemoteDeleteConfirm(null);
-    resetRemoteProbe();
   }
 
   function beginAddingRemoteFromSshAlias(alias: string) {
@@ -4339,7 +4356,6 @@ function MainApp() {
     setRemoteSettingsIdManuallyEdited(false);
     setRemoteSettingsError(null);
     setRemoteDeleteConfirm(null);
-    resetRemoteProbe();
   }
 
   function beginCopyingRemote(remote: RemoteChoice) {
@@ -4358,7 +4374,6 @@ function MainApp() {
     setRemoteSettingsIdManuallyEdited(false);
     setRemoteSettingsError(null);
     setRemoteDeleteConfirm(null);
-    resetRemoteProbe();
   }
 
   function toggleRemoteSettings(remote: RemoteChoice) {
@@ -4367,7 +4382,6 @@ function MainApp() {
       setRemoteSettingsDraftState(null);
       setRemoteSettingsError(null);
       setRemoteDeleteConfirm(null);
-      resetRemoteProbe();
       return;
     }
     setExpandedSettingsRemoteId(remote.id);
@@ -4376,7 +4390,6 @@ function MainApp() {
     setRemoteSettingsIdManuallyEdited(true);
     setRemoteSettingsError(null);
     setRemoteDeleteConfirm(null);
-    resetRemoteProbe();
   }
 
   async function saveRemoteSettings() {
@@ -4417,23 +4430,33 @@ function MainApp() {
       setRemoteSettingsError("Enter an SSH host before testing.");
       return;
     }
-    const request = remoteProbeRequestRef.current + 1;
-    remoteProbeRequestRef.current = request;
-    setRemoteProbeLoading(true);
-    setRemoteProbeResult(null);
+    const key = remoteProbeKey(draft.id);
+    const generation = ++remoteProbeRequestRef.current;
+    remoteProbeGenerationByKeyRef.current[key] = generation;
+    setRemoteProbeLoadingId(key);
+    setRemoteProbeResults((current) => {
+      if (!(key in current)) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
     setRemoteSettingsError(null);
     try {
       const result = await probeRemote(savedRemoteFromSettingsDraft(draft));
-      if (remoteProbeRequestRef.current === request) {
-        setRemoteProbeResult(result);
+      if (remoteProbeGenerationByKeyRef.current[key] !== generation) {
+        return;
       }
+      setRemoteProbeResults((current) => ({ ...current, [key]: result }));
     } catch (err) {
-      if (remoteProbeRequestRef.current === request) {
-        setRemoteSettingsError(unknownErrorMessage(err));
+      if (remoteProbeGenerationByKeyRef.current[key] !== generation) {
+        return;
       }
+      setRemoteSettingsError(unknownErrorMessage(err));
     } finally {
-      if (remoteProbeRequestRef.current === request) {
-        setRemoteProbeLoading(false);
+      if (remoteProbeGenerationByKeyRef.current[key] === generation) {
+        setRemoteProbeLoadingId((current) => (current === key ? null : current));
       }
     }
   }
@@ -4450,7 +4473,7 @@ function MainApp() {
       setExpandedSettingsRemoteId(null);
       setRemoteSettingsDraftState(null);
       setRemoteDeleteConfirm(null);
-      resetRemoteProbe();
+      resetRemoteProbe(id);
       showAppToast("Remote removed");
     } catch (err) {
       setRemoteSettingsError(unknownErrorMessage(err));
@@ -4459,8 +4482,10 @@ function MainApp() {
     }
   }
 
-  function renderRemoteProbeStatus() {
-    if (remoteProbeLoading) {
+  function renderRemoteProbeStatus(probeKey: string) {
+    const probeLoading = remoteProbeLoadingId === probeKey;
+    const probeResult = remoteProbeResults[probeKey];
+    if (probeLoading) {
       return (
         <div className="settings-remote-probe-loading" role="status">
           <LoaderCircle size={14} className="is-spinning" aria-hidden="true" />
@@ -4468,14 +4493,14 @@ function MainApp() {
         </div>
       );
     }
-    if (!remoteProbeResult) {
+    if (!probeResult) {
       return null;
     }
-    const remoteAdapters = remoteProbeResult.adapters.filter((adapter) => adapter.supportsRemote);
+    const remoteAdapters = probeResult.adapters.filter((adapter) => adapter.supportsRemote);
     return (
       <div className="settings-remote-probe-result" aria-live="polite">
         <div className="settings-remote-checks">
-          {remoteProbeResult.checks.map((check) => (
+          {probeResult.checks.map((check) => (
             <div className={`settings-remote-check is-${check.status}`} key={check.id}>
               {check.status === "passed" ? (
                 <Check size={13} aria-hidden="true" />
@@ -4514,8 +4539,28 @@ function MainApp() {
       return null;
     }
     const fieldPrefix = `settings-remote-${encodeURIComponent(draft.id || "new")}`;
+    const probeKey = remoteProbeKey(draft.id);
+    const probeLoading = remoteProbeLoadingId === probeKey;
     return (
       <div className="settings-remote-detail">
+        <div className="settings-remote-fields settings-remote-fields-id">
+          <label htmlFor={`${fieldPrefix}-id`}>
+            <span>ID</span>
+            <input
+              id={`${fieldPrefix}-id`}
+              className="form-field"
+              type="text"
+              value={draft.id}
+              disabled={!remoteSettingsDraftIsNew}
+              spellCheck={false}
+              onChange={(event) => {
+                const id = remoteIdFromLabel(event.currentTarget.value);
+                setRemoteSettingsIdManuallyEdited(true);
+                changeRemoteSettingsDraft((current) => ({ ...current, id }));
+              }}
+            />
+          </label>
+        </div>
         <div className="settings-remote-fields">
           <label htmlFor={`${fieldPrefix}-label`}>
             <span>Name</span>
@@ -4536,22 +4581,6 @@ function MainApp() {
                       : current.id;
                   return { ...current, label, id };
                 });
-              }}
-            />
-          </label>
-          <label htmlFor={`${fieldPrefix}-id`}>
-            <span>ID</span>
-            <input
-              id={`${fieldPrefix}-id`}
-              className="form-field"
-              type="text"
-              value={draft.id}
-              disabled={!remoteSettingsDraftIsNew}
-              spellCheck={false}
-              onChange={(event) => {
-                const id = remoteIdFromLabel(event.currentTarget.value);
-                setRemoteSettingsIdManuallyEdited(true);
-                changeRemoteSettingsDraft((current) => ({ ...current, id }));
               }}
             />
           </label>
@@ -4613,15 +4642,15 @@ function MainApp() {
         {remoteSettingsError ? (
           <p className="settings-agent-error" role="alert">{remoteSettingsError}</p>
         ) : null}
-        {renderRemoteProbeStatus()}
+        {renderRemoteProbeStatus(probeKey)}
         <div className="settings-remote-actions">
           <button
             type="button"
             className="control-button settings-remote-test"
-            disabled={remoteSettingsSaving || remoteProbeLoading}
+            disabled={remoteSettingsSaving || probeLoading}
             onClick={() => void testRemoteSettings(draft)}
           >
-            {remoteProbeLoading ? "Testing…" : "Test connection"}
+            {probeLoading ? "Testing…" : "Test connection"}
           </button>
           {!remoteSettingsDraftIsNew ? (
             <button
@@ -4648,7 +4677,7 @@ function MainApp() {
                 setRemoteSettingsDraftState(null);
                 setRemoteSettingsDraftIsNew(false);
                 setRemoteSettingsError(null);
-                resetRemoteProbe();
+                resetRemoteProbe(draft.id);
               }}
             >
               Cancel
@@ -10897,6 +10926,14 @@ function MainApp() {
     if (!settingsOpen || settingsTab !== "remotes") {
       setRemoteAddMenuOpen(false);
       setRemoteDeleteConfirm(null);
+      const generation = ++remoteProbeRequestRef.current;
+      for (const key of Object.keys(remoteProbeGenerationByKeyRef.current)) {
+        remoteProbeGenerationByKeyRef.current[key] = generation;
+      }
+      setRemoteProbeLoadingId((current) => (current === null ? current : null));
+      setRemoteProbeResults((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      );
     }
   }, [settingsOpen, settingsTab]);
 
@@ -16914,20 +16951,20 @@ function MainApp() {
                                     {remoteSettingsError}
                                   </p>
                                 ) : null}
-                                {renderRemoteProbeStatus()}
+                                {renderRemoteProbeStatus(remote.id)}
                                 <div className="settings-remote-actions">
                                   <button
                                     type="button"
                                     className="control-button settings-remote-test"
-                                    disabled={remoteProbeLoading}
+                                    disabled={remoteProbeLoadingId === remote.id}
                                     onClick={() => void testRemoteSettings(remoteSettingsDraft(remote))}
                                   >
-                                    {remoteProbeLoading ? "Testing…" : "Test connection"}
+                                    {remoteProbeLoadingId === remote.id ? "Testing…" : "Test connection"}
                                   </button>
                                   <button
                                     type="button"
                                     className="control-button"
-                                    disabled={remoteProbeLoading}
+                                    disabled={remoteProbeLoadingId === remote.id}
                                     onClick={() => beginCopyingRemote(remote)}
                                   >
                                     Copy to my remotes

@@ -2043,8 +2043,14 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
 
 .settings-remote-fields {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(120px, 0.55fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 9px;
+}
+
+.settings-remote-fields-id {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--surface-border-subtle);
 }
 
 .settings-remote-fields label {
@@ -2056,8 +2062,11 @@ html[data-body-font="anthropic-sans-text"] .native-input textarea {
   font-size: var(--fs-xs);
 }
 
-.settings-remote-fields label:nth-child(n + 3) {
-  grid-column: 1 / -1;
+.settings-remote-fields label > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .settings-remote-fields small {
