@@ -48,6 +48,7 @@ import type {
   TweetSnapshot,
   TweetTextRun,
 } from "../../lib/journalTweets";
+import { IS_MAC, isEditableTarget } from "../../lib/appHelpers";
 import { openExternalUrl } from "../../lib/api";
 import { writeClipboardText } from "../../lib/clipboard";
 import { ResearchDocumentFrame } from "./ResearchDocumentChrome";
@@ -68,6 +69,10 @@ interface RecentActivityPaneProps {
   onDismissUndo: () => void;
   onOpenResearchQuery: (query: RecentResearchQuery) => void;
   onLoadOlder: () => void;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  onBack?: () => void;
+  onForward?: () => void;
 }
 
 const JOURNAL_MENU_WIDTH = 180;
@@ -621,8 +626,8 @@ function ResearchQueryCard({
   onOpen: () => void;
 }) {
   return (
-    <article className="journal-entry recent-query-card">
-      <button className="control-button recent-query-open" type="button" onClick={onOpen}>
+    <article className="recent-query-card">
+      <button className="recent-query-open" type="button" onClick={onOpen}>
         {query.prompt}
       </button>
       <div className="recent-query-actions" aria-label="Query actions">
@@ -765,6 +770,10 @@ function RecentActivityPane({
   onDismissUndo,
   onOpenResearchQuery,
   onLoadOlder,
+  canGoBack = false,
+  canGoForward = false,
+  onBack,
+  onForward,
 }: RecentActivityPaneProps) {
   const [draft, setDraft] = useState("");
   const [menu, setMenu] = useState<{ entryId: string; left: number; top: number } | null>(
@@ -774,6 +783,60 @@ function RecentActivityPane({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const virtualCanvasRef = useRef<HTMLDivElement | null>(null);
   const loadSentinelRef = useRef<HTMLDivElement | null>(null);
+  const onBackRef = useRef(onBack);
+  const onForwardRef = useRef(onForward);
+  onBackRef.current = onBack;
+  onForwardRef.current = onForward;
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || isEditableTarget(event.target)) {
+        return;
+      }
+      const primary = event.metaKey || event.ctrlKey;
+      let handler: (() => void) | undefined;
+      if (primary && !event.altKey && !event.shiftKey && event.code === "BracketLeft") {
+        handler = onBackRef.current;
+      } else if (primary && !event.altKey && !event.shiftKey && event.code === "BracketRight") {
+        handler = onForwardRef.current;
+      } else if (
+        event.altKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.shiftKey &&
+        event.key === "ArrowLeft"
+      ) {
+        handler = onBackRef.current;
+      } else if (
+        event.altKey &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.shiftKey &&
+        event.key === "ArrowRight"
+      ) {
+        handler = onForwardRef.current;
+      }
+      if (handler) {
+        event.preventDefault();
+        handler();
+      }
+    };
+    const onMouseUp = (event: globalThis.MouseEvent) => {
+      if (event.button === 3) {
+        event.preventDefault();
+        onBackRef.current?.();
+      } else if (event.button === 4) {
+        event.preventDefault();
+        onForwardRef.current?.();
+      }
+    };
+    const mouseTarget = scrollRef.current;
+    window.addEventListener("keydown", onKeyDown);
+    mouseTarget?.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      mouseTarget?.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
   const feed = useMemo(
     () => buildRecentActivityFromItems(items, researchTrees),
     [items, researchTrees],
@@ -1145,7 +1208,15 @@ function RecentActivityPane({
   }
 
   return (
-    <ResearchDocumentFrame title="Recent Activity">
+    <ResearchDocumentFrame
+      title="Recent Activity"
+      canGoBack={canGoBack}
+      canGoForward={canGoForward}
+      backTitle={`Back (${IS_MAC ? "⌘[" : "Ctrl+["})`}
+      forwardTitle={`Forward (${IS_MAC ? "⌘]" : "Ctrl+]"})`}
+      onBack={onBack}
+      onForward={onForward}
+    >
       <div ref={scrollRef} className="research-document-scroll journal-scroll">
         <div className="journal-column">
           <form className="journal-composer" onSubmit={handleSubmit}>

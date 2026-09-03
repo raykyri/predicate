@@ -4,12 +4,18 @@ import {
   EMPTY_RESEARCH_HISTORY,
   canGoBack,
   canGoForward,
+  canGoWorkspaceBack,
+  canGoWorkspaceForward,
   initResearchHistory,
+  initResearchWorkspaceHistory,
   pushResearchHistory,
+  pushResearchWorkspaceHistory,
   pruneResearchHistory,
   researchHistoryBack,
   researchHistoryForward,
   researchSwipeDirection,
+  researchWorkspaceHistoryBack,
+  researchWorkspaceHistoryForward,
 } from "../src/lib/researchHistory";
 
 test("empty history can go neither way", () => {
@@ -112,4 +118,27 @@ test("pruning falls back when every visited node was deleted", () => {
     pruneResearchHistory({ entries: ["branch", "leaf"], index: 1 }, new Set(["root"]), "root"),
     { entries: ["root"], index: 0 },
   );
+});
+
+test("opening a document from Recent Activity pushes a return visit", () => {
+  let history = initResearchWorkspaceHistory({ kind: "journal" });
+  history = pushResearchWorkspaceHistory(history, { kind: "document", treeId: "tree-a" });
+  assert.deepEqual(history, {
+    entries: [{ kind: "journal" }, { kind: "document", treeId: "tree-a" }],
+    index: 1,
+  });
+  assert.equal(canGoWorkspaceBack(history), true);
+  assert.equal(canGoWorkspaceForward(history), false);
+
+  const back = researchWorkspaceHistoryBack(history);
+  assert.ok(back);
+  assert.deepEqual(back.visit, { kind: "journal" });
+  const forward = researchWorkspaceHistoryForward(back.history);
+  assert.ok(forward);
+  assert.deepEqual(forward.visit, { kind: "document", treeId: "tree-a" });
+});
+
+test("re-opening the current workspace page does not grow the stack", () => {
+  const history = initResearchWorkspaceHistory({ kind: "journal" });
+  assert.equal(pushResearchWorkspaceHistory(history, { kind: "journal" }), history);
 });

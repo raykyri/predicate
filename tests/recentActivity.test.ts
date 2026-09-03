@@ -18,7 +18,9 @@ import {
   normalizeRecentActivityPage,
   type RecentActivityItem,
 } from "../src/lib/journal";
-import ActivityMetadataLine from "../src/components/ActivityMetadataLine";
+import ActivityMetadataLine, {
+  formatActivityMetadataSummary,
+} from "../src/components/ActivityMetadataLine";
 import {
   buildRecentActivityVirtualRows,
   virtualActivityRange,
@@ -65,18 +67,34 @@ test("research metadata follows the shared actor/action/object grammar", () => {
   assert.equal(event.state?.label, "Running");
 });
 
-test("the shared metadata renderer preserves slot order outside content cards", () => {
-  const html = renderToStaticMarkup(
-    createElement(ActivityMetadataLine, {
-      event: activityEventFromResearchQuery(query, tree),
-    }),
+test("research metadata names the model or the thread, with the timestamp on the right", () => {
+  const followUp = activityEventFromResearchQuery(query, tree);
+  assert.equal(formatActivityMetadataSummary(followUp), "Follow-up in 'Collective memory'");
+
+  const topLevel = activityEventFromResearchQuery(
+    { ...query, parentNodeId: null, adapter: "claude", model: "fable" },
+    tree,
   );
-  assert.ok(html.includes('class="activity-metadata"'));
-  assert.ok(html.indexOf("You asked") < html.indexOf("Research"));
-  assert.ok(html.indexOf("Research") < html.indexOf("Follow-up"));
-  assert.ok(html.indexOf("Follow-up") < html.indexOf(tree.title));
-  assert.ok(html.indexOf(tree.title) < html.indexOf("codex · gpt-5"));
-  assert.ok(html.indexOf("codex · gpt-5") < html.indexOf("Running"));
+  assert.equal(formatActivityMetadataSummary(topLevel), "You asked Claude Fable");
+  assert.equal(
+    formatActivityMetadataSummary({
+      ...topLevel,
+      execution: { adapter: "claude", model: null },
+    }),
+    "You asked Claude",
+  );
+  assert.equal(
+    formatActivityMetadataSummary({
+      ...topLevel,
+      execution: { adapter: "claude", model: "claude-opus-4-6" },
+    }),
+    "You asked Claude",
+  );
+
+  const html = renderToStaticMarkup(createElement(ActivityMetadataLine, { event: topLevel }));
+  assert.ok(html.includes('class="activity-metadata-summary"'));
+  assert.ok(!html.includes("activity-metadata-primary"));
+  assert.ok(html.indexOf("You asked Claude Fable") < html.indexOf("<time"));
 });
 
 test("saved metadata resolves type and source context", () => {

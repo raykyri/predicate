@@ -54,6 +54,12 @@ interface ResearchDocumentFrameProps {
   hidden?: boolean;
   headerActions?: ReactNode;
   children: ReactNode;
+  canGoBack?: boolean;
+  canGoForward?: boolean;
+  backTitle?: string;
+  forwardTitle?: string;
+  onBack?: () => void;
+  onForward?: () => void;
 }
 
 interface ResearchSidebarRestoreButtonProps {
@@ -106,12 +112,25 @@ export function ResearchDocumentFrame({
   hidden = false,
   headerActions,
   children,
+  canGoBack,
+  canGoForward,
+  backTitle,
+  forwardTitle,
+  onBack,
+  onForward,
 }: ResearchDocumentFrameProps) {
   return (
     <div className="research-workspace" hidden={hidden}>
       <main className="research-document">
         <header className="research-document-header">
-          <ResearchHistoryNav />
+          <ResearchHistoryNav
+            canGoBack={canGoBack}
+            canGoForward={canGoForward}
+            backTitle={backTitle}
+            forwardTitle={forwardTitle}
+            onBack={onBack}
+            onForward={onForward}
+          />
           <div className="research-breadcrumb" aria-label="Research path">
             <span>
               <button className="control-button" type="button" disabled>

@@ -161,6 +161,12 @@ interface ResearchDocumentProps {
   terminalMapOpen?: boolean;
   /** Show held-⌘ shortcut badges (the ⌘J follow-ups hint). */
   shortcutHintsShown: boolean;
+  /** Workspace-level back/forward (Recent Activity ↔ documents). Used when
+   * this tree's own visit stack has nowhere left to go. */
+  workspaceCanGoBack?: boolean;
+  workspaceCanGoForward?: boolean;
+  onWorkspaceBack?: () => void;
+  onWorkspaceForward?: () => void;
 }
 
 // The backend caps snapshots at 64MB, which is still far beyond what markdown
@@ -1631,6 +1637,10 @@ function ResearchDocument({
   onOpenTerminalMap,
   terminalMapOpen,
   shortcutHintsShown,
+  workspaceCanGoBack = false,
+  workspaceCanGoForward = false,
+  onWorkspaceBack,
+  onWorkspaceForward,
 }: ResearchDocumentProps) {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   // Browser-style visit history for the header's back/forward controls, reset
@@ -2570,26 +2580,28 @@ function ResearchDocument({
   const selectNodeRef = useRef(selectNode);
   selectNodeRef.current = selectNode;
 
-  const canGoBack = historyCanGoBack(history);
-  const canGoForward = historyCanGoForward(history);
+  const canGoBack = historyCanGoBack(history) || workspaceCanGoBack;
+  const canGoForward = historyCanGoForward(history) || workspaceCanGoForward;
 
   const goBack = useCallback(() => {
     const step = researchHistoryBack(history);
-    if (!step) {
+    if (step) {
+      applySelection(step.nodeId);
+      setHistory(step.history);
       return;
     }
-    applySelection(step.nodeId);
-    setHistory(step.history);
-  }, [applySelection, history]);
+    onWorkspaceBack?.();
+  }, [applySelection, history, onWorkspaceBack]);
 
   const goForward = useCallback(() => {
     const step = researchHistoryForward(history);
-    if (!step) {
+    if (step) {
+      applySelection(step.nodeId);
+      setHistory(step.history);
       return;
     }
-    applySelection(step.nodeId);
-    setHistory(step.history);
-  }, [applySelection, history]);
+    onWorkspaceForward?.();
+  }, [applySelection, history, onWorkspaceForward]);
   const goBackRef = useRef(goBack);
   const goForwardRef = useRef(goForward);
   goBackRef.current = goBack;

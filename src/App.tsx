@@ -384,6 +384,15 @@ import {
   terminalLinkTarget,
 } from "./lib/links";
 import {
+  canGoWorkspaceBack,
+  canGoWorkspaceForward,
+  initResearchWorkspaceHistory,
+  pushResearchWorkspaceHistory,
+  researchWorkspaceHistoryBack,
+  researchWorkspaceHistoryForward,
+  type ResearchWorkspaceVisit,
+} from "./lib/researchHistory";
+import {
   isResearchTreeSelectionChange,
   pruneResearchNavigation,
   pruneResearchNavigationNodes,
@@ -2225,6 +2234,13 @@ function MainApp() {
     setJournalOpenState(open);
     localStorage.setItem(JOURNAL_OPEN_KEY, open ? "true" : "false");
   }, []);
+  const [researchWorkspaceHistory, setResearchWorkspaceHistory] = useState(() =>
+    initResearchWorkspaceHistory(
+      localStorage.getItem(JOURNAL_OPEN_KEY) === "true" ? { kind: "journal" } : null,
+    ),
+  );
+  const researchWorkspaceHistoryRef = useRef(researchWorkspaceHistory);
+  researchWorkspaceHistoryRef.current = researchWorkspaceHistory;
   const [researchVisibilityFilter, setResearchVisibilityFilter] =
     useState<ResearchVisibilityFilter>(() => {
       const stored = localStorage.getItem(RESEARCH_VISIBILITY_FILTER_KEY);
@@ -8887,6 +8903,20 @@ function MainApp() {
     setJournalOpen,
     setSidebarMode,
   ]);
+  const recordResearchWorkspaceVisit = useCallback((visit: ResearchWorkspaceVisit) => {
+    setResearchWorkspaceHistory((current) => {
+      const next = pushResearchWorkspaceHistory(current, visit);
+      researchWorkspaceHistoryRef.current = next;
+      return next;
+    });
+  }, []);
+  const navigateToResearchDocument = useCallback(
+    (treeId: string) => {
+      recordResearchWorkspaceVisit({ kind: "document", treeId });
+      void selectResearchTree(treeId);
+    },
+    [recordResearchWorkspaceVisit, selectResearchTree],
+  );
   const openRecentResearchQuery = useCallback(
     (query: RecentResearchQuery) => {
       const navigationStore = researchNavigationStore();
@@ -8897,9 +8927,9 @@ function MainApp() {
       if (archivedResearchTreesRef.current.some((tree) => tree.id === query.treeId)) {
         changeResearchVisibilityFilter("all");
       }
-      void selectResearchTree(query.treeId);
+      navigateToResearchDocument(query.treeId);
     },
-    [changeResearchVisibilityFilter, selectResearchTree],
+    [changeResearchVisibilityFilter, navigateToResearchDocument],
   );
   const loadOlderActivity = useCallback(() => {
     if (!recentActivityCursor || loadingOlderActivityRef.current) return;
@@ -8958,7 +8988,7 @@ function MainApp() {
   // Brings the Journal page forward on the research surface. Tree selection is
   // left standing (the journal outranks the document in the stage selector),
   // so closing the journal by picking a tree is a plain selection.
-  const openJournal = useCallback(() => {
+  const showJournal = useCallback(() => {
     // The Journal is a peer page of a research document, not an overlay on one:
     // opening it drops the tree selection the way Home does, so the sidebar
     // never shows a selected row behind the tab that is actually forward.
@@ -8977,6 +9007,46 @@ function MainApp() {
     localStorage.removeItem(ACTIVE_RESEARCH_TREE_KEY);
     setJournalOpen(true);
   }, [dismissPristineNewDocumentComposer, setActiveSurface, setJournalOpen, setSidebarMode]);
+  const openJournal = useCallback(() => {
+    const treeId = activeResearchTreeIdRef.current;
+    setResearchWorkspaceHistory((current) => {
+      const withDocument = treeId
+        ? pushResearchWorkspaceHistory(current, { kind: "document", treeId })
+        : current;
+      const next = pushResearchWorkspaceHistory(withDocument, { kind: "journal" });
+      researchWorkspaceHistoryRef.current = next;
+      return next;
+    });
+    showJournal();
+  }, [showJournal]);
+  const applyResearchWorkspaceVisit = useCallback(
+    (visit: ResearchWorkspaceVisit) => {
+      if (visit.kind === "journal") {
+        showJournal();
+        return;
+      }
+      void selectResearchTree(visit.treeId);
+    },
+    [selectResearchTree, showJournal],
+  );
+  const goResearchWorkspaceBack = useCallback(() => {
+    const step = researchWorkspaceHistoryBack(researchWorkspaceHistoryRef.current);
+    if (!step) {
+      return;
+    }
+    researchWorkspaceHistoryRef.current = step.history;
+    setResearchWorkspaceHistory(step.history);
+    applyResearchWorkspaceVisit(step.visit);
+  }, [applyResearchWorkspaceVisit]);
+  const goResearchWorkspaceForward = useCallback(() => {
+    const step = researchWorkspaceHistoryForward(researchWorkspaceHistoryRef.current);
+    if (!step) {
+      return;
+    }
+    researchWorkspaceHistoryRef.current = step.history;
+    setResearchWorkspaceHistory(step.history);
+    applyResearchWorkspaceVisit(step.visit);
+  }, [applyResearchWorkspaceVisit]);
   // In-flight tweet hydrations by entry id, so a re-render or a second
   // journal open can't double-fetch the same entry.
   const journalHydrationsRef = useRef(new Set<string>());
@@ -11118,7 +11188,7 @@ function MainApp() {
         section: "Research",
         title: tree.title,
         hint: tree.runningCount > 0 ? `${tree.runningCount} running` : undefined,
-        action: () => void selectResearchTree(tree.id),
+        action: () => navigateToResearchDocument(tree.id),
       });
     }
     for (const pane of sidebarPanes) {
@@ -15550,10 +15620,10 @@ function MainApp() {
           treeId,
         )
       ) {
-        void selectResearchTree(treeId);
+        navigateToResearchDocument(treeId);
       }
     },
-    [activeResearchTreeId, newDocumentOpen, researchSurfaceActive, selectResearchTree],
+    [activeResearchTreeId, navigateToResearchDocument, newDocumentOpen, researchSurfaceActive],
   );
   const reorderResearchTreesFromSidebar = useCallback(
     (archived: boolean, orderedTreeIds: string[]) => {
@@ -18458,6 +18528,10 @@ function MainApp() {
               onDismissUndo={dismissJournalUndo}
               onOpenResearchQuery={openRecentResearchQuery}
               onLoadOlder={loadOlderActivity}
+              canGoBack={canGoWorkspaceBack(researchWorkspaceHistory)}
+              canGoForward={canGoWorkspaceForward(researchWorkspaceHistory)}
+              onBack={goResearchWorkspaceBack}
+              onForward={goResearchWorkspaceForward}
             />
           ) : null}
           {/* The tree-id term repeats the selector's own condition solely to
@@ -18508,6 +18582,10 @@ function MainApp() {
               terminalMapOpen={
                 researchSidebarRestoreInHeader ? terminalMapOpen : false
               }
+              workspaceCanGoBack={canGoWorkspaceBack(researchWorkspaceHistory)}
+              workspaceCanGoForward={canGoWorkspaceForward(researchWorkspaceHistory)}
+              onWorkspaceBack={goResearchWorkspaceBack}
+              onWorkspaceForward={goResearchWorkspaceForward}
             />
           ) : null}
           <div className="research-empty-state" hidden={researchStageView !== "home"}>

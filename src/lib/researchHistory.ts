@@ -78,6 +78,82 @@ export function researchHistoryForward(history: ResearchHistory): ResearchHistor
   return { history: { entries: history.entries, index }, nodeId: history.entries[index] };
 }
 
+/** Cross-page research visits. Recent Activity is a peer of a document, so
+ * opening a query from the feed must push here — the document's own node
+ * stack remounts empty and cannot remember the feed. */
+export type ResearchWorkspaceVisit =
+  | { kind: "journal" }
+  | { kind: "document"; treeId: string };
+
+export interface ResearchWorkspaceHistory {
+  entries: ResearchWorkspaceVisit[];
+  index: number;
+}
+
+export interface ResearchWorkspaceHistoryStep {
+  history: ResearchWorkspaceHistory;
+  visit: ResearchWorkspaceVisit;
+}
+
+export const EMPTY_RESEARCH_WORKSPACE_HISTORY: ResearchWorkspaceHistory = {
+  entries: [],
+  index: -1,
+};
+
+export function initResearchWorkspaceHistory(
+  visit: ResearchWorkspaceVisit | null,
+): ResearchWorkspaceHistory {
+  return visit ? { entries: [visit], index: 0 } : EMPTY_RESEARCH_WORKSPACE_HISTORY;
+}
+
+export function sameResearchWorkspaceVisit(
+  left: ResearchWorkspaceVisit,
+  right: ResearchWorkspaceVisit,
+): boolean {
+  if (left.kind !== right.kind) return false;
+  return left.kind === "journal" || left.treeId === right.treeId;
+}
+
+export function pushResearchWorkspaceHistory(
+  history: ResearchWorkspaceHistory,
+  visit: ResearchWorkspaceVisit,
+): ResearchWorkspaceHistory {
+  const current = history.index >= 0 ? history.entries[history.index] : undefined;
+  if (current && sameResearchWorkspaceVisit(current, visit)) {
+    return history;
+  }
+  const entries = [...history.entries.slice(0, history.index + 1), visit];
+  return { entries, index: entries.length - 1 };
+}
+
+export function canGoWorkspaceBack(history: ResearchWorkspaceHistory): boolean {
+  return history.index > 0;
+}
+
+export function canGoWorkspaceForward(history: ResearchWorkspaceHistory): boolean {
+  return history.index >= 0 && history.index < history.entries.length - 1;
+}
+
+export function researchWorkspaceHistoryBack(
+  history: ResearchWorkspaceHistory,
+): ResearchWorkspaceHistoryStep | null {
+  if (!canGoWorkspaceBack(history)) {
+    return null;
+  }
+  const index = history.index - 1;
+  return { history: { entries: history.entries, index }, visit: history.entries[index] };
+}
+
+export function researchWorkspaceHistoryForward(
+  history: ResearchWorkspaceHistory,
+): ResearchWorkspaceHistoryStep | null {
+  if (!canGoWorkspaceForward(history)) {
+    return null;
+  }
+  const index = history.index + 1;
+  return { history: { entries: history.entries, index }, visit: history.entries[index] };
+}
+
 /** Removes visits to nodes that no longer exist while keeping the cursor on
  * the same surviving visit whenever possible. Visits that become adjacent
  * duplicates are collapsed: stepping between two entries for the same node
