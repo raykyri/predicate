@@ -44,9 +44,31 @@ test("transcript file links omit source positions and sentence periods from the 
   assert.match(withPosition, /href="qmux-file:\/tmp\/example\.html"/u);
   assert.doesNotMatch(withPosition, /href="[^"]*example\.html:4/u);
 
+  const withRange = render("[source](/tmp/example.ts:760-843)");
+  assert.match(withRange, />source</u);
+  assert.match(withRange, /href="qmux-file:\/tmp\/example\.ts"/u);
+  assert.doesNotMatch(withRange, /href="[^"]*example\.ts:760/u);
+
   const withPeriod = render("[preview](/tmp/example.html.)");
   assert.match(withPeriod, /href="qmux-file:\/tmp\/example\.html"/u);
   assert.doesNotMatch(withPeriod, /href="[^"]*example\.html\./u);
+});
+
+test("Devin ref tags render as file and line-number links", () => {
+  const snippet =
+    '<ref_snippet file="/Users/raymond/Code/multitool/.claude/worktrees/foks-experiment/foks-ui/src/screens/write-workflows.tsx" lines="760-843" />';
+  const snippetHtml = render(snippet);
+  assert.match(snippetHtml, />write-workflows\.tsx:760-843</u);
+  assert.match(
+    snippetHtml,
+    /href="qmux-file:\/Users\/raymond\/Code\/multitool\/\.claude\/worktrees\/foks-experiment\/foks-ui\/src\/screens\/write-workflows\.tsx"/u,
+  );
+  assert.doesNotMatch(snippetHtml, /ref_snippet/u);
+
+  const fileHtml = render('<ref_file file="/tmp/project/config.json" />');
+  assert.match(fileHtml, />config\.json</u);
+  assert.match(fileHtml, /href="qmux-file:\/tmp\/project\/config\.json"/u);
+  assert.doesNotMatch(fileHtml, /ref_file/u);
 });
 
 test("an exact inline-code loopback HTML URL receives a launch button", () => {

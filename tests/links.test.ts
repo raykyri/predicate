@@ -68,6 +68,10 @@ test("local file links drop trailing source positions and sentence periods befor
     `${QMUX_FILE_HREF_PREFIX}/Users/raymond/Code/foks/README-FOKS.md`,
   );
   assert.equal(
+    safeHref("/Users/raymond/Code/foks/example.ts:760-843"),
+    `${QMUX_FILE_HREF_PREFIX}/Users/raymond/Code/foks/example.ts`,
+  );
+  assert.equal(
     absoluteLocalFilePath("file:///tmp/example.ts:36:8"),
     "/tmp/example.ts",
   );
@@ -177,6 +181,10 @@ test("terminal links keep ordinary web URLs external", () => {
 
 test("terminal links recognize absolute, file URL, and relative paths", () => {
   assert.deepEqual(terminalLinkTarget("/tmp/report.html:36:8"), {
+    kind: "localPath",
+    path: "/tmp/report.html",
+  });
+  assert.deepEqual(terminalLinkTarget("/tmp/report.html:760-843"), {
     kind: "localPath",
     path: "/tmp/report.html",
   });

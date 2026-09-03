@@ -23,6 +23,7 @@ import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import { placePanePopover, turnPaneRectFrom } from "../lib/appHelpers";
 import { writeClipboardText } from "../lib/clipboard";
+import { rewriteDevinFileRefs } from "../lib/devinFileRefs";
 import { loopbackHtmlUrl, safeHref } from "../lib/links";
 import { normalizeLatexMathDelimiters } from "../lib/markdownMathDelimiters";
 import DiagramBlock, { diagramLangFromClassName, nodeText } from "./DiagramBlock";
@@ -774,12 +775,13 @@ export default memo(function TranscriptMarkdown({
   artifactLinks = false,
 }: TranscriptMarkdownProps) {
   const math = useSyncExternalStore(subscribeToMathPlugins, readMathPlugins, readMathPlugins);
-  if (oversizedContent && text.length > oversizedContent.maxCharacters) {
+  const source = rewriteDevinFileRefs(text);
+  if (oversizedContent && source.length > oversizedContent.maxCharacters) {
     const displayLimit = oversizedContent.maxDisplayCharacters;
     const shown =
-      displayLimit !== undefined && text.length > displayLimit
-        ? `${text.slice(0, displayLimit)}\n… (truncated: showing ${displayLimit.toLocaleString()} of ${text.length.toLocaleString()} characters)`
-        : text;
+      displayLimit !== undefined && source.length > displayLimit
+        ? `${source.slice(0, displayLimit)}\n… (truncated: showing ${displayLimit.toLocaleString()} of ${source.length.toLocaleString()} characters)`
+        : source;
     return (
       <pre className={oversizedContent.fallbackClassName ?? "research-plaintext"}>{shown}</pre>
     );
@@ -802,7 +804,7 @@ export default memo(function TranscriptMarkdown({
           disallowedElements={inline ? INLINE_DISALLOWED_ELEMENTS : undefined}
           unwrapDisallowed={inline}
         >
-          {math ? normalizeLatexMathDelimiters(text) : text}
+          {math ? normalizeLatexMathDelimiters(source) : source}
         </ReactMarkdown>
       </div>
     </TranscriptArtifactLinksContext.Provider>
