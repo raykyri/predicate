@@ -69,6 +69,8 @@ pub struct AdapterConfigs {
     pub cursor: CursorAdapterConfig,
     #[serde(default)]
     pub devin: DevinAdapterConfig,
+    #[serde(default)]
+    pub antigravity: AntigravityAdapterConfig,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -123,6 +125,13 @@ pub struct CursorAdapterConfig {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DevinAdapterConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AntigravityAdapterConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub binary: Option<String>,
 }
@@ -492,6 +501,16 @@ impl QmuxConfig {
         )
     }
 
+    pub fn antigravity_binary(&self) -> String {
+        expand_binary(
+            self.adapters
+                .antigravity
+                .binary
+                .clone()
+                .unwrap_or_else(|| "agy".to_string()),
+        )
+    }
+
     fn read_config_file(path: &Path) -> Result<Self, String> {
         let raw = fs::read_to_string(path)
             .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -546,6 +565,9 @@ impl QmuxConfig {
                 },
                 devin: DevinAdapterConfig {
                     binary: Some("devin".to_string()),
+                },
+                antigravity: AntigravityAdapterConfig {
+                    binary: Some("agy".to_string()),
                 },
             },
             remotes: BTreeMap::new(),
@@ -1131,6 +1153,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(configured.devin_binary(), "/opt/bin/devin");
+    }
+
+    #[test]
+    fn antigravity_binary_defaults_and_can_be_configured() {
+        let default_config: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(default_config.antigravity_binary(), "agy");
+
+        let configured: QmuxConfig = serde_json::from_str(
+            r#"{
+              "workspaceRoot": ".qmux/workspaces",
+              "socketPath": ".qmux/run/qmux.sock",
+              "adapters": {
+                "antigravity": {
+                  "binary": "/opt/bin/agy"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(configured.antigravity_binary(), "/opt/bin/agy");
     }
 
     #[test]

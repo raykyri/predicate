@@ -1,4 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
+import { antigravityUiAdapter } from "./antigravity";
 import { claudeUiAdapter } from "./claude";
 import { codexUiAdapter } from "./codex";
 import { cursorUiAdapter } from "./cursor";
@@ -53,6 +54,7 @@ export const agentUiAdapters = [
   piUiAdapter,
   cursorUiAdapter,
   devinUiAdapter,
+  antigravityUiAdapter,
 ];
 
 export function findAgentUiAdapter(adapterId: string | null | undefined): AgentUiAdapter | null {

@@ -1588,6 +1588,7 @@ fn adapter_label(adapter: &str) -> &str {
         "grok" => "Grok",
         "muse" => "Muse",
         "cursor" => "Cursor",
+        "antigravity" => "Antigravity",
         _ => "Agent",
     }
 }

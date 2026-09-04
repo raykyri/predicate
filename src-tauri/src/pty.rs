@@ -575,15 +575,7 @@ pub fn spawn_ssh_shell_pane(
     let pane_id = state.next_id("pane");
     spawn_pty(
         state,
-        ssh_client_spawn_spec(
-            state,
-            pane_id,
-            group.id,
-            cwd,
-            initial_size,
-            false,
-            remote,
-        )?,
+        ssh_client_spawn_spec(state, pane_id, group.id, cwd, initial_size, false, remote)?,
     )
 }
 
@@ -4490,6 +4482,7 @@ mod tests {
                 },
                 cursor: Default::default(),
                 devin: Default::default(),
+                antigravity: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),
@@ -4524,6 +4517,7 @@ mod tests {
                 },
                 cursor: Default::default(),
                 devin: Default::default(),
+                antigravity: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: std::path::PathBuf::new(),

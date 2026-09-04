@@ -57,7 +57,7 @@ function fileBasename(path: string): string {
 }
 
 function markdownFileLink(label: string, destination: string): string {
-  const escapedLabel = label.replaceAll("\\", "\\\\").replaceAll("]", "\\]");
+  const escapedLabel = label.replace(/\\/g, "\\\\").replace(/\]/g, "\\]");
   if (/[\s()]/.test(destination) && !/[<>]/.test(destination)) {
     return `[${escapedLabel}](<${destination}>)`;
   }

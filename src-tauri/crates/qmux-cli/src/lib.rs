@@ -210,6 +210,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             run_agent_exec("devin".to_string(), args.collect())?;
             Ok(true)
         }
+        "antigravity" | "agy" => {
+            run_agent_exec("antigravity".to_string(), args.collect())?;
+            Ok(true)
+        }
         "mcp" => {
             mcp::run()?;
             Ok(true)
@@ -844,10 +848,7 @@ mod tests {
         let line = version_line();
         assert_eq!(line, format!("qmux-cli {VERSION}"));
         assert_eq!(parse_version_line(&line), Some(VERSION));
-        assert_eq!(
-            parse_version_line("qmux-cli 0.3.2\n"),
-            Some("0.3.2")
-        );
+        assert_eq!(parse_version_line("qmux-cli 0.3.2\n"), Some("0.3.2"));
         assert_eq!(parse_version_line("not-a-version"), None);
     }
 

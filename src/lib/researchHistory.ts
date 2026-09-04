@@ -111,7 +111,9 @@ export function sameResearchWorkspaceVisit(
   right: ResearchWorkspaceVisit,
 ): boolean {
   if (left.kind !== right.kind) return false;
-  return left.kind === "journal" || left.treeId === right.treeId;
+  if (left.kind === "journal" && right.kind === "journal") return true;
+  if (left.kind === "document" && right.kind === "document") return left.treeId === right.treeId;
+  return false;
 }
 
 export function pushResearchWorkspaceHistory(

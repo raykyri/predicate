@@ -1,3 +1,4 @@
+import antigravityModelIconUrl from "../assets/model-icons/antigravity.svg";
 import claudeModelIconUrl from "../assets/model-icons/claude-ai.svg";
 import cursorModelIconUrl from "../assets/model-icons/cursor.svg";
 import devinModelIconUrl from "../assets/model-icons/devin.svg";
@@ -6,6 +7,7 @@ import openAiModelIconUrl from "../assets/model-icons/openai.svg";
 import openCodeModelIconUrl from "../assets/model-icons/opencode-dark.svg";
 import grokModelIconUrl from "../assets/model-icons/grok.svg";
 import piModelIconUrl from "../assets/model-icons/pi.svg";
+import { ANTIGRAVITY_ADAPTER_ID } from "../adapters/antigravity";
 import { CLAUDE_ADAPTER_ID } from "../adapters/claude";
 import { CODEX_ADAPTER_ID } from "../adapters/codex";
 import { CURSOR_ADAPTER_ID } from "../adapters/cursor";
@@ -26,6 +28,7 @@ export const ADAPTER_ICON_BY_ID: Record<string, string> = {
   [PI_ADAPTER_ID]: piModelIconUrl,
   [CURSOR_ADAPTER_ID]: cursorModelIconUrl,
   [DEVIN_ADAPTER_ID]: devinModelIconUrl,
+  [ANTIGRAVITY_ADAPTER_ID]: antigravityModelIconUrl,
 };
 
 // Codex's mark is dark-on-transparent, so invert it for the launcher's dark surface.

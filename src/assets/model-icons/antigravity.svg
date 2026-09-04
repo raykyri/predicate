@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
+  <style>
+    .logo-mark { fill: #1b1913; }
+    @media (prefers-color-scheme: dark) {
+      .logo-mark { fill: #f7f7f4; }
+    }
+  </style>
+  <path class="logo-mark" d="M12 2C12 7.523 7.523 12 2 12c5.523 0 10 4.477 10 10 0-5.523 4.477-10 10-10-5.523 0-10-4.477-10-10Z"/>
+</svg>

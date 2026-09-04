@@ -2534,8 +2534,8 @@ async fn group_create(
     tauri::async_runtime::spawn_blocking(move || {
         create_group(&state, prepare_remote_group_request(&state, request)?)
     })
-        .await
-        .map_err(|err| format!("group_create task failed: {err}"))?
+    .await
+    .map_err(|err| format!("group_create task failed: {err}"))?
 }
 
 #[tauri::command]

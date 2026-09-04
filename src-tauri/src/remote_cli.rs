@@ -89,7 +89,9 @@ pub fn bundled_cli_path(target: &str) -> Result<PathBuf, String> {
         candidates.push(exe_dir.join("../../../src-tauri/remote-cli"));
         candidates.push(exe_dir.join("../../../remote-cli"));
     }
-    let Some(dir) = candidates.into_iter().find(|dir| dir.join(target).join("qmux-cli").is_file())
+    let Some(dir) = candidates
+        .into_iter()
+        .find(|dir| dir.join(target).join("qmux-cli").is_file())
     else {
         return Err(format!(
             "this qmux build has no bundled qmux-cli for {target}; run scripts/build-remote-cli.sh"
@@ -100,7 +102,10 @@ pub fn bundled_cli_path(target: &str) -> Result<PathBuf, String> {
 
 /// Ensures a version-matching CLI exists on `remote`, updating `qmux_cli` to
 /// the managed absolute path when qmux owns the install.
-pub fn prepare_remote_ref(state: &AppState, remote: &mut RemoteRef) -> Result<EnsureCliResult, String> {
+pub fn prepare_remote_ref(
+    state: &AppState,
+    remote: &mut RemoteRef,
+) -> Result<EnsureCliResult, String> {
     let host = crate::host::for_group(Some(remote));
     let result = ensure_cli(&host)?;
     if !matches!(
@@ -119,7 +124,11 @@ fn persist_managed_path(state: &AppState, remote_id: &str, path: &str) -> Result
     }
     persistence::update_preferences(&state.config().workspace_root, |preferences| {
         if let Some(saved) = preferences.remotes.get_mut(remote_id) {
-            let current = saved.qmux_cli.as_deref().map(str::trim).filter(|value| !value.is_empty());
+            let current = saved
+                .qmux_cli
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
             if is_managed_cli(current) {
                 saved.qmux_cli = Some(path.to_string());
             }
@@ -175,9 +184,8 @@ pub fn ensure_cli(host: &Host) -> Result<EnsureCliResult, String> {
 
     let dest_dir = host.expand_home("~/.qmux/bin")?;
     install_cli(host, &dest_dir, &expanded, &bytes)?;
-    let version = remote_cli_version(host, &expanded).ok_or_else(|| {
-        format!("installed qmux-cli at {expanded} but could not read --version")
-    })?;
+    let version = remote_cli_version(host, &expanded)
+        .ok_or_else(|| format!("installed qmux-cli at {expanded} but could not read --version"))?;
     if version != VERSION {
         return Err(format!(
             "installed qmux-cli at {expanded} reported {version}, expected {VERSION}"
@@ -202,7 +210,8 @@ fn remote_stdout(host: &Host, program: &str, args: Vec<String>) -> Result<String
         args,
         ..Default::default()
     });
-    let output = pty::remote_command_output(command, None, &format!("run {program} on {}", host.label()))?;
+    let output =
+        pty::remote_command_output(command, None, &format!("run {program} on {}", host.label()))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(if stderr.is_empty() {

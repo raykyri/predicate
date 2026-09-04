@@ -23,6 +23,8 @@ const HOME_FALLBACK_DIRS: &[&str] = &[
     ".cargo/bin",
     ".deno/bin",
     "go/bin",
+    ".gemini/antigravity-cli/bin",
+    ".antigravity/antigravity/bin",
 ];
 
 const SYSTEM_FALLBACK_DIRS: &[&str] = &[

@@ -1427,6 +1427,7 @@ mod tests {
                 },
                 cursor: Default::default(),
                 devin: Default::default(),
+                antigravity: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),

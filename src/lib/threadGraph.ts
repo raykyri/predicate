@@ -274,7 +274,7 @@ function participantForTurn(agent: AgentInfo, turn: Turn): ThreadParticipant {
   };
 }
 
-function adapterLabel(adapter: string) {
+export function adapterLabel(adapter: string) {
   switch (adapter) {
     case "claude":
       return "Claude";
@@ -290,6 +290,10 @@ function adapterLabel(adapter: string) {
       return "Pi";
     case "cursor":
       return "Cursor";
+    case "devin":
+      return "Devin";
+    case "antigravity":
+      return "Antigravity";
     default:
       return "Agent";
   }

@@ -1,3 +1,4 @@
+pub mod antigravity;
 pub mod claude;
 pub mod codex;
 pub mod cursor;
@@ -22,6 +23,7 @@ use crate::workspace::{
     mark_agent_spawn_failed, prepare_agent_workspace_with_parent,
     prepare_named_agent_workspace_with_parent,
 };
+use antigravity::AntigravityAdapter;
 use claude::ClaudeAdapter;
 use codex::CodexAdapter;
 use cursor::CursorAdapter;
@@ -1152,6 +1154,7 @@ fn adapter_login_command(adapter_id: &str, binary: &str) -> Option<String> {
         "opencode" => Some(format!("{binary} auth login")),
         "cursor" => Some(format!("{binary} login")),
         "devin" => Some(format!("{binary} auth login")),
+        "antigravity" => Some(binary),
         _ => None,
     }
 }
@@ -1165,6 +1168,7 @@ fn adapter_install_url(adapter_id: &str) -> Option<&'static str> {
         "pi" => Some("https://github.com/badlogic/pi-mono"),
         "cursor" => Some("https://cursor.com/docs/cli/overview"),
         "devin" => Some("https://docs.devin.ai/work-with-devin/devin-cli"),
+        "antigravity" => Some("https://antigravity.google/docs/cli/reference"),
         _ => None,
     }
 }
@@ -1620,6 +1624,7 @@ pub fn adapter_registry(config: &QmuxConfig) -> AdapterRegistry {
         Box::new(PiAdapter::new(config)),
         Box::new(CursorAdapter::new(config)),
         Box::new(DevinAdapter::new(config)),
+        Box::new(AntigravityAdapter::new(config)),
     ])
 }
 
@@ -2210,6 +2215,7 @@ mod tests {
                 },
                 cursor: Default::default(),
                 devin: Default::default(),
+                antigravity: Default::default(),
             },
             legacy_claude_binary: None,
             claude_plugin_dir: PathBuf::new(),
@@ -2236,7 +2242,7 @@ mod tests {
         let registry = adapter_registry(&test_config());
 
         let metadata = registry.metadata();
-        assert_eq!(metadata.len(), 8);
+        assert_eq!(metadata.len(), 9);
         assert_eq!(metadata[0].id, "claude");
         assert!(metadata[0].default);
         assert_eq!(metadata[1].id, "codex");
@@ -2253,6 +2259,9 @@ mod tests {
         assert!(!metadata[6].default);
         assert_eq!(metadata[7].id, "devin");
         assert!(!metadata[7].default);
+        assert_eq!(metadata[8].id, "antigravity");
+        assert!(!metadata[8].default);
+        assert_eq!(metadata[8].login_command.as_deref(), Some("'agy'"));
         assert!(
             metadata
                 .iter()
@@ -2287,6 +2296,7 @@ mod tests {
         assert!(adapter_supports_research(&config, "grok"));
         assert!(!adapter_supports_research(&config, "opencode"));
         assert!(!adapter_supports_research(&config, "pi"));
+        assert!(!adapter_supports_research(&config, "antigravity"));
         assert!(adapter_supports_fork_at_message(&config, "pi"));
         // Muse has no fork command either — no `--fork-session` flag and no
         // `fork` subcommand — so branching a session is not offered.
@@ -2294,6 +2304,8 @@ mod tests {
         assert!(!adapter_supports_fork_at_message(&config, "muse"));
         assert!(!adapter_supports_fork(&config, "devin"));
         assert!(!adapter_supports_fork_at_message(&config, "devin"));
+        assert!(!adapter_supports_fork(&config, "antigravity"));
+        assert!(!adapter_supports_fork_at_message(&config, "antigravity"));
     }
 
     #[test]
@@ -2387,7 +2399,7 @@ mod tests {
 
         let metadata = probe_adapter_metadata_for_config(&config, Some(&remote), true)
             .expect("remote metadata");
-        assert_eq!(metadata.len(), 8);
+        assert_eq!(metadata.len(), 9);
         assert!(metadata.iter().all(|adapter| {
             adapter.target.kind == "remote" && adapter.target.id.as_deref() == Some("build-host")
         }));
