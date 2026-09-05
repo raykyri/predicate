@@ -11,6 +11,10 @@ use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -180,7 +184,7 @@ pub fn start_transcript_tail(
     transcript_path: String,
     adapter_id: String,
 ) {
-    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, true);
+    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, true, None);
 }
 
 /// Tails a transcript selected for historical viewing without letting its old
@@ -191,7 +195,26 @@ fn start_historical_transcript_tail(
     transcript_path: String,
     adapter_id: String,
 ) {
-    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, false);
+    start_transcript_tail_inner(state, agent_id, transcript_path, adapter_id, false, None);
+}
+
+/// Remote mirrors arrive in batches. Only records beyond the connection's
+/// historical byte boundary may change live status or advance queued prompts.
+pub(crate) fn start_remote_transcript_tail(
+    state: AppState,
+    agent_id: String,
+    transcript_path: String,
+    adapter_id: String,
+    historical_end: Arc<AtomicU64>,
+) {
+    start_transcript_tail_inner(
+        state,
+        agent_id,
+        transcript_path,
+        adapter_id,
+        true,
+        Some(historical_end),
+    );
 }
 
 fn start_transcript_tail_inner(
@@ -200,6 +223,7 @@ fn start_transcript_tail_inner(
     transcript_path: String,
     adapter_id: String,
     observe_snapshot_workspace: bool,
+    historical_end: Option<Arc<AtomicU64>>,
 ) {
     if let Err(err) = adapter_registry(state.config()).get(&adapter_id) {
         state.emit(QmuxEvent::new(
@@ -318,6 +342,7 @@ fn start_transcript_tail_inner(
                             recovered_path,
                             adapter_id.clone(),
                             observe_snapshot_workspace,
+                            historical_end.clone(),
                         );
                         return;
                     }
@@ -472,7 +497,11 @@ fn start_transcript_tail_inner(
                             Ok(false) => {}
                         }
                     }
-                    for line in lines {
+                    let mut record_end = consumed;
+                    for (line, raw_record) in
+                        lines.into_iter().zip(snapshot.data.split_inclusive('\n'))
+                    {
+                        record_end += raw_record.len() as u64;
                         let lifecycle_event = adapter.parse_transcript_lifecycle_event(&line);
                         if !should_refresh_turns
                             && let Some(turn) =
@@ -512,7 +541,11 @@ fn start_transcript_tail_inner(
                         if !should_refresh_turns {
                             raw_lines.push(line.to_string());
                         }
-                        if let Some(lifecycle_event) = lifecycle_event {
+                        if let Some(lifecycle_event) = lifecycle_event
+                            && historical_end
+                                .as_ref()
+                                .is_none_or(|boundary| record_end > boundary.load(Ordering::SeqCst))
+                        {
                             match transcript_lifecycle_agent_event(
                                 &state,
                                 &agent_id,
@@ -786,7 +819,9 @@ fn recover_missing_transcript(
     missing_path: &Path,
     adapter_id: &str,
 ) -> Result<Option<String>, String> {
-    if adapter_id != "claude" {
+    if adapter_id != "claude"
+        || missing_path.starts_with(state.config().workspace_root.join("remote-transcripts"))
+    {
         return Ok(None);
     }
 

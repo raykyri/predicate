@@ -153,6 +153,7 @@ pub fn ensure_cli(host: &Host) -> Result<EnsureCliResult, String> {
     let expanded = host.expand_home(MANAGED_CLI)?;
     if let Some(version) = remote_cli_version(host, &expanded)
         && version == VERSION
+        && remote_transcript_stream_supported(host, &expanded)
     {
         return Ok(EnsureCliResult {
             path: expanded,
@@ -186,6 +187,11 @@ pub fn ensure_cli(host: &Host) -> Result<EnsureCliResult, String> {
     install_cli(host, &dest_dir, &expanded, &bytes)?;
     let version = remote_cli_version(host, &expanded)
         .ok_or_else(|| format!("installed qmux-cli at {expanded} but could not read --version"))?;
+    if !remote_transcript_stream_supported(host, &expanded) {
+        return Err(
+            "bundled qmux-cli is missing transcript streaming; rebuild remote-cli artifacts".into(),
+        );
+    }
     if version != VERSION {
         return Err(format!(
             "installed qmux-cli at {expanded} reported {version}, expected {VERSION}"
@@ -197,6 +203,11 @@ pub fn ensure_cli(host: &Host) -> Result<EnsureCliResult, String> {
         installed: true,
         skipped: None,
     })
+}
+
+fn remote_transcript_stream_supported(host: &Host, path: &str) -> bool {
+    remote_stdout(host, path, vec!["--transcript-stream-version".into()])
+        .is_ok_and(|output| output.trim() == "3")
 }
 
 fn remote_cli_version(host: &Host, path: &str) -> Option<String> {

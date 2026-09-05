@@ -2098,6 +2098,8 @@ fn spawn_remote_tmux(
         return Err(err);
     }
 
+    crate::remote_transcript::restore(state, &pane_id);
+
     if native_surface {
         if let Err(err) = crate::native_terminal::create_host_managed(&pane_id, None) {
             let _ = controller.begin_generation();
@@ -2573,6 +2575,7 @@ fn attach_remote_generation(
         rows: pane.rows,
     }));
     run_remote_argv(&commands.configure_argv, "configure remote tmux session")?;
+    crate::remote_transcript::restore(state, pane_id);
     synchronize_remote_history(
         state,
         pane_id,

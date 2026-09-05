@@ -1046,7 +1046,9 @@ fn handle_line_with_peer(
                 Some(agent_id) => Some(agent_id),
                 None => state.agent_by_pane(&authed_pane)?.map(|agent| agent.id),
             };
+            let transcript_metadata = notification.payload.clone();
             let outcome = ingest_adapter_notification(state, notification)?;
+            crate::remote_transcript::observe(state, &authed_pane, &transcript_metadata);
             for event in outcome.into_events() {
                 state.emit(event);
             }

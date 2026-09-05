@@ -27,6 +27,7 @@ mod publishing;
 mod recovery;
 mod remote_cli;
 mod remote_terminal;
+mod remote_transcript;
 mod research;
 mod research_runtime;
 mod scrollback;

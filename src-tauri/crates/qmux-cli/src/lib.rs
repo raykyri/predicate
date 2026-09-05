@@ -9,6 +9,7 @@ mod cursor;
 mod mcp;
 mod muse;
 mod public_cli;
+pub mod transcript_stream;
 
 use qmux_proto::{ControlRequest, ControlResponse};
 use serde::Deserialize;
@@ -97,6 +98,14 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
     let mut args = remaining.into_iter();
 
     match command.as_str() {
+        "transcript-stream" => {
+            transcript_stream::run(args.collect())?;
+            Ok(true)
+        }
+        "--transcript-stream-version" => {
+            println!("3");
+            Ok(true)
+        }
         "notify" => {
             let event = args
                 .next()

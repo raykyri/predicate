@@ -508,6 +508,18 @@ Before creating a remote group:
   adapters will be used. The launcher probes the remote binaries and auth state;
   it never reuses the Mac's readiness result.
 
+Remote Claude and Codex transcripts are mirrored locally over a separate,
+read-only SSH stream. The transcript view backfills the current session and
+follows complete records as the agent writes them. Persisted offsets resume
+streaming after reconnects or app restarts; a transcript connection failure
+shows a notice while the terminal remains usable. Managed Linux `qmux-cli`
+installs are upgraded automatically when streaming support is missing. Custom
+CLI installations must support `--transcript-stream-version` (currently `3`).
+The stream transfers UTF-8 chunks of at most 128 KiB, allowing image-bearing
+records larger than a transport frame to be reassembled locally. Historical
+records loaded on connection or reconnect update the transcript without
+changing live agent status or advancing queued prompts.
+
 In Terminal mode, the sidebar menu lists each saved remote above **New group…**.
 **New remote group** atomically creates a group plus its first shell in that
 account's home directory. **New remote shell** opens an `ssh` session to that
