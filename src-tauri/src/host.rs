@@ -233,6 +233,10 @@ impl Host {
             format!("{exact_target}:0.0"),
             "#{pane_current_command}\t#{pane_pid}\t#{pane_dead}".to_string(),
         ]);
+        // set-option resolves a window target even for session options. The
+        // colon makes it parse the session component and honor its exact-match
+        // marker; without it, tmux looks for a session literally named "=…".
+        let option_target = format!("{exact_target}:");
         let mut configure_args = tmux_server_args(identity);
         configure_args.extend([
             // tmux is a durability layer for qmux, not a second interactive
@@ -241,19 +245,19 @@ impl Host {
             // session visually indistinguishable from a direct terminal.
             "set-option".to_string(),
             "-t".to_string(),
-            exact_target.clone(),
+            option_target.clone(),
             "prefix".to_string(),
             "None".to_string(),
             ";".to_string(),
             "set-option".to_string(),
             "-t".to_string(),
-            exact_target.clone(),
+            option_target.clone(),
             "prefix2".to_string(),
             "None".to_string(),
             ";".to_string(),
             "set-option".to_string(),
             "-t".to_string(),
-            exact_target.clone(),
+            option_target.clone(),
             "status".to_string(),
             "off".to_string(),
             ";".to_string(),
@@ -1107,6 +1111,71 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires local tmux and permission to create a Unix socket"]
+    fn managed_tmux_configuration_resolves_exact_session() {
+        let mut identity = remote_identity();
+        identity.tmux_server = format!("qmux-test-options-{}", std::process::id());
+        struct Cleanup(RemoteSessionIdentity);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux")
+                    .args(tmux_server_args(&self.0))
+                    .arg("kill-server")
+                    .output();
+            }
+        }
+        let _cleanup = Cleanup(identity.clone());
+        let commands = remote_host()
+            .tmux_session_commands(
+                &identity,
+                "/unused.sock",
+                "test-token",
+                "/tmp",
+                80,
+                24,
+                "sleep",
+                &["60".to_string()],
+                &[],
+            )
+            .unwrap();
+        // Execute the actual remote shell commands locally, bypassing only SSH.
+        for argv in [
+            &commands.create_argv,
+            &commands.configure_argv,
+            &commands.probe_argv,
+        ] {
+            let output = Command::new("sh")
+                .args(["-c", argv.last().unwrap()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        for (option, expected) in [("prefix", "None"), ("prefix2", "None"), ("status", "off")] {
+            let output = Command::new("tmux")
+                .args(tmux_server_args(&identity))
+                .args([
+                    "show-options",
+                    "-v",
+                    "-t",
+                    &format!("={}:", identity.tmux_session),
+                    option,
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+    }
+
+    #[test]
     fn managed_tmux_commands_separate_create_from_attach_and_probe() {
         let commands = remote_host()
             .tmux_session_commands(
@@ -1145,12 +1214,14 @@ mod tests {
         );
         let configure = commands.configure_argv.last().unwrap();
         assert!(
-            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'prefix' 'None' ';'")
+            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef:' 'prefix' 'None' ';'")
         );
         assert!(
-            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'prefix2' 'None' ';'")
+            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef:' 'prefix2' 'None' ';'")
         );
-        assert!(configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef' 'status' 'off' ';'"));
+        assert!(
+            configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef:' 'status' 'off' ';'")
+        );
         assert!(
             configure.contains(
                 "'set-option' '-w' '-t' '=qmux-pane-7-deadbeef:0' 'history-limit' '50000'"
