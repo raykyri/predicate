@@ -1051,18 +1051,11 @@ impl CodexAdapter {
                 };
                 if waiting_on_subagents {
                     "agent.running"
-                } else if remote_pane {
-                    // Local panes settle from the authoritative task_complete
-                    // transcript record. Remote transcript streaming is not in
-                    // the first terminal increment, so Stop is the best
-                    // available completion boundary there; any later tool or
-                    // prompt hook promotes the agent back to Running.
-                    if let Some(agent) = agent.as_mut() {
-                        agent.status = AgentStatus::AwaitingInput;
-                        state.set_agent_status(&agent.id, agent.status)?;
-                    }
-                    "agent.awaiting_input"
                 } else {
+                    // Remote mirrors now provide the same authoritative
+                    // task_complete signal as local rollouts. Even if streaming
+                    // is unavailable, Stop may be mid-turn and cannot settle work.
+                    // The stream worker reports unavailability separately.
                     "agent.stop_observed"
                 }
             }
@@ -5099,7 +5092,7 @@ trusted_hash = "sha256:trusted"
     }
 
     #[test]
-    fn remote_hooks_record_session_identity_and_settle_without_local_transcript_io() {
+    fn remote_hooks_record_identity_without_settling_on_stop() {
         let state = test_state();
         install_remote_agent_pane(&state);
 
@@ -5120,11 +5113,76 @@ trusted_hash = "sha256:trusted"
         assert_eq!(agent.transcript_path, None);
 
         let stopped = ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
-        assert_eq!(stopped.event_type, "agent.awaiting_input");
+        assert_eq!(stopped.event_type, "agent.stop_observed");
         assert!(matches!(
             state.agent("agent-1").unwrap().unwrap().status,
-            AgentStatus::AwaitingInput
+            AgentStatus::Running
         ));
+    }
+
+    #[test]
+    fn remote_stop_cannot_suppress_or_overwrite_transcript_completion() {
+        let state = test_state();
+        install_remote_agent_pane(&state);
+        let path = temp_dir().join("remote.jsonl");
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                codex_message_line("t", "user", "input_text", "work")
+            ),
+        )
+        .unwrap();
+        state
+            .mutate_agent("agent-1", |agent| {
+                agent.transcript_path = Some(path.display().to_string())
+            })
+            .unwrap();
+        crate::transcript::start_remote_transcript_tail(
+            state.clone(),
+            "agent-1".into(),
+            path.display().to_string(),
+            "codex".into(),
+            Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        wait_codex_test(&state, |state| {
+            !state.list_turns(Some("agent-1")).unwrap().is_empty()
+        });
+        ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Running
+        );
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"event_msg","payload":{"type":"task_complete"}})
+        )
+        .unwrap();
+        wait_codex_test(&state, |state| {
+            state.agent("agent-1").unwrap().unwrap().status == AgentStatus::Done
+        });
+        ingest(&state, hook_for_agent("Stop", "agent-1", json!({})));
+        assert_eq!(
+            state.agent("agent-1").unwrap().unwrap().status,
+            AgentStatus::Done
+        );
+        state
+            .mutate_agent("agent-1", |agent| agent.transcript_path = None)
+            .unwrap();
+    }
+
+    fn wait_codex_test(state: &AppState, condition: impl Fn(&AppState) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition(state) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Codex transcript did not progress"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     fn test_state() -> AppState {
