@@ -3726,6 +3726,53 @@ pub fn close_worktree_pane(
     Ok(())
 }
 
+/// Color probes buffered before attachment cannot be answered promptly. A late
+/// OSC reply can become editor input (ESC ] even opens an editor in some TUIs).
+/// Drop only those probes, preserving rendering and live queries. Keep partial
+/// matches across reads, including a probe straddling the attach boundary.
+#[derive(Default)]
+struct StartupColorQueries {
+    pending: Vec<u8>,
+}
+
+impl StartupColorQueries {
+    fn filter<'a>(&mut self, bytes: &'a [u8], buffering: bool) -> Cow<'a, [u8]> {
+        const QUERIES: &[&[u8]] = &[
+            b"\x1b]10;?\x07",
+            b"\x1b]10;?\x1b\\",
+            b"\x1b]11;?\x07",
+            b"\x1b]11;?\x1b\\",
+            b"\x1b]12;?\x07",
+            b"\x1b]12;?\x1b\\",
+        ];
+        if !buffering && self.pending.is_empty() {
+            return Cow::Borrowed(bytes);
+        }
+        let mut output = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            if self.pending.is_empty() && !buffering {
+                output.push(byte);
+                continue;
+            }
+            self.pending.push(byte);
+            loop {
+                if QUERIES.contains(&self.pending.as_slice()) {
+                    self.pending.clear();
+                    break;
+                }
+                if QUERIES.iter().any(|query| query.starts_with(&self.pending)) {
+                    break;
+                }
+                output.push(self.pending.remove(0));
+                if self.pending.is_empty() {
+                    break;
+                }
+            }
+        }
+        Cow::Owned(output)
+    }
+}
+
 #[cfg_attr(all(target_os = "macos", not(test)), allow(dead_code))]
 fn start_reader_thread(
     state: AppState,
@@ -3743,6 +3790,7 @@ fn start_reader_thread(
         // to keep the reader thread's stack frame small.
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut remote_confirmed = false;
+        let mut startup_color_queries = StartupColorQueries::default();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -3765,17 +3813,20 @@ fn start_reader_thread(
                     // live happens after releasing it. `attach_pane` flips `ready`
                     // (and drains the buffer) under the same lock, so no chunk is
                     // ever both buffered and emitted, and order is preserved.
-                    let live = match backlog.lock() {
+                    let (live, chunk) = match backlog.lock() {
                         Ok(mut backlog) => {
+                            let chunk = startup_color_queries
+                                .filter(chunk, native_surface && !backlog.ready);
                             if backlog.ready {
-                                true
+                                (true, chunk)
                             } else {
-                                append_capped(&mut backlog.buffer, chunk);
-                                false
+                                append_capped(&mut backlog.buffer, &chunk);
+                                (false, chunk)
                             }
                         }
-                        Err(_) => true,
+                        Err(_) => (true, startup_color_queries.filter(chunk, false)),
                     };
+                    let chunk = chunk.as_ref();
                     if live {
                         // Hand the surface its bytes before touching disk: the
                         // durable append (and its occasional multi-MB trim) is
@@ -4272,6 +4323,50 @@ mod tests {
     use std::io;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn startup_color_queries_drop_probes_across_every_read_boundary() {
+        let input = b"\x1b[?1049h\x1b]10;?\x07\x1b]11;?\x1b\\\x1b]12;?\x07\x1b[31mDevin\x1b[0m";
+        let expected = b"\x1b[?1049h\x1b[31mDevin\x1b[0m";
+        for split in 0..=input.len() {
+            let mut filter = StartupColorQueries::default();
+            let mut output = filter.filter(&input[..split], true).into_owned();
+            output.extend_from_slice(&filter.filter(&input[split..], true));
+            assert_eq!(output, expected, "split {split}");
+        }
+    }
+
+    #[test]
+    fn startup_color_queries_finish_pending_probe_after_attach_but_keep_live_queries() {
+        let query = b"\x1b]11;?\x1b\\";
+        for split in 1..query.len() {
+            let mut filter = StartupColorQueries::default();
+            assert!(filter.filter(&query[..split], true).is_empty());
+            let mut live = query[split..].to_vec();
+            live.extend_from_slice(query);
+            live.extend_from_slice(b"prompt");
+            let mut expected = query.to_vec();
+            expected.extend_from_slice(b"prompt");
+            assert_eq!(
+                filter.filter(&live, false).as_ref(),
+                expected,
+                "split {split}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_color_queries_preserve_colors_titles_modes_and_non_queries() {
+        let input = b"\x1b]10;rgb:ffff/0000/0000\x07\x1b]2;Devin\x07\x1b[?2004h\x1b]110;?\x07text";
+        let mut filter = StartupColorQueries::default();
+        let mut output = Vec::new();
+        for byte in input {
+            output.extend_from_slice(&filter.filter(std::slice::from_ref(byte), true));
+        }
+        assert_eq!(output, input);
+        let live_query = b"\x1b]10;?\x07";
+        assert_eq!(filter.filter(live_query, false).as_ref(), live_query);
+    }
 
     fn windows_contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack
