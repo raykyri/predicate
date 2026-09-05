@@ -1496,6 +1496,8 @@ pub enum RemoteConnectionState {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteConnectionInfo {
     pub state: RemoteConnectionState,
+    #[serde(default)]
+    pub hook_health: Option<RemoteHookHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default)]
@@ -1518,6 +1520,15 @@ pub struct RemoteConnectionInfo {
     pub recovery_action: Option<String>,
     #[serde(default)]
     pub session_exists: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteHookHealth {
+    Checking,
+    Healthy,
+    AuthenticationFailed,
+    Unavailable,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -3150,6 +3161,60 @@ impl AppState {
         }
         let token = random_token()?;
         Ok(tokens.entry(pane_id.to_string()).or_insert(token).clone())
+    }
+
+    /// Whether this process already knows the surviving remote pane's token.
+    pub(crate) fn has_pane_remote_token(&self, pane_id: &str) -> bool {
+        self.inner
+            .remote_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .contains_key(pane_id)
+    }
+
+    /// Restore only remote authority from the authenticated SSH session being
+    /// reattached. Never let a host rebind another pane's or a local credential.
+    pub(crate) fn restore_pane_remote_token(
+        &self,
+        pane_id: &str,
+        token: &str,
+    ) -> Result<(), String> {
+        if token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("remote session has an invalid hook credential".into());
+        }
+        if self.pane_for_token(token).is_some() || self.pane_for_user_token(token).is_some() {
+            return Err("remote hook credential conflicts with local authority".into());
+        }
+        // Hold the model lock until registration completes so removal cannot
+        // revoke the token and then have a late recovery put it back.
+        let model = self.inner.model.lock().map_err(|_| "model lock poisoned")?;
+        if !model
+            .panes
+            .get(pane_id)
+            .is_some_and(|pane| pane.info.recovered && pane.info.remote_session.is_some())
+        {
+            return Err("hook credential recovery requires a surviving remote pane".into());
+        }
+        let mut tokens = self
+            .inner
+            .remote_tokens
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if tokens
+            .iter()
+            .any(|(id, value)| id != pane_id && value == token)
+        {
+            return Err("remote hook credential belongs to another pane".into());
+        }
+        if let Some(existing) = tokens.get(pane_id) {
+            return if existing == token {
+                Ok(())
+            } else {
+                Err("remote hook credential changed during recovery".into())
+            };
+        }
+        tokens.insert(pane_id.to_string(), token.to_string());
+        Ok(())
     }
 
     /// Resolves a restricted SSH-forwarded credential to its owning pane.
@@ -19949,6 +20014,41 @@ mod tests {
 
         state.remove_pane("pane-1").unwrap();
         assert!(state.pane_for_remote_token(&remote).is_none());
+    }
+
+    #[test]
+    fn remote_hook_credential_recovery_preserves_scope_and_revocation() {
+        let state = AppState::new(test_config(temp_workspace()));
+        for id in ["pane-1", "pane-2"] {
+            let mut pane = sample_pane_runtime(id);
+            pane.info.recovered = true;
+            pane.info.remote_session = Some(RemoteSessionIdentity::new("remote", id).unwrap());
+            state.insert_pane(pane).unwrap();
+        }
+        // The old process retains this token after the app's map is lost.
+        let token = random_token().unwrap();
+        assert!(!state.has_pane_remote_token("pane-1"));
+        state.restore_pane_remote_token("pane-1", &token).unwrap();
+        state.restore_pane_remote_token("pane-1", &token).unwrap();
+        assert_eq!(
+            state.pane_for_remote_token(&token).as_deref(),
+            Some("pane-1")
+        );
+        assert!(state.pane_for_token(&token).is_none());
+        assert!(state.restore_pane_remote_token("pane-2", &token).is_err());
+        assert!(
+            state
+                .restore_pane_remote_token("pane-1", &random_token().unwrap())
+                .is_err()
+        );
+        let local = state.pane_token("pane-2").unwrap();
+        let user = state.pane_user_token("pane-2").unwrap();
+        for invalid in [&local, &user, "", "malformed"] {
+            assert!(state.restore_pane_remote_token("pane-2", invalid).is_err());
+        }
+        state.remove_pane("pane-1").unwrap();
+        assert!(state.pane_for_remote_token(&token).is_none());
+        assert!(state.restore_pane_remote_token("pane-1", &token).is_err());
     }
 
     #[test]

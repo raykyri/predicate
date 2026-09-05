@@ -5,6 +5,9 @@ export function parseRemoteConnection(raw: unknown): RemoteConnectionInfo | null
   const value = raw as Record<string, unknown>;
   if (typeof value.state !== "string" || !["connecting", "checking", "connected", "reconnecting", "disconnected", "failed"].includes(value.state)) return null;
   const connection: RemoteConnectionInfo = { state: value.state as RemoteConnectionInfo["state"] };
+  if (["checking", "healthy", "authenticationFailed", "unavailable"].includes(value.hookHealth as string)) {
+    connection.hookHealth = value.hookHealth as RemoteConnectionInfo["hookHealth"];
+  }
   for (const key of ["message", "stage", "reason", "recoveryAction"] as const) {
     connection[key] = typeof value[key] === "string" ? value[key] : null;
   }
@@ -17,6 +20,7 @@ export function parseRemoteConnection(raw: unknown): RemoteConnectionInfo | null
 }
 
 export function remoteConnectionLabel(connection?: RemoteConnectionInfo | null): string {
+  if (remoteHooksNeedAttention(connection)) return "Connected · hooks need attention";
   if (connection?.stage === "sleeping") return "Sleeping";
   if (connection?.stage === "sessionEnded") return "Session ended";
   if (connection?.stage === "needsAttention") return "Needs attention";
@@ -33,6 +37,10 @@ export function remoteConnectionLabel(connection?: RemoteConnectionInfo | null):
   }
 }
 
+export function remoteHooksNeedAttention(connection?: RemoteConnectionInfo | null): boolean {
+  return connection?.state === "connected" && (connection.hookHealth === "authenticationFailed" || connection.hookHealth === "unavailable");
+}
+
 export function remoteConnectionDetails(connection?: RemoteConnectionInfo | null): string {
   if (!connection) return "Connection has not been verified.";
   const details: string[] = [];
@@ -45,6 +53,10 @@ export function remoteConnectionDetails(connection?: RemoteConnectionInfo | null
     initialConnection: "Initial connection",
   }[connection.reason ?? ""];
   if (connection.state === "connected") {
+    if (connection.hookHealth === "checking") details.push("Checking agent hooks; the terminal is ready.");
+    if (connection.hookHealth === "healthy") details.push("Agent hook authentication verified.");
+    if (connection.hookHealth === "authenticationFailed") details.push("Agent hook authentication failed (invalid QMUX_TOKEN). The terminal remains usable, but agent tracking may not update.");
+    if (connection.hookHealth === "unavailable") details.push("Agent hooks could not be verified. The terminal remains usable, but agent tracking may not update.");
     if (connection.reason === "systemWake") details.push(connection.recoveryAction === "reattached"
       ? "Reattached to the existing session after sleep."
       : "Connection verified after sleep; no reattachment needed.");
@@ -79,6 +91,7 @@ export function remoteGroupStatus(panes: PaneInfo[]): { label: string; detail: s
     if (connection?.state === "reconnecting") return 2;
     if (connection?.state === "checking") return 3;
     if (connection?.state === "connecting") return 4;
+    if (remoteHooksNeedAttention(connection)) return 5;
     if (connection?.state === "connected") return 6;
     return 5;
   };

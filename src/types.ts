@@ -114,6 +114,7 @@ export type RemoteConnectionState =
 
 export interface RemoteConnectionInfo {
   state: RemoteConnectionState;
+  hookHealth?: "checking" | "healthy" | "authenticationFailed" | "unavailable" | null;
   message?: string | null;
   stage?: string | null;
   reason?: string | null;

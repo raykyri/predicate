@@ -156,6 +156,78 @@ pub struct RemoteTmuxCommands {
 }
 
 impl Host {
+    /// Probe using the durable session's actual credential and socket, not a
+    /// newly constructed local environment. Secrets stay on the remote host.
+    pub fn tmux_hook_health_argv(
+        &self,
+        identity: &RemoteSessionIdentity,
+    ) -> Result<Vec<String>, String> {
+        self.validated_tmux_target(identity)?;
+        let mut args = tmux_server_args(identity);
+        args.extend([
+            "show-environment".into(),
+            "-t".into(),
+            format!("={}", identity.tmux_session),
+        ]);
+        let read_env = format!(
+            "tmux {}",
+            args.iter()
+                .map(|arg| shell_quote_arg(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let script = format!(
+            r#"set -eu
+token=$({read_env} QMUX_TOKEN)
+sock=$({read_env} QMUX_SOCK)
+cli=$({read_env} QMUX_CLI)
+case "$token" in QMUX_TOKEN=?*) ;; *) exit 1 ;; esac
+case "$sock" in QMUX_SOCK=?*) ;; *) exit 1 ;; esac
+case "$cli" in QMUX_CLI=?*) ;; *) exit 1 ;; esac
+QMUX_TOKEN=${{token#QMUX_TOKEN=}}
+QMUX_SOCK=${{sock#QMUX_SOCK=}}
+export QMUX_TOKEN QMUX_SOCK
+exec "${{cli#QMUX_CLI=}}" ping
+"#
+        );
+        Ok(self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "sh",
+                    args: vec!["-c".into(), script],
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host"))
+    }
+
+    /// Read the credential retained by the durable session without putting its
+    /// value into command arguments or any local persisted/UI metadata.
+    pub fn tmux_session_token_argv(
+        &self,
+        identity: &RemoteSessionIdentity,
+    ) -> Result<Vec<String>, String> {
+        self.validated_tmux_target(identity)?;
+        let mut args = tmux_server_args(identity);
+        args.extend([
+            "show-environment".to_string(),
+            "-t".to_string(),
+            format!("={}", identity.tmux_session),
+            "QMUX_TOKEN".to_string(),
+        ]);
+        Ok(self
+            .ssh_argv(
+                &RemoteCommand {
+                    program: "tmux",
+                    args,
+                    ..Default::default()
+                },
+                Interaction::Batch,
+            )
+            .expect("validated remote host"))
+    }
+
     fn validated_tmux_target(
         &self,
         identity: &RemoteSessionIdentity,
@@ -562,16 +634,29 @@ impl Host {
         argv.push("ServerAliveInterval=15".to_string());
         argv.push("-o".to_string());
         argv.push("ServerAliveCountMax=3".to_string());
-        // Reuse one authenticated transport for the launch's probes, uploads,
-        // create/configure calls, and attachment. ~/.ssh is owner-only under
-        // normal OpenSSH operation; %C hashes the full connection tuple and
-        // avoids Unix-socket path-length blowups.
-        argv.push("-o".to_string());
-        argv.push("ControlMaster=auto".to_string());
-        argv.push("-o".to_string());
-        argv.push("ControlPersist=60".to_string());
-        argv.push("-o".to_string());
-        argv.push("ControlPath=~/.ssh/qmux-%C".to_string());
+        if remote.forwards.is_empty() {
+            // Reuse a transport for probes, uploads, and create/configure calls.
+            // ~/.ssh is owner-only; %C hashes the full connection tuple.
+            argv.push("-o".to_string());
+            argv.push("ControlMaster=auto".to_string());
+            argv.push("-o".to_string());
+            argv.push("ControlPersist=60".to_string());
+            argv.push("-o".to_string());
+            argv.push("ControlPath=~/.ssh/qmux-%C".to_string());
+        } else {
+            // A hook forward must live and die with its attachment. A shared
+            // master retains -R registrations after a client exits and accepts
+            // duplicate requests without rebinding. After reconnect unlinks
+            // the old socket, that leaves a working TTY with no hook socket.
+            // ControlMaster=no alone still permits joining an existing master;
+            // ControlPath=none also prevents reuse of user-configured masters.
+            argv.push("-o".to_string());
+            argv.push("ControlMaster=no".to_string());
+            argv.push("-o".to_string());
+            argv.push("ControlPath=none".to_string());
+            argv.push("-o".to_string());
+            argv.push("ControlPersist=no".to_string());
+        }
 
         if !remote.forwards.is_empty() {
             // Ask OpenSSH to unlink stale stream sockets where the selected
@@ -951,6 +1036,67 @@ mod tests {
     }
 
     #[test]
+    fn remote_hook_probe_uses_retained_environment_without_shell_evaluation() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(
+            RemoteSessionIdentity::new("test", "hook-probe")
+                .unwrap()
+                .tmux_session,
+        );
+        std::fs::create_dir_all(&dir).unwrap();
+        let cli = dir.join("cli with spaces");
+        let tmux = dir.join("tmux");
+        std::fs::write(
+            &tmux,
+            r#"#!/bin/sh
+for key do :; done
+case "$key" in
+QMUX_TOKEN) printf 'QMUX_TOKEN=%s\n' "$TEST_TOKEN" ;;
+QMUX_SOCK) printf 'QMUX_SOCK=%s\n' "$TEST_SOCK" ;;
+QMUX_CLI) printf 'QMUX_CLI=%s\n' "$TEST_CLI" ;;
+*) exit 1 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &cli,
+            r#"#!/bin/sh
+test "$1" = ping && test "$QMUX_TOKEN" = "$TEST_TOKEN" && test "$QMUX_SOCK" = "$TEST_SOCK" || exit 1
+printf '{"ok":true,"data":{"status":"ok"}}\n'
+"#,
+        )
+        .unwrap();
+        for path in [&tmux, &cli] {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let argv = remote_host()
+            .tmux_hook_health_argv(&remote_identity())
+            .unwrap();
+        let output = Command::new("/bin/sh")
+            .args(["-c", argv.last().unwrap()])
+            .env("PATH", format!("{}:/bin", dir.display()))
+            .env("TEST_TOKEN", "literal '$(exit 99)' token")
+            .env("TEST_SOCK", "/remote/socket with spaces")
+            .env("TEST_CLI", &cli)
+            .env("QMUX_TOKEN", "wrong inherited token")
+            .env("QMUX_SOCK", "/wrong/socket")
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()["ok"],
+            true
+        );
+        assert!(output.stderr.is_empty());
+    }
+
+    #[test]
     fn a_local_host_runs_the_program_directly() {
         assert!(Host::Local.is_local());
         assert_eq!(Host::Local.label(), "local");
@@ -1248,6 +1394,16 @@ mod tests {
                 "default override must survive: {default}"
             );
         }
+        let token_argv = remote_host().tmux_session_token_argv(&identity).unwrap();
+        let output = Command::new("sh")
+            .args(["-c", token_argv.last().unwrap()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim_end(),
+            "QMUX_TOKEN=test-token"
+        );
     }
 
     #[test]
@@ -1498,6 +1654,11 @@ mod tests {
             },
             Interaction::Interactive,
         );
+        assert!(argv.iter().any(|arg| arg == "ControlMaster=no"));
+        assert!(argv.iter().any(|arg| arg == "ControlPath=none"));
+        assert!(argv.iter().any(|arg| arg == "ControlPersist=no"));
+        assert!(!argv.iter().any(|arg| arg == "ControlMaster=auto"));
+        assert!(!argv.iter().any(|arg| arg == "ControlPath=~/.ssh/qmux-%C"));
         assert!(
             argv.windows(2)
                 .any(|pair| pair == ["-R", "/tmp/qmux-remote.sock:/run/qmux.sock"]),

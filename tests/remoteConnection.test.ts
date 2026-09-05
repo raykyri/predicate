@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parseRemoteConnection, remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus } from "../src/lib/remoteConnection";
+import { parseRemoteConnection, remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus, remoteHooksNeedAttention } from "../src/lib/remoteConnection";
 import type { PaneInfo } from "../src/types";
 
 test("events retain recovery metadata and reject invalid states and timestamps", () => {
@@ -40,4 +40,23 @@ test("restoration details include wake cause, verification time, and recovery du
   assert.match(detail, /Attached:/);
   assert.match(detail, /Verified:/);
   assert.match(detail, /1.2 seconds/);
+});
+
+test("hook failures stay connected and surface in pane and group status", () => {
+  const connection = parseRemoteConnection({ state: "connected", hookHealth: "authenticationFailed" })!;
+  assert.equal(connection.state, "connected");
+  assert.equal(remoteHooksNeedAttention(connection), true);
+  assert.equal(remoteConnectionLabel(connection), "Connected · hooks need attention");
+  assert.match(remoteConnectionDetails(connection), /invalid QMUX_TOKEN/);
+  assert.match(remoteConnectionDetails(connection), /terminal remains usable/);
+  const panes = ["healthy", "authenticationFailed"].map(hookHealth => ({
+    remoteSession: { remoteId: "r" }, remoteConnection: parseRemoteConnection({ state: "connected", hookHealth }),
+  }) as PaneInfo);
+  assert.equal(remoteGroupStatus(panes)?.label, "Connected · hooks need attention");
+  assert.match(remoteGroupStatus(panes)!.detail, /2 of 2 connected/);
+  assert.match(remoteConnectionDetails({ state: "connected", hookHealth: "unavailable" }), /could not be verified/);
+  assert.equal(remoteHooksNeedAttention({ state: "connected", hookHealth: "checking" }), false);
+  assert.equal(remoteHooksNeedAttention({ state: "connected", hookHealth: "healthy" }), false);
+  assert.equal(remoteHooksNeedAttention({ state: "reconnecting", hookHealth: "authenticationFailed" }), false);
+  assert.equal(parseRemoteConnection({ state: "connected", hookHealth: "bogus" })?.hookHealth, undefined);
 });

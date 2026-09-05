@@ -1,4 +1,4 @@
-import { remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus } from "./lib/remoteConnection";
+import { remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus, remoteHooksNeedAttention } from "./lib/remoteConnection";
 import { reconnectPane } from "./lib/api";
 import {
   Fragment,
@@ -14877,7 +14877,7 @@ function MainApp() {
             <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
               {paneDisplayTitle}
             </span>
-            {pane.remoteSession && pane.remoteConnection?.state !== "connected" ? (
+            {pane.remoteSession && (pane.remoteConnection?.state !== "connected" || remoteHooksNeedAttention(pane.remoteConnection)) ? (
               <span className="pane-tab-gitmeta" title={remoteConnectionDetails(pane.remoteConnection)}>
                 {remoteConnectionLabel(pane.remoteConnection)}
               </span>

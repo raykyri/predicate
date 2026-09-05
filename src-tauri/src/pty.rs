@@ -10,8 +10,8 @@ use crate::scrollback::{
 };
 use crate::state::{
     AppState, HostPtyBackend, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus,
-    RemoteConnectionInfo, RemoteConnectionState, RemoteSessionIdentity, RemoteTmuxBackend,
-    SharedBacklog, SharedChild, SharedWriter, ShellAgentResume,
+    RemoteConnectionInfo, RemoteConnectionState, RemoteHookHealth, RemoteSessionIdentity,
+    RemoteTmuxBackend, SharedBacklog, SharedChild, SharedWriter, ShellAgentResume,
 };
 use crate::turn_queue::{abort_fork_barrier_for_child, release_waiters_for_agent};
 use crate::workspace::{
@@ -2588,6 +2588,47 @@ fn remote_health_output(argv: &[String], action: &str) -> Result<Output, String>
     remote_command_output_with_timeout(command, None, action, REMOTE_HEALTH_TIMEOUT)
 }
 
+fn remote_hook_health(output: Result<Output, String>) -> RemoteHookHealth {
+    // Never surface arbitrary probe output: it could contain credentials or
+    // shell startup output. Ping returns a JSON envelope even for rejection.
+    let Ok(output) = output else {
+        return RemoteHookHealth::Unavailable;
+    };
+    let response = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    if output.status.success()
+        && response
+            .as_ref()
+            .is_some_and(|value| value["ok"] == true && value["data"]["status"] == "ok")
+    {
+        RemoteHookHealth::Healthy
+    } else if response
+        .as_ref()
+        .is_some_and(|value| value["ok"] == false && value["error"] == "invalid QMUX_TOKEN")
+    {
+        RemoteHookHealth::AuthenticationFailed
+    } else {
+        RemoteHookHealth::Unavailable
+    }
+}
+
+fn check_remote_hook_health(state: &AppState, pane_id: &str) -> RemoteHookHealth {
+    let output = (|| {
+        let pane = state
+            .list_panes()?
+            .into_iter()
+            .find(|pane| pane.id == pane_id)
+            .ok_or("remote pane is gone")?;
+        let identity = pane.remote_session.ok_or("remote session is missing")?;
+        let group = state
+            .group(&pane.group_id)?
+            .ok_or("remote group is missing")?;
+        let argv =
+            crate::host::for_group(group.remote.as_ref()).tmux_hook_health_argv(&identity)?;
+        remote_health_output(&argv, "check remote hooks")
+    })();
+    remote_hook_health(output)
+}
+
 fn retire_remote_master(commands: &crate::host::RemoteTmuxCommands) {
     let argv = &commands.probe_argv;
     // Never terminate a user-owned/default SSH master, or a test helper.
@@ -2697,6 +2738,7 @@ fn schedule_remote_reconnect(
     let (revision, _, reason) = controller.recovery_request();
     report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
         connection.state = RemoteConnectionState::Checking;
+        connection.hook_health = None;
         connection.stage = Some("checking".to_string());
         connection.reason = Some(reason);
         connection.next_retry_at = None;
@@ -2807,6 +2849,7 @@ fn schedule_remote_reconnect(
                                 |connection| {
                                     let now = crate::state::now_millis();
                                     connection.state = RemoteConnectionState::Connected;
+                                    connection.hook_health = Some(RemoteHookHealth::Checking);
                                     connection.stage = None;
                                     connection.message = None;
                                     connection.next_retry_at = None;
@@ -2857,6 +2900,33 @@ fn schedule_remote_reconnect(
             match result {
                 Ok(true) => {
                     drop(host_guard);
+                    // The terminal is already live. Probe on this background
+                    // worker without holding the host queue or making hook
+                    // failures enter the transport teardown/retry path.
+                    let attachment = controller.client_identity();
+                    let cancellation = RemoteRecoveryScope::enter(&controller, revision);
+                    let health = check_remote_hook_health(&state, &pane_id);
+                    drop(cancellation);
+                    let same_attachment = attachment.is_some()
+                        && controller.client_identity() == attachment
+                        && state
+                            .pane_remote_control(&pane_id)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(current, _, _)| Arc::ptr_eq(&current, &controller));
+                    if same_attachment {
+                        report_remote_recovery(
+                            &state,
+                            &pane_id,
+                            &controller,
+                            revision,
+                            |connection| {
+                                if connection.state == RemoteConnectionState::Connected {
+                                    connection.hook_health = Some(health);
+                                }
+                            },
+                        );
+                    }
                     if controller.finish_recovery(revision) {
                         return;
                     }
@@ -2950,6 +3020,33 @@ fn attach_remote_generation(
         .into_iter()
         .find(|pane| pane.id == pane_id)
         .ok_or_else(|| format!("pane {pane_id} was not found"))?;
+    // tmux and its agent survive app restarts, but our in-memory token map does
+    // not. Recover the original restricted credential over authenticated SSH;
+    // minting a new one cannot update an already-running agent's environment.
+    if pane.recovered && !state.has_pane_remote_token(pane_id) {
+        let identity = pane
+            .remote_session
+            .as_ref()
+            .ok_or("remote session identity is missing")?;
+        let group = state
+            .group(&pane.group_id)?
+            .ok_or("remote group is missing")?;
+        let host = crate::host::for_group(group.remote.as_ref());
+        let argv = host.tmux_session_token_argv(identity)?;
+        let output = remote_health_output(&argv, "recover remote hook credential")?;
+        if !output.status.success() {
+            // Do not include stdout/stderr: this operation carries a secret.
+            return Err("could not recover remote hook credential".into());
+        }
+        let token = std::str::from_utf8(&output.stdout)
+            .ok()
+            .and_then(|text| text.trim_end().strip_prefix("QMUX_TOKEN="))
+            .ok_or("remote session hook credential is missing")?;
+        if !controller.recovery_is_current(revision) {
+            return Err("recovery superseded".into());
+        }
+        state.restore_pane_remote_token(pane_id, token)?;
+    }
     let initial_size = resolved_initial_size(Some(InitialPaneSize {
         cols: pane.cols,
         rows: pane.rows,
@@ -5459,7 +5556,9 @@ mod tests {
             let pane_id = "pane-recovery-test".to_string();
             let remote = test_remote();
             let mut identity = RemoteSessionIdentity::new(&remote.id, &pane_id).unwrap();
-            identity.tmux_server = format!("qmux-recovery-{}", crate::state::now_millis());
+            // Parallel tests can start within the same millisecond. Reuse the
+            // session nonce so one fixture's cleanup cannot kill another's server.
+            identity.tmux_server = format!("recovery-{}", identity.tmux_session);
             let server = identity.tmux_server.clone();
             let session = identity.tmux_session.clone();
             let host = crate::host::for_group(Some(&remote));
@@ -5544,6 +5643,9 @@ mod tests {
                     cwd_observation_seq: 0,
                 })
                 .unwrap();
+            // This fixture bypasses SSH to exercise transport recovery with a
+            // local tmux; credential restoration is tested separately.
+            state.pane_remote_token(&pane_id).unwrap();
             Self {
                 state,
                 directory,
@@ -5626,6 +5728,15 @@ mod tests {
         check_remote_pane(&fixture.state, &fixture.pane_id, "appRestart").unwrap();
         fixture.wait(|connection| connection.state == RemoteConnectionState::Connected);
         let initial_generation = fixture.controller.client_identity().unwrap().0;
+        // This transport-only fixture has no remote hook CLI. Its failed
+        // diagnostic must not disconnect or replace the usable attachment.
+        fixture.wait(|connection| connection.hook_health == Some(RemoteHookHealth::Unavailable));
+        assert_eq!(fixture.connection().state, RemoteConnectionState::Connected);
+        assert_eq!(
+            fixture.controller.client_identity().unwrap().0,
+            initial_generation
+        );
+        assert_eq!(fixture.shell_pid(), shell_pid);
         let initially_attached = fixture.connection().last_connected_at;
         remote_system_sleep_changed(&fixture.state, true);
         assert_eq!(fixture.connection().stage.as_deref(), Some("sleeping"));
@@ -5850,6 +5961,39 @@ mod tests {
         assert!(
             !marker.exists(),
             "the compensating kill must remove a session created before SSH reports failure"
+        );
+    }
+
+    #[test]
+    fn remote_hook_health_requires_authenticated_ping_and_sanitizes_failures() {
+        use std::os::unix::process::ExitStatusExt;
+        let probe = |stdout: &str, status| {
+            remote_hook_health(Ok(Output {
+                status: std::process::ExitStatus::from_raw(status),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: b"private shell output".to_vec(),
+            }))
+        };
+        assert_eq!(
+            probe(r#"{"ok":true,"data":{"status":"ok"}}"#, 0),
+            RemoteHookHealth::Healthy
+        );
+        assert_eq!(
+            probe(r#"{"ok":false,"error":"invalid QMUX_TOKEN"}"#, 0),
+            RemoteHookHealth::AuthenticationFailed
+        );
+        assert_eq!(
+            probe(r#"{"ok":true,"data":{"status":"ok"}}"#, 256),
+            RemoteHookHealth::Unavailable
+        );
+        assert_eq!(probe(r#"{"ok":true}"#, 0), RemoteHookHealth::Unavailable);
+        assert_eq!(
+            probe("private shell output", 0),
+            RemoteHookHealth::Unavailable
+        );
+        assert_eq!(
+            remote_hook_health(Err("timed out".into())),
+            RemoteHookHealth::Unavailable
         );
     }
 
