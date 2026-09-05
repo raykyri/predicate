@@ -3206,9 +3206,11 @@ function MainApp() {
   const [terminalPipEnabledByPane, setTerminalPipEnabledByPane] = useState<
     Record<string, boolean>
   >({});
-  const [rightBarCollapsed, setRightBarCollapsed] = useState(false);
-  const rightBarCollapsedRef = useRef(rightBarCollapsed);
-  rightBarCollapsedRef.current = rightBarCollapsed;
+  // Tabs in a group share their right-pane visibility; switching groups restores
+  // that group's choice. Groups without a choice start with the pane open.
+  const [rightBarCollapsedByGroup, setRightBarCollapsedByGroup] = useState<
+    Record<string, boolean>
+  >({});
   const [queueSplitByAgent, setQueueSplitByAgent] = useState<Record<string, boolean>>({});
   const [queueSplitHeightByAgent, setQueueSplitHeightByAgent] = useState<Record<string, number>>(
     {},
@@ -3232,6 +3234,11 @@ function MainApp() {
       researchActive || activeSurface !== "pane" ? undefined : selectedPane,
     [activeSurface, researchActive, selectedPane],
   );
+  const rightBarCollapsed = activePane
+    ? rightBarCollapsedByGroup[activePane.groupId] === true
+    : false;
+  const rightBarCollapsedRef = useRef(rightBarCollapsed);
+  rightBarCollapsedRef.current = rightBarCollapsed;
   const paneById = useMemo(
     () => new Map(panes.map((pane) => [pane.id, pane])),
     [panes],
@@ -5659,7 +5666,13 @@ function MainApp() {
   }
 
   function setRightBarCollapsedForPane(collapsed: boolean, paneId: string | null | undefined) {
-    setRightBarCollapsed(collapsed);
+    const groupId = panesRef.current.find((pane) => pane.id === paneId)?.groupId;
+    if (!groupId) {
+      return;
+    }
+    setRightBarCollapsedByGroup((current) =>
+      current[groupId] === collapsed ? current : { ...current, [groupId]: collapsed },
+    );
     focusTerminalPaneAfterChromeChange(paneId);
   }
 
