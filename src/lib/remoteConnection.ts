@@ -12,9 +12,14 @@ export function parseRemoteConnection(raw: unknown): RemoteConnectionInfo | null
   for (const key of ["message", "stage", "reason", "recoveryAction"] as const) {
     connection[key] = typeof value[key] === "string" ? value[key] : null;
   }
-  for (const key of ["attempt", "nextRetryAt", "disconnectedAt", "lastConnectedAt", "lastVerifiedAt", "recoveryDurationMs"] as const) {
+  for (const key of ["attempt", "nextRetryAt", "disconnectedAt", "lastConnectedAt", "lastVerifiedAt", "recoveryDurationMs", "startupStartedAt"] as const) {
     const number = value[key];
     if (typeof number === "number" && Number.isFinite(number) && number >= 0) connection[key] = number;
+  }
+  if (value.startupTimings && typeof value.startupTimings === "object") {
+    connection.startupTimings = Object.fromEntries(Object.entries(value.startupTimings)
+      .filter(([key, duration]) => ["reserved", "planned", "prerequisites", "bootstrapped", "attachmentSpawned", "firstOutput", "ready"].includes(key)
+        && typeof duration === "number" && Number.isFinite(duration) && duration >= 0));
   }
   connection.sessionExists = typeof value.sessionExists === "boolean" ? value.sessionExists : null;
   return connection;

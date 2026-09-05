@@ -188,6 +188,7 @@ pub struct RemoteAttachmentController {
 
 #[derive(Default)]
 struct RecoveryState {
+    initializing: bool,
     running: bool,
     revision: u64,
     sleeping: bool,
@@ -196,6 +197,32 @@ struct RecoveryState {
 }
 
 impl RemoteAttachmentController {
+    pub fn begin_initial_launch(&self) {
+        self.recovery.lock().unwrap().initializing = true;
+    }
+
+    pub fn finish_initial_launch(&self) {
+        self.recovery.lock().unwrap().initializing = false;
+        self.changed.notify_all();
+    }
+
+    pub fn initial_launch_in_progress(&self) -> bool {
+        self.recovery.lock().unwrap().initializing
+    }
+
+    pub fn wait_for_initial_launch(&self) {
+        let guard = self.recovery.lock().unwrap();
+        drop(
+            self.changed
+                .wait_while(guard, |state| state.initializing)
+                .unwrap(),
+        );
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.recovery.lock().unwrap().stopped
+    }
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
@@ -609,6 +636,27 @@ mod tests {
                 .install_if_current(generation, attachment(Default::default()))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn closing_pending_launch_waits_for_bootstrap_cleanup() {
+        let controller = RemoteAttachmentController::new();
+        controller.begin_initial_launch();
+        assert!(controller.initial_launch_in_progress());
+        controller.cancel_recovery();
+        assert!(controller.stopped());
+        let waiting = controller.clone();
+        let (done, received) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            waiting.wait_for_initial_launch();
+            done.send(()).unwrap();
+        });
+        assert!(received.recv_timeout(Duration::from_millis(20)).is_err());
+        controller.finish_initial_launch();
+        received.recv_timeout(Duration::from_secs(1)).unwrap();
+        waiter.join().unwrap();
+        assert!(!controller.initial_launch_in_progress());
+        assert!(!controller.request_recovery("manualRetry"));
     }
 
     #[test]

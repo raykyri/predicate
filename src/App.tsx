@@ -1,3 +1,4 @@
+import { recordRemoteStartup, reconcileRemoteReservation } from "./lib/remoteStartup";
 import RemoteConnectionDetailsText from "./components/RemoteConnectionDetailsText";
 import { remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus, remoteHooksNeedAttention } from "./lib/remoteConnection";
 import { reconnectPane } from "./lib/api";
@@ -1957,7 +1958,7 @@ function MainApp() {
           typeof update === "function"
             ? (update as (current: PaneInfo[]) => PaneInfo[])(current)
             : update;
-        return applyRecoveredDismissals(next);
+        return applyRecoveredDismissals(next.map(reconcileRemoteReservation));
       });
     },
     [applyRecoveredDismissals],
@@ -6774,6 +6775,7 @@ function MainApp() {
       setPanesPreservingRecoveredDismissals(orderedPanes);
       setActivePaneId(pane.id);
       setLastActiveGroupId(pane.groupId);
+      if (pane.remoteSession) requestAnimationFrame(() => requestAnimationFrame(() => recordRemoteStartup(pane.id, "visible")));
       await refreshGroups();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -6816,6 +6818,7 @@ function MainApp() {
       setPanesPreservingRecoveredDismissals(orderedPanes);
       setActivePaneId(pane.id);
       setLastActiveGroupId(pane.groupId);
+      if (pane.remoteSession) requestAnimationFrame(() => requestAnimationFrame(() => recordRemoteStartup(pane.id, "visible")));
       await refreshGroups();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -6923,6 +6926,7 @@ function MainApp() {
       );
       setActivePaneId(pane.id);
       setLastActiveGroupId(pane.groupId);
+      if (pane.remoteSession) requestAnimationFrame(() => requestAnimationFrame(() => recordRemoteStartup(pane.id, "visible")));
       await refreshGroups();
       requestAnimationFrame(() => {
         terminalPaneRefs.current.get(pane.id)?.focus();

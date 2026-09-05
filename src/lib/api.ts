@@ -1,3 +1,4 @@
+import { trackRemoteStartup, recordRemoteStartup, reconcileRemoteReservation, forgetRemoteStartup } from "./remoteStartup";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { JournalEntry, RecentActivityPage } from "./journal";
@@ -799,18 +800,27 @@ export function setAgentTranscript(agentId: string, path: string | null) {
   return invoke<AgentInfo>("set_agent_transcript", { agentId, path });
 }
 
-export function spawnShell(
+export async function spawnShell(
   initialSize?: InitialPaneSize | null,
   sourcePaneId?: string | null,
   groupId?: string | null,
   remoteId?: string | null,
 ) {
-  return invoke<PaneInfo>("spawn_shell", {
+  const started = performance.now();
+  const pane = await invoke<PaneInfo>("spawn_shell", {
     initialSize: initialSize ?? null,
     sourcePaneId: sourcePaneId ?? null,
     groupId: groupId ?? null,
     remoteId: remoteId ?? null,
   });
+  if (pane.remoteSession) {
+    trackRemoteStartup(pane.id, started);
+    recordRemoteStartup(pane.id, "reserved");
+    const observed = reconcileRemoteReservation(pane).remoteConnection;
+    if (observed?.state === "connected") recordRemoteStartup(pane.id, "ready");
+    if (observed?.state === "failed") forgetRemoteStartup(pane.id);
+  }
+  return pane;
 }
 
 export function openPaneWorktree(

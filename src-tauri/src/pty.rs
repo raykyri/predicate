@@ -6,7 +6,7 @@ use crate::remote_terminal::{
 };
 use crate::scrollback::{
     append_pane_scrollback, read_pane_scrollback, read_remote_history_checkpoint,
-    remove_pane_scrollback, sanitize_scrollback_replay, write_remote_history_checkpoint,
+    sanitize_scrollback_replay, write_remote_history_checkpoint,
 };
 use crate::state::{
     AppState, HostPtyBackend, PaneBackend, PaneInfo, PaneKind, PaneRuntime, PaneStatus,
@@ -295,7 +295,16 @@ pub struct PaneMeta {
 pub fn plan_to_spec(
     state: &AppState,
     meta: PaneMeta,
+    plan: CommandPlan,
+) -> Result<PtySpawnSpec, String> {
+    plan_to_spec_with_identity(state, meta, plan, None)
+}
+
+fn plan_to_spec_with_identity(
+    state: &AppState,
+    meta: PaneMeta,
     mut plan: CommandPlan,
+    identity: Option<RemoteSessionIdentity>,
 ) -> Result<PtySpawnSpec, String> {
     let remote = state.group(&meta.group_id)?.and_then(|group| group.remote);
     let host = crate::host::for_group(remote.as_ref());
@@ -330,7 +339,10 @@ pub fn plan_to_spec(
         let pane_id = pane_id
             .as_deref()
             .ok_or_else(|| "a remote pane requires a stable pane id".to_string())?;
-        let mut identity = RemoteSessionIdentity::new(&target.id, pane_id)?;
+        let mut identity = match identity {
+            Some(identity) => identity,
+            None => RemoteSessionIdentity::new(&target.id, pane_id)?,
+        };
         // The tmux session includes a random nonce and is collision-resistant
         // across qmux workspaces/processes. Scope support files to that durable
         // identity rather than the sequential pane id, which can repeat.
@@ -560,6 +572,38 @@ pub fn spawn_shell_pane_at(
     // shell, then its creation-time seed dir (`group.dir`), then home.
     let cwd = state.resolve_shell_spawn_cwd(&group, source_pane_id, cwd_override)?;
     let pane_id = state.next_id("pane");
+    if group.remote.is_some() {
+        // Reserve a real pane before shell discovery or any SSH operation.
+        let mut spec = plan_to_spec(
+            state,
+            PaneMeta {
+                pane_id: Some(pane_id),
+                agent_id: None,
+                group_id: group.id,
+                kind: PaneKind::Shell,
+                title: "Shell".into(),
+                last_osc_title: None,
+                initial_size,
+                recovered: false,
+            },
+            CommandPlan {
+                program: "sh".into(),
+                args: Vec::new(),
+                cwd,
+                envs: Vec::new(),
+                support_files: Vec::new(),
+                support_file_fallback: None,
+            },
+        )?;
+        let remote = spec.remote.take().ok_or("remote launch plan missing")?;
+        return spawn_remote_tmux_inner(
+            state,
+            spec,
+            remote,
+            cfg!(all(target_os = "macos", not(test))),
+            true,
+        );
+    }
     spawn_pty(
         state,
         shell_spawn_spec(state, pane_id, group.id, cwd, initial_size, false, None)?,
@@ -966,6 +1010,28 @@ fn shell_spawn_spec(
     recovered: bool,
     startup_command: Option<String>,
 ) -> Result<PtySpawnSpec, String> {
+    shell_spawn_spec_with_identity(
+        state,
+        pane_id,
+        group_id,
+        cwd,
+        initial_size,
+        recovered,
+        startup_command,
+        None,
+    )
+}
+
+fn shell_spawn_spec_with_identity(
+    state: &AppState,
+    pane_id: String,
+    group_id: String,
+    cwd: PathBuf,
+    initial_size: Option<InitialPaneSize>,
+    recovered: bool,
+    startup_command: Option<String>,
+    identity: Option<RemoteSessionIdentity>,
+) -> Result<PtySpawnSpec, String> {
     let remote = state.group(&group_id)?.and_then(|group| group.remote);
     let host = crate::host::for_group(remote.as_ref());
     let shell = host.interactive_shell(&pane_shell())?;
@@ -1045,7 +1111,7 @@ fn shell_spawn_spec(
         }
     }
 
-    plan_to_spec(
+    plan_to_spec_with_identity(
         state,
         PaneMeta {
             pane_id: Some(pane_id),
@@ -1065,6 +1131,7 @@ fn shell_spawn_spec(
             support_files,
             support_file_fallback,
         },
+        identity,
     )
 }
 
@@ -1623,12 +1690,12 @@ case "$path" in "$root"/*) ;; *) echo 'support path escapes root' >&2; exit 64 ;
 umask 077
 mkdir -p -- "$managed_root"
 [ -d "$managed_root" ] && [ ! -L "$managed_root" ] || { echo 'managed support root is unsafe' >&2; exit 65; }
-chmod 700 -- "$managed_root"
+chmod 700 "$managed_root"
 if [ ! -e "$root" ] && [ ! -L "$root" ]; then
   mkdir -- "$root"
 fi
 [ -d "$root" ] && [ ! -L "$root" ] || { echo 'support root is unsafe' >&2; exit 65; }
-chmod 700 -- "$root"
+chmod 700 "$root"
 relative=${path#"$root"/}
 parent=${path%/*}
 current=$root
@@ -1643,7 +1710,7 @@ if [ "$relative_parent" != "$relative" ]; then
       mkdir -- "$current"
     fi
     [ -d "$current" ] && [ ! -L "$current" ] || { echo 'support directory is unsafe' >&2; exit 65; }
-    chmod 700 -- "$current"
+    chmod 700 "$current"
   done
   set +f
   IFS=$old_ifs
@@ -1662,7 +1729,7 @@ fi
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 tmp=$tmp_dir/file
 cat > "$tmp"
-chmod "$mode" -- "$tmp"
+chmod "$mode" "$tmp"
 if [ "$exclusive" = 1 ]; then
   # Hard-link creation is atomic and refuses every existing final entry,
   # including symlinks and FIFOs. The temporary file lives in a freshly-created
@@ -1732,25 +1799,6 @@ fn materialize_remote_support_files(host: &Host, files: &[SupportFile]) -> Resul
             });
         }
     }
-    Ok(())
-}
-
-fn materialize_remote_support_files_or_fallback(
-    host: &Host,
-    spec: &mut PtySpawnSpec,
-) -> Result<(), String> {
-    let Err(err) = materialize_remote_support_files(host, &spec.support_files) else {
-        return Ok(());
-    };
-    let Some(fallback) = spec.support_file_fallback.take() else {
-        return Err(err);
-    };
-    spec.args = fallback.args;
-    spec.envs = fallback.envs;
-    if let Some(key) = fallback.error_env_key {
-        spec.envs.push((key, err));
-    }
-    spec.support_files.clear();
     Ok(())
 }
 
@@ -1933,138 +1981,158 @@ struct RemoteReaderContext {
     commands: crate::host::RemoteTmuxCommands,
 }
 
+/// One SSH request provisions files, creates/configures the session, captures
+/// initial history and clears the forwarding pathname. Output is history only.
+fn remote_bootstrap_script(
+    host: &Host,
+    files: &[SupportFile],
+    commands: &crate::host::RemoteTmuxCommands,
+) -> Result<String, String> {
+    let line = |argv: &[String]| {
+        argv.last()
+            .filter(|line| !line.is_empty())
+            .cloned()
+            .ok_or_else(|| "missing remote bootstrap command".to_string())
+    };
+    let kill = line(&commands.kill_argv)?;
+    let cleanup = if commands.support_cleanup_argv.is_empty() {
+        ":".into()
+    } else {
+        line(&commands.support_cleanup_argv)?
+    };
+    let mut script = format!(
+        "set -eu\ncleanup() {{ status=$?; trap - EXIT; {kill} >/dev/null 2>&1 || :; {cleanup} >/dev/null 2>&1 || :; exit \"$status\"; }}\ntrap cleanup EXIT\ntrap 'exit 1' HUP INT TERM\n"
+    );
+    if !files.is_empty() {
+        let managed_root = host
+            .remote_support_root()?
+            .ok_or("remote support root missing")?;
+        for file in files {
+            support_file_relative(file)?;
+            if file.mode & !0o777 != 0 {
+                return Err("invalid support file mode".into());
+            }
+            let prefix = file.prune_prefix.as_deref().unwrap_or_default();
+            if prefix.contains('/') || prefix.contains(['\r', '\n']) {
+                return Err("invalid support prune prefix".into());
+            }
+            let args = [
+                managed_root.clone(),
+                file.root.to_str().ok_or("invalid support root")?.into(),
+                file.path.to_str().ok_or("invalid support path")?.into(),
+                format!("{:o}", file.mode),
+                if file.create_new {
+                    "1".into()
+                } else {
+                    "0".into()
+                },
+                prefix.into(),
+            ];
+            script.push_str(&format!(
+                "if ! printf %s {} | sh -c {} qmux-support {} >/dev/null; then exit 73; fi\n",
+                shell_quote_str(&file.contents),
+                shell_quote_str(REMOTE_SUPPORT_FILE_SCRIPT),
+                args.iter()
+                    .map(|arg| shell_quote_str(arg))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
+        }
+    }
+    script.push_str(&format!(
+        "{} >/dev/null\n{} >/dev/null\n{} >/dev/null\n{}\ntrap - EXIT HUP INT TERM\n",
+        line(&commands.create_argv)?,
+        line(&commands.configure_argv)?,
+        line(&commands.forward_cleanup_argv)?,
+        line(&commands.capture_argv)?
+    ));
+    Ok(script)
+}
+
+fn run_remote_bootstrap(
+    host: &Host,
+    files: &[SupportFile],
+    commands: &crate::host::RemoteTmuxCommands,
+) -> Result<Output, String> {
+    let script = remote_bootstrap_script(host, files, commands)?;
+    remote_command_output(
+        host.command(crate::host::RemoteCommand {
+            program: "sh",
+            args: vec!["-s".into()],
+            ..Default::default()
+        }),
+        Some(script.into_bytes()),
+        "bootstrap remote terminal",
+    )
+}
+
+fn record_remote_startup(state: &AppState, pane_id: &str, stage: &str, elapsed: u128) {
+    eprintln!("qmux: remote startup pane={pane_id} stage={stage} elapsed_ms={elapsed}");
+    let _ = state.mutate_remote_connection(pane_id, |connection| {
+        connection
+            .startup_timings
+            .insert(stage.to_string(), elapsed);
+    });
+}
+
+fn record_remote_startup_elapsed(state: &AppState, pane_id: &str, stage: &str) {
+    let _ = state.mutate_remote_connection(pane_id, |connection| {
+        if let Some(start) = connection.startup_started_at {
+            connection
+                .startup_timings
+                .entry(stage.into())
+                .or_insert_with(|| {
+                    let elapsed = crate::state::now_millis().saturating_sub(start);
+                    eprintln!(
+                        "qmux: remote startup pane={pane_id} stage={stage} elapsed_ms={elapsed}"
+                    );
+                    elapsed
+                });
+        }
+    });
+}
+
 fn spawn_remote_tmux(
     state: &AppState,
-    mut spec: PtySpawnSpec,
+    spec: PtySpawnSpec,
     remote: RemoteSpawnSpec,
     native_surface: bool,
 ) -> Result<PaneInfo, String> {
-    if let Err(err) = materialize_remote_support_files_or_fallback(&remote.host, &mut spec) {
-        cleanup_remote_support_dir(&remote.host, remote.identity.support_dir.as_deref());
-        return Err(err);
-    }
-    let pane_id = spec
-        .pane_id
-        .clone()
-        .ok_or_else(|| "a remote pane requires a stable pane id".to_string())?;
-    let remote_cwd = spec
-        .cwd
-        .to_str()
-        .ok_or_else(|| "remote pane working directory is not valid UTF-8".to_string())?;
+    spawn_remote_tmux_inner(state, spec, remote, native_surface, false)
+}
+
+fn spawn_remote_tmux_inner(
+    state: &AppState,
+    mut spec: PtySpawnSpec,
+    mut remote: RemoteSpawnSpec,
+    native_surface: bool,
+    prepare_shell: bool,
+) -> Result<PaneInfo, String> {
+    let started = Instant::now();
+    let pane_id = spec.pane_id.clone().ok_or("remote pane requires an id")?;
     let initial_size = resolved_initial_size(spec.initial_size);
-    let remote_token = state.pane_remote_token(&pane_id)?;
-    let commands = match remote.host.tmux_session_commands(
-        &remote.identity,
-        &state.config().socket_path.display().to_string(),
-        &remote_token,
-        remote_cwd,
-        initial_size.cols,
-        initial_size.rows,
-        &spec.program,
-        &spec.args,
-        &spec.envs,
-    ) {
-        Ok(commands) => commands,
-        Err(err) => {
-            cleanup_remote_support_dir(&remote.host, remote.identity.support_dir.as_deref());
-            return Err(err);
-        }
-    };
-    if let Err(err) = ensure_remote_tmux_version(&commands.version_argv) {
-        cleanup_remote_support(&commands);
-        return Err(err);
-    }
-    create_remote_tmux_session(&commands)?;
-    if let Err(err) = run_remote_argv(&commands.configure_argv, "configure remote tmux session") {
-        cleanup_remote_launch(&commands);
-        return Err(err);
-    }
-    let initial_history = match capture_remote_history(&commands.capture_argv) {
-        Ok(history) => history,
-        Err(err) => {
-            cleanup_remote_launch(&commands);
-            return Err(err);
-        }
-    };
+    let controller = RemoteAttachmentController::new();
+    controller.begin_initial_launch();
     let history = RemoteHistoryCheckpoint::new(Vec::new());
     let backlog: SharedBacklog = Arc::new(Mutex::new(Default::default()));
-    let initial_replay = terminalize_tmux_history(&history.delta(&initial_history));
-    if !initial_replay.is_empty() {
-        let mut pending = match backlog.lock() {
-            Ok(pending) => pending,
-            Err(_) => {
-                cleanup_remote_launch(&commands);
-                return Err(format!(
-                    "pane {pane_id} backlog lock poisoned during remote launch"
-                ));
-            }
-        };
-        append_capped(&mut pending.buffer, &initial_replay);
-    }
-    if let Err(err) = persist_remote_history_checkpoint(state, &pane_id, &history, &initial_history)
-    {
-        cleanup_remote_launch(&commands);
-        return Err(err);
-    }
-    if let Err(err) = run_remote_argv(
-        &commands.forward_cleanup_argv,
-        "remove stale remote hook socket",
-    ) {
-        cleanup_remote_launch(&commands);
-        return Err(err);
-    }
-    let attachment = match spawn_remote_attachment(state, &commands.attach_argv, initial_size) {
-        Ok(attachment) => attachment,
-        Err(err) => {
-            cleanup_remote_launch(&commands);
-            let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
-            return Err(err);
-        }
-    };
-    let reader = match attachment
-        .master
-        .lock()
-        .map_err(|_| format!("pane {pane_id} master lock poisoned"))
-        .and_then(|master| {
-            master
-                .try_clone_reader()
-                .map_err(|err| format!("failed to clone remote PTY reader: {err}"))
-        }) {
-        Ok(reader) => reader,
-        Err(err) => {
-            retire_remote_attachment(&pane_id, attachment);
-            cleanup_remote_launch(&commands);
-            let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
-            return Err(err);
-        }
-    };
-    let controller = RemoteAttachmentController::new();
-    let (generation, previous) = controller.begin_generation();
-    debug_assert!(previous.is_none());
-    if controller
-        .install_if_current(generation, attachment.clone())
-        .is_err()
-    {
-        retire_remote_attachment(&pane_id, attachment);
-        cleanup_remote_launch(&commands);
-        let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
-        return Err("remote attachment was superseded during initial launch".to_string());
-    }
-
+    let commands = remote.host.existing_tmux_session_commands(
+        &remote.identity,
+        &state.config().socket_path.display().to_string(),
+    )?;
     let pane = PaneInfo {
         id: pane_id.clone(),
-        title: spec.title,
-        last_osc_title: spec.last_osc_title,
+        title: spec.title.clone(),
+        last_osc_title: spec.last_osc_title.clone(),
         kind: spec.kind,
-        agent_id: spec.agent_id,
-        group_id: spec.group_id,
+        agent_id: spec.agent_id.clone(),
+        group_id: spec.group_id.clone(),
         cwd: spec.cwd.display().to_string(),
-        // Remote filesystem observations must never be resolved locally.
         active_workspace: None,
-        remote_session: Some(remote.identity),
+        remote_session: Some(remote.identity.clone()),
         remote_connection: Some(RemoteConnectionInfo {
             state: RemoteConnectionState::Connecting,
-            message: None,
+            stage: Some("starting".into()),
+            startup_started_at: Some(crate::state::now_millis()),
             ..Default::default()
         }),
         cols: initial_size.cols,
@@ -2079,58 +2147,276 @@ fn spawn_remote_tmux(
         controller.clone(),
         history.clone(),
         backlog.clone(),
-        commands.clone(),
+        commands,
         native_surface,
     );
-    let stable_writer = backend.writer.clone();
-    if let Err(err) = state.insert_pane(PaneRuntime {
+    let writer = backend.writer.clone();
+    state.insert_pane(PaneRuntime {
         info: pane.clone(),
         backend: PaneBackend::RemoteTmux(backend),
         cwd_observation_seq: 0,
-    }) {
-        let _ = controller.begin_generation();
-        retire_remote_attachment(&pane_id, attachment);
-        cleanup_remote_launch(&commands);
-        let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
-        return Err(err);
-    }
-
-    crate::remote_transcript::restore(state, &pane_id);
-
+    })?;
     if native_surface {
         if let Err(err) = crate::native_terminal::create_host_managed(&pane_id, None) {
-            let _ = controller.begin_generation();
-            retire_remote_attachment(&pane_id, attachment);
-            cleanup_remote_launch(&commands);
             let _ = state.remove_pane(&pane_id);
             return Err(err);
         }
-        register_native_input_writer(&pane_id, stable_writer);
+        register_native_input_writer(&pane_id, writer);
     }
-    start_reader_thread(
-        state.clone(),
-        pane_id.clone(),
-        reader,
-        backlog.clone(),
-        native_surface,
-        Some(RemoteReaderContext {
-            controller: controller.clone(),
-            history: history.clone(),
-            generation,
-            commands: commands.clone(),
-        }),
-    );
-    schedule_remote_reconnect(
-        state.clone(),
-        pane_id,
-        controller,
-        history,
-        commands,
-        backlog,
-        native_surface,
-        "initialConnection".to_string(),
-    );
-    Ok(pane)
+    record_remote_startup(state, &pane_id, "reserved", started.elapsed().as_millis());
+    let state = state.clone();
+    let result_pane = pane.clone();
+    let launch = move || -> Result<PaneInfo, String> {
+        // Close waits for this guard before its final compensating kill. This
+        // prevents a slow bootstrap from creating a session after close succeeds.
+        struct LaunchGuard(Arc<RemoteAttachmentController>);
+        impl Drop for LaunchGuard {
+            fn drop(&mut self) {
+                self.0.finish_initial_launch();
+            }
+        }
+        let guard = LaunchGuard(controller.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+            || -> Result<crate::host::RemoteTmuxCommands, String> {
+                if controller.stopped() {
+                    return Err("remote launch cancelled".into());
+                }
+                if prepare_shell {
+                    spec = shell_spawn_spec_with_identity(
+                        &state,
+                        pane_id.clone(),
+                        spec.group_id.clone(),
+                        spec.cwd.clone(),
+                        Some(initial_size),
+                        false,
+                        None,
+                        Some(remote.identity.clone()),
+                    )?;
+                    remote = spec.remote.take().ok_or("remote shell plan missing")?;
+                }
+                record_remote_startup(&state, &pane_id, "planned", started.elapsed().as_millis());
+                if controller.stopped() {
+                    return Err("remote launch cancelled".into());
+                }
+                let token = state.pane_remote_token(&pane_id)?;
+                let mut commands = remote.host.tmux_session_commands(
+                    &remote.identity,
+                    &state.config().socket_path.display().to_string(),
+                    &token,
+                    spec.cwd.to_str().ok_or("remote cwd is not UTF-8")?,
+                    initial_size.cols,
+                    initial_size.rows,
+                    &spec.program,
+                    &spec.args,
+                    &spec.envs,
+                )?;
+                state.set_remote_launch_plan(
+                    &pane_id,
+                    remote.identity.clone(),
+                    commands.clone(),
+                )?;
+                ensure_remote_tmux_version(&commands.version_argv)?;
+                record_remote_startup(
+                    &state,
+                    &pane_id,
+                    "prerequisites",
+                    started.elapsed().as_millis(),
+                );
+                if controller.stopped() {
+                    return Err("remote launch cancelled".into());
+                }
+                let bootstrap = (|| {
+                    let mut output =
+                        run_remote_bootstrap(&remote.host, &spec.support_files, &commands)?;
+                    if output.status.code() == Some(73) {
+                        if let Some(fallback) = spec.support_file_fallback.take() {
+                            spec.args = fallback.args;
+                            spec.envs = fallback.envs;
+                            if let Some(key) = fallback.error_env_key {
+                                spec.envs.push((
+                                    key,
+                                    "remote shell integration provisioning failed".into(),
+                                ));
+                            }
+                            spec.support_files.clear();
+                            commands = remote.host.tmux_session_commands(
+                                &remote.identity,
+                                &state.config().socket_path.display().to_string(),
+                                &token,
+                                spec.cwd.to_str().ok_or("remote cwd is not UTF-8")?,
+                                initial_size.cols,
+                                initial_size.rows,
+                                &spec.program,
+                                &spec.args,
+                                &spec.envs,
+                            )?;
+                            state.set_remote_launch_plan(
+                                &pane_id,
+                                remote.identity.clone(),
+                                commands.clone(),
+                            )?;
+                            if controller.stopped() {
+                                return Err("remote launch cancelled".to_string());
+                            }
+                            output = run_remote_bootstrap(&remote.host, &[], &commands)?;
+                        }
+                    }
+                    if !output.status.success() {
+                        return Err(format!(
+                            "remote terminal bootstrap failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                    }
+                    Ok(output.stdout)
+                })();
+                let initial_history = finish_remote_bootstrap(&commands, bootstrap)?;
+                record_remote_startup(
+                    &state,
+                    &pane_id,
+                    "bootstrapped",
+                    started.elapsed().as_millis(),
+                );
+                let attach = (|| {
+                    if controller.stopped() {
+                        return Err("remote launch cancelled".into());
+                    }
+                    let initial_replay = terminalize_tmux_history(&history.delta(&initial_history));
+                    {
+                        let mut pending = backlog.lock().map_err(|_| "backlog lock poisoned")?;
+                        if pending.ready {
+                            if native_surface {
+                                crate::native_terminal::receive(&pane_id, &initial_replay, false)?;
+                            }
+                            record_scrollback(&state, &pane_id, &initial_replay);
+                        } else {
+                            append_capped(&mut pending.buffer, &initial_replay);
+                        }
+                    }
+                    persist_remote_history_checkpoint(
+                        &state,
+                        &pane_id,
+                        &history,
+                        &initial_history,
+                    )?;
+                    let current_pane = state
+                        .list_panes()?
+                        .into_iter()
+                        .find(|pane| pane.id == pane_id)
+                        .ok_or("remote launch pane missing")?;
+                    let attachment_size = resolved_initial_size(Some(InitialPaneSize {
+                        cols: current_pane.cols,
+                        rows: current_pane.rows,
+                    }));
+                    let attachment =
+                        spawn_remote_attachment(&state, &commands.attach_argv, attachment_size)?;
+                    let reader = match attachment
+                        .master
+                        .lock()
+                        .map_err(|_| "master lock poisoned".to_string())
+                        .and_then(|master| master.try_clone_reader().map_err(|err| err.to_string()))
+                    {
+                        Ok(reader) => reader,
+                        Err(err) => {
+                            retire_remote_attachment(&pane_id, attachment);
+                            return Err(err);
+                        }
+                    };
+                    let (generation, _) = controller.begin_generation();
+                    if controller.stopped() {
+                        retire_remote_attachment(&pane_id, attachment);
+                        return Err("remote launch cancelled".into());
+                    }
+                    if let Err(attachment) = controller.install_if_current(generation, attachment) {
+                        retire_remote_attachment(&pane_id, attachment);
+                        return Err("remote launch superseded".into());
+                    }
+                    start_reader_thread(
+                        state.clone(),
+                        pane_id.clone(),
+                        reader,
+                        backlog.clone(),
+                        native_surface,
+                        Some(RemoteReaderContext {
+                            controller: controller.clone(),
+                            history: history.clone(),
+                            generation,
+                            commands: commands.clone(),
+                        }),
+                    );
+                    record_remote_startup(
+                        &state,
+                        &pane_id,
+                        "attachmentSpawned",
+                        started.elapsed().as_millis(),
+                    );
+                    Ok(())
+                })();
+                if let Err(err) = attach {
+                    cleanup_remote_launch(&commands);
+                    return Err(err);
+                }
+                Ok(commands)
+            },
+        ))
+        .unwrap_or_else(|_| {
+            if let Ok(Some((_, _, commands))) = state.pane_remote_control(&pane_id) {
+                cleanup_remote_launch(&commands);
+            }
+            Err("remote terminal launch panicked".into())
+        });
+        match result {
+            Ok(commands) => {
+                if controller.stopped() {
+                    cleanup_remote_launch(&commands);
+                    let (_, attachment) = controller.begin_generation();
+                    if let Some(attachment) = attachment {
+                        retire_remote_attachment(&pane_id, attachment);
+                    }
+                    return Err("remote launch cancelled".into());
+                }
+                drop(guard);
+                if !controller.stopped() {
+                    crate::remote_transcript::restore(&state, &pane_id);
+                    schedule_remote_reconnect(
+                        state.clone(),
+                        pane_id.clone(),
+                        controller,
+                        history,
+                        commands,
+                        backlog,
+                        native_surface,
+                        "initialConnection".into(),
+                    );
+                }
+                Ok(result_pane)
+            }
+            Err(err) => {
+                if !controller.stopped() {
+                    let _ = state.mutate_remote_connection(&pane_id, |connection| {
+                        connection.state = RemoteConnectionState::Failed;
+                        connection.stage = Some("launchFailed".into());
+                        connection.message = Some(err.clone());
+                    });
+                }
+                if !prepare_shell {
+                    let _ = state.remove_pane(&pane_id);
+                    if native_surface {
+                        let _ = crate::native_terminal::remove(&pane_id);
+                        remove_native_input_writer(&pane_id);
+                    }
+                }
+                Err(err)
+            }
+        }
+    };
+    if prepare_shell {
+        thread::spawn(move || {
+            let _ = launch();
+        });
+        Ok(pane)
+    } else {
+        launch()
+    }
 }
 
 /// A discarded attachment must never hold up recovery in waitpid (notably
@@ -2340,16 +2626,18 @@ fn run_remote_argv(argv: &[String], action: &str) -> Result<(), String> {
     })
 }
 
-fn create_remote_tmux_session(commands: &crate::host::RemoteTmuxCommands) -> Result<(), String> {
-    if let Err(err) = run_remote_argv(&commands.create_argv, "create remote tmux session") {
+fn finish_remote_bootstrap(
+    commands: &crate::host::RemoteTmuxCommands,
+    result: Result<Vec<u8>, String>,
+) -> Result<Vec<u8>, String> {
+    if result.is_err() {
         // A failed or timed-out SSH helper has an uncertain remote result: tmux
         // may have created its detached session before the acknowledgement was
         // lost. The nonce-named target belongs only to this launch, so always
         // issue the exact compensating kill before returning the original error.
         cleanup_remote_launch(commands);
-        return Err(err);
     }
-    Ok(())
+    result
 }
 
 fn cleanup_remote_launch(commands: &crate::host::RemoteTmuxCommands) {
@@ -2364,22 +2652,6 @@ fn cleanup_remote_support(commands: &crate::host::RemoteTmuxCommands) {
             "remove remote pane support files",
         )
     {
-        eprintln!("qmux: {err}");
-    }
-}
-
-fn cleanup_remote_support_dir(host: &Host, support_dir: Option<&str>) {
-    let Some(support_dir) = support_dir else {
-        return;
-    };
-    let argv = match host.remote_support_cleanup_argv(support_dir) {
-        Ok(argv) => argv,
-        Err(err) => {
-            eprintln!("qmux: refused unsafe remote support cleanup: {err}");
-            return;
-        }
-    };
-    if let Err(err) = run_remote_argv(&argv, "remove remote pane support files") {
         eprintln!("qmux: {err}");
     }
 }
@@ -2686,6 +2958,9 @@ pub fn check_remote_pane(state: &AppState, pane_id: &str, reason: &str) -> Resul
     let (controller, history, commands) = state
         .pane_remote_control(pane_id)?
         .ok_or("this pane has no managed remote session")?;
+    if controller.initial_launch_in_progress() {
+        return Ok(());
+    }
     let backlog = state
         .pane_backlog(pane_id)?
         .ok_or("remote pane has no backlog")?;
@@ -2734,6 +3009,9 @@ fn schedule_remote_reconnect(
     native_surface: bool,
     reason: String,
 ) {
+    if controller.initial_launch_in_progress() {
+        return;
+    }
     let start = controller.request_recovery(&reason);
     let (revision, _, reason) = controller.recovery_request();
     report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
@@ -2849,6 +3127,12 @@ fn schedule_remote_reconnect(
                                 |connection| {
                                     let now = crate::state::now_millis();
                                     connection.state = RemoteConnectionState::Connected;
+                                    if let Some(start) = connection.startup_started_at {
+                                        connection
+                                            .startup_timings
+                                            .entry("ready".into())
+                                            .or_insert(now.saturating_sub(start));
+                                    }
                                     connection.hook_health = Some(RemoteHookHealth::Checking);
                                     connection.stage = None;
                                     connection.message = None;
@@ -4047,6 +4331,16 @@ pub fn kill_pane(state: &AppState, pane_id: String) -> Result<(), String> {
         eprintln!("qmux: failed to capture closed pane {pane_id}: {err}");
     }
     if let Some((controller, _, commands)) = state.pane_remote_control(&pane_id)? {
+        if controller.initial_launch_in_progress() {
+            controller.cancel_recovery();
+            controller.wait_for_initial_launch();
+        }
+        // Preparation may have filled in the support directory while close
+        // waited. Always clean up the final plan, not the reservation's plan.
+        let commands = state
+            .pane_remote_control(&pane_id)?
+            .map(|(_, _, commands)| commands)
+            .unwrap_or(commands);
         if let Err(err) = run_remote_argv(&commands.kill_argv, "kill remote tmux session")
             && probe_remote_session(&commands.probe_argv) != Ok(false)
         {
@@ -4165,6 +4459,18 @@ pub fn native_pane_did_close(state: &AppState, pane_id: &str, process_alive: boo
 /// the process is about to exit anyway. It cannot help a hard SIGKILL/force-quit,
 /// which no in-process handler can intercept.
 pub fn kill_all_panes(state: &AppState) {
+    let mut pending = Vec::new();
+    for pane in state.list_panes().unwrap_or_default() {
+        if let Ok(Some((controller, _, _))) = state.pane_remote_control(&pane.id) {
+            if controller.initial_launch_in_progress() {
+                controller.cancel_recovery();
+                pending.push(controller);
+            }
+        }
+    }
+    for controller in pending {
+        controller.wait_for_initial_launch();
+    }
     let children = match state.all_pane_children() {
         Ok(children) => children,
         Err(err) => {
@@ -4295,6 +4601,7 @@ fn start_reader_thread(
         let mut buffer = vec![0_u8; 64 * 1024];
         let mut handshake = RemoteClientHandshake::default();
         let mut startup_color_queries = StartupColorQueries::default();
+        let mut first_output = true;
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
@@ -4315,6 +4622,10 @@ fn start_reader_thread(
                     };
                     if chunk.is_empty() {
                         continue;
+                    }
+                    if first_output && remote.is_some() {
+                        first_output = false;
+                        record_remote_startup_elapsed(&state, &pane_id, "firstOutput");
                     }
                     // Hold the backlog lock only long enough to decide; emitting
                     // live happens after releasing it. `attach_pane` flips `ready`
@@ -5955,13 +6266,133 @@ mod tests {
             remote_socket_path: "/tmp/qmux-create-test.sock".to_string(),
         };
 
-        let error = create_remote_tmux_session(&commands).unwrap_err();
+        let result = run_remote_argv(&commands.create_argv, "create remote tmux session")
+            .map(|_| Vec::new());
+        let error = finish_remote_bootstrap(&commands, result).unwrap_err();
 
         assert!(error.contains("create remote tmux session"), "{error}");
         assert!(
             !marker.exists(),
             "the compensating kill must remove a session created before SSH reports failure"
         );
+    }
+
+    fn bootstrap_fixture(root: &Path) -> (Host, SupportFile, crate::host::RemoteTmuxCommands) {
+        let remote = RemoteRef {
+            id: "bootstrap-test".into(),
+            label: "Test".into(),
+            host: "unused.invalid".into(),
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: Some(root.display().to_string()),
+        };
+        let host = crate::host::for_group(Some(&remote));
+        let identity = RemoteSessionIdentity::new(&remote.id, "bootstrap").unwrap();
+        let support = root.join(".qmux/support").join(&identity.tmux_session);
+        let file = SupportFile {
+            root: support.clone(),
+            path: support.join("rc"),
+            contents: "literal 'quotes' $(exit 99)\nno trailing newline".into(),
+            mode: 0o600,
+            create_new: true,
+            prune_prefix: None,
+        };
+        let mut commands = host
+            .existing_tmux_session_commands(&identity, "/unused.sock")
+            .unwrap();
+        let created = shell_quote(&root.join("created"));
+        let configured = shell_quote(&root.join("configured"));
+        commands.create_argv = vec![format!(
+            "test -f {} && touch {created} {}",
+            shell_quote(&file.path),
+            shell_quote(&root.join("creation-attempted"))
+        )];
+        commands.configure_argv = vec![format!("test -f {created} && touch {configured}")];
+        commands.forward_cleanup_argv = vec![format!("test -f {configured}")];
+        commands.capture_argv = vec!["printf 'first line\\nsecond line\\n'".into()];
+        commands.kill_argv = vec![format!("rm -f -- {created} {configured}")];
+        commands.support_cleanup_argv = vec![format!("rm -rf -- {}", shell_quote(&support))];
+        (host, file, commands)
+    }
+
+    fn execute_bootstrap_script(script: String) -> Output {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-s");
+        remote_command_output(command, Some(script.into_bytes()), "test bootstrap").unwrap()
+    }
+
+    #[test]
+    fn remote_bootstrap_batches_exact_support_bytes_and_initial_history() {
+        let root = std::env::temp_dir().join(
+            RemoteSessionIdentity::new("test", "bootstrap-root")
+                .unwrap()
+                .tmux_session,
+        );
+        fs::create_dir_all(&root).unwrap();
+        let (host, file, commands) = bootstrap_fixture(&root);
+        let output = execute_bootstrap_script(
+            remote_bootstrap_script(&host, std::slice::from_ref(&file), &commands).unwrap(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(fs::read_to_string(&file.path).unwrap(), file.contents);
+        assert_eq!(output.stdout, b"first line\nsecond line\n");
+        assert!(
+            root.join("created").exists(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn remote_bootstrap_rolls_back_each_partial_creation_failure() {
+        for phase in ["create", "configure", "capture"] {
+            let root = std::env::temp_dir().join(
+                RemoteSessionIdentity::new("test", "bootstrap-root")
+                    .unwrap()
+                    .tmux_session,
+            );
+            fs::create_dir_all(&root).unwrap();
+            let (host, file, mut commands) = bootstrap_fixture(&root);
+            let command = match phase {
+                "create" => &mut commands.create_argv,
+                "configure" => &mut commands.configure_argv,
+                _ => &mut commands.capture_argv,
+            };
+            command[0].push_str("; exit 1");
+            let output = execute_bootstrap_script(
+                remote_bootstrap_script(&host, std::slice::from_ref(&file), &commands).unwrap(),
+            );
+            assert!(!output.status.success(), "{phase}");
+            assert_ne!(output.status.code(), Some(73), "{phase}");
+            assert!(root.join("creation-attempted").exists(), "{phase}");
+            assert!(!root.join("created").exists(), "{phase}");
+            assert!(!file.root.exists(), "{phase}");
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn remote_bootstrap_distinguishes_support_failure_for_plain_shell_fallback() {
+        let root = std::env::temp_dir().join(
+            RemoteSessionIdentity::new("test", "bootstrap-root")
+                .unwrap()
+                .tmux_session,
+        );
+        fs::create_dir_all(&root).unwrap();
+        let (host, file, commands) = bootstrap_fixture(&root);
+        fs::create_dir_all(&file.root).unwrap();
+        fs::write(&file.path, "existing").unwrap();
+        let output = execute_bootstrap_script(
+            remote_bootstrap_script(&host, std::slice::from_ref(&file), &commands).unwrap(),
+        );
+        assert_eq!(output.status.code(), Some(73));
+        assert!(!root.join("created").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -6003,6 +6434,114 @@ mod tests {
             terminalize_tmux_history(b"one\ntwo\r\nthree"),
             b"one\r\ntwo\r\nthree"
         );
+    }
+
+    #[test]
+    #[ignore = "requires QMUX_TEST_SSH_TARGET; creates and removes isolated remote test shells"]
+    fn pending_remote_shell_opens_and_cancels_without_orphans() {
+        let target = std::env::var("QMUX_TEST_SSH_TARGET").expect("QMUX_TEST_SSH_TARGET");
+        let workspace = temp_workspace();
+        let state = test_state_with_workspace(workspace.clone());
+        let _control = crate::control_socket::start_control_socket(state.clone()).unwrap();
+        let remote_root = format!(
+            "/tmp/{}",
+            RemoteSessionIdentity::new("test", "pending-launch")
+                .unwrap()
+                .tmux_session
+        );
+        let remote = RemoteRef {
+            id: "pending-test".into(),
+            label: "Pending test".into(),
+            host: target,
+            multiplexer: crate::workspace::RemoteMultiplexer::Tmux,
+            qmux_cli: None,
+            workspace_root: Some(remote_root.clone()),
+        };
+        let host = crate::host::for_group(Some(&remote));
+        eprintln!("test remote root: {remote_root}");
+        let group = create_group(
+            &state,
+            CreateGroupRequest {
+                name: Some("Pending test".into()),
+                dir: Some("/tmp".into()),
+                after_group_id: None,
+                base_repo: None,
+                base_ref: None,
+                remote: Some(remote),
+                remote_id: None,
+            },
+        )
+        .unwrap();
+        for cancel in [false, false, true] {
+            state.update_group(group.clone()).unwrap();
+            let requested = Instant::now();
+            let pane = spawn_shell_pane(&state, None, None, Some(&group.id)).unwrap();
+            eprintln!(
+                "test remote pane returned in {} ms (cancel={cancel})",
+                requested.elapsed().as_millis()
+            );
+            assert_eq!(
+                pane.remote_connection.as_ref().unwrap().stage.as_deref(),
+                Some("starting")
+            );
+            let (controller, _, _) = state.pane_remote_control(&pane.id).unwrap().unwrap();
+            if !cancel {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    let connection = state
+                        .list_panes()
+                        .unwrap()
+                        .into_iter()
+                        .find(|p| p.id == pane.id)
+                        .unwrap()
+                        .remote_connection
+                        .unwrap();
+                    if connection.state == RemoteConnectionState::Connected {
+                        assert!(connection.startup_timings.contains_key("bootstrapped"));
+                        assert!(connection.startup_timings.contains_key("ready"));
+                        eprintln!(
+                            "test remote startup timings: {:?}",
+                            connection.startup_timings
+                        );
+                        break;
+                    }
+                    assert_ne!(
+                        connection.state,
+                        RemoteConnectionState::Failed,
+                        "{:?}",
+                        connection
+                    );
+                    assert!(
+                        Instant::now() < deadline,
+                        "remote shell did not connect: {:?}",
+                        connection
+                    );
+                    thread::sleep(Duration::from_millis(20));
+                }
+            }
+            kill_pane(&state, pane.id.clone()).unwrap();
+            assert!(controller.stopped());
+            assert!(!controller.initial_launch_in_progress());
+            let commands = host
+                .existing_tmux_session_commands(
+                    pane.remote_session.as_ref().unwrap(),
+                    "/unused.sock",
+                )
+                .unwrap();
+            assert_eq!(probe_remote_session(&commands.probe_argv), Ok(false));
+            assert!(!state.pane_exists(&pane.id).unwrap());
+        }
+        let cleanup = host
+            .command(crate::host::RemoteCommand {
+                program: "rm",
+                args: vec!["-rf".into(), "--".into(), remote_root],
+                ..Default::default()
+            })
+            .status()
+            .unwrap();
+        assert!(cleanup.success());
+        drop(_control);
+        fs::remove_dir_all(workspace).unwrap();
     }
 
     #[test]
@@ -6096,6 +6635,28 @@ mod tests {
                 thread::sleep(Duration::from_millis(25));
             }
         };
+        let wait_connected = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                if state.list_panes().unwrap().iter().any(|candidate| {
+                    candidate.id == pane.id
+                        && candidate
+                            .remote_connection
+                            .as_ref()
+                            .is_some_and(|connection| {
+                                connection.state == RemoteConnectionState::Connected
+                            })
+                }) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "remote attachment never verified"
+                );
+                thread::sleep(Duration::from_millis(25));
+            }
+        };
+        wait_connected();
         let ready = wait_for(b"remote-ready");
         if ready {
             state
@@ -6129,6 +6690,7 @@ mod tests {
         let disconnected_history = reconnected && wait_for(b"remote-offline-gap-40");
         attach_pane(&state, pane.id.clone()).unwrap();
         if gap_armed && reconnected {
+            wait_connected();
             state
                 .pane_writer(&pane.id)
                 .unwrap()
@@ -6160,6 +6722,7 @@ mod tests {
             .expect("recovered remote controller");
         assert!(!Arc::ptr_eq(&first_controller, &restart_controller));
         assert!(commands.create_argv.is_empty());
+        wait_connected();
         state
             .pane_writer(&pane.id)
             .unwrap()

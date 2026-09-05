@@ -1496,6 +1496,10 @@ pub enum RemoteConnectionState {
 #[serde(rename_all = "camelCase")]
 pub struct RemoteConnectionInfo {
     pub state: RemoteConnectionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_started_at: Option<u128>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub startup_timings: std::collections::BTreeMap<String, u128>,
     #[serde(default)]
     pub hook_health: Option<RemoteHookHealth>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -11021,6 +11025,36 @@ impl AppState {
             .panes
             .get(pane_id)
             .map(|pane| pane.backend.has_host_pty()))
+    }
+
+    pub(crate) fn set_remote_launch_plan(
+        &self,
+        pane_id: &str,
+        identity: RemoteSessionIdentity,
+        commands: RemoteTmuxCommands,
+    ) -> Result<(), String> {
+        let mut model = self.inner.model.lock().map_err(|_| "model lock poisoned")?;
+        let pane = model
+            .panes
+            .get_mut(pane_id)
+            .ok_or("remote pane was closed")?;
+        let PaneBackend::RemoteTmux(backend) = &mut pane.backend else {
+            return Err("pane is not remote".into());
+        };
+        if pane
+            .info
+            .remote_session
+            .as_ref()
+            .map(|value| &value.tmux_session)
+            != Some(&identity.tmux_session)
+        {
+            return Err("remote launch identity changed".into());
+        }
+        pane.info.remote_session = Some(identity);
+        backend.commands = commands;
+        drop(model);
+        self.persist();
+        Ok(())
     }
 
     pub fn pane_remote_control(

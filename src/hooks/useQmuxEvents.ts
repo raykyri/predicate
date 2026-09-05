@@ -1,3 +1,4 @@
+import { recordRemoteStartup, forgetRemoteStartup, forgetRemotePane, rememberRemoteStartupConnection } from "../lib/remoteStartup";
 import { parseRemoteConnection } from "../lib/remoteConnection";
 import { useEffect } from "react";
 import type { Dispatch, SetStateAction } from "react";
@@ -268,6 +269,7 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
       if (event.type === "pane.removed" && event.paneId) {
         const exitedPaneId = event.paneId;
         setPanes((current) => {
+          forgetRemotePane(exitedPaneId);
           const nextPanes = current.filter((pane) => pane.id !== exitedPaneId);
           setActivePaneId((currentActivePaneId) => {
             if (currentActivePaneId !== exitedPaneId) {
@@ -302,6 +304,9 @@ export function useQmuxEvents(handlers: UseQmuxEventsHandlers) {
         const connection = parseRemoteConnection(event.payload.connection);
         if (connection) {
           const paneId = event.paneId;
+          rememberRemoteStartupConnection(paneId, connection);
+          if (connection.state === "connected") recordRemoteStartup(paneId, "ready");
+          if (connection.state === "failed") forgetRemoteStartup(paneId);
           setPanes((current) => current.map((pane) =>
             pane.id === paneId ? { ...pane, remoteConnection: connection } : pane));
         }
