@@ -44,6 +44,10 @@
   font-weight: 600;
 }
 
+.remote-connection-close {
+  margin-top: var(--remote-connection-gap);
+}
+
 .remote-connection-message,
 .remote-connection-detail {
   max-width: 560px;

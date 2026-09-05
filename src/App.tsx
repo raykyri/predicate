@@ -1814,7 +1814,7 @@ function MainApp() {
   // Keep active-tab actions reachable from the global keydown listener without
   // re-registering it on every state change.
   const activePaneRef = useRef<PaneInfo | undefined>(undefined);
-  const requestClosePaneRef = useRef<(pane: PaneInfo) => void>(() => {});
+  const requestClosePaneRef = useRef<(pane: PaneInfo, options?: { confirmAlways?: boolean }) => void>(() => {});
   const splitPaneBelowRef = useRef<(pane: PaneInfo) => void | Promise<void>>(() => {});
   const splitPaneRightRef = useRef<(pane: PaneInfo) => void | Promise<void>>(() => {});
   const canToggleActiveTranscriptExpandedRef = useRef(false);
@@ -12505,6 +12505,11 @@ function MainApp() {
     if (reason) {
       return { kind: "stop", pane: paneToClose, reason };
     }
+    // Remote process inspection cannot establish that the session is idle.
+    // Show the requested confirmation without waiting for that probe.
+    if (paneToClose.remoteSession && options?.confirmAlways) {
+      return { kind: "pane", pane: paneToClose };
+    }
     try {
       const activity = await paneActivity(paneToClose.id);
       if (activity.kind === "runningProcess" && activity.processCount > 0) {
@@ -14092,7 +14097,7 @@ function MainApp() {
           const pane =
             activeSurfaceRef.current === "pane" ? activePaneRef.current : undefined;
           if (pane) {
-            requestClosePaneRef.current(pane);
+            requestClosePaneRef.current(pane, { confirmAlways: Boolean(pane.remoteSession) });
           }
           return;
         }
@@ -18703,6 +18708,7 @@ function MainApp() {
                 (webEditableFocused || webSelectionActive)
               }
               requestAttach={requestPaneAttach}
+              onCloseRemote={() => void closePane(pane)}
               onUserInput={stableNoteUserInput}
               onActivate={activateTerminalPane}
               onOverlayStateChange={updateTerminalOverlayState}

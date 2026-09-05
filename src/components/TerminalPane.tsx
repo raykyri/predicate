@@ -66,6 +66,7 @@ interface TerminalPaneProps {
   /// would steal the keyboard mid-typing.
   webEditableFocused: boolean;
   requestAttach: (paneId: string) => void;
+  onCloseRemote: () => void;
   onUserInput?: (agentId: string) => void;
   onActivate?: (paneId: string) => void;
   onOverlayStateChange?: (paneId: string, open: boolean) => void;
@@ -104,6 +105,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
     readOnly = false,
     webEditableFocused,
     requestAttach,
+    onCloseRemote,
     onUserInput,
     onActivate,
     onOverlayStateChange,
@@ -487,6 +489,9 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
             {remoteConnectionLabel(pane.remoteConnection)}
           </span>
           <RemoteConnectionDetailsText className="remote-connection-detail" connection={pane.remoteConnection} active={visible} />
+          <button type="button" className="control-button remote-connection-close" onClick={onCloseRemote}>
+            Close
+          </button>
         </div>
       ) : null}
       {confirmDialog}
