@@ -992,9 +992,10 @@ impl AdapterRegistry {
             .ok_or_else(|| format!("unknown agent adapter '{adapter_id}'"))
     }
 
-    pub fn shell_commands(&self) -> Vec<ShellCommandIntegration> {
+    pub fn shell_commands(&self, remote: bool) -> Vec<ShellCommandIntegration> {
         self.adapters
             .iter()
+            .filter(|adapter| !remote || adapter.supports_remote())
             .flat_map(|adapter| adapter.shell_commands())
             .collect()
     }
@@ -2064,6 +2065,23 @@ pub fn agent_prepare_shell_launch(
     let prepared_agent_id = request.prepared_agent_id.clone();
     let registry = adapter_registry(state.config());
     let adapter = registry.get(&request.adapter_id)?;
+    // Existing remote shells may still have wrappers for local-only adapters.
+    // Let the remote CLI resolve and run their configured binary directly,
+    // before adapter preparation can inspect local paths or install hooks.
+    if !adapter.supports_remote()
+        && state
+            .list_panes()?
+            .iter()
+            .any(|pane| pane.id == request.pane_id && pane.remote_session.is_some())
+    {
+        return Ok(PreparedShellAgentLaunch {
+            binary: adapter.configured_binary().to_string(),
+            cwd: request.cwd,
+            args: request.args,
+            envs: Vec::new(),
+            supervised: false,
+        });
+    }
     if let Some(passthrough) = adapter.prepare_shell_passthrough(&request)? {
         if passthrough.supervised {
             return Err("adapter shell passthrough was incorrectly marked supervised".to_string());
@@ -2423,6 +2441,98 @@ mod tests {
                         .as_deref()
                         .is_some_and(|message| message.contains("cannot run on remote")))
         );
+    }
+
+    #[test]
+    fn remote_shell_wrappers_only_include_supported_adapters() {
+        let registry = adapter_registry(&test_config());
+        let local = registry.shell_commands(false);
+        let remote = registry.shell_commands(true);
+        for adapter in &registry.adapters {
+            for command in adapter.shell_commands() {
+                assert!(
+                    local
+                        .iter()
+                        .any(|entry| entry.command_name == command.command_name)
+                );
+                assert_eq!(
+                    remote
+                        .iter()
+                        .any(|entry| entry.command_name == command.command_name),
+                    adapter.supports_remote(),
+                    "{}",
+                    command.command_name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stale_remote_shell_wrappers_bypass_local_adapter_preparation() {
+        let mut config = test_config();
+        // This executable and cwd deliberately do not exist on the Mac.
+        config.adapters.devin.binary = Some("/remote/tools/devin".into());
+        let state = AppState::new(config);
+        let identity = crate::state::RemoteSessionIdentity::new("r", "p").unwrap();
+        let remote = serde_json::from_value(json!({
+            "id":"r", "label":"Remote", "host":"unreachable.invalid", "multiplexer":"tmux"
+        }))
+        .unwrap();
+        let commands = crate::host::for_group(Some(&remote))
+            .existing_tmux_session_commands(&identity, "/unused.sock")
+            .unwrap();
+        state
+            .insert_pane(crate::state::PaneRuntime {
+                info: serde_json::from_value(json!({
+                    "id":"p", "title":"Remote", "kind":"shell", "groupId":"g",
+                    "cwd":"/remote/project", "remoteSession":identity,
+                    "cols":80, "rows":24, "status":"running"
+                }))
+                .unwrap(),
+                backend: crate::state::PaneBackend::RemoteTmux(
+                    crate::state::RemoteTmuxBackend::new(
+                        crate::remote_terminal::RemoteAttachmentController::new(),
+                        crate::remote_terminal::RemoteHistoryCheckpoint::new(Vec::new()),
+                        std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+                        commands,
+                        false,
+                    ),
+                ),
+                cwd_observation_seq: 0,
+            })
+            .unwrap();
+        let registry = adapter_registry(state.config());
+        for adapter in registry
+            .adapters
+            .iter()
+            .filter(|adapter| !adapter.supports_remote())
+        {
+            for args in [
+                vec![],
+                vec!["--help".to_string()],
+                vec!["a prompt with 'quotes'".to_string()],
+            ] {
+                let launch = agent_prepare_shell_launch(
+                    &state,
+                    PrepareShellAgentLaunchRequest {
+                        adapter_id: adapter.id().into(),
+                        pane_id: "p".into(),
+                        cwd: "/remote/project".into(),
+                        args: args.clone(),
+                        shell_job_id: Some("unused-job".into()),
+                        supervisor_pid: Some(123),
+                        prepared_agent_id: None,
+                    },
+                )
+                .unwrap();
+                assert_eq!(launch.binary, adapter.configured_binary());
+                assert_eq!(launch.cwd, "/remote/project");
+                assert_eq!(launch.args, args);
+                assert!(!launch.supervised);
+                assert!(launch.envs.is_empty());
+                assert!(state.agent_by_pane("p").unwrap().is_none());
+            }
+        }
     }
 
     #[test]

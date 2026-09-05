@@ -982,7 +982,7 @@ fn shell_spawn_spec(
     let mut support_files = Vec::new();
     let mut support_file_fallback = None;
 
-    let shell_commands = adapter_registry(state.config()).shell_commands();
+    let shell_commands = adapter_registry(state.config()).shell_commands(!host.is_local());
     let login_shell = state.use_login_shell();
     match agent_shell_function_injection(
         &shell,
