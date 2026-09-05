@@ -980,7 +980,9 @@ fn mime_type(path: &Path) -> String {
 /// the overlay to them would only trigger a download, so callers should reveal
 /// those files in the OS file manager instead.
 pub(crate) fn is_browser_previewable_path(path: &Path) -> bool {
-    mime_type(path) != "application/octet-stream"
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(qmux_proto::is_browser_preview_extension)
 }
 
 /// Percent-encodes a path, leaving `/` (the separator) and the RFC 3986 unreserved

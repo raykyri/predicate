@@ -10,7 +10,7 @@ use crate::state::{AppState, PaneKind, canonical_loopback_artifact_url};
 use crate::workspace::{
     LaunchOrigin, recover_shell_agent_from_session_start, validate_launch_workspace,
 };
-use qmux_proto::{ControlRequest, ControlResponse, PublicControlRequest};
+use qmux_proto::{BrowserOpenFileHeader, ControlRequest, ControlResponse, PublicControlRequest};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::fs;
@@ -26,12 +26,16 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 const CONTROL_SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_FILE_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// The streamed upload body is not part of this line. Keep request metadata
+/// bounded before authentication so a peer cannot grow a handler without limit.
+const MAX_CONTROL_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 /// Cap on concurrent client-handler threads. Connections are mostly one-shot
-/// (hook notifies, CLI invocations) with a 5s idle timeout, so this needs to
-/// cover simultaneous in-flight requests, not panes; 64 is far above any real
-/// burst while keeping a connection-spamming local process from exhausting
-/// threads/FDs. At the cap the supervisor leaves excess connections in the
-/// kernel listen backlog and keeps polling so health checks still run.
+/// (hook notifies, CLI invocations); remote file uploads may remain active for
+/// up to 60 seconds. This covers simultaneous in-flight requests, not panes,
+/// while keeping a connection-spamming process from exhausting threads/FDs. At
+/// the cap the supervisor leaves excess connections in the kernel listen backlog
+/// and keeps polling so health checks still run.
 const MAX_CONCURRENT_CLIENTS: usize = 64;
 /// Backoff after a failed accept. Persistent accept errors (e.g. EMFILE under
 /// FD exhaustion) would otherwise spin this loop hot.
@@ -810,18 +814,53 @@ fn handle_client_with_timeout(state: AppState, mut stream: UnixStream, read_time
         );
         return;
     }
-    let reader = BufReader::new(reader_stream);
+    let mut reader = BufReader::new(reader_stream);
 
-    for line in reader.lines() {
-        let result = match line {
-            Ok(line) => handle_line_with_peer(&state, &line, same_user_peer),
+    loop {
+        let mut line = String::new();
+        let read = match reader
+            .by_ref()
+            .take(MAX_CONTROL_HEADER_BYTES + 1)
+            .read_line(&mut line)
+        {
+            Ok(0) => return,
+            Ok(read) => read,
             Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return;
             }
-            Err(err) => Err(format!("failed to read socket request: {err}")),
+            Err(err) => {
+                let _ = write_response(
+                    &mut stream,
+                    Err(format!("failed to read socket request: {err}")),
+                );
+                return;
+            }
+        };
+        if read as u64 > MAX_CONTROL_HEADER_BYTES {
+            let _ = write_response(
+                &mut stream,
+                Err("control request header is too large".into()),
+            );
+            return;
+        }
+        let request = match serde_json::from_str::<ControlRequest>(line.trim_end()) {
+            Ok(request) => request,
+            Err(err) => {
+                let _ = write_response(&mut stream, Err(format!("invalid control request: {err}")));
+                return;
+            }
+        };
+        let streamed_file = request.command == "browser.open_file";
+        let result = if streamed_file {
+            let _ = reader
+                .get_ref()
+                .set_read_timeout(Some(REMOTE_FILE_READ_TIMEOUT));
+            handle_browser_open_file(&state, request, &mut reader)
+        } else {
+            handle_request_with_peer(&state, request, same_user_peer)
         };
 
-        if write_response(&mut stream, result).is_err() {
+        if write_response(&mut stream, result).is_err() || streamed_file {
             return;
         }
     }
@@ -839,6 +878,26 @@ fn handle_line_with_peer(
 ) -> Result<Value, String> {
     let request: ControlRequest =
         serde_json::from_str(line).map_err(|err| format!("invalid control request: {err}"))?;
+    handle_request_with_peer(state, request, same_user_peer)
+}
+
+fn pane_credential(state: &AppState, token: &str) -> Result<(String, ControlCredential), String> {
+    if let Some(pane) = state.pane_for_token(token) {
+        Ok((pane, ControlCredential::LocalPane))
+    } else if let Some(pane) = state.pane_for_remote_token(token) {
+        Ok((pane, ControlCredential::RemotePane))
+    } else if let Some(pane) = state.pane_for_user_token(token) {
+        Ok((pane, ControlCredential::InteractiveUser))
+    } else {
+        Err("invalid QMUX_TOKEN".to_string())
+    }
+}
+
+fn handle_request_with_peer(
+    state: &AppState,
+    request: ControlRequest,
+    same_user_peer: bool,
+) -> Result<Value, String> {
     // `qmux send` is intentionally usable outside qmux panes. An empty token is
     // accepted for this one non-mutating command only when the kernel says the
     // Unix-socket peer has our uid. The socket and its parent are also 0600/0700,
@@ -859,15 +918,7 @@ fn handle_line_with_peer(
     // namespaces. In particular, a remote process never receives a local pane or
     // user credential: after pane scope is resolved below, the remote namespace is
     // also checked against an explicit role-sensitive command allowlist.
-    let (authed_pane, credential) = if let Some(pane) = state.pane_for_token(&request.token) {
-        (pane, ControlCredential::LocalPane)
-    } else if let Some(pane) = state.pane_for_remote_token(&request.token) {
-        (pane, ControlCredential::RemotePane)
-    } else if let Some(pane) = state.pane_for_user_token(&request.token) {
-        (pane, ControlCredential::InteractiveUser)
-    } else {
-        return Err("invalid QMUX_TOKEN".to_string());
-    };
+    let (authed_pane, credential) = pane_credential(state, &request.token)?;
     let user_credential = credential == ControlCredential::InteractiveUser;
 
     if user_credential && request.command != "cli.call" {
@@ -1186,10 +1237,66 @@ fn handle_line_with_peer(
             }
             Ok(json!({ "url": resolved.url, "sandbox": resolved.sandbox }))
         }
+        "browser.open_file" => {
+            Err("browser.open_file requires a streamed request body".to_string())
+        }
         // Other agent spawning and turn queueing are management operations that belong
         // to the trusted GUI (Tauri commands), not to processes holding a pane token.
         other => Err(format!("unknown control command '{other}'")),
     }
+}
+
+fn handle_browser_open_file<R: Read>(
+    state: &AppState,
+    request: ControlRequest,
+    reader: &mut R,
+) -> Result<Value, String> {
+    let (authed_pane, credential) = pane_credential(state, &request.token)?;
+    if credential != ControlCredential::RemotePane {
+        return Err("browser.open_file requires a remote pane credential".to_string());
+    }
+    ensure_remote_command_allowed(state, &authed_pane, &request.command)?;
+    let header = serde_json::from_value::<BrowserOpenFileHeader>(request.payload)
+        .map_err(|err| format!("invalid browser.open_file payload: {err}"))?;
+    crate::remote_files::validate_name(&header.name)?;
+    let port = state
+        .file_server_port()
+        .ok_or_else(|| "the file server is not running".to_string())?;
+    let token = state.pane_file_token(&authed_pane)?;
+    let upload_id = state.next_id("remote-file");
+    let path = crate::remote_files::stage(
+        &state.config().workspace_root,
+        &upload_id,
+        &header.name,
+        header.size,
+        reader,
+    )?;
+    let canonical = match state.grant_pane_file_preview(&authed_pane, &path) {
+        Ok(path) => path,
+        Err(err) => {
+            if let Some(parent) = path.parent() {
+                let _ = fs::remove_dir_all(parent);
+            }
+            return Err(err);
+        }
+    };
+    let url = crate::file_server::file_url(port, &token, &canonical);
+    state.emit(QmuxEvent::new(
+        "browser.open",
+        Some(authed_pane.clone()),
+        None,
+        json!({ "url": url, "sandbox": true }),
+    ));
+    if state.agent_by_pane(&authed_pane)?.is_some()
+        && let Err(err) = state.record_artifact(
+            &authed_pane,
+            Some(canonical.to_string_lossy().into_owned()),
+            None,
+        )
+    {
+        eprintln!("failed to record remote artifact for pane {authed_pane}: {err}");
+    }
+    Ok(json!({ "opened": true, "name": header.name }))
 }
 
 fn validate_recovered_adapter_for_pane(
@@ -1235,8 +1342,9 @@ fn ensure_remote_command_allowed(
         }
         // SessionStart itself is allowed to recover a lost shell-agent binding.
         "hook.notify" => true,
-        // These are documented agent capabilities and retain their existing
-        // pane/workspace/lineage checks. They are unavailable to a remote shell.
+        // A remote shell or agent may stage one bounded preview file. The remaining
+        // agent capabilities retain their existing pane/workspace/lineage checks.
+        "browser.open_file" => true,
         "agent.detach_pane" | "agent.fork" | "mcp.call" | "browser.open" | "cli.call" => has_agent,
         // In particular: never accept pane.write or transcript.append from an
         // SSH-forwarded credential. The latter writes local files and currently
@@ -1418,11 +1526,16 @@ mod tests {
         MuseAdapterConfig, OpencodeAdapterConfig, QmuxConfig,
     };
 
-    use crate::workspace::{AgentInfo, AgentStatus};
-    use std::io::Read;
+    use crate::state::{HostPtyBackend, PaneBackend, PaneInfo, PaneRuntime, PaneStatus};
+    use crate::workspace::{
+        AgentInfo, AgentStatus, GroupInfo, RemoteMultiplexer, RemoteRef, WorkspaceScope,
+    };
+    use portable_pty::{Child, ChildKiller, ExitStatus, PtySize, native_pty_system};
+    use std::io::{self, Read};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::mpsc;
+    use std::sync::{Arc, Mutex};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1562,6 +1675,108 @@ mod tests {
             paused: false,
             created_at: 0,
         }
+    }
+
+    #[derive(Debug)]
+    struct FakeChild;
+
+    impl ChildKiller for FakeChild {
+        fn kill(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(FakeChild)
+        }
+    }
+
+    impl Child for FakeChild {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            Ok(None)
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            Ok(ExitStatus::with_exit_code(0))
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    fn insert_remote_shell(state: &AppState, pane_id: &str) {
+        state
+            .update_group(GroupInfo {
+                id: "group-1".to_string(),
+                name: "Remote".to_string(),
+                name_override: None,
+                dir: "/srv/project".to_string(),
+                managed_dir: state
+                    .config()
+                    .workspace_root
+                    .join("group-1")
+                    .to_string_lossy()
+                    .into_owned(),
+                base_repo: None,
+                base_ref: None,
+                parent_id: None,
+                created_at: 0,
+                collapsed: false,
+                scope: WorkspaceScope::Terminal,
+                imported_research_archive_id: None,
+                remote: Some(RemoteRef {
+                    id: "remote-1".to_string(),
+                    label: "Remote".to_string(),
+                    host: "example.test".to_string(),
+                    multiplexer: RemoteMultiplexer::Tmux,
+                    qmux_cli: None,
+                    workspace_root: None,
+                }),
+                agents: Vec::new(),
+            })
+            .unwrap();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        drop(pair.slave);
+        state
+            .insert_pane(PaneRuntime {
+                info: PaneInfo {
+                    id: pane_id.to_string(),
+                    title: "Remote shell".to_string(),
+                    last_osc_title: None,
+                    kind: PaneKind::Shell,
+                    agent_id: None,
+                    group_id: "group-1".to_string(),
+                    cwd: "/srv/project".to_string(),
+                    active_workspace: None,
+                    remote_session: Some(
+                        crate::state::RemoteSessionIdentity::new("remote-1", pane_id).unwrap(),
+                    ),
+                    remote_connection: Some(crate::state::RemoteConnectionInfo::default()),
+                    ssh_target: None,
+                    cols: 80,
+                    rows: 24,
+                    status: PaneStatus::Running,
+                    last_active_at: 0,
+                    recovered: false,
+                    depth: 0,
+                },
+                backend: PaneBackend::HostPty(HostPtyBackend {
+                    child: Arc::new(Mutex::new(Box::new(FakeChild))),
+                    master: Arc::new(Mutex::new(pair.master)),
+                    writer: Arc::new(Mutex::new(Box::new(io::sink()))),
+                    backlog: Default::default(),
+                    native_surface: false,
+                }),
+                cwd_observation_seq: 0,
+            })
+            .unwrap();
     }
 
     fn request_line(token: &str, command: &str, payload: Value) -> String {
@@ -1983,6 +2198,75 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("server reader should exit after the client closes");
+    }
+
+    #[test]
+    fn remote_shell_streams_one_file_into_an_exact_preview_grant() {
+        let state = test_state();
+        insert_remote_shell(&state, "pane-remote");
+        state.set_file_server(45678);
+        let token = state.pane_remote_token("pane-remote").unwrap();
+        let (mut client, server) = UnixStream::pair().unwrap();
+        let server_state = state.clone();
+        let handle = thread::spawn(move || {
+            handle_client_with_timeout(server_state, server, Duration::from_secs(1));
+        });
+        let body = b"<!doctype html><p>remote snapshot</p>";
+        let request = ControlRequest {
+            token,
+            command: "browser.open_file".to_string(),
+            payload: serde_json::to_value(BrowserOpenFileHeader {
+                name: "report.html".to_string(),
+                size: body.len() as u64,
+            })
+            .unwrap(),
+        };
+        serde_json::to_writer(&mut client, &request).unwrap();
+        client.write_all(b"\n").unwrap();
+        client.write_all(body).unwrap();
+        client.flush().unwrap();
+
+        let mut response = String::new();
+        BufReader::new(client.try_clone().unwrap())
+            .read_line(&mut response)
+            .unwrap();
+        let response = serde_json::from_str::<ControlResponse>(&response).unwrap();
+        assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.data,
+            json!({ "opened": true, "name": "report.html" })
+        );
+        let grants = state.pane_file_preview_grants("pane-remote");
+        assert_eq!(grants.len(), 1);
+        assert_eq!(fs::read(&grants[0]).unwrap(), body);
+        assert!(
+            state
+                .pane_file_roots("pane-remote")
+                .iter()
+                .all(|root| { !grants[0].starts_with(root) })
+        );
+        assert!(state.list_artifacts().unwrap().is_empty());
+
+        handle.join().unwrap();
+        fs::remove_dir_all(&state.config().workspace_root).unwrap();
+    }
+
+    #[test]
+    fn streamed_file_open_rejects_a_local_pane_token_before_reading_the_body() {
+        let state = test_state();
+        let request = ControlRequest {
+            token: state.pane_token("pane-local").unwrap(),
+            command: "browser.open_file".to_string(),
+            payload: serde_json::to_value(BrowserOpenFileHeader {
+                name: "report.html".to_string(),
+                size: 3,
+            })
+            .unwrap(),
+        };
+        let error = handle_browser_open_file(&state, request, &mut io::empty()).unwrap_err();
+        assert!(error.contains("requires a remote pane credential"));
+        assert!(!crate::remote_files::store_root(&state.config().workspace_root).exists());
+        fs::remove_dir_all(&state.config().workspace_root).unwrap();
     }
 
     #[test]

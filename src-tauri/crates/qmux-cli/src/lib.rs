@@ -11,7 +11,9 @@ mod muse;
 mod public_cli;
 pub mod transcript_stream;
 
-use qmux_proto::{ControlRequest, ControlResponse};
+use qmux_proto::{
+    BrowserOpenFileHeader, ControlRequest, ControlResponse, MAX_REMOTE_OPEN_FILE_BYTES,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::env;
@@ -104,6 +106,10 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
         }
         "--transcript-stream-version" => {
             println!("3");
+            Ok(true)
+        }
+        "--remote-open-file-version" => {
+            println!("1");
             Ok(true)
         }
         "notify" => {
@@ -268,6 +274,20 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             let target = args
                 .next()
                 .ok_or_else(|| "usage: qmux open <file|url>".to_string())?;
+            if args.next().is_some() {
+                return Err(syntax_error("usage: qmux open <file|url>".to_string()));
+            }
+            if env::var("QMUX_REMOTE").ok().as_deref() == Some("1") {
+                if target.starts_with("http://") || target.starts_with("https://") {
+                    return Err(
+                        "remote qmux open supports files only; remote URLs are not forwarded"
+                            .to_string(),
+                    );
+                }
+                request_remote_file_open(&target)?;
+                println!("Opened {target} in the qmux browser overlay.");
+                return Ok(true);
+            }
             let cwd = env::current_dir()
                 .ok()
                 .map(|path| path.display().to_string());
@@ -291,6 +311,89 @@ pub fn run_cli_if_requested() -> Result<bool, String> {
             Err(syntax_error(format!("unknown qmux command '{command}'")))
         }
         _ => Ok(false),
+    }
+}
+
+fn request_remote_file_open(target: &str) -> Result<(), String> {
+    let requested = Path::new(target);
+    let requested = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        env::current_dir()
+            .map_err(|err| format!("failed to read current directory: {err}"))?
+            .join(requested)
+    };
+    let canonical = std::fs::canonicalize(&requested)
+        .map_err(|err| format!("'{}' was not found: {err}", requested.display()))?;
+    let mut file = std::fs::File::open(&canonical)
+        .map_err(|err| format!("failed to open {}: {err}", canonical.display()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|err| format!("failed to inspect {}: {err}", canonical.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("'{}' is not a regular file", canonical.display()));
+    }
+    let size = metadata.len();
+    if size > MAX_REMOTE_OPEN_FILE_BYTES {
+        return Err(format!(
+            "'{}' is larger than the {} MiB remote preview limit",
+            canonical.display(),
+            MAX_REMOTE_OPEN_FILE_BYTES / (1024 * 1024)
+        ));
+    }
+    let name = canonical
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "remote preview filename is not valid UTF-8".to_string())?
+        .to_string();
+    if !qmux_proto::is_safe_browser_preview_name(&name) {
+        return Err(format!("'{name}' is not a browser-previewable file"));
+    }
+
+    let socket_path = env::var("QMUX_SOCK").map_err(|_| "QMUX_SOCK is not set".to_string())?;
+    let token = env::var("QMUX_TOKEN").map_err(|_| "QMUX_TOKEN is not set".to_string())?;
+    let mut stream = UnixStream::connect(&socket_path)
+        .map_err(|err| format!("failed to connect to {socket_path}: {err}"))?;
+    let timeout = Some(Duration::from_secs(60));
+    let _ = stream.set_read_timeout(timeout);
+    let _ = stream.set_write_timeout(timeout);
+    let request = ControlRequest {
+        token,
+        command: "browser.open_file".to_string(),
+        payload: serde_json::to_value(BrowserOpenFileHeader { name, size })
+            .map_err(|err| format!("failed to encode remote preview header: {err}"))?,
+    };
+    serde_json::to_writer(&mut stream, &request)
+        .map_err(|err| format!("failed to encode remote preview request: {err}"))?;
+    stream
+        .write_all(b"\n")
+        .map_err(|err| format!("failed to send remote preview header: {err}"))?;
+    let copied = std::io::copy(&mut Read::by_ref(&mut file).take(size), &mut stream)
+        .map_err(|err| format!("failed to send remote preview: {err}"))?;
+    if copied != size {
+        return Err(format!(
+            "remote preview changed while reading: sent {copied} of {size} bytes"
+        ));
+    }
+    stream
+        .flush()
+        .map_err(|err| format!("failed to flush remote preview: {err}"))?;
+
+    let mut response = String::new();
+    let read = BufReader::new(stream)
+        .read_line(&mut response)
+        .map_err(|err| format!("failed to read remote preview response: {err}"))?;
+    if read == 0 {
+        return Err("qmux closed the remote preview connection without a response".to_string());
+    }
+    let response = serde_json::from_str::<ControlResponse>(response.trim_end())
+        .map_err(|err| format!("invalid qmux response: {err}"))?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response
+            .error
+            .unwrap_or_else(|| "qmux remote preview failed".to_string()))
     }
 }
 

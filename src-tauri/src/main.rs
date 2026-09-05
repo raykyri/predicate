@@ -26,6 +26,7 @@ mod pty;
 mod publishing;
 mod recovery;
 mod remote_cli;
+mod remote_files;
 mod remote_terminal;
 mod remote_transcript;
 mod research;
@@ -976,6 +977,31 @@ fn resolve_local_link_target(
     control_socket::resolve_browser_target(state, pane_id, trimmed, None)
 }
 
+fn grant_staged_artifact_to_pane(
+    state: &AppState,
+    pane_id: &str,
+    artifact_id: &str,
+    path: &str,
+) -> Result<(), String> {
+    let artifact = state.artifact(artifact_id)?;
+    if artifact.path.as_deref() != Some(path) {
+        return Err("artifact path does not match its persisted target".to_string());
+    }
+    let pane_group = state
+        .pane_group_id(pane_id)?
+        .ok_or_else(|| format!("pane {pane_id} has no workspace"))?;
+    if artifact.group_id.as_deref() != Some(&pane_group) {
+        return Err("artifact belongs to another workspace".to_string());
+    }
+    let canonical = remote_files::resolve_staged_file(
+        &state.config().workspace_root,
+        std::path::Path::new(path),
+    )
+    .ok_or_else(|| "staged remote artifact is no longer available".to_string())?;
+    state.grant_pane_file_preview(pane_id, &canonical)?;
+    Ok(())
+}
+
 fn resolve_terminal_link_target(
     state: &AppState,
     pane_id: &str,
@@ -1052,6 +1078,15 @@ fn browser_open_local_path(
     path: String,
     artifact_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
+    if let Some(artifact_id) = artifact_id.as_deref()
+        && remote_files::resolve_staged_file(
+            &state.config().workspace_root,
+            std::path::Path::new(&path),
+        )
+        .is_some()
+    {
+        grant_staged_artifact_to_pane(&state, &pane_id, artifact_id, &path)?;
+    }
     let resolved = resolve_local_link_target(&state, &pane_id, &path)?;
     open_local_link(&state, &pane_id, resolved, artifact_id)
 }
@@ -1150,7 +1185,8 @@ fn artifact_open_external(
 /// Mints a token-scoped file-server URL for a file artifact so the tray can
 /// render tiny thumbnails/previews. None (rather than an error) when the source
 /// pane is gone — file tokens are per-pane — or the artifact is a URL or the
-/// file moved outside the pane's roots; the tray falls back to a glyph tile.
+/// file moved outside the pane's roots/exact grants; the tray falls back to a
+/// glyph tile.
 #[tauri::command]
 fn artifact_file_url(
     state: tauri::State<'_, AppState>,
@@ -1169,8 +1205,15 @@ fn artifact_file_url(
     let Ok(token) = state.pane_file_token(&artifact.pane_id) else {
         return Ok(None);
     };
+    if remote_files::resolve_staged_file(&state.config().workspace_root, std::path::Path::new(path))
+        .is_some()
+    {
+        grant_staged_artifact_to_pane(&state, &artifact.pane_id, &artifact.id, path)?;
+    }
     let roots = state.pane_file_roots(&artifact.pane_id);
+    let grants = state.pane_file_preview_grants(&artifact.pane_id);
     let Some(canonical) = file_server::resolve_under_roots(std::path::Path::new(path), &roots)
+        .or_else(|| file_server::resolve_exact_file(std::path::Path::new(path), &grants))
     else {
         return Ok(None);
     };
@@ -3797,6 +3840,21 @@ fn main() {
                 // panes into fresh PTYs before the command handlers go live so the
                 // webview's first list_panes() already sees the recovered session.
                 let recovered_panes = state.restore_session();
+                {
+                    let workspace_root = state.config().workspace_root.clone();
+                    let referenced = state
+                        .list_artifacts()
+                        .map(|artifacts| {
+                            artifacts
+                                .into_iter()
+                                .filter_map(|artifact| artifact.path.map(std::path::PathBuf::from))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    std::thread::spawn(move || {
+                        remote_files::remove_orphaned(&workspace_root, &referenced);
+                    });
+                }
                 workspace::reconcile_imported_research_archives(&state);
                 // Recovery fell back to an empty session (state discarded to a .bak)
                 // or dropped entries: say so in a dialog, since a Finder launch never

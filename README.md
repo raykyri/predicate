@@ -296,6 +296,10 @@ hosted view can show proposal status without a separate collaboration database.
   the notification to the owning agent's adapter. The same socket, scoped to the
   caller's pane, serves other in-pane commands such as `qmux fork` and
   `qmux open <file|localhost-url>`.
+- In a remote pane, `qmux open <file>` streams one browser-previewable regular
+  file of at most 10 MiB into an owner-only local snapshot. Only that exact file
+  is granted to the embedded browser; HTML dependencies and sibling files are
+  not copied or resolved. Remote loopback URLs are not forwarded.
 - `qmux send [options] <message>` sends a manual user notification. The default
   `auto` mode shows a stacked card at the top right while qmux is focused and a
   native macOS notification while it is in the background; unavailable native
@@ -513,8 +517,9 @@ read-only SSH stream. The transcript view backfills the current session and
 follows complete records as the agent writes them. Persisted offsets resume
 streaming after reconnects or app restarts; a transcript connection failure
 shows a notice while the terminal remains usable. Managed Linux `qmux-cli`
-installs are upgraded automatically when streaming support is missing. Custom
-CLI installations must support `--transcript-stream-version` (currently `3`).
+installs are upgraded automatically when required remote capabilities are
+missing. Custom CLI installations must support `--transcript-stream-version`
+(currently `3`) and `--remote-open-file-version` (currently `1`).
 The stream transfers UTF-8 chunks of at most 128 KiB, allowing image-bearing
 records larger than a transport frame to be reassembled locally. Historical
 records loaded on connection or reconnect update the transcript without

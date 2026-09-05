@@ -882,6 +882,16 @@ fn artifact_open(state: &AppState, context: &ControlContext, arguments: Value) -
         .as_deref()
         .or(artifact.url.as_deref())
         .ok_or_else(|| ControlFailure::new("invalid_artifact", "artifact has no target"))?;
+    if artifact.path.is_some()
+        && let Some(canonical) = crate::remote_files::resolve_staged_file(
+            &state.config().workspace_root,
+            std::path::Path::new(target),
+        )
+    {
+        state
+            .grant_pane_file_preview(&artifact.pane_id, &canonical)
+            .map_err(internal)?;
+    }
     let resolved =
         crate::control_socket::resolve_browser_target(state, &artifact.pane_id, target, None)
             .map_err(internal)?;

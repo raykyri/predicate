@@ -901,6 +901,7 @@ fn remote_pane_envs(
     // so an untrusted or stale launch specification cannot override them.
     resolved.insert("QMUX_SOCK".to_string(), remote_socket.to_string());
     resolved.insert("QMUX_CLI".to_string(), target.qmux_cli.clone());
+    resolved.insert("QMUX_REMOTE".to_string(), "1".to_string());
     resolved.insert("QMUX_TOKEN".to_string(), remote_token.to_string());
     if let Some(root) = remote_workspace_root {
         resolved.insert("QMUX_WORKSPACE_ROOT".to_string(), root.to_string());
