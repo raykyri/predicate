@@ -15865,7 +15865,9 @@ function MainApp() {
             const connectionStatus = group.remote ? remoteGroupStatus(groupPanes) : null;
             const isActiveGroup = activePane?.groupId === group.id;
             const isCollapsedGroup = group.collapsed;
-            const groupDisplayName = displayGroupName(group);
+            const groupDisplayName = group.remote
+              ? `${displayGroupName(group)}@${group.remote.label}`
+              : displayGroupName(group);
             const groupRootPath = groupRootDir(group);
             const groupDropGap = groupDropTarget?.index ?? null;
             const collapsedStatusAgents = isCollapsedGroup
@@ -15921,14 +15923,6 @@ function MainApp() {
                       >
                         {groupDisplayName}
                       </span>
-                      {group.remote ? (
-                        <span
-                          className="pane-group-remote-label"
-                          title={`Runs on ${group.remote.label}`}
-                        >
-                          {group.remote.label}
-                        </span>
-                      ) : null}
                       {isCollapsedGroup ? (
                         <span className="pane-group-count">{groupPanes.length}</span>
                       ) : null}

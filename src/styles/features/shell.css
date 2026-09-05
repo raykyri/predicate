@@ -548,21 +548,6 @@
   white-space: nowrap;
 }
 
-.pane-group-remote-label {
-  min-width: 0;
-  max-width: 86px;
-  overflow: hidden;
-  padding: 1px 5px;
-  border: 1px solid color-mix(in srgb, var(--accent-color) 34%, transparent);
-  border-radius: 999px;
-  color: color-mix(in srgb, var(--accent-color) 76%, var(--text-secondary));
-  font-size: 10px;
-  font-weight: 550;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .pane-group-count {
   flex: none;
   color: #747d79;
