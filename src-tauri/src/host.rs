@@ -261,6 +261,16 @@ impl Host {
             "status".to_string(),
             "off".to_string(),
             ";".to_string(),
+            // Let tmux own remote history scrolling. Without mouse reporting,
+            // Ghostty's alternate-screen scrolling becomes Up/Down key input.
+            // The default wheel bindings enter copy-mode -e for shell history
+            // (exiting at the bottom) and forward events to interactive apps.
+            "set-option".to_string(),
+            "-t".to_string(),
+            option_target.clone(),
+            "mouse".to_string(),
+            "on".to_string(),
+            ";".to_string(),
             "set-option".to_string(),
             "-w".to_string(),
             "-t".to_string(),
@@ -1154,7 +1164,12 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
-        for (option, expected) in [("prefix", "None"), ("prefix2", "None"), ("status", "off")] {
+        for (option, expected) in [
+            ("prefix", "None"),
+            ("prefix2", "None"),
+            ("status", "off"),
+            ("mouse", "on"),
+        ] {
             let output = Command::new("tmux")
                 .args(tmux_server_args(&identity))
                 .args([
@@ -1222,6 +1237,7 @@ mod tests {
         assert!(
             configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef:' 'status' 'off' ';'")
         );
+        assert!(configure.contains("'set-option' '-t' '=qmux-pane-7-deadbeef:' 'mouse' 'on' ';'"));
         assert!(
             configure.contains(
                 "'set-option' '-w' '-t' '=qmux-pane-7-deadbeef:0' 'history-limit' '50000'"
