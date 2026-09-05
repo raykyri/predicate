@@ -1,4 +1,5 @@
 import type { PaneInfo, RemoteConnectionInfo } from "../types";
+import { formatRelativeTime } from "./transcriptSessions";
 
 export function parseRemoteConnection(raw: unknown): RemoteConnectionInfo | null {
   if (!raw || typeof raw !== "object") return null;
@@ -19,66 +20,154 @@ export function parseRemoteConnection(raw: unknown): RemoteConnectionInfo | null
   return connection;
 }
 
-export function remoteConnectionLabel(connection?: RemoteConnectionInfo | null): string {
-  if (remoteHooksNeedAttention(connection)) return "Connected · hooks need attention";
-  if (connection?.stage === "sleeping") return "Sleeping";
-  if (connection?.stage === "sessionEnded") return "Session ended";
-  if (connection?.stage === "needsAttention") return "Needs attention";
-  if (connection?.stage === "restoringHistory") return "Restoring history";
-  if (connection?.stage === "attaching") return "Reattaching";
-  if (connection?.stage === "configuring") return "Preparing session";
-  switch (connection?.state) {
-    case "connected": return "Connected";
-    case "connecting": return "Connecting";
-    case "checking": return "Checking connection";
-    case "reconnecting": return "Reconnecting";
-    case "failed": return "Connection failed";
-    default: return "Disconnected";
+const RECOVERY_TITLES = new Map([
+  ["initialConnection", "Connecting"],
+  ["appRestart", "Restoring session"],
+  ["connectionLost", "Restoring lost connection"],
+  ["systemWake", "Resuming after sleep"],
+]);
+
+type ProgressStep = "connecting" | "checking" | "reconnecting" | "configuring" | "restoringHistory" | "attaching";
+
+const STATE_STEPS = new Map<string, ProgressStep>([
+  ["connecting", "connecting"],
+  ["checking", "checking"],
+  ["reconnecting", "reconnecting"],
+]);
+
+const STAGE_STEPS = new Map<string, ProgressStep>([
+  ["checking", "checking"],
+  ["configuring", "configuring"],
+  ["restoringHistory", "restoringHistory"],
+  ["attaching", "attaching"],
+]);
+
+const STEP_LABELS: Record<ProgressStep, string> = {
+  connecting: "Connecting",
+  checking: "Checking connection",
+  reconnecting: "Reconnecting",
+  configuring: "Preparing session",
+  restoringHistory: "Restoring history",
+  attaching: "Reattaching",
+};
+
+type ConnectionErrorKind = "none" | "timeout" | "credentialRecovery" | "other";
+
+interface ConnectionError {
+  kind: ConnectionErrorKind;
+  text: string;
+}
+
+export interface RemoteConnectionPresentation {
+  title: string;
+  lines: string[];
+  lastConnection: string | null;
+  refreshEveryMs: number | null;
+}
+
+/** Resolve lifecycle first, then compose copy without inspecting formatted text. */
+export function remoteConnectionPresentation(
+  connection?: RemoteConnectionInfo | null,
+  now = Date.now(),
+): RemoteConnectionPresentation {
+  const view: RemoteConnectionPresentation = {
+    title: "Disconnected", lines: [], lastConnection: null, refreshEveryMs: null,
+  };
+  if (!connection) return view;
+  if (connection.state === "connected") {
+    view.title = remoteHooksNeedAttention(connection) ? "Connected · hooks need attention" : "Connected";
+    view.lines = connectedDetails(connection);
+    return view;
   }
+  if (connection.lastConnectedAt != null) {
+    view.lastConnection = `Last connection: ${formatRelativeTime(connection.lastConnectedAt, now)}`;
+    view.refreshEveryMs = 1000;
+  }
+  if (connection.stage === "sleeping") {
+    view.title = "Sleeping";
+    view.lines = ["Waiting for wake signal..."];
+    return view;
+  }
+  if (connection.stage === "sessionEnded" || connection.sessionExists === false) {
+    view.title = "Session ended";
+    return view;
+  }
+
+  const error = classifyConnectionError(connection.message);
+  if (connection.state === "failed" || connection.stage === "needsAttention") {
+    view.title = "Connection failed";
+    if (error.text) view.lines.push(error.text);
+    return view;
+  }
+  const stateStep = STATE_STEPS.get(connection.state);
+  if (!stateStep) {
+    if (error.text) view.lines.push(error.text);
+    return view;
+  }
+
+  const stepKey = STAGE_STEPS.get(connection.stage ?? "") ?? stateStep;
+  const step = STEP_LABELS[stepKey];
+  const credentialRecovery = error.kind === "credentialRecovery";
+  const recoveryTitle = credentialRecovery ? error.text : RECOVERY_TITLES.get(connection.reason ?? "");
+  const showStep = recoveryTitle !== undefined;
+  view.title = recoveryTitle ?? step;
+
+  const retrySeconds = connection.nextRetryAt == null ? null : Math.max(0, Math.ceil((connection.nextRetryAt - now) / 1000));
+  const combinedRetry = showStep && stepKey === "reconnecting" && retrySeconds != null && retrySeconds > 0;
+  if (showStep) {
+    const descriptionStep = connection.reason === "initialConnection" && !credentialRecovery && stepKey === "connecting"
+      ? "Establishing connection" : step;
+    view.lines.push(combinedRetry ? `${descriptionStep}... (retrying in ${retrySeconds} sec)` : `${descriptionStep}...`);
+  }
+  const hideTimeout = connection.state === "reconnecting" && connection.reason === "connectionLost" && error.kind === "timeout";
+  if (error.text && !credentialRecovery && !hideTimeout) view.lines.push(error.text);
+  if (retrySeconds != null) {
+    view.refreshEveryMs = 1000;
+    if (!combinedRetry) view.lines.push(retrySeconds > 0 ? `Retrying in ${retrySeconds} sec...` : "Waiting to retry...");
+  }
+  return view;
+}
+
+export function remoteConnectionLabel(connection?: RemoteConnectionInfo | null): string {
+  return remoteConnectionPresentation(connection).title;
+}
+
+export function remoteConnectionDetails(connection?: RemoteConnectionInfo | null, now = Date.now()): string {
+  const view = remoteConnectionPresentation(connection, now);
+  return [...view.lines, ...(view.lastConnection ? [view.lastConnection] : [])].join("\n");
 }
 
 export function remoteHooksNeedAttention(connection?: RemoteConnectionInfo | null): boolean {
   return connection?.state === "connected" && (connection.hookHealth === "authenticationFailed" || connection.hookHealth === "unavailable");
 }
 
-export function remoteConnectionDetails(connection?: RemoteConnectionInfo | null): string {
-  if (!connection) return "Connection has not been verified.";
+function connectedDetails(connection: RemoteConnectionInfo): string[] {
   const details: string[] = [];
-  const reason = {
-    systemWake: "Checking after sleep",
-    systemSleep: "Checks resume when this computer wakes",
-    appRestart: "Restoring after app restart",
-    manualRetry: "Reconnect requested",
-    connectionLost: "SSH connection closed",
-    initialConnection: "Initial connection",
-  }[connection.reason ?? ""];
-  if (connection.state === "connected") {
-    if (connection.hookHealth === "checking") details.push("Checking agent hooks; the terminal is ready.");
-    if (connection.hookHealth === "healthy") details.push("Agent hook authentication verified.");
-    if (connection.hookHealth === "authenticationFailed") details.push("Agent hook authentication failed (invalid QMUX_TOKEN). The terminal remains usable, but agent tracking may not update.");
-    if (connection.hookHealth === "unavailable") details.push("Agent hooks could not be verified. The terminal remains usable, but agent tracking may not update.");
-    if (connection.reason === "systemWake") details.push(connection.recoveryAction === "reattached"
-      ? "Reattached to the existing session after sleep."
-      : "Connection verified after sleep; no reattachment needed.");
-    if (connection.reason === "appRestart") details.push("Reattached to the existing session after app restart.");
-    if (connection.reason === "connectionLost") details.push("Reattached to the existing session after connection loss.");
-    if (connection.lastConnectedAt) details.push(`Attached: ${new Date(connection.lastConnectedAt).toLocaleString()}.`);
-    if (connection.lastVerifiedAt) details.push(`Verified: ${new Date(connection.lastVerifiedAt).toLocaleString()}.`);
-    if (connection.recoveryDurationMs != null && connection.reason !== "initialConnection") {
-      details.push(`Recovery took ${(connection.recoveryDurationMs / 1000).toFixed(1)} seconds.`);
-    }
-  } else {
-    if (reason) details.push(`${reason}.`);
-    if (connection.attempt) details.push(`Attempt ${connection.attempt}.`);
-    if (connection.nextRetryAt) details.push(`Next retry: ${new Date(connection.nextRetryAt).toLocaleTimeString()}.`);
-    if (connection.lastConnectedAt) details.push(`Last attached: ${new Date(connection.lastConnectedAt).toLocaleString()}.`);
-    if (connection.message) details.push(connection.message);
+  if (connection.hookHealth === "checking") details.push("Checking agent hooks; the terminal is ready.");
+  if (connection.hookHealth === "healthy") details.push("Agent hook authentication verified.");
+  if (connection.hookHealth === "authenticationFailed") details.push("Agent hook authentication failed (invalid QMUX_TOKEN). The terminal remains usable, but agent tracking may not update.");
+  if (connection.hookHealth === "unavailable") details.push("Agent hooks could not be verified. The terminal remains usable, but agent tracking may not update.");
+  if (connection.reason === "systemWake") details.push(connection.recoveryAction === "reattached"
+    ? "Reattached to the existing session after sleep."
+    : "Connection verified after sleep; no reattachment needed.");
+  if (connection.reason === "appRestart") details.push("Reattached to the existing session after app restart.");
+  if (connection.reason === "connectionLost") details.push("Reattached to the existing session after connection loss.");
+  if (connection.lastConnectedAt) details.push(`Attached: ${new Date(connection.lastConnectedAt).toLocaleString()}.`);
+  if (connection.lastVerifiedAt) details.push(`Verified: ${new Date(connection.lastVerifiedAt).toLocaleString()}.`);
+  if (connection.recoveryDurationMs != null && connection.reason !== "initialConnection") {
+    details.push(`Recovery took ${(connection.recoveryDurationMs / 1000).toFixed(1)} seconds.`);
   }
-  if (connection.sessionExists === false) details.push("The session will not be recreated automatically.");
-  else if (connection.state !== "connected" && connection.stage !== "sleeping") {
-    details.push(connection.sessionExists ? "Existing session found; restoring the connection." : "Remote session status is unknown.");
-  }
-  return details.join("\n");
+  return details;
+}
+
+function classifyConnectionError(message?: string | null): ConnectionError {
+  if (!message || /^Unable to establish the remote connection\.?$/i.test(message.trim())) return { kind: "none", text: "" };
+  if (message.includes("require tmux 3.2 or newer")) return { kind: "other", text: "Remote terminals require tmux 3.2 or newer" };
+  if (message.includes("Permission denied") || message.includes("Too many authentication failures")) return { kind: "other", text: "SSH authentication failed" };
+  if (message.includes("Host key verification failed") || message.includes("REMOTE HOST IDENTIFICATION HAS CHANGED")) return { kind: "other", text: "SSH host key verification failed" };
+  if (/timed out/i.test(message)) return { kind: "timeout", text: "Connection timed out" };
+  if (message.includes("could not recover remote hook credential")) return { kind: "credentialRecovery", text: "Could not restore agent authentication" };
+  return { kind: "other", text: message };
 }
 
 export function remoteGroupStatus(panes: PaneInfo[]): { label: string; detail: string } | null {

@@ -1,3 +1,4 @@
+import RemoteConnectionDetailsText from "./components/RemoteConnectionDetailsText";
 import { remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus, remoteHooksNeedAttention } from "./lib/remoteConnection";
 import { reconnectPane } from "./lib/api";
 import {
@@ -14878,7 +14879,7 @@ function MainApp() {
               {paneDisplayTitle}
             </span>
             {pane.remoteSession && (pane.remoteConnection?.state !== "connected" || remoteHooksNeedAttention(pane.remoteConnection)) ? (
-              <span className="pane-tab-gitmeta" title={remoteConnectionDetails(pane.remoteConnection)}>
+              <span className="pane-tab-gitmeta" title={remoteConnectionDetails(pane.remoteConnection)} onMouseEnter={event => { event.currentTarget.title = remoteConnectionDetails(pane.remoteConnection); }}>
                 {remoteConnectionLabel(pane.remoteConnection)}
               </span>
             ) : null}
@@ -15945,6 +15946,7 @@ function MainApp() {
                       <span
                         className="pane-tab-gitmeta pane-group-connection-status"
                         title={connectionStatus.detail}
+                        onMouseEnter={event => { event.currentTarget.title = remoteGroupStatus(groupPanes)?.detail ?? ""; }}
                       >
                         {connectionStatus.label}
                       </span>
@@ -16391,7 +16393,7 @@ function MainApp() {
                 <dt>Connection</dt>
                 <dd className="pane-connection-details">
                   {remoteConnectionLabel(contextMenuPane.remoteConnection)}
-                  <span>{remoteConnectionDetails(contextMenuPane.remoteConnection)}</span>
+                  <RemoteConnectionDetailsText connection={contextMenuPane.remoteConnection} />
                 </dd>
               </div>
             ) : null}

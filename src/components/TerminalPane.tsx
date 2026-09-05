@@ -1,4 +1,5 @@
-import { remoteConnectionLabel, remoteConnectionDetails } from "../lib/remoteConnection";
+import { remoteConnectionLabel } from "../lib/remoteConnection";
+import RemoteConnectionDetailsText from "./RemoteConnectionDetailsText";
 import {
   forwardRef,
   memo,
@@ -485,9 +486,7 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
           <span className="remote-connection-state">
             {remoteConnectionLabel(pane.remoteConnection)}
           </span>
-          <span className="remote-connection-detail">
-            {remoteConnectionDetails(pane.remoteConnection)}
-          </span>
+          <RemoteConnectionDetailsText className="remote-connection-detail" connection={pane.remoteConnection} active={visible} />
         </div>
       ) : null}
       {confirmDialog}

@@ -22,6 +22,7 @@
 }
 
 .remote-connection-overlay {
+  --remote-connection-gap: 6px;
   position: absolute;
   inset: 0;
   z-index: 7;
@@ -29,7 +30,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: var(--remote-connection-gap);
   padding: 24px;
   color: var(--text-primary);
   text-align: center;
@@ -49,10 +50,23 @@
   color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
+  white-space: pre-line;
 }
 
 .remote-connection-message {
   font-family: var(--font-mono);
+}
+
+.remote-connection-details-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--remote-connection-gap, 6px);
+}
+
+.remote-connection-last-connection {
+  color: var(--text-muted, var(--text-secondary));
+  font-weight: 400;
+  opacity: 0.75;
 }
 
 /* Match the dotted blue sidebar preview while a queue/wait option targets this

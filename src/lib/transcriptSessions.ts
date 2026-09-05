@@ -51,9 +51,9 @@ export function sessionMenuTitle(option: TranscriptOption): string {
 
 // Coarse "x ago" label for a session's last-modified time, shown as gray
 // subordinate text under each session title.
-export function formatRelativeTime(modifiedMs: number): string {
-  const diffMs = Date.now() - modifiedMs;
-  if (diffMs < 45_000) {
+export function formatRelativeTime(modifiedMs: number, now = Date.now()): string {
+  const diffMs = now - modifiedMs;
+  if (diffMs < 60_000) {
     return "just now";
   }
   const minutes = Math.floor(diffMs / 60_000);
