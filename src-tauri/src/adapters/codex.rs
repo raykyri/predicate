@@ -566,15 +566,8 @@ impl CodexAdapter {
         // Running) so a recovered quiet session isn't shown as working; the first real
         // prompt/tool hook promotes it to Running.
         let restored = attach_codex_agent_pane(state, &agent.id, pane.id.clone(), false)?;
-        if host.is_local()
-            && let Some(transcript_path) = restored.transcript_path.clone()
-        {
-            start_transcript_tail(
-                state.clone(),
-                restored.id.clone(),
-                transcript_path,
-                self.id().to_string(),
-            );
+        if host.is_local() {
+            ensure_codex_transcript_tail(state, &restored);
         }
         state.emit(QmuxEvent::new(
             "agent.recovered",
@@ -795,6 +788,9 @@ impl CodexAdapter {
             args_contain_prompt(&request.args),
         )?;
         let agent = if host.is_local() {
+            // A resumed shell agent retains its durable binding across restart,
+            // but the process-local watcher must be recreated independently of hooks.
+            ensure_codex_transcript_tail(state, &agent);
             agent
         } else {
             state
@@ -2001,19 +1997,33 @@ fn adopt_forked_codex_session_identity(
 const CODEX_TRANSCRIPT_DISCOVERY_ATTEMPTS: usize = 40;
 const CODEX_TRANSCRIPT_DISCOVERY_DELAY: Duration = Duration::from_millis(250);
 
+fn ensure_codex_transcript_tail(state: &AppState, agent: &AgentInfo) {
+    if let Some(path) = agent.transcript_path.as_ref() {
+        start_transcript_tail(
+            state.clone(),
+            agent.id.clone(),
+            path.clone(),
+            "codex".into(),
+        );
+    }
+}
+
 fn start_codex_transcript_binding(
     state: AppState,
     agent_id: String,
     session_id: Option<String>,
     transcript_path: Option<String>,
 ) {
-    if state.agent(&agent_id).ok().flatten().is_some_and(|agent| {
+    if let Some(agent) = state.agent(&agent_id).ok().flatten().filter(|agent| {
         agent.session_id == session_id
             && agent.transcript_path.is_some()
             && transcript_path
                 .as_deref()
                 .is_none_or(|path| agent.transcript_path.as_deref() == Some(path))
     }) {
+        // Durable identity is not proof that a process-local watcher survived.
+        // Registration is idempotent, so repeated hooks cannot duplicate tails.
+        ensure_codex_transcript_tail(&state, &agent);
         return;
     }
 
@@ -4356,6 +4366,75 @@ trusted_hash = "sha256:trusted"
                 Some(val) => env::set_var("CODEX_HOME", val),
                 None => env::remove_var("CODEX_HOME"),
             }
+        }
+    }
+
+    #[test]
+    fn saved_codex_binding_restarts_watching_without_replaying_completion() {
+        // Each iteration models restored durable metadata in a fresh AppState:
+        // shell preparation without a hook, then the matching SessionStart path.
+        for via_hook in [false, true] {
+            let state = test_state();
+            let mut agent = sample_agent();
+            let path = temp_dir().join("restored.jsonl");
+            let completion = json!({"type":"event_msg","payload":{"type":"task_complete"}});
+            fs::write(
+                &path,
+                format!(
+                    "{}\n{}\n",
+                    codex_message_line("old", "assistant", "output_text", "history"),
+                    completion
+                ),
+            )
+            .unwrap();
+            agent.transcript_path = Some(path.display().to_string());
+            let session_id = agent.session_id.clone();
+            state.insert_agent(agent.clone()).unwrap();
+            let ensure = || {
+                if via_hook {
+                    start_codex_transcript_binding(
+                        state.clone(),
+                        agent.id.clone(),
+                        session_id.clone(),
+                        Some(path.display().to_string()),
+                    );
+                } else {
+                    ensure_codex_transcript_tail(&state, &agent);
+                }
+            };
+            ensure();
+            wait_codex_test(&state, |state| {
+                state.list_turns(Some("agent-1")).unwrap().len() == 1
+            });
+            assert_eq!(
+                state.agent("agent-1").unwrap().unwrap().status,
+                AgentStatus::Running,
+                "historical completion must not settle resumed work"
+            );
+            ensure();
+            assert!(
+                state
+                    .mark_transcript_tail("agent-1", path.to_str().unwrap(), true)
+                    .unwrap()
+                    .is_none(),
+                "the watcher must already be registered"
+            );
+            use std::io::Write;
+            let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+            writeln!(
+                file,
+                "{}",
+                codex_message_line("new", "assistant", "output_text", "new response")
+            )
+            .unwrap();
+            writeln!(file, "{completion}").unwrap();
+            wait_codex_test(&state, |state| {
+                state.agent("agent-1").unwrap().unwrap().status == AgentStatus::Done
+            });
+            assert_eq!(state.list_turns(Some("agent-1")).unwrap().len(), 2);
+            state
+                .mutate_agent("agent-1", |agent| agent.transcript_path = None)
+                .unwrap();
         }
     }
 
