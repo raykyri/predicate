@@ -248,6 +248,18 @@ impl Host {
         let option_target = format!("{exact_target}:");
         let mut configure_args = tmux_server_args(identity);
         configure_args.extend([
+            // Our attachment advertises xterm-256color but renders in Ghostty,
+            // which supports DEC 2026 synchronized updates. Specify Sync
+            // directly: tmux 3.2's `sync` feature uses the older DCS protocol.
+            // Reserve a high array slot on our dedicated (-f /dev/null) server
+            // to preserve defaults and avoid appending on every reconnect.
+            "set-option".to_string(),
+            "-s".to_string(),
+            "terminal-overrides[100]".to_string(),
+            // Escape the final semicolon for tmux's command parser as well as
+            // shell quoting below, so it remains part of the terminfo program.
+            "xterm-256color:Sync=\\E[?2026%?%p1%{1}%-%tl%eh%\\;".to_string(),
+            ";".to_string(),
             // tmux is a durability layer for qmux, not a second interactive
             // multiplexer. Disabling both prefixes lets every control byte
             // reach the pane, while hiding the status line keeps the managed
@@ -1159,8 +1171,11 @@ mod tests {
             )
             .unwrap();
         // Execute the actual remote shell commands locally, bypassing only SSH.
+        let mut default_overrides = String::new();
         for argv in [
             &commands.create_argv,
+            &commands.configure_argv,
+            // Recovery reapplies the same configuration on the shared server.
             &commands.configure_argv,
             &commands.probe_argv,
         ] {
@@ -1173,6 +1188,15 @@ mod tests {
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
+            if std::ptr::eq(argv, &commands.create_argv) {
+                let output = Command::new("tmux")
+                    .args(tmux_server_args(&identity))
+                    .args(["show-options", "-s", "-v", "terminal-overrides"])
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                default_overrides = String::from_utf8(output.stdout).unwrap();
+            }
         }
         for (option, expected) in [
             ("prefix", "None"),
@@ -1197,6 +1221,32 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), expected);
+        }
+        let output = Command::new("tmux")
+            .args(tmux_server_args(&identity))
+            .args(["show-options", "-s", "-v", "terminal-overrides"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let overrides = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            overrides
+                .lines()
+                .filter(|line| line.starts_with("xterm-256color:Sync="))
+                .count(),
+            1,
+            "reconfiguration must not accumulate Sync overrides: {overrides}"
+        );
+        assert!(
+            overrides
+                .lines()
+                .any(|line| line == "xterm-256color:Sync=\\E[?2026%?%p1%{1}%-%tl%eh%;")
+        );
+        for default in default_overrides.lines() {
+            assert!(
+                overrides.lines().any(|line| line == default),
+                "default override must survive: {default}"
+            );
         }
     }
 
