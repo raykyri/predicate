@@ -1768,3 +1768,8 @@ export function markEventsListenerReady() {
 export function acknowledgeInterfaceHealthProbe(generation: number) {
   return invoke<void>("acknowledge_interface_health_probe", { generation });
 }
+
+/** Verify and reattach the existing remote session; never starts another shell. */
+export function reconnectPane(paneId: string) {
+  return invoke<void>("pane_reconnect", { paneId });
+}

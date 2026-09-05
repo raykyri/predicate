@@ -1,3 +1,5 @@
+import { remoteConnectionLabel, remoteConnectionDetails, remoteGroupStatus } from "./lib/remoteConnection";
+import { reconnectPane } from "./lib/api";
 import {
   Fragment,
   useCallback,
@@ -14875,6 +14877,11 @@ function MainApp() {
             <span className={`pane-tab-title${paneTitleIsUserSet ? " is-user-set" : ""}`}>
               {paneDisplayTitle}
             </span>
+            {pane.remoteSession && pane.remoteConnection?.state !== "connected" ? (
+              <span className="pane-tab-gitmeta" title={remoteConnectionDetails(pane.remoteConnection)}>
+                {remoteConnectionLabel(pane.remoteConnection)}
+              </span>
+            ) : null}
             {settings.codeMode && settings.showTabDirectories && paneDir && !hidePaneDir ? (
               <span className="pane-tab-path" title={paneDir}>
                 {formatPaneDir(paneDir)}
@@ -14895,9 +14902,9 @@ function MainApp() {
               </span>
             ) : null}
           </span>
-          {pane.recovered || paneStatus ? (
+          {(pane.recovered && !pane.remoteSession) || paneStatus ? (
             <span className="pane-tab-meta">
-              {pane.recovered ? (
+              {pane.recovered && !pane.remoteSession ? (
                 <small className="pane-tab-status" title="Restored after restart">
                   Restored
                 </small>
@@ -15845,6 +15852,7 @@ function MainApp() {
           {sidebarMode === "terminal" ? terminalGroups.map((group, groupIndex) => {
             const groupPanes = panes.filter((pane) => pane.groupId === group.id);
             const hasGroupPanes = groupPanes.length > 0;
+            const connectionStatus = group.remote ? remoteGroupStatus(groupPanes) : null;
             const isActiveGroup = activePane?.groupId === group.id;
             const isCollapsedGroup = group.collapsed;
             const groupDisplayName = displayGroupName(group);
@@ -15881,54 +15889,64 @@ function MainApp() {
                   onPointerUp={handleGroupHeaderPointerUp}
                   onPointerCancel={handleGroupHeaderPointerCancel}
                 >
-                  <span className="pane-group-title">
-                    {group.remote ? (
-                      <Globe
-                        className="pane-group-folder pane-group-remote-icon"
-                        size={13}
-                        aria-label={`Remote group on ${group.remote.label}`}
-                      />
-                    ) : (
-                      <Folder className="pane-group-folder" size={13} aria-hidden="true" />
-                    )}
-                    <span
-                      className="pane-group-name"
-                      title={groupDisplayName}
-                      onDoubleClick={(event) => {
-                        event.preventDefault();
-                        event.stopPropagation();
-                        openGroupRenameDialog(group);
-                      }}
-                    >
-                      {groupDisplayName}
-                    </span>
-                    {group.remote ? (
+                  <span className="pane-group-heading">
+                    <span className="pane-group-title">
+                      {group.remote ? (
+                        <Globe
+                          className="pane-group-folder pane-group-remote-icon"
+                          size={13}
+                          aria-label={`Remote group on ${group.remote.label}`}
+                        />
+                      ) : (
+                        <Folder className="pane-group-folder" size={13} aria-hidden="true" />
+                      )}
                       <span
-                        className="pane-group-remote-label"
-                        title={`Runs on ${group.remote.label}`}
+                        className="pane-group-name"
+                        title={groupDisplayName}
+                        onDoubleClick={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          openGroupRenameDialog(group);
+                        }}
                       >
-                        {group.remote.label}
+                        {groupDisplayName}
                       </span>
-                    ) : null}
-                    {isCollapsedGroup ? (
-                      <span className="pane-group-count">{groupPanes.length}</span>
-                    ) : null}
-                    {collapsedStatusAgents.length > 0 ? (
+                      {group.remote ? (
+                        <span
+                          className="pane-group-remote-label"
+                          title={`Runs on ${group.remote.label}`}
+                        >
+                          {group.remote.label}
+                        </span>
+                      ) : null}
+                      {isCollapsedGroup ? (
+                        <span className="pane-group-count">{groupPanes.length}</span>
+                      ) : null}
+                      {collapsedStatusAgents.length > 0 ? (
+                        <span
+                          className="pane-group-status-icons"
+                          role="img"
+                          aria-label={collapsedStatusAgents
+                            .map(collapsedGroupStatusLabel)
+                            .join(", ")}
+                        >
+                          {collapsedStatusAgents.map((agent) => (
+                            <span
+                              key={agent.id}
+                              className={agentTabStatusDotClass(agent.status, false)}
+                              title={collapsedGroupStatusLabel(agent)}
+                              aria-hidden="true"
+                            />
+                          ))}
+                        </span>
+                      ) : null}
+                    </span>
+                    {connectionStatus ? (
                       <span
-                        className="pane-group-status-icons"
-                        role="img"
-                        aria-label={collapsedStatusAgents
-                          .map(collapsedGroupStatusLabel)
-                          .join(", ")}
+                        className="pane-tab-gitmeta pane-group-connection-status"
+                        title={connectionStatus.detail}
                       >
-                        {collapsedStatusAgents.map((agent) => (
-                          <span
-                            key={agent.id}
-                            className={agentTabStatusDotClass(agent.status, false)}
-                            title={collapsedGroupStatusLabel(agent)}
-                            aria-hidden="true"
-                          />
-                        ))}
+                        {connectionStatus.label}
                       </span>
                     ) : null}
                   </span>
@@ -16368,6 +16386,15 @@ function MainApp() {
                 </dd>
               </div>
             ) : null}
+            {contextMenuPane.remoteSession ? (
+              <div>
+                <dt>Connection</dt>
+                <dd className="pane-connection-details">
+                  {remoteConnectionLabel(contextMenuPane.remoteConnection)}
+                  <span>{remoteConnectionDetails(contextMenuPane.remoteConnection)}</span>
+                </dd>
+              </div>
+            ) : null}
             <div>
               <dt>Directory</dt>
               <dd>{contextMenuAgent?.activeWorkspace?.cwd ?? contextMenuPane.cwd}</dd>
@@ -16386,6 +16413,20 @@ function MainApp() {
             ) : null}
           </dl>
           <div className="pane-context-actions" role="menu" aria-label="Tab actions">
+            {contextMenuPane.remoteSession ? (
+              <button
+                type="button"
+                role="menuitem"
+                className="control-button"
+                onClick={() => {
+                  void reconnectPane(contextMenuPane.id).catch((error) => setError(String(error)));
+                  setPaneContextMenu(null);
+                }}
+              >
+                <RefreshCw size={13} aria-hidden="true" />
+                <span>Reconnect now</span>
+              </button>
+            ) : null}
             <button
               type="button"
               role="menuitem"

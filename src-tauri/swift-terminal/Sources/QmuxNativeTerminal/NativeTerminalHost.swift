@@ -27,6 +27,9 @@ private func nativeTerminalDidCancelInterfaceHealthCheck()
 @_silgen_name("qmux_native_terminal_did_detect_unhealthy_webview")
 private func nativeTerminalDidDetectUnhealthyWebView(_ generation: UInt64)
 
+@_silgen_name("qmux_native_terminal_system_sleep_changed")
+private func nativeTerminalSystemSleepChanged(_ sleeping: Int32)
+
 @MainActor
 final class NativeTerminalHost {
     static let shared = NativeTerminalHost()
@@ -873,10 +876,12 @@ final class NativeTerminalHost {
     }
 
     private func systemDidWake() {
+        nativeTerminalSystemSleepChanged(0)
         requestInterfaceRecovery()
     }
 
     private func systemWillSleep() {
+        nativeTerminalSystemSleepChanged(1)
         resetInterruptedInputState()
         interfaceHealthCheckPending = false
         interfaceHealthCheckInFlight = false

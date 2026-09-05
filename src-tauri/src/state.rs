@@ -1481,6 +1481,7 @@ impl RemoteSessionIdentity {
 #[serde(rename_all = "camelCase")]
 pub enum RemoteConnectionState {
     Connecting,
+    Checking,
     Connected,
     Reconnecting,
     #[default]
@@ -1497,6 +1498,26 @@ pub struct RemoteConnectionInfo {
     pub state: RemoteConnectionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(default)]
+    pub stage: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default)]
+    pub next_retry_at: Option<u128>,
+    #[serde(default)]
+    pub disconnected_at: Option<u128>,
+    #[serde(default)]
+    pub last_connected_at: Option<u128>,
+    #[serde(default)]
+    pub last_verified_at: Option<u128>,
+    #[serde(default)]
+    pub recovery_duration_ms: Option<u128>,
+    #[serde(default)]
+    pub recovery_action: Option<String>,
+    #[serde(default)]
+    pub session_exists: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -2417,10 +2438,13 @@ impl AppState {
         // normalized records during the normal recovery pass.
         for pane in &mut persisted.panes {
             pane.depth = 0;
-            pane.remote_connection = pane
-                .remote_session
-                .as_ref()
-                .map(|_| RemoteConnectionInfo::default());
+            pane.remote_connection = pane.remote_session.as_ref().map(|_| RemoteConnectionInfo {
+                last_connected_at: pane
+                    .remote_connection
+                    .as_ref()
+                    .and_then(|connection| connection.last_connected_at),
+                ..Default::default()
+            });
         }
         if source_version == Some(2)
             && let Err(err) =
@@ -7879,6 +7903,11 @@ impl AppState {
     }
 
     pub fn remove_pane(&self, pane_id: &str) -> Result<(), String> {
+        // Cancel network helpers before removing the runtime; a late recovery
+        // must not install a new attachment into a closing pane.
+        if let Some((controller, _, _)) = self.pane_remote_control(pane_id)? {
+            controller.cancel_recovery();
+        }
         // The bound agent's identity and status at the moment the pane went
         // away, captured before the pruning below rewrites or removes the
         // record. The research detach at the end of this function needs it to
@@ -10957,8 +10986,24 @@ impl AppState {
         state: RemoteConnectionState,
         message: Option<String>,
     ) -> Result<(), String> {
-        let connection = RemoteConnectionInfo { state, message };
-        {
+        self.mutate_remote_connection(pane_id, |connection| {
+            connection.state = state;
+            connection.message = message;
+            connection.stage = None;
+            connection.session_exists = None;
+            connection.next_retry_at = None;
+            if state != RemoteConnectionState::Connected {
+                connection.disconnected_at.get_or_insert(now_millis());
+            }
+        })
+    }
+
+    pub fn mutate_remote_connection(
+        &self,
+        pane_id: &str,
+        update: impl FnOnce(&mut RemoteConnectionInfo),
+    ) -> Result<(), String> {
+        let connection = {
             let mut model = self
                 .inner
                 .model
@@ -10971,14 +11016,22 @@ impl AppState {
             if pane.info.remote_session.is_none() {
                 return Err(format!("pane {pane_id} is not remote"));
             }
-            pane.info.remote_connection = Some(connection.clone());
-        }
+            let connection = pane
+                .info
+                .remote_connection
+                .get_or_insert_with(Default::default);
+            update(connection);
+            connection.clone()
+        };
         self.emit(QmuxEvent::new(
             "pane.remote_connection",
             Some(pane_id.to_string()),
             None,
             json!({ "connection": connection }),
         ));
+        if connection.state == RemoteConnectionState::Connected {
+            self.persist();
+        }
         Ok(())
     }
 
@@ -20295,6 +20348,7 @@ mod tests {
         legacy_pane.remote_connection = Some(RemoteConnectionInfo {
             state: RemoteConnectionState::Connected,
             message: Some("stale live state".to_string()),
+            ..Default::default()
         });
         let persisted = PersistedState {
             next_id: 99,

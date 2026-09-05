@@ -1,7 +1,7 @@
 use crate::state::{SharedChild, SharedMaster, SharedWriter};
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::time::Duration;
 
 /// Maximum overlap retained locally for reconciling successive tmux history
@@ -168,6 +168,8 @@ pub struct RemoteAttachment {
 struct AttachmentState {
     generation: u64,
     current: Option<RemoteAttachment>,
+    client_pid: Option<u32>,
+    confirmed: bool,
 }
 
 /// Stable process-local owner for a sequence of disposable SSH attachments.
@@ -180,11 +182,112 @@ struct AttachmentState {
 pub struct RemoteAttachmentController {
     state: Mutex<AttachmentState>,
     reconnect_failures: AtomicU32,
+    recovery: Mutex<RecoveryState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct RecoveryState {
+    running: bool,
+    revision: u64,
+    sleeping: bool,
+    stopped: bool,
+    reason: String,
 }
 
 impl RemoteAttachmentController {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// One worker owns all checks/reattachments. Requests interrupt its backoff
+    /// and invalidate in-flight observations without creating another worker.
+    pub fn request_recovery(&self, reason: &str) -> bool {
+        let mut recovery = self.recovery.lock().unwrap();
+        if recovery.stopped {
+            return false;
+        }
+        recovery.revision += 1;
+        if !recovery.running || reason != "connectionLost" {
+            recovery.reason = reason.to_string();
+        }
+        let start = !recovery.running;
+        recovery.running = true;
+        self.changed.notify_all();
+        start
+    }
+
+    pub fn cancel_recovery(&self) {
+        let mut recovery = self.recovery.lock().unwrap();
+        recovery.stopped = true;
+        recovery.revision += 1;
+        self.changed.notify_all();
+    }
+
+    pub fn set_sleeping(&self, sleeping: bool) {
+        let mut recovery = self.recovery.lock().unwrap();
+        recovery.sleeping = sleeping;
+        recovery.revision += 1;
+        self.changed.notify_all();
+    }
+
+    pub fn recovery_request(&self) -> (u64, bool, String) {
+        let recovery = self.recovery.lock().unwrap();
+        (
+            recovery.revision,
+            recovery.sleeping || recovery.stopped,
+            recovery.reason.clone(),
+        )
+    }
+
+    pub fn recovery_is_current(&self, revision: u64) -> bool {
+        let recovery = self.recovery.lock().unwrap();
+        recovery.revision == revision && !recovery.sleeping && !recovery.stopped
+    }
+
+    pub fn observe_recovery(&self, revision: u64, update: impl FnOnce()) -> bool {
+        let recovery = self.recovery.lock().unwrap();
+        if recovery.revision != revision || recovery.sleeping || recovery.stopped {
+            return false;
+        }
+        update();
+        true
+    }
+
+    pub fn finish_recovery(&self, revision: u64) -> bool {
+        let mut recovery = self.recovery.lock().unwrap();
+        if recovery.revision != revision {
+            return false;
+        }
+        recovery.running = false;
+        true
+    }
+
+    pub fn wait_for_recovery(&self, revision: u64, delay: Duration) {
+        let recovery = self.recovery.lock().unwrap();
+        let _ = self
+            .changed
+            .wait_timeout_while(recovery, delay, |r| r.revision == revision)
+            .unwrap();
+    }
+
+    pub fn client_identity(&self) -> Option<(u64, Option<u32>)> {
+        let state = self.state.lock().unwrap();
+        state
+            .current
+            .as_ref()
+            .map(|_| (state.generation, state.client_pid))
+    }
+
+    pub fn attachment_verified(&self) -> bool {
+        self.state.lock().unwrap().confirmed
+    }
+
+    pub fn record_client_pid(&self, generation: u64, pid: u32) {
+        let mut state = self.state.lock().unwrap();
+        if state.generation == generation && state.current.is_some() {
+            state.client_pid.get_or_insert(pid);
+        }
     }
 
     /// Starts a new attachment attempt and removes the previous generation.
@@ -198,12 +301,14 @@ impl RemoteAttachmentController {
             .generation
             .checked_add(1)
             .expect("remote attachment generation exhausted");
+        state.client_pid = None;
+        state.confirmed = false;
         let previous = state.current.take();
         (state.generation, previous)
     }
 
     /// Carries reconnect backoff across short-lived SSH generations. A process
-    /// that spawns successfully and exits before delivering terminal bytes is
+    /// that spawns successfully and exits before its tmux client is verified is
     /// still a failed attachment; resetting on spawn would otherwise create a
     /// permanent four-attempts-per-second loop.
     pub fn next_reconnect_delay(&self, initial: Duration, maximum: Duration) -> Duration {
@@ -216,17 +321,18 @@ impl RemoteAttachmentController {
     }
 
     /// Marks a generation live only while it still owns the controller. A
-    /// superseded reader can race its final bytes with the next
-    /// `begin_generation`; those bytes must not reset backoff or report the new
+    /// superseded verifier can race its response with the next
+    /// `begin_generation`; that response must not reset backoff or report the new
     /// generation as connected.
     pub fn mark_attachment_live_if_current(&self, generation: u64) -> bool {
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.generation != generation {
+        if state.generation != generation || state.current.is_none() {
             return false;
         }
+        state.confirmed = true;
         self.reconnect_failures.store(0, Ordering::Relaxed);
         true
     }
@@ -237,6 +343,10 @@ impl RemoteAttachmentController {
         generation: u64,
         attachment: RemoteAttachment,
     ) -> Result<(), RemoteAttachment> {
+        let recovery = self.recovery.lock().unwrap();
+        if recovery.stopped {
+            return Err(attachment);
+        }
         let mut state = self
             .state
             .lock()
@@ -335,6 +445,51 @@ impl Write for RemoteInputWriter {
     }
 }
 
+/// The remote launcher announces its PID before exec'ing tmux. Confirming that
+/// exact PID in list-clients proves attachment; SSH banners/errors cannot do so.
+#[derive(Default)]
+pub struct RemoteClientHandshake {
+    pending: Vec<u8>,
+    complete: bool,
+}
+
+impl RemoteClientHandshake {
+    pub fn feed(&mut self, bytes: &[u8]) -> (Vec<u8>, Option<u32>) {
+        const PREFIX: &[u8] = b"\x1b]777;qmux-client-pid=";
+        if self.complete {
+            return (bytes.to_vec(), None);
+        }
+        self.pending.extend_from_slice(bytes);
+        if let Some(start) = self.pending.windows(PREFIX.len()).position(|w| w == PREFIX) {
+            let value_start = start + PREFIX.len();
+            if let Some(end) = self.pending[value_start..].iter().position(|b| *b == 7) {
+                let end = value_start + end;
+                let pid = std::str::from_utf8(&self.pending[value_start..end])
+                    .ok()
+                    .and_then(|s| s.parse::<u32>().ok())
+                    .filter(|pid| *pid > 0);
+                if pid.is_some() {
+                    let mut output = self.pending[..start].to_vec();
+                    output.extend_from_slice(&self.pending[end + 1..]);
+                    self.pending.clear();
+                    self.complete = true;
+                    return (output, pid);
+                }
+            } else if self.pending.len() - value_start <= 10 {
+                let output = self.pending[..start].to_vec();
+                self.pending.drain(..start);
+                return (output, None);
+            }
+        }
+        let keep = (1..PREFIX.len())
+            .rev()
+            .find(|n| self.pending.ends_with(&PREFIX[..*n]))
+            .unwrap_or(0);
+        let output = self.pending.drain(..self.pending.len() - keep).collect();
+        (output, None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -396,6 +551,64 @@ mod tests {
             master: Arc::new(Mutex::new(pair.master)),
             writer: Arc::new(Mutex::new(Box::new(RecordingWriter(output)))),
         }
+    }
+
+    #[test]
+    fn handshake_handles_every_split_and_does_not_expose_control_metadata() {
+        let wire = b"banner\r\n\x1b]777;qmux-client-pid=12345\x07prompt> ";
+        for split in 0..=wire.len() {
+            let mut handshake = RemoteClientHandshake::default();
+            let (mut first, pid1) = handshake.feed(&wire[..split]);
+            let (second, pid2) = handshake.feed(&wire[split..]);
+            first.extend(second);
+            assert_eq!(first, b"banner\r\nprompt> ");
+            assert_eq!(pid1.or(pid2), Some(12345));
+        }
+        let mut handshake = RemoteClientHandshake::default();
+        assert_eq!(
+            handshake.feed(b"Permission denied\r\n"),
+            (b"Permission denied\r\n".to_vec(), None)
+        );
+        assert_eq!(
+            handshake.feed(b"\x1b]777;qmux-client-pid=oops\x07"),
+            (b"\x1b]777;qmux-client-pid=oops\x07".to_vec(), None)
+        );
+    }
+
+    #[test]
+    fn recovery_requests_coalesce_and_sleep_fences_old_observations() {
+        let controller = RemoteAttachmentController::new();
+        assert!(controller.request_recovery("systemWake"));
+        let (first, _, _) = controller.recovery_request();
+        assert!(!controller.request_recovery("connectionLost"));
+        let (second, _, reason) = controller.recovery_request();
+        assert_eq!(reason, "systemWake");
+        assert!(!controller.finish_recovery(first));
+        assert!(!controller.observe_recovery(first, || panic!("stale observation accepted")));
+        controller.set_sleeping(true);
+        assert!(!controller.observe_recovery(second, || panic!("asleep observation accepted")));
+        controller.set_sleeping(false);
+        assert!(!controller.request_recovery("manualRetry"));
+        let (latest, _, reason) = controller.recovery_request();
+        assert_eq!(reason, "manualRetry");
+        assert!(controller.finish_recovery(latest));
+        assert!(controller.request_recovery("connectionLost"));
+    }
+
+    #[test]
+    fn closed_pane_rejects_late_installs_and_recovery_requests() {
+        let controller = RemoteAttachmentController::new();
+        let (generation, _) = controller.begin_generation();
+        controller.request_recovery("systemWake");
+        let (revision, _, _) = controller.recovery_request();
+        controller.cancel_recovery();
+        assert!(!controller.recovery_is_current(revision));
+        assert!(!controller.request_recovery("connectionLost"));
+        assert!(
+            controller
+                .install_if_current(generation, attachment(Default::default()))
+                .is_err()
+        );
     }
 
     #[test]
@@ -465,6 +678,7 @@ mod tests {
             configure_argv: Vec::new(),
             attach_argv: Vec::new(),
             probe_argv: Vec::new(),
+            clients_argv: Vec::new(),
             capture_argv: Vec::new(),
             capture_full_argv: Vec::new(),
             activity_argv: Vec::new(),
@@ -522,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn reconnect_backoff_survives_attachment_generations_until_bytes_arrive() {
+    fn reconnect_backoff_survives_generations_until_verified() {
         let controller = RemoteAttachmentController::new();
         assert_eq!(
             controller.next_reconnect_delay(Duration::from_millis(250), Duration::from_secs(10)),
@@ -532,6 +746,12 @@ mod tests {
         assert_eq!(
             controller.next_reconnect_delay(Duration::from_millis(250), Duration::from_secs(10)),
             Duration::from_millis(500)
+        );
+        assert!(!controller.mark_attachment_live_if_current(1));
+        assert!(
+            controller
+                .install_if_current(1, attachment(Default::default()))
+                .is_ok()
         );
         assert!(controller.mark_attachment_live_if_current(1));
         assert_eq!(

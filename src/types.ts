@@ -106,6 +106,7 @@ export interface RemoteSessionIdentity {
 
 export type RemoteConnectionState =
   | "connecting"
+  | "checking"
   | "connected"
   | "reconnecting"
   | "disconnected"
@@ -114,6 +115,16 @@ export type RemoteConnectionState =
 export interface RemoteConnectionInfo {
   state: RemoteConnectionState;
   message?: string | null;
+  stage?: string | null;
+  reason?: string | null;
+  attempt?: number;
+  nextRetryAt?: number;
+  disconnectedAt?: number;
+  lastConnectedAt?: number;
+  lastVerifiedAt?: number;
+  recoveryDurationMs?: number;
+  recoveryAction?: string | null;
+  sessionExists?: boolean | null;
 }
 
 export type PaneSplitIntentSource = "command" | "join" | "drag-half" | "drag-divider";

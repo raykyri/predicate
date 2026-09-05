@@ -1506,6 +1506,16 @@ fn emit_native_event(event_type: &str, pane_id: *const std::ffi::c_char) {
     });
 }
 
+/// Remote recovery runs even when the window is hidden. Interface health
+/// checks are visibility-gated and must not own transport recovery.
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn qmux_native_terminal_system_sleep_changed(sleeping: i32) {
+    with_app_state(|state| {
+        crate::pty::remote_system_sleep_changed(state, sleeping != 0);
+    });
+}
+
 /// AppKit observed a wake, suspension gap, memory-pressure recovery, or display
 /// transition while qmux has an active visible window. Start the document
 /// event-loop half of the health check. A stale readiness flag is intentional:

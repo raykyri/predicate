@@ -5303,6 +5303,7 @@ trusted_hash = "sha256:trusted"
                             configure_argv: Vec::new(),
                             attach_argv: Vec::new(),
                             probe_argv: Vec::new(),
+                            clients_argv: Vec::new(),
                             capture_argv: Vec::new(),
                             capture_full_argv: Vec::new(),
                             activity_argv: Vec::new(),

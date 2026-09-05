@@ -2996,6 +2996,11 @@ async fn pane_activity(
 }
 
 #[tauri::command]
+fn pane_reconnect(state: tauri::State<'_, AppState>, pane_id: String) -> Result<(), String> {
+    pty::check_remote_pane(&state, &pane_id, "manualRetry")
+}
+
+#[tauri::command]
 async fn pane_kill(state: tauri::State<'_, AppState>, pane_id: String) -> Result<(), String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || state.close_pane_for_user(&pane_id))
@@ -3991,6 +3996,7 @@ fn main() {
             mark_events_listener_ready,
             pane_resize,
             pane_activity,
+            pane_reconnect,
             pane_kill,
             pane_activate,
             pane_restore_last_closed,

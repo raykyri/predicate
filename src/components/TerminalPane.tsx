@@ -1,3 +1,4 @@
+import { remoteConnectionLabel, remoteConnectionDetails } from "../lib/remoteConnection";
 import {
   forwardRef,
   memo,
@@ -482,19 +483,10 @@ const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function 
       {remoteUnavailable ? (
         <div className="remote-connection-overlay" role="status" aria-live="polite">
           <span className="remote-connection-state">
-            {pane.remoteConnection?.state === "failed"
-              ? "Remote connection failed"
-              : pane.remoteConnection?.state === "disconnected"
-                ? "Remote disconnected"
-                : pane.remoteConnection?.state === "connecting"
-                  ? "Connecting to remote…"
-                  : "Reconnecting to remote…"}
+            {remoteConnectionLabel(pane.remoteConnection)}
           </span>
-          {pane.remoteConnection?.message ? (
-            <span className="remote-connection-message">{pane.remoteConnection.message}</span>
-          ) : null}
           <span className="remote-connection-detail">
-            The tmux session is still running; input resumes automatically.
+            {remoteConnectionDetails(pane.remoteConnection)}
           </span>
         </div>
       ) : null}

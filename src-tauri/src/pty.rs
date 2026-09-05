@@ -2,7 +2,7 @@ use crate::adapters::{ShellCommandIntegration, adapter_registry};
 use crate::events::QmuxEvent;
 use crate::host::Host;
 use crate::remote_terminal::{
-    RemoteAttachment, RemoteAttachmentController, RemoteHistoryCheckpoint,
+    RemoteAttachment, RemoteAttachmentController, RemoteClientHandshake, RemoteHistoryCheckpoint,
 };
 use crate::scrollback::{
     append_pane_scrollback, read_pane_scrollback, read_remote_history_checkpoint,
@@ -32,6 +32,40 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
+
+thread_local! {
+    // Only the recovery worker installs this scope. All its existing SSH
+    // helpers then honor sleep/new-request cancellation, including history and
+    // version checks, without changing launch/provisioning helper behavior.
+    static REMOTE_RECOVERY_CANCEL: std::cell::RefCell<Option<(std::sync::Weak<RemoteAttachmentController>, u64)>> = const { std::cell::RefCell::new(None) };
+}
+
+fn remote_recovery_cancelled() -> bool {
+    REMOTE_RECOVERY_CANCEL.with(|scope| {
+        scope
+            .borrow()
+            .as_ref()
+            .is_some_and(|(controller, revision)| {
+                controller
+                    .upgrade()
+                    .is_none_or(|controller| !controller.recovery_is_current(*revision))
+            })
+    })
+}
+
+struct RemoteRecoveryScope;
+impl RemoteRecoveryScope {
+    fn enter(controller: &Arc<RemoteAttachmentController>, revision: u64) -> Self {
+        REMOTE_RECOVERY_CANCEL
+            .with(|scope| *scope.borrow_mut() = Some((Arc::downgrade(controller), revision)));
+        Self
+    }
+}
+impl Drop for RemoteRecoveryScope {
+    fn drop(&mut self) {
+        REMOTE_RECOVERY_CANCEL.with(|scope| *scope.borrow_mut() = None);
+    }
+}
 
 const SUBMIT_KEY: &[u8] = b"\r";
 const REMOTE_BATCH_TIMEOUT: Duration = Duration::from_secs(55);
@@ -811,15 +845,6 @@ pub fn reattach_remote_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInf
         &identity,
         &state.config().socket_path.display().to_string(),
     )?;
-    ensure_remote_tmux_version(&commands.version_argv)?;
-    let probe = probe_remote_session(&commands.probe_argv);
-    if probe == Ok(false) {
-        return Err(format!(
-            "remote tmux session '{}' no longer exists",
-            identity.tmux_session
-        ));
-    }
-
     let native_surface = cfg!(all(target_os = "macos", not(test)));
     let controller = RemoteAttachmentController::new();
     let history = RemoteHistoryCheckpoint::new(read_remote_history_checkpoint(
@@ -829,16 +854,12 @@ pub fn reattach_remote_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInf
     let backlog: SharedBacklog = Arc::new(Mutex::new(Default::default()));
     let mut recovered = pane.clone();
     recovered.recovered = true;
-    recovered.remote_connection = Some(match &probe {
-        Ok(true) => RemoteConnectionInfo {
-            state: RemoteConnectionState::Connecting,
-            message: None,
-        },
-        Err(err) => RemoteConnectionInfo {
-            state: RemoteConnectionState::Disconnected,
-            message: Some(err.clone()),
-        },
-        Ok(false) => unreachable!("missing sessions returned above"),
+    recovered.remote_connection = Some(RemoteConnectionInfo {
+        last_connected_at: pane
+            .remote_connection
+            .as_ref()
+            .and_then(|connection| connection.last_connected_at),
+        ..Default::default()
     });
     let backend = RemoteTmuxBackend::new(
         controller.clone(),
@@ -861,41 +882,16 @@ pub fn reattach_remote_pane(state: &AppState, pane: &PaneInfo) -> Result<PaneInf
         register_native_input_writer(&pane.id, stable_writer);
     }
 
-    match probe {
-        Ok(true) => {
-            if let Err(err) = attach_remote_generation(
-                state,
-                &pane.id,
-                controller.clone(),
-                history.clone(),
-                commands.clone(),
-                backlog.clone(),
-                native_surface,
-            ) {
-                schedule_remote_reconnect(
-                    state.clone(),
-                    pane.id.clone(),
-                    controller,
-                    history,
-                    commands,
-                    backlog,
-                    native_surface,
-                    err,
-                );
-            }
-        }
-        Err(err) => schedule_remote_reconnect(
-            state.clone(),
-            pane.id.clone(),
-            controller,
-            history,
-            commands,
-            backlog,
-            native_surface,
-            err,
-        ),
-        Ok(false) => unreachable!("missing sessions returned above"),
-    }
+    schedule_remote_reconnect(
+        state.clone(),
+        pane.id.clone(),
+        controller,
+        history,
+        commands,
+        backlog,
+        native_surface,
+        "appRestart".to_string(),
+    );
     Ok(recovered)
 }
 
@@ -2036,7 +2032,7 @@ fn spawn_remote_tmux(
         }) {
         Ok(reader) => reader,
         Err(err) => {
-            let _ = kill_child(&pane_id, attachment.child);
+            retire_remote_attachment(&pane_id, attachment);
             cleanup_remote_launch(&commands);
             let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
             return Err(err);
@@ -2049,7 +2045,7 @@ fn spawn_remote_tmux(
         .install_if_current(generation, attachment.clone())
         .is_err()
     {
-        let _ = kill_child(&pane_id, attachment.child);
+        retire_remote_attachment(&pane_id, attachment);
         cleanup_remote_launch(&commands);
         let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
         return Err("remote attachment was superseded during initial launch".to_string());
@@ -2069,6 +2065,7 @@ fn spawn_remote_tmux(
         remote_connection: Some(RemoteConnectionInfo {
             state: RemoteConnectionState::Connecting,
             message: None,
+            ..Default::default()
         }),
         cols: initial_size.cols,
         rows: initial_size.rows,
@@ -2092,7 +2089,7 @@ fn spawn_remote_tmux(
         cwd_observation_seq: 0,
     }) {
         let _ = controller.begin_generation();
-        let _ = kill_child(&pane_id, attachment.child);
+        retire_remote_attachment(&pane_id, attachment);
         cleanup_remote_launch(&commands);
         let _ = remove_pane_scrollback(&state.config().workspace_root, &pane_id);
         return Err(err);
@@ -2103,7 +2100,7 @@ fn spawn_remote_tmux(
     if native_surface {
         if let Err(err) = crate::native_terminal::create_host_managed(&pane_id, None) {
             let _ = controller.begin_generation();
-            let _ = kill_child(&pane_id, attachment.child);
+            retire_remote_attachment(&pane_id, attachment);
             cleanup_remote_launch(&commands);
             let _ = state.remove_pane(&pane_id);
             return Err(err);
@@ -2112,18 +2109,45 @@ fn spawn_remote_tmux(
     }
     start_reader_thread(
         state.clone(),
-        pane_id,
+        pane_id.clone(),
         reader,
-        backlog,
+        backlog.clone(),
         native_surface,
         Some(RemoteReaderContext {
-            controller,
-            history,
+            controller: controller.clone(),
+            history: history.clone(),
             generation,
-            commands,
+            commands: commands.clone(),
         }),
     );
+    schedule_remote_reconnect(
+        state.clone(),
+        pane_id,
+        controller,
+        history,
+        commands,
+        backlog,
+        native_surface,
+        "initialConnection".to_string(),
+    );
     Ok(pane)
+}
+
+/// A discarded attachment must never hold up recovery in waitpid (notably
+/// after wake, or while a PTY client is exiting). Drop our PTY handles first;
+/// signal and reap the disposable child off the recovery worker.
+fn retire_remote_attachment(pane_id: &str, attachment: RemoteAttachment) {
+    let pane_id = pane_id.to_string();
+    let RemoteAttachment {
+        child,
+        master,
+        writer,
+    } = attachment;
+    drop(writer);
+    drop(master);
+    thread::spawn(move || {
+        let _ = kill_child(&pane_id, child);
+    });
 }
 
 fn spawn_remote_attachment(
@@ -2131,6 +2155,23 @@ fn spawn_remote_attachment(
     attach_argv: &[String],
     initial_size: InitialPaneSize,
 ) -> Result<RemoteAttachment, String> {
+    let mut attach_argv = attach_argv.to_vec();
+    let command = attach_argv
+        .last_mut()
+        .ok_or("remote attachment command is empty")?;
+    *command = format!(
+        "sh -c {} qmux {}",
+        crate::adapters::shell_quote_arg(
+            r#"printf '\033]777;qmux-client-pid=%s\007' "$$"; exec "$@""#
+        ),
+        command
+    );
+    if let Some(index) = attach_argv.iter().position(|arg| arg == "--") {
+        attach_argv.splice(
+            index..index,
+            ["-o".to_string(), "BatchMode=yes".to_string()],
+        );
+    }
     let (program, args) = attach_argv
         .split_first()
         .ok_or_else(|| "remote attach command is empty".to_string())?;
@@ -2183,6 +2224,9 @@ pub(crate) fn remote_command_output_with_timeout(
     action: &str,
     timeout: Duration,
 ) -> Result<Output, String> {
+    if remote_recovery_cancelled() {
+        return Err("recovery superseded".into());
+    }
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -2229,7 +2273,9 @@ pub(crate) fn remote_command_output_with_timeout(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            Ok(None) if Instant::now() < deadline && !remote_recovery_cancelled() => {
+                thread::sleep(Duration::from_millis(20))
+            }
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -2238,6 +2284,9 @@ pub(crate) fn remote_command_output_with_timeout(
                 }
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
+                if remote_recovery_cancelled() {
+                    return Err("recovery superseded".into());
+                }
                 return Err(format!(
                     "failed to {action}: timed out after {} seconds",
                     timeout.as_secs_f64()
@@ -2435,13 +2484,20 @@ fn probe_remote_session(argv: &[String]) -> Result<bool, String> {
     let mut command = Command::new(program);
     command.args(args);
     let output = remote_command_output(command, None, "check remote session")?;
+    remote_session_probe_result(output)
+}
+
+fn remote_session_probe_result(output: Output) -> Result<bool, String> {
     let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
     match output.status.code() {
         Some(0) => Ok(true),
         // Exit 1 is also used for permission/config/socket failures. Only the
         // two tmux diagnostics that actually mean absence may delete pane state.
         Some(1)
-            if detail.contains("can't find session") || detail.contains("no server running") =>
+            if detail.contains("can't find session")
+                || detail.contains("no server running")
+                || (detail.starts_with("error connecting to ")
+                    && detail.ends_with("(No such file or directory)")) =>
         {
             Ok(false)
         }
@@ -2507,6 +2563,126 @@ pub(crate) fn validate_remote_tmux_version(raw: &str) -> Result<(), String> {
 const REMOTE_RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const REMOTE_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(10);
 
+const REMOTE_HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+// All panes sharing an SSH control connection serialize recovery network work.
+// This also serializes retiring a stale master against other attachment attempts.
+static REMOTE_RECOVERY_HOSTS: LazyLock<Mutex<HashMap<Vec<String>, std::sync::Weak<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn remote_recovery_host(commands: &crate::host::RemoteTmuxCommands) -> Arc<Mutex<()>> {
+    let key = commands.probe_argv[..commands.probe_argv.len().saturating_sub(1)].to_vec();
+    let mut hosts = REMOTE_RECOVERY_HOSTS.lock().unwrap();
+    hosts.retain(|_, value| value.strong_count() > 0);
+    if let Some(host) = hosts.get(&key).and_then(std::sync::Weak::upgrade) {
+        return host;
+    }
+    let host = Arc::new(Mutex::new(()));
+    hosts.insert(key, Arc::downgrade(&host));
+    host
+}
+
+fn remote_health_output(argv: &[String], action: &str) -> Result<Output, String> {
+    let (program, args) = argv.split_first().ok_or("remote health command is empty")?;
+    let mut command = Command::new(program);
+    command.args(args);
+    remote_command_output_with_timeout(command, None, action, REMOTE_HEALTH_TIMEOUT)
+}
+
+fn retire_remote_master(commands: &crate::host::RemoteTmuxCommands) {
+    let argv = &commands.probe_argv;
+    // Never terminate a user-owned/default SSH master, or a test helper.
+    if argv.first().map(String::as_str) != Some("ssh")
+        || !argv.iter().any(|arg| arg == "ControlPath=~/.ssh/qmux-%C")
+    {
+        return;
+    }
+    let Some(destination) = argv.iter().position(|arg| arg == "--") else {
+        return;
+    };
+    let Some(host) = argv.get(destination + 1) else {
+        return;
+    };
+    let mut command = Command::new("ssh");
+    command
+        .args(&argv[1..destination])
+        .args(["-O", "exit", "--", host]);
+    let _ = remote_command_output_with_timeout(
+        command,
+        None,
+        "retire stale qmux SSH transport",
+        Duration::from_secs(2),
+    );
+}
+
+fn remote_failure_needs_attention(error: &str) -> bool {
+    [
+        "Permission denied",
+        "Host key verification failed",
+        "REMOTE HOST IDENTIFICATION HAS CHANGED",
+        "Too many authentication failures",
+        "require tmux 3.2",
+        "unrecognized tmux version",
+    ]
+    .iter()
+    .any(|message| error.contains(message))
+}
+
+fn report_remote_recovery(
+    state: &AppState,
+    pane_id: &str,
+    controller: &RemoteAttachmentController,
+    revision: u64,
+    update: impl FnOnce(&mut RemoteConnectionInfo),
+) -> bool {
+    controller.observe_recovery(revision, || {
+        let _ = state.mutate_remote_connection(pane_id, update);
+    })
+}
+
+/// Wake and manual retry share the same worker as EOF recovery. This command is
+/// non-blocking and never creates a remote session.
+pub fn check_remote_pane(state: &AppState, pane_id: &str, reason: &str) -> Result<(), String> {
+    let (controller, history, commands) = state
+        .pane_remote_control(pane_id)?
+        .ok_or("this pane has no managed remote session")?;
+    let backlog = state
+        .pane_backlog(pane_id)?
+        .ok_or("remote pane has no backlog")?;
+    let native_surface = state.pane_is_native(pane_id)? == Some(true);
+    schedule_remote_reconnect(
+        state.clone(),
+        pane_id.to_string(),
+        controller,
+        history,
+        commands,
+        backlog,
+        native_surface,
+        reason.to_string(),
+    );
+    Ok(())
+}
+
+pub fn remote_system_sleep_changed(state: &AppState, sleeping: bool) {
+    for pane in state.list_panes().unwrap_or_default() {
+        let Ok(Some((controller, _, _))) = state.pane_remote_control(&pane.id) else {
+            continue;
+        };
+        controller.set_sleeping(sleeping);
+        if sleeping {
+            let _ = state.mutate_remote_connection(&pane.id, |connection| {
+                connection.state = RemoteConnectionState::Disconnected;
+                connection.stage = Some("sleeping".to_string());
+                connection.reason = Some("systemSleep".to_string());
+                connection.session_exists = None;
+                connection.next_retry_at = None;
+                connection.message = None;
+            });
+        } else {
+            let _ = check_remote_pane(state, &pane.id, "systemWake");
+        }
+    }
+}
+
 fn schedule_remote_reconnect(
     state: AppState,
     pane_id: String,
@@ -2515,41 +2691,244 @@ fn schedule_remote_reconnect(
     commands: crate::host::RemoteTmuxCommands,
     backlog: SharedBacklog,
     native_surface: bool,
-    message: String,
+    reason: String,
 ) {
-    let _ = state.update_remote_connection(
-        &pane_id,
-        RemoteConnectionState::Reconnecting,
-        Some(message),
-    );
+    let start = controller.request_recovery(&reason);
+    let (revision, _, reason) = controller.recovery_request();
+    report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
+        connection.state = RemoteConnectionState::Checking;
+        connection.stage = Some("checking".to_string());
+        connection.reason = Some(reason);
+        connection.next_retry_at = None;
+        connection.session_exists = None;
+        connection
+            .disconnected_at
+            .get_or_insert(crate::state::now_millis());
+    });
+    if !start {
+        return;
+    }
     thread::spawn(move || {
+        let host = remote_recovery_host(&commands);
         loop {
-            let delay = controller
-                .next_reconnect_delay(REMOTE_RECONNECT_INITIAL_DELAY, REMOTE_RECONNECT_MAX_DELAY);
-            thread::sleep(delay);
-            let Ok(Some((current, current_history, _))) = state.pane_remote_control(&pane_id)
-            else {
-                return;
-            };
-            if !Arc::ptr_eq(&current, &controller) || !Arc::ptr_eq(&current_history, &history) {
-                return;
+            let (revision, sleeping, reason) = controller.recovery_request();
+            let same_pane = state
+                .pane_remote_control(&pane_id)
+                .ok()
+                .flatten()
+                .is_some_and(|(current, _, _)| Arc::ptr_eq(&current, &controller));
+            if !same_pane {
+                if controller.finish_recovery(revision) {
+                    return;
+                }
+                continue;
             }
-            match attach_remote_generation(
-                &state,
-                &pane_id,
-                controller.clone(),
-                history.clone(),
-                commands.clone(),
-                backlog.clone(),
-                native_surface,
-            ) {
-                Ok(()) => return,
-                Err(err) => {
-                    let _ = state.update_remote_connection(
+            if sleeping {
+                controller.wait_for_recovery(revision, Duration::from_secs(1));
+                continue;
+            }
+            report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
+                connection.state = RemoteConnectionState::Checking;
+                connection.stage = Some("checking".to_string());
+                connection.reason = Some(reason.clone());
+                connection.next_retry_at = None;
+                connection.attempt = connection.attempt.saturating_add(1);
+            });
+            // Waiting for another pane must remain interruptible by sleep/close.
+            let host_guard = loop {
+                if !controller.recovery_is_current(revision) {
+                    break None;
+                }
+                match host.try_lock() {
+                    Ok(guard) => break Some(guard),
+                    Err(std::sync::TryLockError::Poisoned(error)) => {
+                        break Some(error.into_inner());
+                    }
+                    Err(_) => controller.wait_for_recovery(revision, Duration::from_millis(100)),
+                }
+            };
+            let Some(host_guard) = host_guard else {
+                continue;
+            };
+            let cancellation = RemoteRecoveryScope::enter(&controller, revision);
+            let result = (|| -> Result<bool, String> {
+                let output = remote_health_output(&commands.probe_argv, "check remote session")?;
+                if !remote_session_probe_result(output)? {
+                    return Ok(false);
+                }
+                if !report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
+                    connection.session_exists = Some(true);
+                    connection.message = None;
+                }) {
+                    return Err("recovery superseded".to_string());
+                }
+                if controller.client_identity().is_none() {
+                    ensure_remote_tmux_version(&commands.version_argv)?;
+                    attach_remote_generation(
+                        &state,
                         &pane_id,
-                        RemoteConnectionState::Reconnecting,
-                        Some(err),
+                        controller.clone(),
+                        history.clone(),
+                        commands.clone(),
+                        backlog.clone(),
+                        native_surface,
+                        revision,
+                    )?;
+                }
+                // The marker is emitted by the remote shell immediately before
+                // exec tmux. Allow a bounded interval for it to register as a client.
+                let deadline = Instant::now() + REMOTE_HEALTH_TIMEOUT;
+                loop {
+                    if !controller.recovery_is_current(revision) {
+                        return Err("recovery superseded".into());
+                    }
+                    let (generation, pid) = controller
+                        .client_identity()
+                        .ok_or("SSH attachment closed")?;
+                    if let Some(pid) = pid {
+                        let output = remote_health_output(
+                            &commands.clients_argv,
+                            "verify remote attachment",
+                        )?;
+                        if output.status.success()
+                            && String::from_utf8_lossy(&output.stdout)
+                                .lines()
+                                .any(|line| line.trim().parse::<u32>().ok() == Some(pid))
+                        {
+                            let was_verified = controller.attachment_verified();
+                            if !controller.mark_attachment_live_if_current(generation) {
+                                return Err("SSH attachment was replaced".into());
+                            }
+                            report_remote_recovery(
+                                &state,
+                                &pane_id,
+                                &controller,
+                                revision,
+                                |connection| {
+                                    let now = crate::state::now_millis();
+                                    connection.state = RemoteConnectionState::Connected;
+                                    connection.stage = None;
+                                    connection.message = None;
+                                    connection.next_retry_at = None;
+                                    connection.last_verified_at = Some(now);
+                                    connection.recovery_action = Some(
+                                        if was_verified {
+                                            "verified"
+                                        } else if connection.last_connected_at.is_some()
+                                            || reason == "appRestart"
+                                        {
+                                            "reattached"
+                                        } else {
+                                            "attached"
+                                        }
+                                        .into(),
+                                    );
+                                    if !was_verified || connection.last_connected_at.is_none() {
+                                        connection.last_connected_at = Some(now);
+                                    }
+                                    connection.recovery_duration_ms = connection
+                                        .disconnected_at
+                                        .take()
+                                        .map(|start| now.saturating_sub(start));
+                                    connection.session_exists = Some(true);
+                                    connection.attempt = 0;
+                                },
+                            );
+                            return Ok(true);
+                        }
+                        if !output.status.success() {
+                            return Err(format!(
+                                "could not verify remote attachment: {}",
+                                String::from_utf8_lossy(&output.stderr).trim()
+                            ));
+                        }
+                    }
+                    if Instant::now() >= deadline {
+                        return Err("Remote attachment did not become ready".into());
+                    }
+                    controller.wait_for_recovery(revision, Duration::from_millis(100));
+                }
+            })();
+            drop(cancellation);
+            if !controller.recovery_is_current(revision) {
+                drop(host_guard);
+                continue;
+            }
+            match result {
+                Ok(true) => {
+                    drop(host_guard);
+                    if controller.finish_recovery(revision) {
+                        return;
+                    }
+                }
+                result => {
+                    let (_, previous) = controller.begin_generation();
+                    if let Some(previous) = previous {
+                        retire_remote_attachment(&pane_id, previous);
+                    }
+                    let missing = matches!(result, Ok(false));
+                    let error = result.err().unwrap_or_else(|| {
+                        "The remote session has ended. It will not be recreated automatically."
+                            .to_string()
+                    });
+                    let attention = remote_failure_needs_attention(&error);
+                    if error.contains("timed out") {
+                        retire_remote_master(&commands);
+                    }
+                    drop(host_guard);
+                    if missing || attention {
+                        report_remote_recovery(
+                            &state,
+                            &pane_id,
+                            &controller,
+                            revision,
+                            |connection| {
+                                connection.state = RemoteConnectionState::Failed;
+                                connection.stage = Some(
+                                    if missing {
+                                        "sessionEnded"
+                                    } else {
+                                        "needsAttention"
+                                    }
+                                    .into(),
+                                );
+                                connection.session_exists =
+                                    if missing { Some(false) } else { None };
+                                connection.message = Some(error);
+                                connection.next_retry_at = None;
+                            },
+                        );
+                        if missing
+                            && controller.recovery_is_current(revision)
+                            && let Ok(Some(agent)) = state.agent_by_pane(&pane_id)
+                            && let Ok(agent) =
+                                crate::workspace::mark_agent_failed(&state, &agent.id)
+                        {
+                            state.emit(QmuxEvent::new(
+                                "agent.remote_session_ended",
+                                Some(pane_id.clone()),
+                                Some(agent.id.clone()),
+                                serde_json::json!({ "agent": agent }),
+                            ));
+                        }
+                        if controller.finish_recovery(revision) {
+                            return;
+                        }
+                        continue;
+                    }
+                    let delay = controller.next_reconnect_delay(
+                        REMOTE_RECONNECT_INITIAL_DELAY,
+                        REMOTE_RECONNECT_MAX_DELAY,
                     );
+                    report_remote_recovery(&state, &pane_id, &controller, revision, |connection| {
+                        connection.state = RemoteConnectionState::Reconnecting;
+                        connection.stage = Some("waitingToRetry".into());
+                        connection.message = Some(error);
+                        connection.session_exists = None;
+                        connection.next_retry_at =
+                            Some(crate::state::now_millis() + delay.as_millis());
+                    });
+                    controller.wait_for_recovery(revision, delay);
                 }
             }
         }
@@ -2564,6 +2943,7 @@ fn attach_remote_generation(
     commands: crate::host::RemoteTmuxCommands,
     backlog: SharedBacklog,
     native_surface: bool,
+    revision: u64,
 ) -> Result<(), String> {
     let pane = state
         .list_panes()?
@@ -2574,8 +2954,20 @@ fn attach_remote_generation(
         cols: pane.cols,
         rows: pane.rows,
     }));
+    if !report_remote_recovery(state, pane_id, &controller, revision, |connection| {
+        connection.state = RemoteConnectionState::Reconnecting;
+        connection.stage = Some("configuring".to_string());
+    }) {
+        return Err("recovery superseded".into());
+    }
     run_remote_argv(&commands.configure_argv, "configure remote tmux session")?;
     crate::remote_transcript::restore(state, pane_id);
+    if !report_remote_recovery(state, pane_id, &controller, revision, |connection| {
+        connection.state = RemoteConnectionState::Reconnecting;
+        connection.stage = Some("restoringHistory".to_string());
+    }) {
+        return Err("recovery superseded".into());
+    }
     synchronize_remote_history(
         state,
         pane_id,
@@ -2585,9 +2977,15 @@ fn attach_remote_generation(
         &backlog,
         native_surface,
     )?;
+    if !report_remote_recovery(state, pane_id, &controller, revision, |connection| {
+        connection.state = RemoteConnectionState::Reconnecting;
+        connection.stage = Some("attaching".to_string());
+    }) {
+        return Err("recovery superseded".into());
+    }
     let (generation, previous) = controller.begin_generation();
     if let Some(previous) = previous {
-        let _ = kill_child(pane_id, previous.child);
+        retire_remote_attachment(pane_id, previous);
     }
     run_remote_argv(
         &commands.forward_cleanup_argv,
@@ -2605,12 +3003,20 @@ fn attach_remote_generation(
         }) {
         Ok(reader) => reader,
         Err(err) => {
-            let _ = kill_child(pane_id, attachment.child);
+            retire_remote_attachment(pane_id, attachment);
             return Err(err);
         }
     };
+    if !controller.recovery_is_current(revision)
+        || !state
+            .pane_remote_control(pane_id)?
+            .is_some_and(|(current, _, _)| Arc::ptr_eq(&current, &controller))
+    {
+        retire_remote_attachment(pane_id, attachment);
+        return Err("recovery superseded".into());
+    }
     if let Err(stale) = controller.install_if_current(generation, attachment) {
-        let _ = kill_child(pane_id, stale.child);
+        retire_remote_attachment(pane_id, stale);
         return Err("remote attachment was superseded before installation".to_string());
     }
     start_reader_thread(
@@ -3559,9 +3965,10 @@ pub fn kill_pane(state: &AppState, pane_id: String) -> Result<(), String> {
         // session is confirmed gone. If the kill/probe transport failed, leave
         // the live generation installed so the user can keep working or retry
         // close instead of stranding a Failed pane with no reconnect path.
+        controller.cancel_recovery();
         let (_, attachment) = controller.begin_generation();
         if let Some(attachment) = attachment {
-            let _ = kill_child(&pane_id, attachment.child);
+            retire_remote_attachment(&pane_id, attachment);
         }
         cleanup_remote_support(&commands);
         if let Some(agent_id) = pane_agent_id.as_deref()
@@ -3789,25 +4196,28 @@ fn start_reader_thread(
         // `cat` of a large file) paid that overhead 8x as often. Heap-allocated
         // to keep the reader thread's stack frame small.
         let mut buffer = vec![0_u8; 64 * 1024];
-        let mut remote_confirmed = false;
+        let mut handshake = RemoteClientHandshake::default();
         let mut startup_color_queries = StartupColorQueries::default();
         loop {
             match reader.read(&mut buffer) {
                 Ok(0) => break,
                 Ok(count) => {
-                    let chunk = &buffer[..count];
-                    if !remote_confirmed
-                        && let Some(remote) = remote.as_ref()
-                        && remote
-                            .controller
-                            .mark_attachment_live_if_current(remote.generation)
-                    {
-                        let _ = state.update_remote_connection(
-                            &pane_id,
-                            RemoteConnectionState::Connected,
-                            None,
-                        );
-                        remote_confirmed = true;
+                    let filtered;
+                    let chunk = if let Some(remote) = remote.as_ref() {
+                        if !remote.controller.is_current(remote.generation) {
+                            return;
+                        }
+                        let (output, pid) = handshake.feed(&buffer[..count]);
+                        if let Some(pid) = pid {
+                            remote.controller.record_client_pid(remote.generation, pid);
+                        }
+                        filtered = output;
+                        filtered.as_slice()
+                    } else {
+                        &buffer[..count]
+                    };
+                    if chunk.is_empty() {
+                        continue;
                     }
                     // Hold the backlog lock only long enough to decide; emitting
                     // live happens after releasing it. `attach_pane` flips `ready`
@@ -3869,59 +4279,18 @@ fn start_reader_thread(
                 // must not alter its state or remove its surface.
                 return;
             };
-            let exit_code = attachment
-                .child
-                .lock()
-                .ok()
-                .and_then(|mut child| child.wait().ok())
-                .map(|status| status.exit_code() as i32);
-            // Reconcile before probing/retrying. The remote program continues
-            // while these batch SSH calls run, so merely advancing the cursor at
-            // EOF could mark post-disconnect output as seen even though it never
-            // traversed the dead attachment. Accepting the capture into local
-            // history first favors a possible repeated connected line over
-            // silently losing a disconnected one.
-            let _ = synchronize_remote_history(
-                &state,
-                &pane_id,
-                &remote.history,
-                &remote.commands.capture_argv,
-                &remote.commands.capture_full_argv,
-                &backlog,
+            schedule_remote_reconnect(
+                state.clone(),
+                pane_id.clone(),
+                remote.controller,
+                remote.history,
+                remote.commands,
+                backlog.clone(),
                 native_surface,
+                "connectionLost".to_string(),
             );
-            match probe_remote_session(&remote.commands.probe_argv) {
-                Ok(true) => {
-                    schedule_remote_reconnect(
-                        state.clone(),
-                        pane_id.clone(),
-                        remote.controller,
-                        remote.history,
-                        remote.commands,
-                        backlog.clone(),
-                        native_surface,
-                        "SSH connection closed; reconnecting".to_string(),
-                    );
-                    return;
-                }
-                Err(err) => {
-                    schedule_remote_reconnect(
-                        state.clone(),
-                        pane_id.clone(),
-                        remote.controller,
-                        remote.history,
-                        remote.commands,
-                        backlog.clone(),
-                        native_surface,
-                        err,
-                    );
-                    return;
-                }
-                Ok(false) => {
-                    cleanup_remote_support(&remote.commands);
-                    exit_code
-                }
-            }
+            retire_remote_attachment(&pane_id, attachment);
+            return;
         } else {
             reap_pane_child(&state, &pane_id)
         };
@@ -5067,6 +5436,299 @@ mod tests {
         );
     }
 
+    // Exercise the real tmux protocol and PTY handshake with a local transport.
+    // No SSH server, credentials, or existing tmux server is touched.
+    struct LocalRemoteFixture {
+        state: AppState,
+        directory: PathBuf,
+        pane_id: String,
+        controller: Arc<RemoteAttachmentController>,
+        commands: crate::host::RemoteTmuxCommands,
+        server: String,
+        session: String,
+    }
+
+    impl LocalRemoteFixture {
+        fn new() -> Self {
+            Self::with_offline_transport(false)
+        }
+
+        fn with_offline_transport(offline: bool) -> Self {
+            let directory = temp_workspace();
+            let state = test_state_with_workspace(directory.clone());
+            let pane_id = "pane-recovery-test".to_string();
+            let remote = test_remote();
+            let mut identity = RemoteSessionIdentity::new(&remote.id, &pane_id).unwrap();
+            identity.tmux_server = format!("qmux-recovery-{}", crate::state::now_millis());
+            let server = identity.tmux_server.clone();
+            let session = identity.tmux_session.clone();
+            let host = crate::host::for_group(Some(&remote));
+            let mut commands = host
+                .existing_tmux_session_commands(&identity, "/unused-local.sock")
+                .unwrap();
+            for argv in [
+                &mut commands.version_argv,
+                &mut commands.configure_argv,
+                &mut commands.attach_argv,
+                &mut commands.probe_argv,
+                &mut commands.clients_argv,
+                &mut commands.capture_argv,
+                &mut commands.capture_full_argv,
+                &mut commands.activity_argv,
+                &mut commands.kill_argv,
+            ] {
+                *argv = vec!["/bin/sh".into(), "-c".into(), argv.last().unwrap().clone()];
+            }
+            commands.forward_cleanup_argv = vec!["/usr/bin/true".into()];
+            let output = Command::new("tmux")
+                .args([
+                    "-L",
+                    &server,
+                    "-f",
+                    "/dev/null",
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &session,
+                    "exec /bin/sh",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success() && output.stderr.is_empty(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if offline {
+                let gate = directory.join("online");
+                let original_probe = commands.probe_argv.last().unwrap();
+                commands.probe_argv = vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!(
+                        "if test -f {}; then {}; else echo 'Network unavailable' >&2; exit 255; fi",
+                        crate::adapters::shell_quote_arg(&gate.display().to_string()),
+                        original_probe
+                    ),
+                ];
+            }
+            let controller = RemoteAttachmentController::new();
+            state
+                .insert_pane(PaneRuntime {
+                    info: PaneInfo {
+                        id: pane_id.clone(),
+                        title: "Recovery test".into(),
+                        last_osc_title: None,
+                        kind: PaneKind::Shell,
+                        agent_id: None,
+                        group_id: "group-1".into(),
+                        cwd: directory.display().to_string(),
+                        active_workspace: None,
+                        remote_session: Some(identity),
+                        remote_connection: Some(Default::default()),
+                        cols: 80,
+                        rows: 24,
+                        status: PaneStatus::Running,
+                        last_active_at: 0,
+                        recovered: true,
+                        ssh_target: None,
+                        depth: 0,
+                    },
+                    backend: PaneBackend::RemoteTmux(RemoteTmuxBackend::new(
+                        controller.clone(),
+                        RemoteHistoryCheckpoint::new(Vec::new()),
+                        Arc::new(Mutex::new(Default::default())),
+                        commands.clone(),
+                        false,
+                    )),
+                    cwd_observation_seq: 0,
+                })
+                .unwrap();
+            Self {
+                state,
+                directory,
+                pane_id,
+                controller,
+                commands,
+                server,
+                session,
+            }
+        }
+
+        fn connection(&self) -> RemoteConnectionInfo {
+            self.state
+                .list_panes()
+                .unwrap()
+                .into_iter()
+                .find(|pane| pane.id == self.pane_id)
+                .unwrap()
+                .remote_connection
+                .unwrap()
+        }
+
+        fn wait(&self, predicate: impl Fn(&RemoteConnectionInfo) -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let connection = self.connection();
+                if predicate(&connection) {
+                    return;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "recovery timed out: {connection:?}"
+                );
+                thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn shell_pid(&self) -> String {
+            let output = Command::new("tmux")
+                .args([
+                    "-L",
+                    &self.server,
+                    "display-message",
+                    "-p",
+                    "-t",
+                    &self.session,
+                    "#{pane_pid}",
+                ])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap()
+        }
+    }
+
+    impl Drop for LocalRemoteFixture {
+        fn drop(&mut self) {
+            self.controller.set_sleeping(true);
+            let _ = self.state.remove_pane(&self.pane_id);
+            let (_, attachment) = self.controller.begin_generation();
+            if let Some(attachment) = attachment {
+                retire_remote_attachment(&self.pane_id, attachment);
+            }
+            let _ = Command::new("tmux")
+                .args(["-L", &self.server, "kill-server"])
+                .output();
+            let _ = fs::remove_dir_all(&self.directory);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a local tmux binary and permission to create its Unix socket"]
+    fn remote_recovery_preserves_shell_across_wake_and_lost_attachment() {
+        let fixture = LocalRemoteFixture::new();
+        let mut agent = sample_remote_agent("group-1");
+        agent.pane_id = Some(fixture.pane_id.clone());
+        agent.status = crate::workspace::AgentStatus::Running;
+        fixture.state.insert_agent(agent).unwrap();
+        let shell_pid = fixture.shell_pid();
+        check_remote_pane(&fixture.state, &fixture.pane_id, "appRestart").unwrap();
+        fixture.wait(|connection| connection.state == RemoteConnectionState::Connected);
+        let initial_generation = fixture.controller.client_identity().unwrap().0;
+        let initially_attached = fixture.connection().last_connected_at;
+        remote_system_sleep_changed(&fixture.state, true);
+        assert_eq!(fixture.connection().stage.as_deref(), Some("sleeping"));
+        remote_system_sleep_changed(&fixture.state, false);
+        fixture.wait(|connection| connection.state == RemoteConnectionState::Connected);
+        assert_eq!(
+            fixture.controller.client_identity().unwrap().0,
+            initial_generation
+        );
+        assert_eq!(fixture.connection().last_connected_at, initially_attached);
+        assert_eq!(fixture.connection().reason.as_deref(), Some("systemWake"));
+        assert_eq!(
+            fixture.connection().recovery_action.as_deref(),
+            Some("verified")
+        );
+        assert_eq!(fixture.shell_pid(), shell_pid);
+
+        fixture
+            .controller
+            .current_child()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .kill()
+            .unwrap();
+        fixture.wait(|connection| {
+            connection.state == RemoteConnectionState::Connected
+                && fixture
+                    .controller
+                    .client_identity()
+                    .is_some_and(|(generation, _)| generation > initial_generation)
+        });
+        assert_eq!(
+            fixture.shell_pid(),
+            shell_pid,
+            "recovery must not relaunch the shell"
+        );
+        assert!(fixture.connection().recovery_duration_ms.is_some());
+
+        run_remote_argv(&fixture.commands.kill_argv, "end test session").unwrap();
+        fixture.wait(|connection| connection.stage.as_deref() == Some("sessionEnded"));
+        fixture.wait(|_| {
+            fixture.state.agent("agent-remote").unwrap().unwrap().status
+                == crate::workspace::AgentStatus::Failed
+        });
+        assert_eq!(fixture.connection().session_exists, Some(false));
+        assert!(fixture.connection().next_retry_at.is_none());
+        assert!(fixture.controller.current_child().is_none());
+        assert_eq!(
+            probe_remote_session(&fixture.commands.probe_argv),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a local tmux binary and permission to create its Unix socket"]
+    fn remote_recovery_offline_startup_retries_and_wake_interrupts_backoff() {
+        let fixture = LocalRemoteFixture::with_offline_transport(true);
+        let gate = fixture.directory.join("online");
+        check_remote_pane(&fixture.state, &fixture.pane_id, "appRestart").unwrap();
+        fixture.wait(|connection| connection.stage.as_deref() == Some("waitingToRetry"));
+        assert!(fixture.connection().next_retry_at.is_some());
+        assert!(
+            fixture
+                .connection()
+                .message
+                .unwrap()
+                .contains("Network unavailable")
+        );
+        assert!(fixture.controller.current_child().is_none());
+        remote_system_sleep_changed(&fixture.state, true);
+        fs::write(gate, b"online").unwrap();
+        remote_system_sleep_changed(&fixture.state, false);
+        fixture.wait(|connection| connection.state == RemoteConnectionState::Connected);
+        assert_eq!(fixture.connection().reason.as_deref(), Some("systemWake"));
+    }
+
+    #[test]
+    fn remote_recovery_sleep_cancels_an_inflight_helper() {
+        let controller = RemoteAttachmentController::new();
+        controller.request_recovery("systemWake");
+        let (revision, _, _) = controller.recovery_request();
+        let worker_controller = controller.clone();
+        let started = Instant::now();
+        let worker = thread::spawn(move || {
+            let _scope = RemoteRecoveryScope::enter(&worker_controller, revision);
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30");
+            remote_command_output(command, None, "test cancelled recovery")
+        });
+        thread::sleep(Duration::from_millis(50));
+        controller.set_sleeping(true);
+        assert!(worker.join().unwrap().unwrap_err().contains("superseded"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(remote_failure_needs_attention(
+            "Permission denied (publickey)"
+        ));
+        assert!(remote_failure_needs_attention(
+            "Host key verification failed"
+        ));
+        assert!(!remote_failure_needs_attention("Connection timed out"));
+    }
+
     #[test]
     fn remote_probe_distinguishes_exists_missing_and_transport_failure() {
         assert_eq!(
@@ -5082,6 +5744,15 @@ mod tests {
                 "/bin/sh".to_string(),
                 "-c".to_string(),
                 "printf \"can't find session: exact\" >&2; exit 1".to_string()
+            ]),
+            Ok(false)
+        );
+        assert_eq!(
+            probe_remote_session(&[
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo 'error connecting to /tmp/qmux-test (No such file or directory)' >&2; exit 1"
+                    .into()
             ]),
             Ok(false)
         );
@@ -5157,6 +5828,7 @@ mod tests {
             configure_argv: Vec::new(),
             attach_argv: Vec::new(),
             probe_argv: Vec::new(),
+            clients_argv: Vec::new(),
             capture_argv: Vec::new(),
             capture_full_argv: Vec::new(),
             activity_argv: Vec::new(),
@@ -6252,6 +6924,7 @@ mod tests {
             configure_argv: Vec::new(),
             attach_argv: Vec::new(),
             probe_argv: Vec::new(),
+            clients_argv: Vec::new(),
             capture_argv: Vec::new(),
             capture_full_argv: Vec::new(),
             activity_argv: Vec::new(),
@@ -6277,6 +6950,7 @@ mod tests {
                     remote_connection: Some(RemoteConnectionInfo {
                         state: RemoteConnectionState::Reconnecting,
                         message: None,
+                        ..Default::default()
                     }),
                     cols: 80,
                     rows: 24,

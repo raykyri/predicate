@@ -145,6 +145,7 @@ pub struct RemoteTmuxCommands {
     pub configure_argv: Vec<String>,
     pub attach_argv: Vec<String>,
     pub probe_argv: Vec<String>,
+    pub clients_argv: Vec<String>,
     pub capture_argv: Vec<String>,
     pub capture_full_argv: Vec<String>,
     pub activity_argv: Vec<String>,
@@ -199,6 +200,14 @@ impl Host {
             "has-session".to_string(),
             "-t".to_string(),
             exact_target.clone(),
+        ]);
+        let mut clients_args = tmux_server_args(identity);
+        clients_args.extend([
+            "list-clients".to_string(),
+            "-t".to_string(),
+            exact_target.clone(),
+            "-F".to_string(),
+            "#{client_pid}".to_string(),
         ]);
         let capture_base = [
             "capture-pane".to_string(),
@@ -346,6 +355,7 @@ impl Host {
             configure_argv: batch_argv(configure_args),
             attach_argv,
             probe_argv: batch_argv(probe_args),
+            clients_argv: batch_argv(clients_args),
             capture_argv: batch_argv(capture_args),
             capture_full_argv: batch_argv(capture_full_args),
             activity_argv: batch_argv(activity_args),

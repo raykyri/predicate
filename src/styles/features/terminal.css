@@ -328,3 +328,7 @@
   background-color: #a8842f;
   color: #111315;
 }
+
+.remote-connection-detail {
+  white-space: pre-line;
+}
