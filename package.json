@@ -9,6 +9,7 @@
     "dev:site": "tsx watch web/server.tsx",
     "dev:tauri": "tauri dev",
     "build": "bash scripts/build.sh",
+    "build:aarch": "QMUX_BUILD_TARGET=aarch64-apple-darwin bash scripts/build.sh",
     "build:remote-cli": "bash scripts/build-remote-cli.sh",
     "build:release": "bash scripts/release.sh",
     "build:site:frontend": "tsc && vite build",
