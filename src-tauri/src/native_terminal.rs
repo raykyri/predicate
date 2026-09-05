@@ -1633,6 +1633,18 @@ pub extern "C" fn qmux_native_terminal_did_receive_shortcut(
     let (Some(pane_id), Some(key)) = (callback_string(pane_id), callback_string(key)) else {
         return 0;
     };
+    // Remote tmux owns the screen: Ghostty's local clear_screen cannot
+    // clear it. Send Ctrl-L through the ordered PTY writer before consulting
+    // the web listener; terminal input must also work while WebKit is down.
+    if key == "k" && command == 1 && shift == 0 && control == 0 && option == 0 {
+        let mut handled = false;
+        with_app_state(|state| {
+            handled = crate::pty::clear_remote_native_screen(state, &pane_id);
+        });
+        if handled {
+            return 1;
+        }
+    }
     // Claiming a chord is a promise the frontend will execute it. Without a
     // live event listener the emit below is dropped, so decline instead —
     // the chord stays in the native responder chain rather than being

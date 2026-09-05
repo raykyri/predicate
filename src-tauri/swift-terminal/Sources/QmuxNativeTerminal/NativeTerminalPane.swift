@@ -198,10 +198,11 @@ final class NativeTerminalPane: NSObject,
             // the font-size trio silently diverges the surface from qmux's
             // font settings. Once unbound, a missed chord falls through to
             // the running program (e.g. kitty-keyboard-protocol TUIs) or to
-            // nothing — never to a divergent Ghostty action. ⌘K (clear
-            // screen) and ⌘C (copy) stay bound: those are deliberately left
-            // native for a focused terminal.
+            // nothing — never to a divergent Ghostty action. ⌘C (copy)
+            // stays bound. QmuxTerminalView explicitly dispatches local ⌘K
+            // after offering remote clear-screen to the qmux classifier.
             for chord in [
+                "super+k",  // qmux: remote Ctrl-L, local clear_screen
                 "super+w",  // close_surface, bypassing requestClosePane
                 "super+shift+w",  // close_window
                 "super+alt+shift+w",  // close_all_windows

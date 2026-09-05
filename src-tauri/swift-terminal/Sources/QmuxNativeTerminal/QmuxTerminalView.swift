@@ -140,8 +140,9 @@ final class QmuxTerminalView: TerminalView {
         {
             return true
         }
-        // Cmd-K deliberately remains Ghostty's clear-screen chord in a native
-        // terminal. Dispatch it directly while this pane owns the keyboard so
+        // Remote Cmd-K is claimed above and sends Ctrl-L to tmux. Local
+        // Cmd-K deliberately remains Ghostty's clear-screen action. Dispatch it
+        // directly while this pane owns the keyboard so
         // it also survives the owner/first-responder desync a stopped TUI can
         // expose after Ctrl-Z. Falling through to upstream is insufficient in
         // that state: its key-equivalent path requires this exact view to be

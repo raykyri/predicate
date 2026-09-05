@@ -4074,6 +4074,27 @@ pub fn resize_native_host_pane(
     resize_pane(state, pane_id.to_string(), cols, rows)
 }
 
+/// Claim Cmd-K only for a remote backend. Local panes keep Ghostty's
+/// clear_screen action; remote panes ask the running shell/TUI to redraw via
+/// Ctrl-L. This intentionally does not erase tmux history.
+pub(crate) fn clear_remote_native_screen(state: &AppState, pane_id: &str) -> bool {
+    match state.pane_remote_control(pane_id) {
+        Ok(Some(_)) => {
+            if let Err(err) = write_native_host_input(state, pane_id, vec![0x0c]) {
+                eprintln!("qmux: failed to clear remote terminal {pane_id}: {err}");
+            }
+            // Even a disconnected remote owns this chord. Falling through
+            // would clear only the local renderer and conceal the failure.
+            true
+        }
+        Ok(None) => false,
+        Err(err) => {
+            eprintln!("qmux: failed to resolve clear-screen target {pane_id}: {err}");
+            true
+        }
+    }
+}
+
 pub fn write_native_host_input(
     state: &AppState,
     pane_id: &str,
@@ -7619,8 +7640,7 @@ mod tests {
         let _ = kill_pane(&state, pane.id);
     }
 
-    #[test]
-    fn disconnected_remote_resize_is_persisted_for_the_next_attachment() {
+    fn state_with_disconnected_remote() -> AppState {
         let state = test_state();
         let controller = RemoteAttachmentController::new();
         let history = RemoteHistoryCheckpoint::new(Vec::new());
@@ -7674,6 +7694,43 @@ mod tests {
             })
             .unwrap();
 
+        state
+    }
+
+    #[test]
+    fn remote_clear_screen_declines_local_panes() {
+        let state = test_state_with_workspace(temp_workspace());
+        let pane = spawn_test_pty(
+            &state,
+            "pane-local-clear-screen",
+            vec!["-c".to_string(), "sleep 30".to_string()],
+        );
+        assert!(!clear_remote_native_screen(&state, &pane.id));
+        kill_pane(&state, pane.id).expect("cleanup test pane");
+    }
+
+    #[test]
+    fn remote_clear_screen_sends_ctrl_l_through_native_input_writer() {
+        let state = state_with_disconnected_remote();
+        let pane_id = "pane-offline-resize";
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let writer: SharedWriter = Arc::new(Mutex::new(Box::new(SharedSink(sink.clone()))));
+        register_native_input_writer(pane_id, writer);
+        write_native_host_input(&state, pane_id, b"before".to_vec()).unwrap();
+        assert!(clear_remote_native_screen(&state, pane_id));
+        assert_eq!(flush_native_host_input(pane_id).unwrap(), 7);
+        assert_eq!(*sink.lock().unwrap(), b"before\x0c");
+        remove_native_input_writer(pane_id);
+
+        // A disconnected transport still claims the chord instead of clearing
+        // only Ghostty. Missing panes decline it.
+        assert!(clear_remote_native_screen(&state, pane_id));
+        assert!(!clear_remote_native_screen(&state, "missing-pane"));
+    }
+
+    #[test]
+    fn disconnected_remote_resize_is_persisted_for_the_next_attachment() {
+        let state = state_with_disconnected_remote();
         resize_pane(&state, "pane-offline-resize".to_string(), 132, 41).unwrap();
         let pane = state
             .list_panes()
