@@ -35,6 +35,7 @@ const MAX_INLINE_BYTES: u64 = 64 * 1024 * 1024;
 /// here prevents a malformed directive from turning the wrapper render into an
 /// unbounded allocation.
 const MAX_CODEX_INLINE_VIS_BYTES: u64 = 2 * 1024 * 1024;
+const HTML_PREVIEW_SCROLL_BRIDGE: &str = r#"<script>(()=>{let f=0;addEventListener('scroll',()=>{cancelAnimationFrame(f);f=requestAnimationFrame(()=>parent.postMessage({type:'qmux-preview-scroll',x:scrollX,y:scrollY},'*'))},{passive:true});addEventListener('message',e=>{const d=e.data;if(d?.type!=='qmux-preview-scroll-restore'||!Number.isFinite(d.x)||!Number.isFinite(d.y))return;requestAnimationFrame(()=>requestAnimationFrame(()=>scrollTo(d.x,d.y)))})})();</script>"#;
 /// Cap on concurrent connection-handler threads. Each connection serves one
 /// request then closes, so this bounds in-flight requests; 64 comfortably covers
 /// a browser overlay fetching a page full of assets in parallel while keeping a
@@ -548,6 +549,24 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
         return response;
     }
 
+    if content_type.starts_with("text/html") && total <= MAX_INLINE_BYTES {
+        let content_length = total + HTML_PREVIEW_SCROLL_BRIDGE.len() as u64;
+        let mut response = Response::new(200, "OK");
+        response.header("Content-Type", &content_type);
+        response.header("Content-Length", &content_length.to_string());
+        if let Some(csp) = &csp {
+            response.header("Content-Security-Policy", csp);
+        }
+        if !is_head {
+            let Ok(mut body) = read_slice(file, 0, total) else {
+                return Response::error(500, "Internal Server Error");
+            };
+            body.extend_from_slice(HTML_PREVIEW_SCROLL_BRIDGE.as_bytes());
+            response.body = body;
+        }
+        return response;
+    }
+
     if let Some(range_raw) = &head.range {
         let Some((start, requested_end)) = parse_range(range_raw, total) else {
             let mut response = Response::error(416, "Range Not Satisfiable");
@@ -834,7 +853,7 @@ fn render_codex_inline_visualization_page(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{css}</style>\n</head>\n\
-         <body>\n{CODEX_INLINE_VIS_ERROR_REPORTER}\n{source}\n</body>\n</html>\n"
+         <body>\n{CODEX_INLINE_VIS_ERROR_REPORTER}\n{source}\n{HTML_PREVIEW_SCROLL_BRIDGE}\n</body>\n</html>\n"
     )
 }
 
@@ -1438,6 +1457,27 @@ mod tests {
         );
         let (status, _) = http_get(info.port, &wrong, None);
         assert!(status.contains("404"), "status: {status}");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn html_previews_include_the_scroll_bridge() {
+        let base = non_temp_test_dir("html-scroll");
+        let root = base.join("ws");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("page.html"), b"<!doctype html><p>hello</p>").unwrap();
+
+        let state = test_state(&root, &base, "pane-html-scroll");
+        let info = start_file_server(state.clone()).unwrap();
+        let token = state.pane_file_token("pane-html-scroll").unwrap();
+        let page = std::fs::canonicalize(root.join("page.html")).unwrap();
+        let (head, body) = http_get_full(info.port, &url_path(info.port, &token, &page), None);
+        let body = String::from_utf8(body).unwrap();
+
+        assert!(head.starts_with("HTTP/1.1 200"), "head: {head}");
+        assert!(body.contains("<p>hello</p>"));
+        assert!(body.contains("qmux-preview-scroll"));
 
         let _ = std::fs::remove_dir_all(&base);
     }

@@ -174,6 +174,7 @@ export default function BrowserOverlay({
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const addressInputRef = useRef<HTMLInputElement | null>(null);
   const frameRef = useRef<HTMLIFrameElement | null>(null);
+  const frameScrollRef = useRef<{ url: string; x: number; y: number } | null>(null);
   const lastAutomationMoveRef = useRef(0);
   const cleanupResizeRef = useRef<(() => void) | null>(null);
   const humanBrowserUrlRef = useRef(url);
@@ -187,6 +188,18 @@ export default function BrowserOverlay({
   const humanBrowser = mode === "webkit" && !sandbox && url !== null;
   const displayedUrl = automated ? (automationSnapshot?.url ?? url) : url;
   const mirrorImage = mirrorFrame ?? automationSnapshot?.imageDataUrl ?? null;
+  const frameUrl = (() => {
+    if (!url || !sandbox) {
+      return url;
+    }
+    try {
+      const parsed = new URL(url);
+      parsed.searchParams.set("qmux-body-font", bodyFontId);
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  })();
 
   humanBrowserUrlRef.current = url;
   humanBrowserOccludedRef.current = occluded;
@@ -199,6 +212,30 @@ export default function BrowserOverlay({
       setDraft(displayedUrl ?? "");
     }
   }, [displayedUrl]);
+
+  useEffect(() => {
+    if (!sandbox || !frameUrl) {
+      return;
+    }
+    const rememberScroll = (event: MessageEvent) => {
+      if (event.source !== frameRef.current?.contentWindow) {
+        return;
+      }
+      const message = event.data as { type?: unknown; x?: unknown; y?: unknown } | null;
+      if (
+        message?.type !== "qmux-preview-scroll" ||
+        typeof message.x !== "number" ||
+        typeof message.y !== "number" ||
+        !Number.isFinite(message.x) ||
+        !Number.isFinite(message.y)
+      ) {
+        return;
+      }
+      frameScrollRef.current = { url: frameUrl, x: message.x, y: message.y };
+    };
+    window.addEventListener("message", rememberScroll);
+    return () => window.removeEventListener("message", rememberScroll);
+  }, [frameUrl, sandbox]);
 
   useLayoutEffect(() => {
     if (!humanBrowser) {
@@ -668,7 +705,7 @@ export default function BrowserOverlay({
     };
   }, []);
 
-  function startResize(event: ReactPointerEvent<HTMLDivElement>) {
+  function startResize(event: ReactPointerEvent<HTMLDivElement>, resizeWidth: boolean) {
     const overlay = overlayRef.current;
     const parent = overlay?.offsetParent instanceof HTMLElement ? overlay.offsetParent : null;
     if (!overlay || !parent) {
@@ -676,6 +713,7 @@ export default function BrowserOverlay({
     }
 
     event.preventDefault();
+    event.stopPropagation();
     event.currentTarget.setPointerCapture(event.pointerId);
     const releaseNativePointer = claimNativeTerminalPointerForWebDrag();
 
@@ -702,7 +740,7 @@ export default function BrowserOverlay({
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
 
-    document.body.style.cursor = "nesw-resize";
+    document.body.style.cursor = resizeWidth ? "nesw-resize" : "ns-resize";
     document.body.style.userSelect = "none";
     setResizing(true);
 
@@ -723,11 +761,13 @@ export default function BrowserOverlay({
     const stopResize = () => cleanup();
 
     const handlePointerMove = (moveEvent: PointerEvent) => {
-      const width = clampSize(
-        startWidth - (moveEvent.clientX - startX),
-        MIN_BROWSER_OVERLAY_WIDTH,
-        maxWidth,
-      );
+      const width = resizeWidth
+        ? clampSize(
+            startWidth - (moveEvent.clientX - startX),
+            MIN_BROWSER_OVERLAY_WIDTH,
+            maxWidth,
+          )
+        : startWidth;
       const height = clampSize(
         startHeight + (moveEvent.clientY - startY),
         MIN_BROWSER_OVERLAY_HEIGHT,
@@ -752,18 +792,6 @@ export default function BrowserOverlay({
   const closeTitle = toggleShortcutLabel
     ? `Hide browser (Esc, ${toggleShortcutLabel})`
     : "Hide browser (Esc)";
-  const frameUrl = (() => {
-    if (!url || !sandbox) {
-      return url;
-    }
-    try {
-      const parsed = new URL(url);
-      parsed.searchParams.set("qmux-body-font", bodyFontId);
-      return parsed.toString();
-    } catch {
-      return url;
-    }
-  })();
   function automationPoint(event: {
     clientX: number;
     clientY: number;
@@ -899,15 +927,6 @@ export default function BrowserOverlay({
             <ArrowRight size={14} aria-hidden="true" />
           </button>
         </div>
-        {fullWidth ? null : (
-          <div
-            className="browser-overlay-resize-handle"
-            role="separator"
-            aria-label="Resize browser overlay"
-            title="Resize browser overlay"
-            onPointerDown={startResize}
-          />
-        )}
         <form
           className="browser-overlay-nav-form"
           onSubmit={(event) => {
@@ -1139,6 +1158,15 @@ export default function BrowserOverlay({
             // allow-same-origin (opaque origin → can't read the token-gated server).
             sandbox={sandbox ? "allow-scripts" : undefined}
             referrerPolicy="no-referrer"
+            onLoad={() => {
+              const scroll = frameScrollRef.current;
+              if (scroll?.url === frameUrl) {
+                frameRef.current?.contentWindow?.postMessage(
+                  { type: "qmux-preview-scroll-restore", x: scroll.x, y: scroll.y },
+                  "*",
+                );
+              }
+            }}
           />
         ) : (
           <div className="browser-overlay-empty">
@@ -1149,6 +1177,23 @@ export default function BrowserOverlay({
           </div>
         )}
       </div>
+      {fullWidth ? null : (
+        <div
+          className="browser-overlay-resize-border"
+          role="separator"
+          aria-label="Resize browser height"
+          title="Drag to resize browser height"
+          onPointerDown={(event) => startResize(event, false)}
+        >
+          <div
+            className="browser-overlay-resize-corner"
+            role="separator"
+            aria-label="Resize browser"
+            title="Drag to resize browser"
+            onPointerDown={(event) => startResize(event, true)}
+          />
+        </div>
+      )}
     </div>
   );
 }
