@@ -293,6 +293,14 @@ export function selectPaneAfterClose(
     }
   }
 
+  const closedGroupId = panes[closedIndex].groupId;
+  for (let offset = 1; offset < panes.length; offset += 1) {
+    const previous = panes[closedIndex - offset];
+    const next = panes[closedIndex + offset];
+    addCandidate(previous?.groupId === closedGroupId ? previous.id : undefined);
+    addCandidate(next?.groupId === closedGroupId ? next.id : undefined);
+  }
+
   for (let offset = 1; offset < panes.length; offset += 1) {
     addCandidate(panes[closedIndex - offset]?.id);
     addCandidate(panes[closedIndex + offset]?.id);

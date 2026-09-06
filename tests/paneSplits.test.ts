@@ -398,6 +398,34 @@ test("selectPaneAfterClose falls back to neighboring tabs outside a split", () =
   assert.equal(selectPaneAfterClose(panes(["pane-1", "pane-2", "pane-3"]), "pane-2"), "pane-1");
 });
 
+test("selectPaneAfterClose selects the next tab when closing the first tab in a group", () => {
+  assert.equal(
+    selectPaneAfterClose(
+      [
+        pane("pane-previous-group", 0, "group-1"),
+        pane("pane-closing", 0, "group-2"),
+        pane("pane-next", 0, "group-2"),
+      ],
+      "pane-closing",
+    ),
+    "pane-next",
+  );
+});
+
+test("selectPaneAfterClose leaves the group when its only tab closes", () => {
+  assert.equal(
+    selectPaneAfterClose(
+      [
+        pane("pane-previous-group", 0, "group-1"),
+        pane("pane-closing", 0, "group-2"),
+        pane("pane-next-group", 0, "group-3"),
+      ],
+      "pane-closing",
+    ),
+    "pane-previous-group",
+  );
+});
+
 test("selectPaneAfterClose prefers visible tabs over collapsed-group neighbors", () => {
   assert.equal(
     selectPaneAfterClose(
