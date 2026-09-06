@@ -16,6 +16,8 @@
 
 use crate::connection_limit::ConnectionLimiter;
 use crate::state::AppState;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -35,7 +37,7 @@ const MAX_INLINE_BYTES: u64 = 64 * 1024 * 1024;
 /// here prevents a malformed directive from turning the wrapper render into an
 /// unbounded allocation.
 const MAX_CODEX_INLINE_VIS_BYTES: u64 = 2 * 1024 * 1024;
-const HTML_PREVIEW_SCROLL_BRIDGE: &str = r#"<script>(()=>{let f=0;addEventListener('scroll',()=>{cancelAnimationFrame(f);f=requestAnimationFrame(()=>parent.postMessage({type:'qmux-preview-scroll',x:scrollX,y:scrollY},'*'))},{passive:true});addEventListener('message',e=>{const d=e.data;if(d?.type!=='qmux-preview-scroll-restore'||!Number.isFinite(d.x)||!Number.isFinite(d.y))return;requestAnimationFrame(()=>requestAnimationFrame(()=>scrollTo(d.x,d.y)))})})();</script>"#;
+const HTML_PREVIEW_SCROLL_SCRIPT: &str = r#"(()=>{let f=0;addEventListener('scroll',()=>{cancelAnimationFrame(f);f=requestAnimationFrame(()=>parent.postMessage({type:'qmux-preview-scroll',x:scrollX,y:scrollY},'*'))},{passive:true});addEventListener('message',e=>{const d=e.data;if(d?.type!=='qmux-preview-scroll-restore'||!Number.isFinite(d.x)||!Number.isFinite(d.y))return;requestAnimationFrame(()=>requestAnimationFrame(()=>scrollTo(d.x,d.y)))})})();"#;
 /// Cap on concurrent connection-handler threads. Each connection serves one
 /// request then closes, so this bounds in-flight requests; 64 comfortably covers
 /// a browser overlay fetching a page full of assets in parallel while keeping a
@@ -550,7 +552,8 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
     }
 
     if content_type.starts_with("text/html") && total <= MAX_INLINE_BYTES {
-        let content_length = total + HTML_PREVIEW_SCROLL_BRIDGE.len() as u64;
+        let scroll_bridge = html_preview_scroll_bridge();
+        let content_length = total + scroll_bridge.len() as u64;
         let mut response = Response::new(200, "OK");
         response.header("Content-Type", &content_type);
         response.header("Content-Length", &content_length.to_string());
@@ -561,7 +564,7 @@ fn build_response(state: &AppState, head: &RequestHead) -> Response {
             let Ok(mut body) = read_slice(file, 0, total) else {
                 return Response::error(500, "Internal Server Error");
             };
-            body.extend_from_slice(HTML_PREVIEW_SCROLL_BRIDGE.as_bytes());
+            body.extend_from_slice(scroll_bridge.as_bytes());
             response.body = body;
         }
         return response;
@@ -645,6 +648,10 @@ fn embedded_font_response(path: &str, is_head: bool) -> Option<Response> {
     Some(response)
 }
 
+fn html_preview_scroll_bridge() -> String {
+    format!("<script>{HTML_PREVIEW_SCROLL_SCRIPT}</script>")
+}
+
 /// CSP applied to every served file. Served files always come back from
 /// `http://127.0.0.1:<port>` (see `file_url`), so passive subresources are pinned to
 /// that exact origin — a report's sibling CSS/JS/images/fonts render, but the document
@@ -669,17 +676,17 @@ fn file_content_csp(port: u16) -> String {
     )
 }
 
-/// CSP for *rendered Markdown* pages. Identical to [`file_content_csp`] but with no
-/// `script-src` directive, so it falls back to `default-src 'none'` and blocks all
-/// script execution. The styled Markdown template carries only inline styles (allowed
-/// below) and no script, and raw HTML embedded in the source passes through the
-/// renderer verbatim — so omitting `script-src` turns any embedded `<script>` into
-/// inert markup, a second line of defense alongside the overlay's opaque-origin
-/// sandbox rather than the sole one.
+/// CSP for *rendered Markdown* pages. Identical to [`file_content_csp`] except that
+/// only qmux's exact scroll-restoration script hash is allowed to execute. Raw HTML
+/// embedded in the source passes through the renderer verbatim, so excluding
+/// `unsafe-inline` keeps any embedded `<script>` inert as a second line of defense
+/// alongside the overlay's opaque-origin sandbox rather than the sole one.
 fn markdown_page_csp(port: u16) -> String {
     let origin = format!("http://127.0.0.1:{port}");
+    let script_hash = STANDARD.encode(Sha256::digest(HTML_PREVIEW_SCROLL_SCRIPT.as_bytes()));
     format!(
         "default-src 'none'; \
+         script-src 'sha256-{script_hash}'; \
          style-src 'unsafe-inline' {origin}; \
          img-src data: blob: {origin}; \
          font-src data: {origin}; \
@@ -849,11 +856,12 @@ fn render_codex_inline_visualization_page(
     let css = CODEX_INLINE_VIS_CSS
         .replace("__QMUX_FONT_FACE__", markdown_font_face_css(body_font_id))
         .replace("__QMUX_BODY_FONT__", markdown_body_font(body_font_id));
+    let scroll_bridge = html_preview_scroll_bridge();
     format!(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{css}</style>\n</head>\n\
-         <body>\n{CODEX_INLINE_VIS_ERROR_REPORTER}\n{source}\n{HTML_PREVIEW_SCROLL_BRIDGE}\n</body>\n</html>\n"
+         <body>\n{CODEX_INLINE_VIS_ERROR_REPORTER}\n{source}\n{scroll_bridge}\n</body>\n</html>\n"
     )
 }
 
@@ -939,11 +947,12 @@ fn render_markdown_page(path: &Path, source: &str, body_font_id: Option<&str>) -
     let markdown_page_css = MARKDOWN_PAGE_CSS
         .replace("__QMUX_FONT_FACE__", markdown_font_face_css(body_font_id))
         .replace("__QMUX_BODY_FONT__", markdown_body_font(body_font_id));
+    let scroll_bridge = html_preview_scroll_bridge();
     format!(
         "<!doctype html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{title}</title>\n<style>{markdown_page_css}</style>\n</head>\n\
-         <body>\n<main>\n{body}</main>\n</body>\n</html>\n"
+         <body>\n<main>\n{body}</main>\n{scroll_bridge}\n</body>\n</html>\n"
     )
 }
 
@@ -1097,14 +1106,16 @@ mod tests {
     }
 
     #[test]
-    fn markdown_page_csp_blocks_scripts() {
+    fn markdown_page_csp_allows_only_the_scroll_bridge_script() {
         let csp = markdown_page_csp(12345);
-        // No script-src at all → falls back to default-src 'none', so an embedded
-        // <script> in a rendered Markdown file cannot execute.
+        let script_hash = STANDARD.encode(Sha256::digest(HTML_PREVIEW_SCROLL_SCRIPT.as_bytes()));
+        // Only the exact qmux-injected bridge may execute; scripts embedded in the
+        // Markdown remain blocked because the policy still excludes unsafe-inline.
         assert!(
-            !csp.contains("script-src"),
-            "rendered markdown CSP must not grant script execution: {csp}"
+            csp.contains(&format!("script-src 'sha256-{script_hash}'")),
+            "{csp}"
         );
+        assert!(!csp.contains("script-src 'unsafe-inline'"), "{csp}");
         assert!(csp.contains("default-src 'none'"), "{csp}");
         assert!(csp.contains("style-src 'unsafe-inline'"), "{csp}");
         assert!(csp.contains("connect-src 'none'"), "{csp}");
@@ -1503,6 +1514,10 @@ mod tests {
         assert!(head.contains("Content-Type: text/html"), "head: {head}");
         assert!(body_text.contains("<h1>Hello</h1>"), "body: {body_text}");
         assert!(body_text.contains("<table>"), "body: {body_text}");
+        assert!(
+            body_text.contains("qmux-preview-scroll"),
+            "body: {body_text}"
+        );
 
         // `?raw=1` opts out and serves the source as plain text.
         let (head, body) = http_get_full(info.port, &format!("{path}?raw=1"), None);
